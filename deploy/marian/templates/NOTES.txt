@@ -1,0 +1,13 @@
+Marian is installed as one pod. Events live in SQLite, so the chart keeps a single replica and recreates the pod instead of rolling two writers.
+
+The dashboard:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "marian.fullname" . }} 8080:{{ .Values.service.port }}
+
+Then open http://127.0.0.1:8080 and sign in with Discord. Register `{public URL}/auth/discord/callback` as a redirect on the Discord application, and set the OAuth client secret (`discord.clientSecret`, or `discord.clientSecretKey` when the secret already exists).
+
+The gateway connects outbound to Discord. Allow egress to discord.com and gateway.discord.gg.
+{{- if and .Values.ingress.enabled .Values.ingress.host }}
+
+Ingress host: {{ .Values.ingress.host }}
+{{- end }}

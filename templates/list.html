@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ heading }}</h1>
+    <p class="lede">{{ lede }}</p>
+  </div>
+</div>
+{% if rows and dense %}
+<ul class="log-list">
+  {% for row in rows %}
+  <li><a href="{{ row.href }}">{{ row.title }}</a><time>{{ row.meta }}</time></li>
+  {% endfor %}
+</ul>
+{% elif rows %}
+<div class="stack">
+  {% for row in rows %}
+  <a class="card" href="{{ row.href }}">
+    <span class="badge">{{ row.badge }}</span>
+    <h3>{{ row.title }}</h3>
+    <p class="meta">{{ row.meta }}</p>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<section class="empty"><h2>{{ empty_title }}</h2><p>{{ empty_body }}</p></section>
+{% endif %}
+{% if extra %}
+<section class="panel" style="margin-top:18px">{{ extra }}</section>
+{% endif %}
+{% endblock %}

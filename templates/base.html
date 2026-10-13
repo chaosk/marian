@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>{{ title }} · Marian</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="mark" src="/static/marian.png" alt="">
+        <p>Marian<em>the discord scheduler</em></p>
+      </div>
+      {% if guild_name %}
+      <div class="server">
+        <strong>{{ guild_name }}</strong>
+        {{ tz_label }}{% if park %} · clock parked{% endif %}
+      </div>
+      {% endif %}
+      {% if guilds|length > 1 %}
+      <nav class="servers">
+        {% for guild in guilds %}
+        <a href="/servers/{{ guild.id }}" class="{% if guild.id == guild_id %}active{% endif %}">{{ guild.name }}</a>
+        {% endfor %}
+      </nav>
+      {% endif %}
+      <nav class="nav">
+        <a href="{{ base }}" class="{% if nav == 'schedule' %}active{% endif %}">Schedule</a>
+        <a href="{{ base }}/drafts" class="{% if nav == 'drafts' %}active{% endif %}">Drafts <span class="count">{{ draft_count }}</span></a>
+        <a href="{{ base }}/scheduled" class="{% if nav == 'scheduled' %}active{% endif %}">Scheduled <span class="count">{{ scheduled_count }}</span></a>
+        <a href="{{ base }}/recurring" class="{% if nav == 'recurring' %}active{% endif %}">Recurring <span class="count">{{ series_count }}</span></a>
+        <a href="{{ base }}/archive" class="{% if nav == 'archive' %}active{% endif %}">Archive</a>
+        <a href="{{ base }}/presets" class="{% if nav == 'presets' %}active{% endif %}">Presets</a>
+        <a href="{{ base }}/channels" class="{% if nav == 'channels' %}active{% endif %}">Channels</a>
+        <a href="{{ base }}/commands" class="{% if nav == 'commands' %}active{% endif %}">Command desk</a>
+        <a href="{{ base }}/activity" class="{% if nav == 'activity' %}active{% endif %}">Activity</a>
+        <a href="{{ base }}/settings" class="{% if nav == 'settings' %}active{% endif %}">Settings</a>
+      </nav>
+      {% if user_id %}
+      <div class="account">
+        <p class="who">Signed in as <strong>{{ user_name }}</strong></p>
+        {% if calendar_url %}
+        <a class="calendar" href="{{ calendar_url }}">Calendar feed</a>
+        {% endif %}
+        <div class="account-row">
+          <form method="post" action="{{ base }}/me/reminders">
+            <input type="hidden" name="enabled" value="{% if reminders_on %}0{% else %}1{% endif %}">
+            <button type="submit" class="remind{% if reminders_on %} on{% endif %}">{% if reminders_on %}Reminders on{% else %}Reminders off{% endif %}</button>
+          </form>
+          <form method="post" action="/logout">
+            <button type="submit" class="leave">Sign out</button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+      {% if invite_url %}
+      <a class="invite" href="{{ invite_url }}">Invite Marian to Discord</a>
+      {% endif %}
+    </aside>
+    <main class="main" id="content">
+      {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+      {% block content %}{% endblock %}
+      <p class="foot">Marian checks for updates every few seconds.</p>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="kicker">{{ cadence }}{% if active %} · active{% else %} · ended{% endif %}</p>
+    <h1>{{ heading }}</h1>
+    <p class="lede">{{ lede }}</p>
+  </div>
+  {% if active %}
+  <form method="post" action="{{ base }}/recurring/{{ series_id }}/end" data-confirm="Skip every date that has not been posted?">
+    <button class="danger" type="submit">End series</button>
+  </form>
+  {% endif %}
+</div>
+{% include "vote.html" %}
+<div class="stack">
+  {% for row in rows %}
+  <div class="card">
+    <span class="badge">{{ row.badge }}</span>
+    <h3><a href="{{ base }}/events/{{ row.id }}">{{ row.title }}</a></h3>
+    <p class="meta">{{ row.meta }}</p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

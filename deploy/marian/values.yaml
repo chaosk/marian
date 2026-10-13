@@ -1,0 +1,62 @@
+# One process owns the SQLite database. Keep this at 1.
+replicaCount: 1
+
+image:
+  repository: marian
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+discord:
+  # Bot token. Required unless discord.existingSecret is set.
+  token: ""
+  # Use a secret you already created instead of discord.token.
+  existingSecret: ""
+  secretKey: token
+  # Application id. Public. Used for the invite link and dashboard sign-in.
+  clientId: ""
+  # OAuth client secret. Empty leaves the dashboard on the landing page.
+  # With existingSecret, leave this empty and set clientSecretKey instead.
+  clientSecret: ""
+  # Key in the Discord secret that holds the OAuth client secret.
+  clientSecretKey: ""
+
+# Custom status under the bot's name. Empty leaves it unset.
+status: ""
+
+# Dashboard URL linked from Discord embeds. Empty is fine.
+# When ingress is on and this is empty, the chart uses https://<ingress.host>.
+publicUrl: ""
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /
+  tls: false
+  annotations: {}
+
+persistence:
+  enabled: true
+  size: 1Gi
+  # "-" selects the empty storage class. Empty uses the cluster default.
+  storageClass: ""
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

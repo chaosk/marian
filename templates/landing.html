@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Marian</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="gate">
+  <main class="gate-card">
+    <div class="brand">
+      <img class="mark" src="/static/marian.png" alt="">
+      <p>Marian<em>the discord scheduler</em></p>
+    </div>
+    {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+    <h1>Events for your server.</h1>
+    <p class="lede">Sign in with Discord. Marian opens a server you're in, once the bot is there.</p>
+    {% if ready %}
+    <a class="discord" href="/auth/discord?next={{ next }}">Sign in with Discord</a>
+    {% else %}
+    <p class="notice">Sign-in is not configured yet.</p>
+    {% endif %}
+    {% if invite_url %}
+    <p class="gate-invite"><a href="{{ invite_url }}">Invite Marian to a server</a></p>
+    {% endif %}
+  </main>
+</body>
+</html>
