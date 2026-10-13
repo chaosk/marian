@@ -1,0 +1,96 @@
+# Marian
+
+Marian keeps a Discord community's events, signups, reminders, and recurring dates. It starts only with a bot token. That same process opens an outbound Discord gateway, posts the events, and takes signup buttons. The cluster does not need a public interactions URL.
+
+## Run it locally
+
+Rust 1.99 (see `rust-toolchain.toml`).
+
+```sh
+DISCORD_TOKEN=... cargo run
+```
+
+Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
+
+| Variable | Default | Role |
+| --- | --- | --- |
+| `PORT` | `8080` | HTTP port |
+| `MARIAN_DB` | `data/marian.db` | SQLite file |
+| `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
+| `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
+| `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
+| `MARIAN_PUBLIC_URL` | empty | Dashboard URL. Discord embeds link here, and it is the OAuth redirect base |
+| `MARIAN_STATUS` | empty | Custom status under the bot's name, up to 128 characters. Empty leaves it unset |
+
+`/healthz` and `/readyz` report the process and the database. Readiness does not wait for Discord.
+
+## Discord
+
+```sh
+DISCORD_TOKEN=... DISCORD_CLIENT_ID=... \
+  MARIAN_PUBLIC_URL=https://marian.example.com \
+  MARIAN_STATUS="marian.example.com | /event" \
+  cargo run --release
+```
+
+Invite the bot with View Channel, Send Messages, Manage Messages, Embed Links, Read Message History, Mention Everyone, Add Reactions, Manage Roles, and the public-thread permissions. That set is the permissions integer `326686174272`:
+
+```text
+https://discord.com/api/oauth2/authorize?client_id=YOUR_ID&permissions=326686174272&scope=bot%20applications.commands
+```
+
+Marian asks for the `GUILDS` and `DIRECT_MESSAGES` intents. It does not use privileged intents. A bad token is logged and retried; the dashboard stays up.
+
+`/event` in Discord opens a direct message. It asks where to post, then the title, the description, when it starts, when it ends, and how often it repeats. The last step is finish, or change signup options and the other details first. `/response` asks for the event, the person, and the signup option, and lists the choices for the event and the option. The other slash commands (`/edit`, `/events`, `/reminders`, `/settings`, `/signup_options`, `/signup_presets`, `/channel`, `/google`, `/sort`, `/help`) accept the same line syntax as the command desk on the dashboard. The desk can still run `/response add event:… user:… option:…`. `/google` explains the calendar feed. There is no Google account connection. Each person gets a private feed at `/calendar/<token>.ics`. The token is a long random secret, shown on Settings and in `/google authorize`. The feed lists events they accepted and events they created. Event links use a public id. The rest of the dashboard asks you to sign in with Discord first.
+
+## Dashboard sign-in
+
+The site opens on a landing page. Sign in with Discord, with the `identify` and `guilds` scopes. Marian lets you into a server only when the bot is already in that server and your Discord account is a member.
+
+In the Discord application, add this redirect:
+
+```text
+https://marian.example.com/auth/discord/callback
+```
+
+That host is `MARIAN_PUBLIC_URL`. Locally, with that variable empty, the redirect is `http://<host>/auth/discord/callback` from the request.
+
+```sh
+DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
+  MARIAN_PUBLIC_URL=https://marian.example.com \
+  cargo run --release
+```
+
+## Install on Kubernetes
+
+The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret.
+
+```sh
+docker build -t ghcr.io/you/marian:0.1.0 .
+docker push ghcr.io/you/marian:0.1.0
+
+helm upgrade --install marian ./deploy/marian \
+  --set image.repository=ghcr.io/you/marian \
+  --set image.tag=0.1.0 \
+  --set discord.token="$DISCORD_TOKEN" \
+  --set discord.clientId="$DISCORD_CLIENT_ID" \
+  --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \
+  --set ingress.enabled=true \
+  --set ingress.host=marian.example.com
+```
+
+`discord.token` or `discord.existingSecret` is required. Use `existingSecret` and `discord.secretKey` when the token already lives in the cluster. `discord.clientSecret` is the OAuth secret when the chart creates the Secret. With `existingSecret`, set `discord.clientSecretKey` to the key that already holds it. `imagePullSecrets` is a list of `{name: ...}` objects.
+
+The Deployment is a single replica with `strategy: Recreate`. SQLite has one writer, so do not scale it. The root filesystem is read-only; the database is at `/data/marian.db` on a PersistentVolumeClaim (1Gi unless you change `persistence.size`). Set `persistence.existingClaim` to bring your own volume.
+
+Probes call `/healthz` and `/readyz`. The pod runs as uid 65532.
+
+Until ingress is ready:
+
+```sh
+kubectl port-forward svc/marian 8080:80
+```
+
+The gateway needs egress to `discord.com` and `gateway.discord.gg`. Nothing needs to reach the pod for Discord interactions.
+
+Passing `--set discord.token=...` stores the token in a Secret in the release namespace and in Helm's release history. Prefer `existingSecret` when that matters.

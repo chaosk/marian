@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="kicker">#{{ event.channel }} · {{ event.status_label }}</p>
+    <h1>{{ event.title }}</h1>
+    {% if event.status == 'ballot' %}
+    <p class="lede">The day is chosen when voting closes. {{ event.when }} is the clock time. The signup post replaces the day vote then.</p>
+    {% else %}
+    <p class="lede">{{ event.when }}–{{ event.end }} · {{ event.duration }} · {{ event.rel }}</p>
+    {% endif %}
+  </div>
+  <div class="actions">
+    {% if can_edit %}<a class="ghost" href="{{ base }}/events/{{ event.id }}/edit">Edit</a>{% endif %}
+    {% if can_archive %}
+    <form method="post" action="{{ base }}/events/{{ event.id }}/archive"><button class="ghost" type="submit">Archive</button></form>
+    {% endif %}
+    <form method="post" action="{{ base }}/events/{{ event.id }}/duplicate"><button class="ghost" type="submit">Duplicate</button></form>
+    {% if can_skip %}
+    <form method="post" action="{{ base }}/events/{{ event.id }}/skip"><button class="ghost" type="submit">Skip this date</button></form>
+    {% endif %}
+    {% if can_delete %}
+    <form method="post" action="{{ base }}/events/{{ event.id }}/delete" data-confirm="Remove this event?"><button class="danger" type="submit">Delete</button></form>
+    {% endif %}
+  </div>
+</div>
+{% if event.series_note %}<p class="notice">{{ event.series_note }}</p>{% endif %}
+{% include "vote.html" %}
+<div class="split">
+  <section>
+    {% if event.status == 'ballot' %}
+    <p class="kicker">Discord</p>
+    <p>The day vote is the first message in the thread. Other questions are a reply. The signup post replaces the day vote when voting closes.</p>
+    {% else %}
+    <p class="kicker">Discord message</p>
+    <div class="discord">
+      <div class="embed" style="border-color: {{ event.color }}">
+        <h3>{{ event.title }}</h3>
+        {% if event.description %}<div class="d-desc md">{{ event.description|md }}</div>{% endif %}
+        <p class="d-kicker">Time</p>
+        <p class="d-desc">{{ event.when }} - {{ event.end }}</p>
+        <p class="d-links"><a href="{{ event.plus_url }}">+</a>{% if event.web_url %} · <a href="{{ event.web_url }}">View on web</a>{% endif %}</p>
+        <p class="d-desc">🕐 {{ event.rel }}</p>
+        {% if event.status != "posted" %}<p class="d-desc"><em>{{ event.status_label }}</em></p>{% endif %}
+        <div class="d-fields">
+          {% for opt in event.options %}
+          <div class="d-field">
+            <p class="d-field-name">{{ opt.emoji }} <strong>{{ opt.name }}</strong> ({{ opt.spots }})</p>
+            <p class="d-field-value">{% if opt.field_lines %}{% for line in opt.field_lines %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}-{% endif %}</p>
+          </div>
+          {% endfor %}
+        </div>
+        {% if event.image_url %}<img class="d-image" src="{{ event.image_url }}" alt="">{% endif %}
+        <p class="d-foot">Created by {{ event.creator }}</p>
+      </div>
+      <div class="btn-row">
+        {% for button in event.buttons %}
+        <form method="post" action="{{ base }}/events/{{ event.id }}/signup">
+          <input type="hidden" name="option_id" value="{{ button.id }}">
+          <button class="d-btn" {% if button.disabled %}disabled{% endif %}>{{ button.emoji }}</button>
+          {% if button.reason %}<span class="why">{{ button.reason }}</span>{% endif %}
+        </form>
+        {% endfor %}
+        {% if can_edit %}
+        <a class="d-btn primary" href="{{ base }}/events/{{ event.id }}/edit">Edit</a>
+        {% else %}
+        <button class="d-btn primary" type="button" disabled>Edit</button>
+        {% endif %}
+        {% if can_delete %}
+        <form method="post" action="{{ base }}/events/{{ event.id }}/delete" data-confirm="Remove this event?">
+          <button class="d-btn danger" type="submit">Delete</button>
+        </form>
+        {% else %}
+        <button class="d-btn danger" type="button" disabled>Delete</button>
+        {% endif %}
+      </div>
+      <p class="why">Clicking as {{ user_name }}. {{ event.localize_note }}</p>
+    </div>
+    {% endif %}
+    {% if event.status != 'ballot' %}
+    <p class="meta" style="margin-top:10px">
+      <a href="{{ event.google_url }}">Add to Google Calendar</a>
+      · <a href="{{ base }}/calendar/{{ event.id }}.ics">Download .ics</a>
+      {% if event.calendar_on %} · on the calendar feed{% endif %}
+    </p>
+    {% endif %}
+  </section>
+  <div class="stack">
+    <section class="panel">
+      <h3>Roster</h3>
+      {% for opt in event.options %}
+      <p><strong>{{ opt.emoji }} {{ opt.name }}</strong> · {{ opt.spots }}{% if opt.role %} · {{ opt.role }} only{% endif %}{% if opt.reminders %} · reminders{% endif %}</p>
+      <div class="meter"><span style="width: {{ opt.pct }}%"></span></div>
+      {% for person in opt.confirmed %}
+      <div class="person"><span><i class="dot" style="background: {{ person.color }}"></i>{{ person.name }}</span>
+        {% if can_edit %}
+        <form method="post" action="{{ base }}/events/{{ event.id }}/response">
+          <input type="hidden" name="action" value="remove">
+          <input type="hidden" name="user_id" value="{{ person.id }}">
+          <input type="hidden" name="option_id" value="{{ opt.id }}">
+          <button class="ghost" type="submit">Remove</button>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% for person in opt.waiting %}
+      <div class="person"><span>{{ person.name }} · waiting</span></div>
+      {% endfor %}
+      {% endfor %}
+      {% if can_edit and event.status == "posted" %}
+      <form method="post" action="{{ base }}/events/{{ event.id }}/response" class="grid" style="margin-top:12px">
+        <input type="hidden" name="action" value="add">
+        <label class="field">Person
+          <select name="user_id">
+            {% for person in users %}
+            <option value="{{ person.id }}">{{ person.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">Option
+          <select name="option_id">
+            {% for opt in event.options %}
+            <option value="{{ opt.id }}">{{ opt.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button class="primary" type="submit">Add to roster</button>
+      </form>
+      {% endif %}
+    </section>
+    <section class="panel">
+      <h3>Reminders</h3>
+      {% for rem in event.reminders %}
+      <p>{{ rem.offset }}<br><span class="muted">{{ rem.state }}</span></p>
+      {% if rem.message %}<div class="md">{{ rem.message|md }}</div>{% endif %}
+      {% else %}
+      <p class="muted">No reminders on this event.</p>
+      {% endfor %}
+      {% if event.cutoff %}<p class="muted">Signups close {{ event.cutoff }}.</p>{% endif %}
+      {% if event.attendee_role %}<p class="muted">Confirmed people on a reminding option get {{ event.attendee_role }}.</p>{% endif %}
+    </section>
+    <section class="panel">
+      <h3>Thread</h3>
+      {% if event.members %}
+      <p class="muted">{% for member in event.members %}{{ member }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+      {% endif %}
+      {% for note in event.thread %}
+      <p>{{ note.body }}<br><span class="muted">{{ note.place }} · {{ note.when }}</span></p>
+      {% else %}
+      <p class="muted">No thread messages yet.</p>
+      {% endfor %}
+    </section>
+  </div>
+</div>
+{% endblock %}

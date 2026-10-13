@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Command desk</h1>
+    <p class="lede">The same verbs as the Discord slash commands. On a real server they run in Discord; here you can drive them as the person selected in the sidebar.</p>
+  </div>
+</div>
+<div class="split">
+  <section class="cmd">
+    <div class="log">
+      {% for row in log %}
+      <div>
+        <p class="who">{{ row.user }}</p>
+        <p>{{ row.line }}</p>
+        <div class="reply md">{{ row.reply|md }}</div>
+      </div>
+      {% else %}
+      <p>No commands yet. Try one of the examples.</p>
+      {% endfor %}
+    </div>
+    <form method="post" action="{{ base }}/commands" style="margin-top:12px">
+      <label class="field">Command
+        <input id="command-line" name="line" placeholder='/event title:"Shore cleanup" start:"tomorrow at 4pm"' required>
+      </label>
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+  <section>
+    <pre class="panel" style="white-space: pre-wrap">{{ help }}</pre>
+    {% for example in examples %}
+    <form method="post" action="{{ base }}/commands" style="margin-top:8px">
+      <input type="hidden" name="line" value="{{ example }}">
+      <button class="ghost" type="submit">{{ example }}</button>
+    </form>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>This week</h1>
+    <p class="lede">Posted events, the ones still waiting to go out, and the roster Marian is already keeping.</p>
+  </div>
+  <a class="primary" href="{{ base }}/events/new">New event</a>
+</div>
+{% if empty_server %}
+<section class="empty">
+  <h2>No events yet.</h2>
+  <p>Invite Marian to a Discord server, then create an event with <code>/event</code> or from this dashboard. The bot uses an outbound gateway connection, so the cluster does not need a public interactions URL.</p>
+  {% if invite_url %}<p><a class="primary" href="{{ invite_url }}">Invite Marian</a></p>{% endif %}
+</section>
+{% else %}
+{% if hero %}
+<section class="hero">
+  <div>
+    <p class="kicker">Next up · {{ hero.rel }}</p>
+    <h2><a href="{{ base }}/events/{{ hero.id }}">{{ hero.title }}</a></h2>
+    <p>{{ hero.when }} · #{{ hero.channel }}</p>
+    {% if hero.description %}<div class="md">{{ hero.description|md }}</div>{% endif %}
+  </div>
+  <div>
+    <p class="kicker">Roster</p>
+    <p>{{ hero.spots }}</p>
+  </div>
+</section>
+{% endif %}
+{% for day in days %}
+<section class="day {% if day.today %}today{% endif %}">
+  <h2>{{ day.label }}</h2>
+  <div class="stack">
+    {% for event in day.events %}
+    <a class="card" href="{{ base }}/events/{{ event.id }}">
+      <span class="badge">{{ event.status_label }}</span>
+      <h3>{{ event.title }}</h3>
+      <p class="meta">{{ event.when }}–{{ event.end }} · #{{ event.channel }} · {{ event.rel }}</p>
+      <div class="pills">
+        {% for spot in event.spots %}
+        <span class="pill">{{ spot }}</span>
+        {% endfor %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+<section class="empty">
+  <h2>Nothing scheduled.</h2>
+  <p>Drafts and scheduled posts live in their own lists. A posted event shows up here.</p>
+</section>
+{% endfor %}
+{% if wrapped %}
+<section class="day">
+  <h2>Wrapped, not archived yet</h2>
+  <div class="stack">
+    {% for event in wrapped %}
+    <a class="card" href="{{ base }}/events/{{ event.id }}">{{ event.title }} · {{ event.when }}</a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+<div class="columns">
+  <section class="panel">
+    <h3>Waiting to post</h3>
+    {% for item in waiting %}
+    <p><a href="{{ base }}/events/{{ item.id }}">{{ item.title }}</a><br><span class="muted">{{ item.post_when }}</span></p>
+    {% else %}
+    <p class="muted">Nothing is queued.</p>
+    {% endfor %}
+  </section>
+  <section class="panel">
+    <h3>Reminders still out</h3>
+    {% for item in reminders %}
+    <p><a href="{{ base }}/events/{{ item.id }}">{{ item.title }}</a><br><span class="muted">{{ item.detail }}</span></p>
+    {% else %}
+    <p class="muted">No reminders are waiting.</p>
+    {% endfor %}
+  </section>
+  <section class="panel">
+    <h3>What Marian did</h3>
+    {% for item in activity %}
+    <p>{{ item.body }}<br><span class="muted">{{ item.when }}</span></p>
+    {% else %}
+    <p class="muted">The log is quiet.</p>
+    {% endfor %}
+    <p><a href="{{ base }}/activity">The whole log</a></p>
+  </section>
+</div>
+{% endif %}
+{% endblock %}

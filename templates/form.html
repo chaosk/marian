@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ heading }}</h1>
+    <p class="lede">Post it to Discord, queue it, or leave it as a draft. Signup buttons, caps, and reminders live on the same form.</p>
+  </div>
+</div>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if series_note %}<p class="notice">{{ series_note }}</p>{% endif %}
+<form method="post" action="{{ action_url }}">
+  <div class="grid">
+    <label class="field span-2">Title
+      <input name="title" required value="{{ event_title }}">
+    </label>
+    <label class="field span-2">Description
+      <textarea name="description">{{ description }}</textarea>
+    </label>
+    <label class="field">Channel
+      <select name="channel_id">
+        {% for channel in channels %}
+        <option value="{{ channel.id }}" {% if channel.selected %}selected{% endif %}>#{{ channel.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">Color
+      <select name="color">
+        {% for color in colors %}
+        <option value="{{ color.value }}" {% if color.selected %}selected{% endif %}>{{ color.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field"><span id="start-label">{% if vote_enabled %}Clock time{% else %}Starts{% endif %}</span>
+      <input id="start-input" type="{% if vote_enabled %}time{% else %}datetime-local{% endif %}" name="start" required value="{{ start }}">
+    </label>
+    <label class="field">Duration in minutes
+      <input name="duration" inputmode="numeric" value="{{ duration }}">
+    </label>
+    <label class="field">Signup cutoff
+      <input type="datetime-local" name="cutoff" value="{{ cutoff }}">
+    </label>
+    <label class="field">Post at
+      <input type="datetime-local" name="post_at" value="{{ post_at }}">
+    </label>
+  </div>
+  <h2>Signup options</h2>
+  <p class="muted">Leave a name blank to skip the row. Capacity blank means unlimited. A waitlist needs a capacity.</p>
+  {% for opt in options %}
+  <div class="option-row">
+    <input type="hidden" name="opt{{ opt.n }}_id" value="{{ opt.id }}">
+    <input name="opt{{ opt.n }}_emoji" value="{{ opt.emoji }}" aria-label="Emoji {{ opt.n }}">
+    <input name="opt{{ opt.n }}_name" value="{{ opt.name }}" aria-label="Option name {{ opt.n }}" {% if lock_options and opt.id == '' %}disabled{% endif %}>
+    <input name="opt{{ opt.n }}_capacity" value="{{ opt.capacity }}" aria-label="Capacity {{ opt.n }}" placeholder="cap">
+    <select name="opt{{ opt.n }}_role" aria-label="Role limit {{ opt.n }}">
+      <option value="">Any role</option>
+      {% for role in roles %}
+      <option value="{{ role.id }}" {% if opt.role_id == role.id_s %}selected{% endif %}>{{ role.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="checks">
+    <label><input type="checkbox" name="opt{{ opt.n }}_waitlist" value="1" {% if opt.waitlist %}checked{% endif %}> Waitlist</label>
+    <label><input type="checkbox" name="opt{{ opt.n }}_reminders" value="1" {% if opt.reminders %}checked{% endif %}> Reminders and attendee role</label>
+  </div>
+  {% endfor %}
+  <h2>Reminders</h2>
+  {% for rem in reminders %}
+  <div class="rem-row">
+    <input name="rem{{ rem.n }}_offset" value="{{ rem.offset }}" placeholder="minutes">
+    <input class="span-2" name="rem{{ rem.n }}_message" value="{{ rem.message }}" placeholder="Optional note, such as flasks and food">
+  </div>
+  {% endfor %}
+  <h2>Access</h2>
+  <div class="checks">
+    <label><input type="checkbox" name="thread_enabled" value="1" {% if thread_enabled %}checked{% endif %}> Event thread</label>
+    <label><input type="checkbox" name="multiple_signups" value="1" {% if multiple_signups %}checked{% endif %}> Allow several options</label>
+    <label><input type="checkbox" name="mention_everyone" value="1" {% if mention_everyone %}checked{% endif %}> Mention everyone</label>
+  </div>
+  <label class="field">Attendee role
+    <select name="attendee_role_id">
+      <option value="">None</option>
+      {% for role in roles %}
+      <option value="{{ role.id }}" {% if attendee_role_id == role.id_s %}selected{% endif %}>{{ role.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <p>Mention</p>
+  <div class="checks">
+    {% for role in roles %}
+    <label><input type="checkbox" name="mention_{{ role.id }}" value="1" {% if role.mentioned %}checked{% endif %}> {{ role.name }}</label>
+    {% endfor %}
+  </div>
+  <p>Limit the whole event to</p>
+  <div class="checks">
+    {% for role in roles %}
+    <label><input type="checkbox" name="restrict_{{ role.id }}" value="1" {% if role.restricted %}checked{% endif %}> {{ role.name }}</label>
+    {% endfor %}
+  </div>
+  {% if not series_locked %}
+  <h2>Repeat</h2>
+  <div class="grid">
+    <label class="field">Cadence
+      <select name="repeat">
+        <option value="none" {% if repeat == 'none' %}selected{% endif %}>Does not repeat</option>
+        <option value="daily" {% if repeat == 'daily' %}selected{% endif %}>Daily</option>
+        <option value="weekly" {% if repeat == 'weekly' %}selected{% endif %}>Weekly</option>
+        <option value="biweekly" {% if repeat == 'biweekly' %}selected{% endif %}>Every two weeks</option>
+        <option value="monthly" {% if repeat == 'monthly' %}selected{% endif %}>Monthly</option>
+      </select>
+    </label>
+    <label class="field">Stop after
+      <input name="repeat_count" value="{{ repeat_count }}" placeholder="Leave empty to continue">
+    </label>
+    <label class="field">Or end on
+      <input type="date" name="repeat_until" value="{{ repeat_until }}">
+    </label>
+  </div>
+  <p>Leave both empty and the series keeps going.</p>
+  <h2>Vote</h2>
+  <label class="checks"><input type="checkbox" name="vote" value="1" {% if vote_enabled %}checked{% endif %}> Let people vote on the days they can make before this event is posted.</label>
+  <p>Works for a single event or a weekly series. People can pick more than one day. The clock time is when it starts that day. The signup message replaces the day vote when voting closes.</p>
+  <div class="grid">
+    <label class="field">Voting closes
+      <select name="vote_close_weekday">
+        {% for day in vote_days %}
+        <option value="{{ day.n }}" {% if day.n == vote_close_weekday %}selected{% endif %}>{{ day.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">At
+      <input type="time" name="vote_close_time" value="{{ vote_close_time }}">
+    </label>
+    <label class="field">If nobody votes
+      <select name="vote_default_weekday">
+        {% for day in vote_days %}
+        <option value="{{ day.n }}" {% if day.n == vote_default_weekday %}selected{% endif %}>{{ day.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <p>Days people can choose</p>
+  <div class="checks">
+    {% for day in vote_days %}
+    <label><input type="checkbox" name="vote_day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
+    {% endfor %}
+  </div>
+  <p class="q-title">Other questions</p>
+  {% set question_prefix = "vote" %}
+  {% set question_rows = vote_question_rows %}
+  {% include "questions.html" %}
+  {% endif %}
+  {% if show_apply %}
+  <label class="checks"><input type="checkbox" name="apply_series" value="1" {% if apply_series %}checked{% endif %}> Also update upcoming dates in this series. This date's start time stays its own.</label>
+  {% endif %}
+  <div class="actions">
+    {% if show_draft %}<button class="ghost" name="action" value="draft" type="submit">Save draft</button>{% endif %}
+    {% if show_schedule %}<button class="ghost" name="action" value="schedule" type="submit">Schedule post</button>{% endif %}
+    {% if show_publish %}<button class="primary" name="action" value="publish" type="submit">Post now</button>{% endif %}
+    {% if show_save %}<button class="primary" name="action" value="save" type="submit">Save changes</button>{% endif %}
+  </div>
+</form>
+{% endblock %}

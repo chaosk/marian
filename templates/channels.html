@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Channels</h1>
+    <p class="lede">Event channels can be cleared when an event archives, if that switch is on in settings.</p>
+  </div>
+</div>
+<div class="stack">
+  {% for channel in channels %}
+  <article class="card">
+    <h3>#{{ channel.name }}</h3>
+    <p class="meta">{{ channel.kind }}{% if channel.purged %} · last cleared {{ channel.purged }}{% endif %} · {{ channel.count }} events</p>
+  </article>
+  {% endfor %}
+</div>
+<form method="post" action="{{ base }}/channels" class="panel" style="margin-top:16px">
+  <div class="grid">
+    <label class="field">Name <input name="name" placeholder="race-night" required></label>
+    <label class="field">Kind
+      <select name="kind">
+        <option value="text">Text</option>
+        <option value="event">Event channel</option>
+      </select>
+    </label>
+  </div>
+  <button class="primary" type="submit">Create channel</button>
+</form>
+{% endblock %}

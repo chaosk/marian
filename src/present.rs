@@ -1,0 +1,1919 @@
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Duration, Utc};
+use chrono_tz::Tz;
+use minijinja::{Environment, Value};
+use rusqlite::Connection;
+use serde::Serialize;
+
+use crate::clock::{self, zone_label};
+use crate::commands::HELP;
+use crate::error::OpError;
+use crate::ics;
+use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction};
+use crate::store::{self, Event, Settings, User};
+
+pub struct Page<'a> {
+    pub conn: &'a Connection,
+    pub guild_id: i64,
+    pub user_id: i64,
+    pub notice: Option<&'a str>,
+    pub invite_url: &'a str,
+    pub nav: &'a str,
+    pub title: &'a str,
+    pub allowed_guilds: &'a [i64],
+}
+
+pub fn landing(invite_url: &str, next: &str, notice: &str, ready: bool) -> Result<String, OpError> {
+    let mut ctx = Bag::new();
+    ctx.insert("invite_url", Value::from(invite_url));
+    ctx.insert("next", Value::from(next));
+    ctx.insert("notice", Value::from(notice));
+    ctx.insert("ready", context_bool(ready));
+    render("landing.html", ctx)
+}
+
+pub fn home(page: &Page<'_>) -> Result<String, OpError> {
+    if page.guild_id == 0 {
+        let mut ctx = shell(page)?;
+        ctx.insert("empty_server", context_bool(true));
+        ctx.insert("hero", Value::from_serialize(&()));
+        ctx.insert("days", Value::from_serialize(&Vec::<DayBucket>::new()));
+        ctx.insert(
+            "wrapped",
+            Value::from_serialize(&Vec::<serde_json::Value>::new()),
+        );
+        ctx.insert(
+            "waiting",
+            Value::from_serialize(&Vec::<serde_json::Value>::new()),
+        );
+        ctx.insert(
+            "reminders",
+            Value::from_serialize(&Vec::<serde_json::Value>::new()),
+        );
+        ctx.insert(
+            "activity",
+            Value::from_serialize(&Vec::<serde_json::Value>::new()),
+        );
+        return render("schedule.html", ctx);
+    }
+    let now = Utc::now();
+    let (settings, tz) = zone_of(page)?;
+    let events = store::list_events(page.conn, page.guild_id)?;
+    let mut days: Vec<DayBucket> = Vec::new();
+    let mut wrapped = Vec::new();
+    let mut waiting = Vec::new();
+    let mut reminders = Vec::new();
+    let mut hero: Option<serde_json::Value> = None;
+    let mut hero_start: Option<DateTime<Utc>> = None;
+    for event in &events {
+        let start = clock::parse_stamp(&event.starts_at)?;
+        let end = start + Duration::minutes(event.duration_minutes);
+        if event.status == "scheduled" || event.status == "failed" {
+            waiting.push(serde_json::json!({
+                "id": event.public_id,
+                "title": event.title,
+                "post_when": event.post_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_else(|| "when you publish it".into()),
+            }));
+        }
+        if event.status == "posted" && end < now {
+            wrapped.push(serde_json::json!({
+                "id": event.public_id,
+                "title": event.title,
+                "when": clock::format_when(start, tz, settings.hour_24),
+            }));
+            continue;
+        }
+        if matches!(event.status.as_str(), "posted" | "scheduled") {
+            if event.status == "posted"
+                && end >= now
+                && hero_start.map(|current| start < current).unwrap_or(true)
+            {
+                hero_start = Some(start);
+                hero = Some(card_value(page.conn, event, &settings, tz, now, true)?);
+            }
+            let label = clock::format_day(start.with_timezone(&tz).date_naive());
+            let today =
+                start.with_timezone(&tz).date_naive() == now.with_timezone(&tz).date_naive();
+            if days.last().map(|day| day.label != label).unwrap_or(true) {
+                days.push(DayBucket {
+                    label,
+                    today,
+                    events: Vec::new(),
+                });
+            }
+            days.last_mut()
+                .unwrap()
+                .events
+                .push(card_value(page.conn, event, &settings, tz, now, false)?);
+        }
+        if event.status == "posted" {
+            for rem in store::reminders_for(page.conn, event.id)? {
+                if rem.sent_at.is_none() {
+                    reminders.push(serde_json::json!({
+                        "id": event.public_id,
+                        "title": event.title,
+                        "detail": format!("{} before", clock::human_offset(rem.offset_minutes)),
+                    }));
+                }
+            }
+        }
+    }
+    let activity = activity_rows(page, 8)?;
+    let mut ctx = shell(page)?;
+    ctx["empty_server"] = context_bool(false);
+    ctx["hero"] = hero
+        .map(|value| Value::from_serialize(&value))
+        .unwrap_or_else(|| Value::from_serialize(&()));
+    ctx["days"] = Value::from_serialize(&days);
+    ctx["wrapped"] = Value::from_serialize(&wrapped);
+    ctx["waiting"] = Value::from_serialize(&waiting.into_iter().take(4).collect::<Vec<_>>());
+    ctx["reminders"] = Value::from_serialize(&reminders.into_iter().take(6).collect::<Vec<_>>());
+    ctx["activity"] = Value::from_serialize(&activity);
+    render("schedule.html", ctx)
+}
+
+#[derive(Serialize)]
+struct DayBucket {
+    label: String,
+    today: bool,
+    events: Vec<serde_json::Value>,
+}
+
+pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
+    let event = store::event(page.conn, event_id)?.ok_or(OpError::NotFound)?;
+    if event.guild_id != page.guild_id {
+        return Err(OpError::NotFound);
+    }
+    let (settings, tz) = zone_of(page)?;
+    let user = must_user(page)?;
+    let roles = store::user_role_ids(page.conn, user.id)?;
+    let can_edit = logic::can_edit(&user, &event, &settings, &roles);
+    let options = store::options_for(page.conn, event.id)?;
+    let signups = store::signups_for(page.conn, event.id)?;
+    let users = store::list_users(page.conn, page.guild_id)?;
+    let role_rows = store::list_roles(page.conn, page.guild_id)?;
+    let restrict_ids = store::event_role_ids(page.conn, event.id, "restrict")?;
+    let now = Utc::now();
+    let start = clock::parse_stamp(&event.starts_at)?;
+    let closed = event.status != "posted" || event.signups_closed || cutoff_passed(&event, now);
+    let mut option_views = Vec::new();
+    let mut buttons = Vec::new();
+    for opt in &options {
+        let confirmed: Vec<_> = signups
+            .iter()
+            .filter(|s| s.option_id == opt.id && s.state == "confirmed")
+            .collect();
+        let waiting: Vec<_> = signups
+            .iter()
+            .filter(|s| s.option_id == opt.id && s.state == "waitlisted")
+            .collect();
+        let spots = match opt.capacity {
+            Some(cap) => format!("{}/{}", confirmed.len(), cap),
+            None => confirmed.len().to_string(),
+        };
+        let mut field_lines = Vec::new();
+        if settings.show_attendees {
+            field_lines.extend(confirmed.iter().filter_map(|s| {
+                users
+                    .iter()
+                    .find(|u| u.id == s.user_id)
+                    .map(|u| u.name.clone())
+            }));
+        }
+        if !waiting.is_empty() {
+            field_lines.push(format!("{} waiting", waiting.len()));
+        }
+        let names = field_lines.join(", ");
+        let pct = opt
+            .capacity
+            .map(|cap| ((confirmed.len() as i64) * 100 / cap.max(1)).min(100))
+            .unwrap_or(0);
+        let role_name = opt
+            .role_id
+            .and_then(|id| {
+                role_rows
+                    .iter()
+                    .find(|role| role.id == id)
+                    .map(|role| role.name.clone())
+            })
+            .unwrap_or_default();
+        option_views.push(serde_json::json!({
+            "id": opt.id,
+            "emoji": opt.emoji,
+            "name": opt.name,
+            "spots": spots,
+            "names": names,
+            "field_lines": field_lines,
+            "role": role_name,
+            "reminders": opt.reminders_enabled,
+            "pct": pct,
+            "confirmed": people(&users, &confirmed.iter().map(|s| s.user_id).collect::<Vec<_>>()),
+            "waiting": people(&users, &waiting.iter().map(|s| s.user_id).collect::<Vec<_>>()),
+        }));
+        let yours = signups
+            .iter()
+            .any(|s| s.option_id == opt.id && s.user_id == user.id);
+        let (disabled, reason, wait, label) = button_state(
+            &event,
+            opt,
+            &user,
+            &roles,
+            yours,
+            confirmed.len(),
+            closed,
+            &restrict_ids,
+        );
+        buttons.push(serde_json::json!({
+            "id": opt.id,
+            "label": label,
+            "emoji": opt.emoji,
+            "disabled": disabled,
+            "reason": reason,
+            "wait": wait,
+            "yours": yours,
+        }));
+    }
+    let channel = store::channel(page.conn, event.channel_id)?;
+    let channel_name = channel
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "deleted".into());
+    let reminders = store::reminders_for(page.conn, event.id)?;
+    let thread = store::thread_messages(page.conn, event.id)?;
+    let members = store::thread_member_ids(page.conn, event.id)?;
+    let series = event
+        .series_id
+        .and_then(|id| store::series(page.conn, id).ok().flatten());
+    let once = series
+        .as_ref()
+        .is_some_and(|series| series.cadence == "once");
+    let series_note = if series.is_some() && !once && event.status != "ballot" {
+        "This is one date in a series. Moving this start time leaves the other dates where they are."
+    } else {
+        ""
+    };
+    let vote = match event.series_id {
+        Some(series_id) => {
+            let panel =
+                logic::vote_panel(page.conn, series_id, page.user_id, tz, settings.hour_24)?;
+            let open = panel.get("round").is_some_and(|round| !round.is_null());
+            if event.status == "ballot" || open {
+                panel
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        None => serde_json::Value::Null,
+    };
+    let google = ics::google_link(&event, &format!("#{channel_name}")).unwrap_or_default();
+    let plus = ics::calendar_template(&event).unwrap_or_default();
+    let creator = users
+        .iter()
+        .find(|person| person.id == event.created_by)
+        .map(|person| person.name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Marian".into());
+    let image_url = event.image_url.as_deref().and_then(|url| {
+        let url = url.trim();
+        if url.starts_with("https://") || url.starts_with("http://") {
+            Some(url.to_string())
+        } else {
+            None
+        }
+    });
+    let web_url = format!(
+        "/servers/{}/events/{}",
+        store::discord_server_id(page.conn, event.guild_id).unwrap_or_default(),
+        event.public_id
+    );
+    let mut ctx = shell(page)?;
+    ctx["vote"] = Value::from_serialize(&vote);
+    ctx["series_id"] = Value::from(event.series_id.unwrap_or(0));
+    ctx["can_edit"] = context_bool(can_edit);
+    ctx["can_delete"] = context_bool(logic::can_delete(&user, &event, &settings, &roles));
+    ctx["can_archive"] = context_bool(can_edit && event.status == "posted");
+    ctx["can_skip"] = context_bool(
+        can_edit
+            && event.series_id.is_some()
+            && matches!(event.status.as_str(), "scheduled" | "draft"),
+    );
+    ctx["event"] = Value::from_serialize(&serde_json::json!({
+        "id": event.public_id,
+        "title": event.title,
+        "description": event.description,
+        "when": if event.status == "ballot" {
+            clock::format_clock(start.with_timezone(&tz), settings.hour_24)
+        } else {
+            clock::format_when(start, tz, settings.hour_24)
+        },
+        "end": clock::format_end(start, event.duration_minutes, tz, settings.hour_24),
+        "rel": clock::format_rel(start, now),
+        "channel": channel_name,
+        "status": event.status,
+        "status_label": logic::status_label(&event.status),
+        "color": event.color,
+        "description": event.description,
+        "show_names": settings.show_attendees,
+        "options": option_views,
+        "buttons": buttons,
+        "localize_note": if settings.localize_time { "Members see this time in their own zone on Discord." } else { "Times stay in the server zone." },
+        "google_url": google,
+        "plus_url": plus,
+        "web_url": web_url,
+        "creator": creator,
+        "image_url": image_url,
+        "calendar_on": event.calendar_synced_at.is_some(),
+        "duration": clock::human_duration(event.duration_minutes),
+        "cutoff": event.cutoff_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
+        "attendee_role": event.attendee_role_id.and_then(|id| role_rows.iter().find(|r| r.id == id).map(|r| r.name.clone())).unwrap_or_default(),
+        "series_note": series_note,
+        "reminders": reminders.iter().map(|rem| serde_json::json!({
+            "offset": format!("{} before", clock::human_offset(rem.offset_minutes)),
+            "message": rem.message,
+            "state": if rem.sent_at.is_some() { "Sent" } else { "Waiting" },
+        })).collect::<Vec<_>>(),
+        "thread": thread.iter().map(|note| serde_json::json!({
+            "body": note.body,
+            "place": note.place,
+            "when": clock::parse_stamp(&note.created_at).map(|dt| clock::format_rel(dt, now)).unwrap_or_default(),
+        })).collect::<Vec<_>>(),
+        "members": members.iter().filter_map(|id| users.iter().find(|u| u.id == *id).map(|u| u.name.clone())).collect::<Vec<_>>(),
+    }));
+    render("event.html", ctx)
+}
+
+fn button_state(
+    event: &Event,
+    opt: &store::SignupOption,
+    user: &User,
+    roles: &[i64],
+    yours: bool,
+    confirmed: usize,
+    closed: bool,
+    restrict_ids: &[i64],
+) -> (bool, String, bool, String) {
+    let base = format!(
+        "{} {} ({})",
+        opt.emoji,
+        opt.name,
+        match opt.capacity {
+            Some(cap) => format!("{confirmed}/{cap}"),
+            None => confirmed.to_string(),
+        }
+    );
+    if yours {
+        return (
+            event.status != "posted",
+            String::new(),
+            false,
+            format!("Leave {}", opt.name),
+        );
+    }
+    if event.status != "posted" {
+        return (
+            true,
+            "Signups open once the event is posted.".into(),
+            false,
+            base,
+        );
+    }
+    if closed {
+        return (true, "Signups are closed.".into(), false, base);
+    }
+    if !restrict_ids.is_empty()
+        && !user.organizer
+        && !restrict_ids.iter().any(|id| roles.contains(id))
+    {
+        return (
+            true,
+            "This event is limited to another role.".into(),
+            false,
+            base,
+        );
+    }
+    if let Some(role_id) = opt.role_id {
+        if !user.organizer && !roles.contains(&role_id) {
+            return (
+                true,
+                "Your roles don't include this option.".into(),
+                false,
+                base,
+            );
+        }
+    }
+    if let Some(cap) = opt.capacity {
+        if confirmed as i64 >= cap {
+            if opt.waitlist {
+                return (false, String::new(), true, format!("Waitlist {}", opt.name));
+            }
+            return (true, format!("{} is full.", opt.name), false, base);
+        }
+    }
+    (false, String::new(), false, base)
+}
+
+pub fn list_page(page: &Page<'_>, kind: &str) -> Result<String, OpError> {
+    let (settings, tz) = zone_of(page)?;
+    let server = store::discord_server_id(page.conn, page.guild_id)?;
+    let events = store::list_events(page.conn, page.guild_id)?;
+    let (heading, lede, empty_title, empty_body, rows) =
+        match kind {
+            "drafts" => (
+                "Drafts",
+                "Saved, not posted, and not on the Discord clock yet.",
+                "No drafts.",
+                "Start an event and choose Save draft.",
+                rows_for(&server, &events, &settings, tz, |e| e.status == "draft"),
+            ),
+            "scheduled" => (
+                "Scheduled posts",
+                "These are saved and will be posted when their time arrives.",
+                "Nothing is queued.",
+                "Choose Schedule post on an event to put it here.",
+                rows_for(&server, &events, &settings, tz, |e| {
+                    e.status == "scheduled" || e.status == "failed"
+                }),
+            ),
+            "archive" => (
+                "Archive",
+                "Past events stay searchable after the channel moves on.",
+                "The archive is empty.",
+                "Posted events land here when they are archived.",
+                rows_for(&server, &events, &settings, tz, |e| {
+                    matches!(e.status.as_str(), "archived" | "cancelled" | "skipped")
+                }),
+            ),
+            "activity" => {
+                let rows = activity_rows(page, 80)?;
+                let mapped = rows.iter().map(|row| serde_json::json!({
+                "href": row.get("href").cloned().unwrap_or(serde_json::json!("/activity")),
+                "badge": "Log",
+                "title": row.get("body").cloned().unwrap_or(serde_json::json!("")),
+                "meta": row.get("when").cloned().unwrap_or(serde_json::json!("")),
+            })).collect::<Vec<_>>();
+                (
+                    "Activity",
+                    "Everything Marian posted, moved, or reminded.",
+                    "The log is empty.",
+                    "Signups and posts will show up here.",
+                    mapped,
+                )
+            }
+            _ => ("Schedule", "", "", "", vec![]),
+        };
+    let mut ctx = shell(page)?;
+    ctx["heading"] = Value::from(heading);
+    ctx["lede"] = Value::from(lede);
+    ctx["empty_title"] = Value::from(empty_title);
+    ctx["empty_body"] = Value::from(empty_body);
+    ctx["rows"] = Value::from_serialize(&rows);
+    ctx["extra"] = Value::from("");
+    ctx["dense"] = context_bool(kind == "activity");
+    render("list.html", ctx)
+}
+
+pub fn recurring(page: &Page<'_>) -> Result<String, OpError> {
+    let (settings, tz) = zone_of(page)?;
+    let mut rows = Vec::new();
+    for series in store::list_series(page.conn, page.guild_id)? {
+        if series.cadence == "once" {
+            continue;
+        }
+        let template: logic::SeriesTemplate = serde_json::from_str(&series.template_json)
+            .unwrap_or(logic::SeriesTemplate {
+                title: "Series".into(),
+                description: String::new(),
+                duration_minutes: 60,
+                channel_id: 0,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                thread_enabled: false,
+                multiple_signups: false,
+                mention_everyone: false,
+                attendee_role_id: None,
+                mention_role_ids: vec![],
+                restrict_role_ids: vec![],
+                cutoff_offset_minutes: None,
+                options: vec![],
+                reminders: vec![],
+                vote: logic::VoteSpec::default(),
+            });
+        let events = store::events_in_series(page.conn, series.id)?;
+        let next = events
+            .iter()
+            .find(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "draft"));
+        let mut when = next
+            .and_then(|event| clock::parse_stamp(&event.starts_at).ok())
+            .map(|dt| clock::format_when(dt, tz, settings.hour_24))
+            .unwrap_or_else(|| "no upcoming date".into());
+        if template.vote.enabled {
+            if let Some(line) = logic::closes_label(page.conn, series.id, tz, settings.hour_24)? {
+                when = line;
+            }
+        }
+        rows.push(serde_json::json!({
+            "href": format!(
+                "/servers/{}/recurring/{}",
+                store::discord_server_id(page.conn, page.guild_id)?,
+                series.id
+            ),
+            "badge": if series.active { clock::cadence_label(&series.cadence) } else { "Ended" },
+            "title": template.title,
+            "meta": format!(
+                "{when} · {}",
+                if series.active && series.max_occurrences.is_none() && series.end_on.is_none() {
+                    "keeps going".to_string()
+                } else {
+                    format!("{} dates", events.len())
+                }
+            ),
+        }));
+    }
+    let mut ctx = shell(page)?;
+    ctx["heading"] = Value::from("Recurring");
+    ctx["lede"] =
+        Value::from("A series keeps its own dates. Shifting one Tuesday does not move the rest.");
+    ctx["empty_title"] = Value::from("No series yet.");
+    ctx["empty_body"] = Value::from("Set a repeat when you create an event.");
+    ctx["rows"] = Value::from_serialize(&rows);
+    ctx["extra"] = Value::from("");
+    ctx["dense"] = context_bool(false);
+    render("list.html", ctx)
+}
+
+pub fn series_page(page: &Page<'_>, series_id: i64) -> Result<String, OpError> {
+    let series = store::series(page.conn, series_id)?.ok_or(OpError::NotFound)?;
+    if series.guild_id != page.guild_id {
+        return Err(OpError::NotFound);
+    }
+    let (settings, tz) = zone_of(page)?;
+    let template: serde_json::Value = serde_json::from_str(&series.template_json)
+        .unwrap_or(serde_json::json!({"title": "Series"}));
+    let title = template
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Series")
+        .to_string();
+    let events = store::events_in_series(page.conn, series.id)?;
+    let rows = events.iter().filter(|event| event.status != "ballot").filter_map(|event| {
+        let start = clock::parse_stamp(&event.starts_at).ok()?;
+        let post = event.post_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default();
+        Some(serde_json::json!({
+            "id": event.public_id,
+            "title": event.title,
+            "badge": logic::status_label(&event.status),
+            "meta": format!("{} · posts {}", clock::format_when(start, tz, settings.hour_24), if post.is_empty() { "with the event".into() } else { post }),
+        }))
+    }).collect::<Vec<_>>();
+    let next_post = events
+        .iter()
+        .filter(|e| e.status == "scheduled")
+        .filter_map(|e| {
+            e.post_at
+                .as_deref()
+                .and_then(|v| clock::parse_stamp(v).ok())
+        })
+        .min();
+    let mut lede = match next_post {
+        Some(dt) => format!(
+            "Next post {}.",
+            clock::format_when(dt, tz, settings.hour_24)
+        ),
+        None => "Nothing else is waiting to post.".into(),
+    };
+    let vote = logic::vote_panel(page.conn, series.id, page.user_id, tz, settings.hour_24)?;
+    if let Some(closes) = vote
+        .get("round")
+        .and_then(|round| round.get("closes"))
+        .and_then(|value| value.as_str())
+    {
+        lede = format!("Voting closes {closes}.");
+    }
+    if series.active && series.max_occurrences.is_none() && series.end_on.is_none() {
+        lede.push_str(" This series keeps going.");
+    }
+    let mut ctx = shell(page)?;
+    ctx["heading"] = Value::from(title);
+    ctx["cadence"] = Value::from(clock::cadence_label(&series.cadence));
+    ctx["active"] = context_bool(series.active);
+    ctx["lede"] = Value::from(lede);
+    ctx["series_id"] = Value::from(series.id);
+    ctx["rows"] = Value::from_serialize(&rows);
+    ctx["vote"] = Value::from_serialize(&vote);
+    render("series.html", ctx)
+}
+
+pub fn presets(page: &Page<'_>) -> Result<String, OpError> {
+    let mut items = Vec::new();
+    for preset in store::list_presets(page.conn, page.guild_id)? {
+        let summary = serde_json::from_str::<logic::PresetBody>(&preset.body)
+            .map(|body| {
+                body.options
+                    .iter()
+                    .map(|opt| opt.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|_| "Unreadable preset".into());
+        items.push(serde_json::json!({ "id": preset.id, "name": preset.name, "summary": summary }));
+    }
+    let library = store::list_library(page.conn, page.guild_id)?;
+    let mut ctx = shell(page)?;
+    ctx["presets"] = Value::from_serialize(&items);
+    ctx["library"] = Value::from_serialize(
+        &library
+            .iter()
+            .map(|item| serde_json::json!({"emoji": item.emoji, "name": item.name}))
+            .collect::<Vec<_>>(),
+    );
+    render("presets.html", ctx)
+}
+
+pub fn channels(page: &Page<'_>) -> Result<String, OpError> {
+    let (settings, tz) = zone_of(page)?;
+    let events = store::list_events(page.conn, page.guild_id)?;
+    let mut rows = Vec::new();
+    for channel in store::list_channels(page.conn, page.guild_id)? {
+        let count = events
+            .iter()
+            .filter(|event| event.channel_id == channel.id)
+            .count();
+        rows.push(serde_json::json!({
+            "name": channel.name,
+            "kind": if channel.kind == "event" { "Event channel" } else { "Text" },
+            "count": count,
+            "purged": channel.purged_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
+        }));
+    }
+    let mut ctx = shell(page)?;
+    ctx["channels"] = Value::from_serialize(&rows);
+    render("channels.html", ctx)
+}
+
+pub fn commands_page(page: &Page<'_>) -> Result<String, OpError> {
+    let rows = store::list_commands(page.conn, page.guild_id, 30)?;
+    let users = store::list_users(page.conn, page.guild_id)?;
+    let mut log = Vec::new();
+    for row in rows.into_iter().rev() {
+        let name = users
+            .iter()
+            .find(|user| user.id == row.user_id)
+            .map(|user| user.name.clone())
+            .unwrap_or_else(|| "Marian".into());
+        log.push(serde_json::json!({"user": name, "line": row.line, "reply": row.reply}));
+    }
+    let sample = store::list_events(page.conn, page.guild_id)?
+        .into_iter()
+        .find(|event| event.status == "posted");
+    let mut examples = vec![
+        "/events".to_string(),
+        "/reminders off".to_string(),
+        r#"/event title:"Shore cleanup" start:"tomorrow at 4pm" channel:social"#.to_string(),
+    ];
+    if let Some(event) = sample {
+        examples.push(format!(
+            "/response add event:{} user:samir option:Accepted",
+            event.public_id
+        ));
+    }
+    let mut ctx = shell(page)?;
+    ctx["log"] = Value::from_serialize(&log);
+    ctx["help"] = Value::from(HELP);
+    ctx["examples"] = Value::from_serialize(&examples);
+    render("commands.html", ctx)
+}
+
+pub fn settings_page(page: &Page<'_>) -> Result<String, OpError> {
+    if page.guild_id == 0 {
+        let mut ctx = shell(page)?;
+        ctx.insert("empty_server", context_bool(true));
+        return render("settings.html", ctx);
+    }
+    let settings = store::settings(page.conn, page.guild_id)?;
+    let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
+    let user = store::user(page.conn, page.user_id)?;
+    let organizer = user.as_ref().map(|user| user.organizer).unwrap_or(false);
+    let roles = store::list_roles(page.conn, page.guild_id)?;
+    let mut ctx = shell(page)?;
+    ctx["empty_server"] = context_bool(false);
+    ctx["empty_people"] = context_bool(user.is_none());
+    ctx["organizer"] = context_bool(organizer);
+    ctx["default_reminder_minutes"] = Value::from(settings.default_reminder_minutes);
+    ctx["auto_archive_hours"] = Value::from(settings.auto_archive_hours);
+    ctx["post_lead_hours"] = Value::from(settings.post_lead_hours);
+    ctx["thread_reminders"] = context_bool(settings.thread_reminders);
+    ctx["auto_archive"] = context_bool(settings.auto_archive);
+    ctx["event_threads"] = context_bool(settings.event_threads);
+    ctx["auto_join_threads"] = context_bool(settings.auto_join_threads);
+    ctx["show_attendees"] = context_bool(settings.show_attendees);
+    ctx["hour_24"] = context_bool(settings.hour_24);
+    ctx["localize_time"] = context_bool(settings.localize_time);
+    ctx["purge_channels"] = context_bool(settings.purge_channels);
+    ctx["temp_roles"] = context_bool(settings.temp_roles);
+    ctx["calendar_auto_sync"] = context_bool(settings.calendar_auto_sync);
+    ctx["park_clock"] = context_bool(settings.park_clock);
+    ctx["zone_groups"] = Value::from_serialize(&clock::zone_groups(Utc::now(), &guild.timezone));
+    ctx["digests"] = Value::from_serialize(
+        &["off", "daily", "weekly"]
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "label": id,
+                    "selected": settings.digest == *id,
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    ctx["role_event"] = role_choices(&roles, settings.role_event);
+    ctx["role_edit"] = role_choices(&roles, settings.role_edit);
+    ctx["role_delete"] = role_choices(&roles, settings.role_delete);
+    ctx["role_channel"] = role_choices(&roles, settings.role_channel);
+    ctx["role_signup"] = role_choices(&roles, settings.role_signup);
+    render("settings.html", ctx)
+}
+
+pub fn form_page(page: &Page<'_>, draft: &FormDraft) -> Result<String, OpError> {
+    let (channels, roles) = form_refs(page, draft)?;
+    let mut ctx = shell(page)?;
+    ctx["heading"] = Value::from(draft.heading.clone());
+    ctx["error"] = Value::from(draft.error.clone());
+    ctx["series_note"] = Value::from(draft.series_note.clone());
+    ctx["action_url"] = Value::from(draft.action_url.clone());
+    ctx["event_title"] = Value::from(draft.event_title.clone());
+    ctx["description"] = Value::from(draft.description.clone());
+    ctx["channels"] = channels;
+    ctx["colors"] = colors(&draft.color);
+    ctx["start"] = Value::from(draft.start.clone());
+    ctx["duration"] = Value::from(draft.duration.clone());
+    ctx["cutoff"] = Value::from(draft.cutoff.clone());
+    ctx["post_at"] = Value::from(draft.post_at.clone());
+    ctx["options"] = Value::from_serialize(&draft.options);
+    ctx["reminders"] = Value::from_serialize(&draft.reminders);
+    ctx["roles"] = roles;
+    ctx["lock_options"] = context_bool(draft.lock_options);
+    ctx["thread_enabled"] = context_bool(draft.thread_enabled);
+    ctx["multiple_signups"] = context_bool(draft.multiple_signups);
+    ctx["mention_everyone"] = context_bool(draft.mention_everyone);
+    ctx["attendee_role_id"] = Value::from(draft.attendee_role_id.clone());
+    ctx["series_locked"] = context_bool(draft.series_locked);
+    ctx["repeat"] = Value::from(draft.repeat.clone());
+    ctx["repeat_count"] = Value::from(draft.repeat_count.clone());
+    ctx["repeat_until"] = Value::from(draft.repeat_until.clone());
+    ctx["vote_enabled"] = context_bool(draft.vote_enabled);
+    ctx["vote_close_weekday"] = Value::from(draft.vote_close_weekday.clone());
+    ctx["vote_close_time"] = Value::from(draft.vote_close_time.clone());
+    ctx["vote_default_weekday"] = Value::from(draft.vote_default_weekday.clone());
+    ctx["vote_question_rows"] =
+        Value::from_serialize(&logic::question_fields(&draft.vote_questions));
+    ctx["vote_days"] = Value::from_serialize(
+        &(0..7)
+            .map(|day| {
+                serde_json::json!({
+                    "n": day.to_string(),
+                    "name": logic::weekday_name(day as u8),
+                    "on": draft.vote_days.get(day).copied().unwrap_or(true),
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    ctx["show_apply"] = context_bool(draft.show_apply);
+    ctx["apply_series"] = context_bool(draft.apply_series);
+    ctx["show_draft"] = context_bool(draft.show_draft);
+    ctx["show_schedule"] = context_bool(draft.show_schedule);
+    ctx["show_publish"] = context_bool(draft.show_publish);
+    ctx["show_save"] = context_bool(draft.show_save);
+    render("form.html", ctx)
+}
+
+pub fn not_found(page: &Page<'_>) -> Result<String, OpError> {
+    render("notfound.html", shell(page)?)
+}
+
+#[derive(Clone, Serialize)]
+pub struct Slot {
+    pub n: usize,
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
+    pub capacity: String,
+    pub waitlist: bool,
+    pub role_id: String,
+    pub reminders: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemSlot {
+    pub n: usize,
+    pub offset: String,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct FormDraft {
+    pub heading: String,
+    pub error: String,
+    pub series_note: String,
+    pub action_url: String,
+    pub event_title: String,
+    pub description: String,
+    pub channel_id: String,
+    pub color: String,
+    pub start: String,
+    pub duration: String,
+    pub cutoff: String,
+    pub post_at: String,
+    pub options: Vec<Slot>,
+    pub reminders: Vec<RemSlot>,
+    pub thread_enabled: bool,
+    pub multiple_signups: bool,
+    pub mention_everyone: bool,
+    pub attendee_role_id: String,
+    pub mention_role_ids: Vec<i64>,
+    pub restrict_role_ids: Vec<i64>,
+    pub series_locked: bool,
+    pub repeat: String,
+    pub repeat_count: String,
+    pub repeat_until: String,
+    pub vote_enabled: bool,
+    pub vote_close_weekday: String,
+    pub vote_close_time: String,
+    pub vote_default_weekday: String,
+    pub vote_days: Vec<bool>,
+    pub vote_questions: Vec<logic::VoteQuestion>,
+    pub show_apply: bool,
+    pub apply_series: bool,
+    pub lock_options: bool,
+    pub show_draft: bool,
+    pub show_schedule: bool,
+    pub show_publish: bool,
+    pub show_save: bool,
+    pub existing_id: Option<i64>,
+}
+
+pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft {
+    let mut draft = FormDraft {
+        heading: "New event".into(),
+        error: String::new(),
+        series_note: String::new(),
+        action_url: format!("/servers/{server}/events/new"),
+        event_title: String::new(),
+        description: String::new(),
+        channel_id: String::new(),
+        color: "#1e3a6e".into(),
+        start: String::new(),
+        duration: "60".into(),
+        cutoff: String::new(),
+        post_at: String::new(),
+        options: vec![],
+        reminders: vec![RemSlot {
+            n: 0,
+            offset: "15".into(),
+            message: String::new(),
+        }],
+        thread_enabled: true,
+        multiple_signups: false,
+        mention_everyone: false,
+        attendee_role_id: String::new(),
+        mention_role_ids: vec![],
+        restrict_role_ids: vec![],
+        series_locked: false,
+        repeat: "none".into(),
+        repeat_count: String::new(),
+        repeat_until: String::new(),
+        vote_enabled: false,
+        vote_close_weekday: "0".into(),
+        vote_close_time: "18:00".into(),
+        vote_default_weekday: "0".into(),
+        vote_days: vec![true; 7],
+        vote_questions: Vec::new(),
+        show_apply: false,
+        apply_series: false,
+        lock_options: false,
+        show_draft: true,
+        show_schedule: true,
+        show_publish: true,
+        show_save: false,
+        existing_id: None,
+    };
+    let options = preset
+        .map(|body| {
+            draft.multiple_signups = body.multiple_signups;
+            body.options
+        })
+        .unwrap_or_else(default_options);
+    draft.options = pad_options(options.into_iter().map(slot_from_option).collect());
+    draft.reminders = pad_reminders(draft.reminders.clone());
+    draft
+}
+
+pub fn form_from_event(conn: &Connection, event_id: i64, tz: Tz) -> Result<FormDraft, OpError> {
+    let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
+    let options = store::options_for(conn, event_id)?;
+    let reminders = store::reminders_for(conn, event_id)?;
+    let server = store::discord_server_id(conn, event.guild_id)?;
+    let mut draft = blank_form(&server, None);
+    draft.heading = format!("Edit {}", event.title);
+    draft.action_url = format!("/servers/{server}/events/{}/edit", event.public_id);
+    draft.existing_id = Some(event.id);
+    draft.event_title = event.title.clone();
+    draft.description = event.description.clone();
+    draft.channel_id = event.channel_id.to_string();
+    draft.color = event.color.clone();
+    draft.start = clock::datetime_local(clock::parse_stamp(&event.starts_at)?, tz);
+    draft.duration = event.duration_minutes.to_string();
+    draft.cutoff = event
+        .cutoff_at
+        .as_deref()
+        .and_then(|v| clock::parse_stamp(v).ok())
+        .map(|dt| clock::datetime_local(dt, tz))
+        .unwrap_or_default();
+    draft.post_at = event
+        .post_at
+        .as_deref()
+        .and_then(|v| clock::parse_stamp(v).ok())
+        .map(|dt| clock::datetime_local(dt, tz))
+        .unwrap_or_default();
+    draft.options = pad_options(
+        options
+            .into_iter()
+            .map(|opt| Slot {
+                n: 0,
+                id: opt.id.to_string(),
+                name: opt.name,
+                emoji: opt.emoji,
+                capacity: opt.capacity.map(|n| n.to_string()).unwrap_or_default(),
+                waitlist: opt.waitlist,
+                role_id: opt.role_id.map(|id| id.to_string()).unwrap_or_default(),
+                reminders: opt.reminders_enabled,
+            })
+            .collect(),
+    );
+    draft.reminders = pad_reminders(
+        reminders
+            .into_iter()
+            .map(|rem| RemSlot {
+                n: 0,
+                offset: rem.offset_minutes.to_string(),
+                message: rem.message,
+            })
+            .collect(),
+    );
+    draft.thread_enabled = event.thread_enabled;
+    draft.multiple_signups = event.multiple_signups;
+    draft.mention_everyone = event.mention_everyone;
+    draft.attendee_role_id = event
+        .attendee_role_id
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    draft.mention_role_ids = store::event_role_ids(conn, event.id, "mention")?;
+    draft.restrict_role_ids = store::event_role_ids(conn, event.id, "restrict")?;
+    draft.series_locked = event.series_id.is_some();
+    let once = event.series_id.is_some_and(|id| {
+        store::series(conn, id)
+            .ok()
+            .flatten()
+            .is_some_and(|series| series.cadence == "once")
+    });
+    draft.series_note = if event.series_id.is_some() && !once {
+        "This date keeps its own start time. The repeat cadence stays with the series.".into()
+    } else {
+        String::new()
+    };
+    apply_flags(&mut draft, &event.status, event.series_id.is_some());
+    Ok(draft)
+}
+
+pub fn form_from_map(
+    map: &HashMap<String, String>,
+    server: &str,
+    existing: Option<&Event>,
+    error: String,
+    tz: Tz,
+) -> FormDraft {
+    let mut draft = blank_form(server, None);
+    draft.error = error;
+    draft.event_title = map.get("title").cloned().unwrap_or_default();
+    draft.description = map.get("description").cloned().unwrap_or_default();
+    draft.channel_id = map.get("channel_id").cloned().unwrap_or_default();
+    draft.color = map
+        .get("color")
+        .cloned()
+        .unwrap_or_else(|| "#1e3a6e".into());
+    draft.start = map.get("start").cloned().unwrap_or_default();
+    draft.duration = map.get("duration").cloned().unwrap_or_else(|| "60".into());
+    draft.cutoff = map.get("cutoff").cloned().unwrap_or_default();
+    draft.post_at = map.get("post_at").cloned().unwrap_or_default();
+    draft.thread_enabled = map.contains_key("thread_enabled");
+    draft.multiple_signups = map.contains_key("multiple_signups");
+    draft.mention_everyone = map.contains_key("mention_everyone");
+    draft.attendee_role_id = map.get("attendee_role_id").cloned().unwrap_or_default();
+    draft.repeat = map.get("repeat").cloned().unwrap_or_else(|| "none".into());
+    draft.repeat_count = map.get("repeat_count").cloned().unwrap_or_default();
+    draft.repeat_until = map.get("repeat_until").cloned().unwrap_or_default();
+    draft.vote_enabled = map.contains_key("vote");
+    draft.vote_close_weekday = map
+        .get("vote_close_weekday")
+        .cloned()
+        .unwrap_or_else(|| "0".into());
+    draft.vote_close_time = map
+        .get("vote_close_time")
+        .cloned()
+        .unwrap_or_else(|| "18:00".into());
+    draft.vote_default_weekday = map
+        .get("vote_default_weekday")
+        .cloned()
+        .unwrap_or_else(|| "0".into());
+    draft.vote_questions = logic::questions_from_map(map, "vote").unwrap_or_default();
+    if map.contains_key("vote") || map.keys().any(|key| key.starts_with("vote_day_")) {
+        let mut days: Vec<bool> = (0..7)
+            .map(|day| map.contains_key(&format!("vote_day_{day}")))
+            .collect();
+        if days.iter().all(|on| !on) {
+            days = vec![true; 7];
+        }
+        draft.vote_days = days;
+    }
+    draft.apply_series = map.contains_key("apply_series");
+    for key in map.keys() {
+        if let Some(id) = key.strip_prefix("mention_") {
+            if let Ok(id) = id.parse() {
+                draft.mention_role_ids.push(id);
+            }
+        }
+        if let Some(id) = key.strip_prefix("restrict_") {
+            if let Ok(id) = id.parse() {
+                draft.restrict_role_ids.push(id);
+            }
+        }
+    }
+    draft.options = pad_options(
+        (0..8)
+            .map(|n| Slot {
+                n,
+                id: map.get(&format!("opt{n}_id")).cloned().unwrap_or_default(),
+                name: map
+                    .get(&format!("opt{n}_name"))
+                    .cloned()
+                    .unwrap_or_default(),
+                emoji: map
+                    .get(&format!("opt{n}_emoji"))
+                    .cloned()
+                    .unwrap_or_default(),
+                capacity: map
+                    .get(&format!("opt{n}_capacity"))
+                    .cloned()
+                    .unwrap_or_default(),
+                waitlist: map.contains_key(&format!("opt{n}_waitlist")),
+                role_id: map
+                    .get(&format!("opt{n}_role"))
+                    .cloned()
+                    .unwrap_or_default(),
+                reminders: map.contains_key(&format!("opt{n}_reminders")),
+            })
+            .collect(),
+    );
+    draft.reminders = pad_reminders(
+        (0..5)
+            .map(|n| RemSlot {
+                n,
+                offset: map
+                    .get(&format!("rem{n}_offset"))
+                    .cloned()
+                    .unwrap_or_default(),
+                message: map
+                    .get(&format!("rem{n}_message"))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    );
+    if let Some(event) = existing {
+        draft.existing_id = Some(event.id);
+        draft.action_url = format!("/servers/{server}/events/{}/edit", event.public_id);
+        draft.heading = format!("Edit {}", event.title);
+        draft.series_locked = event.series_id.is_some();
+        apply_flags(&mut draft, &event.status, event.series_id.is_some());
+    }
+    let _ = tz;
+    draft
+}
+
+pub fn input_from_form(
+    map: &HashMap<String, String>,
+    guild_id: i64,
+    actor_id: i64,
+    tz: Tz,
+    existing: Option<&Event>,
+) -> Result<EventInput, OpError> {
+    let draft = form_from_map(map, "", existing, String::new(), tz);
+    let start = if draft.vote_enabled && !draft.start.contains('T') {
+        if draft.start.trim().is_empty() {
+            return Err(OpError::message(
+                "Set the clock time. The day comes from the vote.",
+            ));
+        }
+        clock::anchor_at_clock(&draft.start, tz)?
+    } else {
+        clock::parse_local(&draft.start, tz)?
+    };
+    let duration = draft
+        .duration
+        .parse::<i64>()
+        .map_err(|_| OpError::message("Duration needs to be a number of minutes."))?;
+    let cutoff = if draft.cutoff.trim().is_empty() {
+        None
+    } else {
+        Some(clock::parse_local(&draft.cutoff, tz)?)
+    };
+    let post_at = if draft.post_at.trim().is_empty() {
+        None
+    } else {
+        Some(clock::parse_local(&draft.post_at, tz)?)
+    };
+    let repeat_until = if draft.repeat_until.trim().is_empty() {
+        None
+    } else {
+        Some(clock::parse_date(&draft.repeat_until, tz)?)
+    };
+    let repeat = if draft.series_locked || draft.repeat == "none" || draft.repeat.is_empty() {
+        None
+    } else {
+        Some(RepeatSpec {
+            cadence: draft.repeat.clone(),
+            end_on: repeat_until,
+            max_occurrences: if draft.repeat_count.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    draft
+                        .repeat_count
+                        .parse()
+                        .map_err(|_| OpError::message("The date count needs to be a number."))?,
+                )
+            },
+        })
+    };
+    let action = match map.get("action").map(String::as_str).unwrap_or("publish") {
+        "draft" => SaveAction::Draft,
+        "schedule" => SaveAction::Schedule,
+        "save" => SaveAction::Save,
+        _ => SaveAction::Publish,
+    };
+    let mut mention_role_ids = Vec::new();
+    let mut restrict_role_ids = Vec::new();
+    for (key, _) in map {
+        if let Some(id) = key.strip_prefix("mention_") {
+            if let Ok(id) = id.parse() {
+                mention_role_ids.push(id);
+            }
+        }
+        if let Some(id) = key.strip_prefix("restrict_") {
+            if let Ok(id) = id.parse() {
+                restrict_role_ids.push(id);
+            }
+        }
+    }
+    let options = draft
+        .options
+        .iter()
+        .filter(|slot| !slot.name.trim().is_empty())
+        .map(|slot| OptionInput {
+            id: slot.id.parse().ok(),
+            name: slot.name.clone(),
+            emoji: slot.emoji.clone(),
+            capacity: if slot.capacity.trim().is_empty() {
+                None
+            } else {
+                slot.capacity.parse().ok()
+            },
+            waitlist: slot.waitlist,
+            role_id: slot.role_id.parse().ok(),
+            reminders_enabled: slot.reminders,
+        })
+        .collect();
+    let reminders = draft
+        .reminders
+        .iter()
+        .filter(|slot| !slot.offset.trim().is_empty())
+        .map(|slot| ReminderInput {
+            offset_minutes: slot.offset.parse().unwrap_or(0),
+            message: slot.message.clone(),
+        })
+        .collect();
+    Ok(EventInput {
+        id: existing.map(|event| event.id),
+        guild_id,
+        actor_id,
+        channel_id: draft.channel_id.parse().unwrap_or(0),
+        title: draft.event_title,
+        description: draft.description,
+        starts_at: start,
+        duration_minutes: duration,
+        color: draft.color,
+        image_url: None,
+        cutoff_at: cutoff,
+        attendee_role_id: draft.attendee_role_id.parse().ok(),
+        thread_enabled: draft.thread_enabled,
+        multiple_signups: draft.multiple_signups,
+        mention_everyone: draft.mention_everyone,
+        mention_role_ids,
+        restrict_role_ids,
+        options,
+        reminders,
+        repeat,
+        action,
+        post_at,
+        apply_series: draft.apply_series,
+        vote: if map.contains_key("vote") {
+            Some(logic::spec_from_map(map)?)
+        } else {
+            None
+        },
+    })
+}
+
+fn apply_flags(draft: &mut FormDraft, status: &str, series: bool) {
+    draft.show_apply = series;
+    draft.lock_options = status == "posted";
+    match status {
+        "posted" => {
+            draft.show_draft = false;
+            draft.show_schedule = false;
+            draft.show_publish = false;
+            draft.show_save = true;
+        }
+        "scheduled" | "failed" => {
+            draft.show_draft = true;
+            draft.show_schedule = true;
+            draft.show_publish = true;
+            draft.show_save = true;
+        }
+        _ => {
+            draft.show_draft = true;
+            draft.show_schedule = true;
+            draft.show_publish = true;
+            draft.show_save = false;
+        }
+    }
+}
+
+fn pad_options(mut slots: Vec<Slot>) -> Vec<Slot> {
+    slots.truncate(8);
+    while slots.len() < 8 {
+        slots.push(Slot {
+            n: slots.len(),
+            id: String::new(),
+            name: String::new(),
+            emoji: String::new(),
+            capacity: String::new(),
+            waitlist: false,
+            role_id: String::new(),
+            reminders: true,
+        });
+    }
+    for (n, slot) in slots.iter_mut().enumerate() {
+        slot.n = n;
+    }
+    slots
+}
+
+fn pad_reminders(mut slots: Vec<RemSlot>) -> Vec<RemSlot> {
+    slots.truncate(5);
+    while slots.len() < 5 {
+        slots.push(RemSlot {
+            n: slots.len(),
+            offset: String::new(),
+            message: String::new(),
+        });
+    }
+    for (n, slot) in slots.iter_mut().enumerate() {
+        slot.n = n;
+    }
+    slots
+}
+
+fn slot_from_option(opt: OptionInput) -> Slot {
+    Slot {
+        n: 0,
+        id: String::new(),
+        name: opt.name,
+        emoji: opt.emoji,
+        capacity: opt.capacity.map(|n| n.to_string()).unwrap_or_default(),
+        waitlist: opt.waitlist,
+        role_id: opt.role_id.map(|id| id.to_string()).unwrap_or_default(),
+        reminders: opt.reminders_enabled,
+    }
+}
+
+fn default_options() -> Vec<OptionInput> {
+    vec![
+        OptionInput {
+            id: None,
+            name: "Accepted".into(),
+            emoji: "✅".into(),
+            capacity: None,
+            waitlist: false,
+            role_id: None,
+            reminders_enabled: true,
+        },
+        OptionInput {
+            id: None,
+            name: "Declined".into(),
+            emoji: "❌".into(),
+            capacity: None,
+            waitlist: false,
+            role_id: None,
+            reminders_enabled: false,
+        },
+        OptionInput {
+            id: None,
+            name: "Tentative".into(),
+            emoji: "❔".into(),
+            capacity: None,
+            waitlist: false,
+            role_id: None,
+            reminders_enabled: false,
+        },
+    ]
+}
+
+fn form_refs(page: &Page<'_>, draft: &FormDraft) -> Result<(Value, Value), OpError> {
+    let channels = store::list_channels(page.conn, page.guild_id)?;
+    let roles = store::list_roles(page.conn, page.guild_id)?;
+    let channel_values = channels.iter().map(|channel| serde_json::json!({
+        "id": channel.id,
+        "name": channel.name,
+        "selected": draft.channel_id == channel.id.to_string() || (draft.channel_id.is_empty() && channel.id == channels.first().map(|c| c.id).unwrap_or(0)),
+    })).collect::<Vec<_>>();
+    let mention: HashSet<i64> = draft.mention_role_ids.iter().copied().collect();
+    let restrict: HashSet<i64> = draft.restrict_role_ids.iter().copied().collect();
+    let role_values = roles
+        .iter()
+        .map(|role| {
+            serde_json::json!({
+                "id": role.id,
+                "id_s": role.id.to_string(),
+                "name": role.name,
+                "mentioned": mention.contains(&role.id),
+                "restricted": restrict.contains(&role.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        Value::from_serialize(&channel_values),
+        Value::from_serialize(&role_values),
+    ))
+}
+
+fn colors(current: &str) -> Value {
+    let palette = [
+        ("#1e3a6e", "Marian blue"),
+        ("#2f6b4f", "Tide green"),
+        ("#8a6232", "Brass"),
+        ("#6b3a6b", "Plum"),
+        ("#8d3a32", "Seal red"),
+        ("#243038", "Ink"),
+    ];
+    Value::from_serialize(
+        &palette
+            .iter()
+            .map(|(value, label)| {
+                serde_json::json!({
+                    "value": value,
+                    "label": label,
+                    "selected": *value == current,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn role_choices(roles: &[store::Role], selected: Option<i64>) -> Value {
+    let mut rows = vec![
+        serde_json::json!({"id": "", "name": "No extra role", "selected": selected.is_none()}),
+    ];
+    for role in roles {
+        rows.push(serde_json::json!({
+            "id": role.id.to_string(),
+            "name": role.name,
+            "selected": selected == Some(role.id),
+        }));
+    }
+    Value::from_serialize(&rows)
+}
+
+fn rows_for(
+    server: &str,
+    events: &[Event],
+    settings: &Settings,
+    tz: Tz,
+    keep: impl Fn(&Event) -> bool,
+) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| keep(event))
+        .filter_map(|event| {
+            let start = clock::parse_stamp(&event.starts_at).ok()?;
+            Some(serde_json::json!({
+                "href": format!("/servers/{server}/events/{}", event.public_id),
+                "badge": logic::status_label(&event.status),
+                "title": event.title,
+                "meta": clock::format_when(start, tz, settings.hour_24),
+            }))
+        })
+        .collect()
+}
+
+fn card_value(
+    conn: &Connection,
+    event: &Event,
+    settings: &Settings,
+    tz: Tz,
+    now: DateTime<Utc>,
+    hero: bool,
+) -> Result<serde_json::Value, OpError> {
+    let start = clock::parse_stamp(&event.starts_at)?;
+    let options = store::options_for(conn, event.id)?;
+    let signups = store::signups_for(conn, event.id)?;
+    let spots: Vec<String> = options
+        .iter()
+        .map(|opt| {
+            let confirmed = signups
+                .iter()
+                .filter(|s| s.option_id == opt.id && s.state == "confirmed")
+                .count();
+            let waiting = signups
+                .iter()
+                .filter(|s| s.option_id == opt.id && s.state == "waitlisted")
+                .count();
+            let main = match opt.capacity {
+                Some(cap) => format!("{} {}/{}", opt.emoji, confirmed, cap),
+                None => format!("{} {}", opt.emoji, confirmed),
+            };
+            if waiting > 0 {
+                format!("{main} +{waiting} waiting")
+            } else {
+                main
+            }
+        })
+        .collect();
+    let channel = store::channel(conn, event.channel_id)?
+        .map(|c| c.name)
+        .unwrap_or_else(|| "deleted".into());
+    let mut value = serde_json::json!({
+        "id": event.public_id,
+        "title": event.title,
+        "when": clock::format_when(start, tz, settings.hour_24),
+        "end": clock::format_end(start, event.duration_minutes, tz, settings.hour_24),
+        "channel": channel,
+        "status_label": logic::status_label(&event.status),
+        "rel": clock::format_rel(start, now),
+        "spots": spots,
+    });
+    if hero {
+        value["description"] =
+            serde_json::Value::String(event.description.chars().take(180).collect());
+        value["spots"] = serde_json::Value::String(spots_join(&options, &signups));
+    }
+    Ok(value)
+}
+
+fn spots_join(options: &[store::SignupOption], signups: &[store::Signup]) -> String {
+    options
+        .iter()
+        .map(|opt| {
+            let confirmed = signups
+                .iter()
+                .filter(|s| s.option_id == opt.id && s.state == "confirmed")
+                .count();
+            format!("{} {}", opt.name, confirmed)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn people(users: &[User], ids: &[i64]) -> Vec<serde_json::Value> {
+    ids.iter()
+        .filter_map(|id| {
+            users.iter().find(|user| user.id == *id).map(|user| {
+                serde_json::json!({
+                    "id": user.id,
+                    "name": user.name,
+                    "color": user.color,
+                })
+            })
+        })
+        .collect()
+}
+
+fn activity_rows(page: &Page<'_>, limit: i64) -> Result<Vec<serde_json::Value>, OpError> {
+    let now = Utc::now();
+    let mut rows = Vec::new();
+    for item in store::list_activity(page.conn, page.guild_id, limit)? {
+        let when = clock::parse_stamp(&item.created_at)
+            .map(|dt| clock::format_rel(dt, now))
+            .unwrap_or_default();
+        let server = store::discord_server_id(page.conn, page.guild_id)?;
+        let href = match item.event_id {
+            Some(id) => match store::event(page.conn, id)? {
+                Some(event) => format!("/servers/{server}/events/{}", event.public_id),
+                None => format!("/servers/{server}/activity"),
+            },
+            None => format!("/servers/{server}/activity"),
+        };
+        rows.push(serde_json::json!({"body": item.body, "when": when, "href": href}));
+    }
+    Ok(rows)
+}
+
+fn cutoff_passed(event: &Event, now: DateTime<Utc>) -> bool {
+    event
+        .cutoff_at
+        .as_deref()
+        .and_then(|v| clock::parse_stamp(v).ok())
+        .map(|dt| now >= dt)
+        .unwrap_or(false)
+}
+
+fn zone_of(page: &Page<'_>) -> Result<(Settings, Tz), OpError> {
+    let settings = store::settings(page.conn, page.guild_id)?;
+    let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
+    Ok((settings, clock::zone(&guild.timezone)?))
+}
+
+fn must_user(page: &Page<'_>) -> Result<User, OpError> {
+    store::user(page.conn, page.user_id)?.ok_or(OpError::NotFound)
+}
+
+struct Bag(HashMap<String, Value>);
+
+impl Bag {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn insert(&mut self, key: &str, value: Value) {
+        self.0.insert(key.to_string(), value);
+    }
+}
+
+impl std::ops::Index<&str> for Bag {
+    type Output = Value;
+
+    fn index(&self, key: &str) -> &Value {
+        &self.0[key]
+    }
+}
+
+impl std::ops::IndexMut<&str> for Bag {
+    fn index_mut(&mut self, key: &str) -> &mut Value {
+        self.0
+            .entry(key.to_string())
+            .or_insert_with(|| Value::from(""))
+    }
+}
+
+fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
+    let mut ctx = Bag::new();
+    ctx.insert("title", Value::from(page.title));
+    ctx.insert("notice", Value::from(page.notice.unwrap_or("")));
+    ctx.insert("nav", Value::from(page.nav));
+    ctx.insert("invite_url", Value::from(page.invite_url));
+    if page.guild_id == 0 {
+        ctx.insert("guild_name", Value::from(""));
+        ctx.insert("guild_id", Value::from(0));
+        ctx.insert("base", Value::from(""));
+        ctx.insert("tz_label", Value::from(""));
+        ctx.insert("park", context_bool(false));
+        ctx.insert("users", Value::from_serialize(&Vec::<Value>::new()));
+        ctx.insert("guilds", Value::from_serialize(&Vec::<Value>::new()));
+        ctx.insert("user_id", Value::from(0));
+        ctx.insert("user_name", Value::from(""));
+        ctx.insert("reminders_on", context_bool(false));
+        ctx.insert("draft_count", Value::from(0));
+        ctx.insert("scheduled_count", Value::from(0));
+        ctx.insert("series_count", Value::from(0));
+        ctx.insert("calendar_url", Value::from(""));
+        return Ok(ctx);
+    }
+    let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
+    let settings = store::settings(page.conn, page.guild_id)?;
+    let tz = clock::zone(&guild.timezone)?;
+    let users = store::list_users(page.conn, page.guild_id)?;
+    let guilds = store::list_guilds(page.conn)?
+        .into_iter()
+        .filter(|guild| page.allowed_guilds.contains(&guild.id))
+        .collect::<Vec<_>>();
+    let user = users.iter().find(|user| user.id == page.user_id);
+    let server = guild
+        .discord_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or(OpError::NotFound)?;
+    ctx.insert("guild_name", Value::from(guild.name));
+    ctx.insert("guild_id", Value::from(server.clone()));
+    ctx.insert("base", Value::from(format!("/servers/{server}")));
+    ctx.insert("tz_label", Value::from(zone_label(tz)));
+    ctx.insert("park", context_bool(settings.park_clock));
+    ctx.insert(
+        "users",
+        Value::from_serialize(
+            &users
+                .iter()
+                .map(|user| serde_json::json!({"id": user.id, "name": user.name}))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    ctx.insert(
+        "guilds",
+        Value::from_serialize(
+            &guilds
+                .iter()
+                .filter_map(|g| {
+                    let id = g.discord_id.clone().filter(|id| !id.is_empty())?;
+                    Some(serde_json::json!({"id": id, "name": g.name}))
+                })
+                .collect::<Vec<_>>(),
+        ),
+    );
+    ctx.insert("user_id", Value::from(page.user_id));
+    ctx.insert(
+        "user_name",
+        Value::from(user.map(|u| u.name.as_str()).unwrap_or("")),
+    );
+    ctx.insert(
+        "reminders_on",
+        context_bool(user.map(|u| u.reminders_enabled).unwrap_or(true)),
+    );
+    ctx.insert(
+        "draft_count",
+        Value::from(store::count_status(page.conn, page.guild_id, "draft")?),
+    );
+    ctx.insert(
+        "scheduled_count",
+        Value::from(
+            store::count_status(page.conn, page.guild_id, "scheduled")?
+                + store::count_status(page.conn, page.guild_id, "failed")?,
+        ),
+    );
+    ctx.insert(
+        "series_count",
+        Value::from(store::count_active_series(page.conn, page.guild_id)?),
+    );
+    let calendar_url = user
+        .and_then(|person| person.discord_id.as_deref())
+        .map(|discord_id| store::ensure_calendar_token(page.conn, discord_id))
+        .transpose()?
+        .map(|token| format!("/calendar/{token}.ics"))
+        .unwrap_or_default();
+    ctx.insert("calendar_url", Value::from(calendar_url));
+    Ok(ctx)
+}
+
+fn context_bool(value: bool) -> Value {
+    Value::from(value)
+}
+
+fn markdown_filter(value: String) -> Value {
+    Value::from_safe_string(crate::markdown::render(&value))
+}
+
+fn render(name: &str, ctx: Bag) -> Result<String, OpError> {
+    let env = templates();
+    let template = env
+        .get_template(name)
+        .map_err(|err| OpError::message(err.to_string()))?;
+    template
+        .render(ctx.0)
+        .map_err(|err| OpError::message(err.to_string()))
+}
+
+fn templates() -> &'static Environment<'static> {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<Environment<'static>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let mut env = Environment::new();
+        env.set_trim_blocks(true);
+        env.set_lstrip_blocks(true);
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
+        env.set_auto_escape_callback(|name| {
+            if name.ends_with(".html") {
+                minijinja::AutoEscape::Html
+            } else {
+                minijinja::AutoEscape::None
+            }
+        });
+        env.add_filter("md", markdown_filter);
+        env.add_template("base.html", include_str!("../templates/base.html"))
+            .expect("base");
+        env.add_template("schedule.html", include_str!("../templates/schedule.html"))
+            .expect("schedule");
+        env.add_template("event.html", include_str!("../templates/event.html"))
+            .expect("event");
+        env.add_template("form.html", include_str!("../templates/form.html"))
+            .expect("form");
+        env.add_template("list.html", include_str!("../templates/list.html"))
+            .expect("list");
+        env.add_template("series.html", include_str!("../templates/series.html"))
+            .expect("series");
+        env.add_template("vote.html", include_str!("../templates/vote.html"))
+            .expect("vote");
+        env.add_template(
+            "questions.html",
+            include_str!("../templates/questions.html"),
+        )
+        .expect("questions");
+        env.add_template("settings.html", include_str!("../templates/settings.html"))
+            .expect("settings");
+        env.add_template(
+            "role_option.html",
+            include_str!("../templates/role_option.html"),
+        )
+        .expect("role");
+        env.add_template("presets.html", include_str!("../templates/presets.html"))
+            .expect("presets");
+        env.add_template("channels.html", include_str!("../templates/channels.html"))
+            .expect("channels");
+        env.add_template("commands.html", include_str!("../templates/commands.html"))
+            .expect("commands");
+        env.add_template("notfound.html", include_str!("../templates/notfound.html"))
+            .expect("notfound");
+        env.add_template("landing.html", include_str!("../templates/landing.html"))
+            .expect("landing");
+        env
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn sample() -> Connection {
+        let conn = store::open_memory().unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
+            INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
+              VALUES (1, 1, 'Nell', 'nell', '#112233', 1, 1);
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&conn, 1).unwrap();
+        conn
+    }
+
+    #[test]
+    fn pages_render() {
+        let mut conn = sample();
+        logic::save_event(
+            &mut conn,
+            EventInput {
+                id: None,
+                guild_id: 1,
+                actor_id: 1,
+                channel_id: 1,
+                title: "Raid".into(),
+                description: "Meet at **the hall**. <script>".into(),
+                starts_at: Utc::now() + Duration::hours(5),
+                duration_minutes: 60,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                cutoff_at: None,
+                attendee_role_id: None,
+                thread_enabled: false,
+                multiple_signups: false,
+                mention_everyone: false,
+                mention_role_ids: vec![],
+                restrict_role_ids: vec![],
+                options: vec![OptionInput {
+                    id: None,
+                    name: "Yes".into(),
+                    emoji: "✅".into(),
+                    capacity: None,
+                    waitlist: false,
+                    role_id: None,
+                    reminders_enabled: true,
+                }],
+                reminders: vec![ReminderInput {
+                    offset_minutes: 15,
+                    message: String::new(),
+                }],
+                repeat: None,
+                action: SaveAction::Publish,
+                post_at: None,
+                apply_series: false,
+                vote: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO activity (guild_id, body, created_at) VALUES (1, 'Posted Raid.', '2026-10-13T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let page = Page {
+            conn: &conn,
+            guild_id: 1,
+            user_id: 1,
+            notice: None,
+            invite_url: "",
+            nav: "schedule",
+            title: "This week",
+            allowed_guilds: &[1],
+        };
+        home(&page).unwrap();
+        let event = store::list_events(&conn, 1)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "posted")
+            .unwrap();
+        let page = Page {
+            nav: "event",
+            title: "Event",
+            ..page
+        };
+        let body = event_page(&page, event.id).unwrap();
+        assert!(body.contains("d-kicker"), "{body}");
+        assert!(body.contains("Time"), "{body}");
+        assert!(body.contains("Created by Nell"), "{body}");
+        assert!(body.contains("View on web"), "{body}");
+        assert!(body.contains("d-btn primary"), "{body}");
+        assert!(body.contains("d-btn danger"), "{body}");
+        assert!(body.contains("✅"), "{body}");
+        assert!(body.contains("<strong>the hall</strong>"), "{body}");
+        assert!(body.contains("&lt;script&gt;"), "{body}");
+        let form = form_page(&page, &blank_form("99", None)).unwrap();
+        assert!(form.contains("single event or a weekly series"), "{form}");
+        assert!(form.contains("vote_q0_prompt"), "{form}");
+        assert!(form.contains("Add a question"), "{form}");
+        settings_page(&Page {
+            nav: "settings",
+            title: "Settings",
+            ..page
+        })
+        .unwrap();
+        commands_page(&Page {
+            nav: "commands",
+            title: "Commands",
+            ..page
+        })
+        .unwrap();
+        let drafts = list_page(
+            &Page {
+                nav: "drafts",
+                title: "Drafts",
+                ..page
+            },
+            "drafts",
+        )
+        .unwrap();
+        assert!(!drafts.contains("log-list"), "{drafts}");
+        let activity = list_page(
+            &Page {
+                nav: "activity",
+                title: "Activity",
+                ..page
+            },
+            "activity",
+        )
+        .unwrap();
+        assert!(activity.contains("log-list"), "{activity}");
+        assert!(activity.contains("Posted Raid."), "{activity}");
+        assert!(!activity.contains(">Log<"), "{activity}");
+        recurring(&page).unwrap();
+    }
+
+    #[test]
+    fn settings_render_for_a_server_with_no_people() {
+        let conn = store::open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99')",
+            [],
+        )
+        .unwrap();
+        store::insert_default_settings(&conn, 1).unwrap();
+        let page = Page {
+            conn: &conn,
+            guild_id: 1,
+            user_id: 0,
+            notice: None,
+            invite_url: "",
+            nav: "settings",
+            title: "Settings",
+            allowed_guilds: &[],
+        };
+        let body = settings_page(&page).unwrap();
+        assert!(
+            body.contains("Nobody from this server has used Marian yet"),
+            "{body}"
+        );
+        assert!(body.contains("id=\"zone-list\""));
+        assert!(body.contains("Europe&#x2f;Warsaw"));
+        assert!(body.contains(">Warsaw</option>"));
+        assert!(body.contains("value=\"UTC\" selected"));
+    }
+}

@@ -1,0 +1,107 @@
+{% if vote %}
+<section class="card vote">
+  {% if vote.round %}
+  <h2>{% if vote.weekly %}This week{% else %}Vote{% endif %}</h2>
+  <p class="meta">Closes {{ vote.round.closes }}</p>
+  {% for poll in vote.round.polls %}
+  <h3>{{ poll.prompt }}</h3>
+  {% if poll.key == "d" %}<p>Pick every day you can make. Click a day again to take it off.</p>{% endif %}
+  {% if poll.note %}<p>{{ poll.note }}</p>{% endif %}
+  <div class="vote-choices">
+    {% for choice in poll.choices %}
+    <form method="post" action="{{ base }}/recurring/{{ series_id }}/vote">
+      <input type="hidden" name="intent" value="cast">
+      <input type="hidden" name="poll" value="{{ poll.key }}">
+      <input type="hidden" name="choice" value="{{ choice.index }}">
+      <button class="{% if choice.yours %}primary{% else %}ghost{% endif %}" type="submit">{{ choice.label }} · {{ choice.votes }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  {% if vote.can_edit %}
+  <form method="post" action="{{ base }}/recurring/{{ series_id }}/vote" class="vote-pin">
+    <input type="hidden" name="intent" value="pin">
+    <input type="hidden" name="poll" value="{{ poll.key }}">
+    <select name="choice">
+      {% for choice in poll.choices %}
+      <option value="{{ choice.index }}">{{ choice.label }}</option>
+      {% endfor %}
+    </select>
+    <button class="ghost" type="submit">Pin this result</button>
+  </form>
+  {% endif %}
+  {% endfor %}
+  {% if vote.can_edit %}
+  <form method="post" action="{{ base }}/recurring/{{ series_id }}/vote">
+    <input type="hidden" name="intent" value="close">
+    <button class="danger" type="submit">Close vote and use this result</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <h2>Vote</h2>
+  <p>No vote is open.</p>
+  {% endif %}
+  {% if vote.can_edit and vote.week %}
+  <h2>Choices this week</h2>
+  <form method="post" action="{{ base }}/recurring/{{ series_id }}/vote">
+    <input type="hidden" name="intent" value="week">
+    <label class="field">If nobody votes
+      <select name="week_default_weekday">
+        {% for day in vote.week.days %}
+        <option value="{{ day.n }}" {% if day.n == vote.week.default_weekday %}selected{% endif %}>{{ day.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p>Days people can choose</p>
+    <div class="checks">
+      {% for day in vote.week.days %}
+      <label><input type="checkbox" name="week_day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
+      {% endfor %}
+    </div>
+    <p class="q-title">Other questions</p>
+    {% set question_prefix = "week" %}
+    {% set question_rows = vote.week.question_rows %}
+    {% include "questions.html" %}
+    <p>These days and questions are for the vote that's open. Later weeks use the settings below. Changing a question's wording clears the votes on that question.</p>
+    <button class="primary" type="submit">Save this week</button>
+  </form>
+  {% endif %}
+  {% if vote.can_edit %}
+  <h2>Vote settings</h2>
+  <form method="post" action="{{ base }}/recurring/{{ series_id }}/vote">
+    <input type="hidden" name="intent" value="settings">
+    <label class="checks"><input type="checkbox" name="vote" value="1" {% if vote.enabled %}checked{% endif %}> {% if vote.weekly %}People vote each week and can pick more than one day. The signup post replaces the day vote when voting closes.{% else %}People can pick more than one day. The signup post replaces the day vote when voting closes.{% endif %}</label>
+    <div class="grid">
+      <label class="field">Voting closes
+        <select name="vote_close_weekday">
+          {% for day in vote.days %}
+          <option value="{{ day.n }}" {% if day.n == vote.close_weekday %}selected{% endif %}>{{ day.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">At
+        <input type="time" name="vote_close_time" value="{{ vote.close_time }}">
+      </label>
+      <label class="field">If nobody votes
+        <select name="vote_default_weekday">
+          {% for day in vote.days %}
+          <option value="{{ day.n }}" {% if day.n == vote.default_weekday %}selected{% endif %}>{{ day.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <p>{% if vote.week %}Days for later weeks{% else %}Days people can choose{% endif %}</p>
+    <div class="checks">
+      {% for day in vote.days %}
+      <label><input type="checkbox" name="vote_day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
+      {% endfor %}
+    </div>
+    <p class="q-title">Other questions</p>
+    {% set question_prefix = "vote" %}
+    {% set question_rows = vote.question_rows %}
+    {% include "questions.html" %}
+    {% if vote.week %}<p>Later weeks use these days and questions. The cutoff still applies to the vote that's open.</p>{% elif vote.weekly %}<p>Dates already on the schedule stay there.</p>{% endif %}
+    <button class="primary" type="submit">{% if vote.week %}Save for later weeks{% else %}Save vote{% endif %}</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
