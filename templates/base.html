@@ -5,16 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
   <title>{{ title }} · Marian</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="{{ asset_icon }}" type="image/svg+xml">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ asset_css }}">
 </head>
 <body>
   <a class="skip" href="#content">Skip to content</a>
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <img class="mark" src="/static/marian.png" alt="">
+        <img class="mark" src="{{ asset_mark }}" alt="">
         <p>Marian<em>the discord scheduler</em></p>
       </div>
       {% if guild_name %}
@@ -70,6 +70,6 @@
       <p class="foot">Marian checks for updates every few seconds.</p>
     </main>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="{{ asset_js }}"></script>
 </body>
 </html>

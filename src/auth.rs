@@ -146,16 +146,9 @@ fn decode(text: &str) -> String {
 pub fn is_public(path: &str) -> bool {
     matches!(
         path,
-        "/" | "/healthz"
-            | "/readyz"
-            | "/favicon.svg"
-            | "/static/app.css"
-            | "/static/app.js"
-            | "/static/marian.png"
-            | "/auth/discord"
-            | "/auth/discord/callback"
-            | "/logout"
-    ) || personal_calendar(path)
+        "/" | "/healthz" | "/readyz" | "/auth/discord" | "/auth/discord/callback" | "/logout"
+    ) || crate::assets::is_static(path)
+        || personal_calendar(path)
         || server_calendar(path)
 }
 
@@ -246,6 +239,9 @@ mod tests {
         assert!(!is_public("/calendar/short.ics"));
         assert!(!is_public("/servers/4/calendar.ics"));
         assert!(is_public("/servers/4/calendar/9.ics"));
+        assert!(is_public("/static/app.abc.css"));
+        assert!(is_public("/favicon.svg"));
+        assert!(!is_public("/static"));
         assert!(!is_public("/servers/4/settings"));
         assert!(!is_public("/servers/4/events/9"));
     }

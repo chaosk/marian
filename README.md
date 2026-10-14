@@ -68,12 +68,12 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret.
 
 ```sh
-docker build -t ghcr.io/you/marian:0.2.1 .
-docker push ghcr.io/you/marian:0.2.1
+docker build -t ghcr.io/you/marian:0.2.2 .
+docker push ghcr.io/you/marian:0.2.2
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.2.1 \
+  --set image.tag=0.2.2 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

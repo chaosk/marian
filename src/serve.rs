@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Form, Path, Query, Request, State};
+use axum::extract::{Form, MatchedPath, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -14,6 +14,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::assets;
 use crate::auth;
 use crate::clock;
 use crate::commands;
@@ -23,8 +24,6 @@ use crate::jobs::DiscordJob;
 use crate::logic::{self, OptionInput, PresetBody};
 use crate::present::{self, Page};
 use crate::store::{self, Settings};
-
-const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#14284d"/><path d="M8 22V10h3.2l4.8 7.2L20.8 10H24v12h-2.6v-7.1L17.2 22h-2.4l-4.2-7.1V22H8z" fill="#f4efe4"/></svg>"##;
 
 #[derive(Clone)]
 struct AppState {
@@ -124,10 +123,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
-        .route("/favicon.svg", get(favicon))
-        .route("/static/app.css", get(css))
-        .route("/static/app.js", get(js))
-        .route("/static/marian.png", get(portrait))
+        .route("/favicon.svg", get(asset))
+        .route("/static/*file", get(asset))
         .route("/", get(schedule))
         .route("/auth/discord", get(auth_start))
         .route("/auth/discord/callback", get(auth_callback))
@@ -219,10 +216,17 @@ impl<B> tower_http::trace::MakeSpan<B> for HttpSpan {
         if quiet_path(request.uri().path()) {
             return tracing::Span::none();
         }
+        let route = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map(MatchedPath::as_str)
+            .unwrap_or("unmatched");
+        let name = format!("{} {route}", request.method());
         tracing::info_span!(
             "http",
+            otel.name = name.as_str(),
             "http.method" = %request.method(),
-            "http.route" = http_route(request.uri().path()),
+            "http.route" = route,
             "http.status_code" = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
         )
@@ -267,16 +271,6 @@ fn quiet_path(path: &str) -> bool {
         || path.starts_with("/static/")
 }
 
-fn http_route(path: &str) -> &str {
-    if path.starts_with("/calendar/") {
-        "/calendar/:file"
-    } else if path.contains("/calendar/") {
-        "/servers/:guild_id/calendar/:file"
-    } else {
-        path
-    }
-}
-
 async fn health() -> &'static str {
     "ok"
 }
@@ -293,32 +287,11 @@ async fn ready(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn favicon() -> Response {
-    ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON).into_response()
-}
-
-async fn css() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../static/app.css"),
+async fn asset(request: Request) -> Response {
+    assets::response(
+        request.uri().path(),
+        request.headers().get(header::IF_NONE_MATCH),
     )
-        .into_response()
-}
-
-async fn js() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../static/app.js"),
-    )
-        .into_response()
-}
-
-async fn portrait() -> Response {
-    (
-        [(header::CONTENT_TYPE, "image/png")],
-        include_bytes!("../static/marian.png").as_slice(),
-    )
-        .into_response()
 }
 
 async fn schedule(
@@ -2056,6 +2029,9 @@ fn page_for<'a>(
 
 fn html_ok(body: String, clear_notice: bool) -> Response {
     let mut response = Html(body).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     if clear_notice {
         clear_cookie(&mut response, "marian_notice");
     }
@@ -2306,15 +2282,20 @@ mod tests {
             .unwrap();
         let home = client.get(format!("http://{addr}/")).send().await.unwrap();
         assert_eq!(home.status(), StatusCode::OK);
+        assert_eq!(
+            home.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
         let body = home.text().await.unwrap();
         assert!(body.contains("Sign in with Discord"));
         assert!(body.contains("class=\"gate-actions\""));
         assert!(body.contains("Invite Marian"));
         assert!(body.contains("Events for your server"));
-        assert!(body.contains("/static/marian.png"));
+        let mark = assets::mark();
+        assert!(body.contains(mark), "{body}");
 
         let picture = client
-            .get(format!("http://{addr}/static/marian.png"))
+            .get(format!("http://{addr}{mark}"))
             .send()
             .await
             .unwrap();
@@ -2323,6 +2304,37 @@ mod tests {
             picture.headers().get(header::CONTENT_TYPE).unwrap(),
             "image/png"
         );
+        assert_eq!(
+            picture.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            picture
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+        let etag = picture
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cached = client
+            .get(format!("http://{addr}{mark}"))
+            .header(header::IF_NONE_MATCH, &etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        let missing = client
+            .get(format!("http://{addr}/static/missing.css"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         let blocked = client
             .get(format!("http://{addr}/settings"))
@@ -2351,7 +2363,7 @@ mod tests {
         assert!(body.contains("Sign out"));
         assert!(body.contains("class=\"invite\""));
         assert!(body.contains("Invite Marian to Discord"));
-        assert!(body.contains("/static/marian.png"));
+        assert!(body.contains(assets::mark()), "{body}");
         assert!(body.contains("servers&#x2f;99/settings"));
         assert!(!body.contains("Acting as"));
 

@@ -30,6 +30,7 @@ pub fn landing(invite_url: &str, next: &str, notice: &str, ready: bool) -> Resul
     ctx.insert("next", Value::from(next));
     ctx.insert("notice", Value::from(notice));
     ctx.insert("ready", context_bool(ready));
+    asset_context(&mut ctx);
     render("landing.html", ctx)
 }
 
@@ -1539,6 +1540,7 @@ impl std::ops::IndexMut<&str> for Bag {
 
 fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
     let mut ctx = Bag::new();
+    asset_context(&mut ctx);
     ctx.insert("title", Value::from(page.title));
     ctx.insert("notice", Value::from(page.notice.unwrap_or("")));
     ctx.insert("nav", Value::from(page.nav));
@@ -1639,6 +1641,14 @@ fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
     Ok(ctx)
 }
 
+fn asset_context(ctx: &mut Bag) {
+    let url = |path: &str| Value::from_safe_string(path.to_string());
+    ctx.insert("asset_css", url(crate::assets::css()));
+    ctx.insert("asset_js", url(crate::assets::js()));
+    ctx.insert("asset_mark", url(crate::assets::mark()));
+    ctx.insert("asset_icon", url(crate::assets::icon()));
+}
+
 fn context_bool(value: bool) -> Value {
     Value::from(value)
 }
@@ -1652,9 +1662,17 @@ fn render(name: &str, ctx: Bag) -> Result<String, OpError> {
     let template = env
         .get_template(name)
         .map_err(|err| OpError::message(err.to_string()))?;
-    template
-        .render(ctx.0)
-        .map_err(|err| OpError::message(err.to_string()))
+    let operation = format!("template {name}");
+    let span = tracing::info_span!(
+        "template",
+        otel.name = operation.as_str(),
+        "template.name" = name,
+    );
+    span.in_scope(|| {
+        template
+            .render(ctx.0)
+            .map_err(|err| OpError::message(err.to_string()))
+    })
 }
 
 fn templates() -> &'static Environment<'static> {

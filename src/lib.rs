@@ -1,5 +1,6 @@
 //! Marian keeps a Discord community's events, signups, and reminders.
 
+mod assets;
 mod auth;
 pub mod clock;
 pub mod commands;
