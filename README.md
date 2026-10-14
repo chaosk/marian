@@ -22,7 +22,7 @@ Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot jo
 | `MARIAN_PUBLIC_URL` | empty | Dashboard URL. Discord embeds link here, and it is the OAuth redirect base |
 | `MARIAN_STATUS` | empty | Custom status under the bot's name, up to 128 characters. Empty leaves it unset |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Base URL of an OTLP/HTTP collector, such as `http://tempo:4318`. Empty leaves traces off and keeps logs on stderr. Do not append `/v1/traces` |
-| `OTEL_SERVICE_NAME` | `marian` | Service name on exported spans |
+| `OTEL_SERVICE_NAME` | `marian` | Service name on exported spans. `service.version` is the image version |
 
 `/healthz` and `/readyz` report the process and the database. Readiness does not wait for Discord.
 
@@ -65,15 +65,15 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 
 ## Install on Kubernetes
 
-The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret.
+The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build -t ghcr.io/you/marian:0.2.2 .
-docker push ghcr.io/you/marian:0.2.2
+docker build --build-arg MARIAN_VERSION=0.2.3 -t ghcr.io/you/marian:0.2.3 .
+docker push ghcr.io/you/marian:0.2.3
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.2.2 \
+  --set image.tag=0.2.3 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

@@ -93,14 +93,17 @@ fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
             return None;
         }
     };
-    let resource = if env::var("OTEL_SERVICE_NAME")
+    let mut resource = Resource::builder();
+    if env::var("OTEL_SERVICE_NAME")
         .ok()
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
-        Resource::builder().build()
-    } else {
-        Resource::builder().with_service_name("marian").build()
-    };
+        resource = resource.with_service_name("marian");
+    }
+    // Compiled in by build.rs: a release number from a tag, or the commit from a branch.
+    let resource = resource
+        .with_attribute(KeyValue::new("service.version", env!("MARIAN_VERSION")))
+        .build();
     Some(
         SdkTracerProvider::builder()
             .with_batch_exporter(exporter)

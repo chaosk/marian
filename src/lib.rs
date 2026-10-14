@@ -14,6 +14,7 @@ mod markdown;
 mod observe;
 pub mod parse;
 pub mod present;
+mod release_version;
 pub mod serve;
 pub mod store;
 

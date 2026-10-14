@@ -23,16 +23,26 @@ RUN mkdir src \
     && printf '\n' > src/lib.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
     && rm -rf src
+COPY build.rs ./
 COPY src ./src
 COPY templates ./templates
 COPY migrations ./migrations
 COPY static ./static
-RUN find src templates migrations static -exec touch {} + \
+# A branch build passes the commit hash. A tag build passes the version number.
+ARG MARIAN_VERSION
+RUN if [ -z "$MARIAN_VERSION" ]; then \
+      echo "Pass --build-arg MARIAN_VERSION. A branch uses the commit hash. A tag uses the version number." >&2; \
+      exit 1; \
+    fi
+ENV MARIAN_VERSION=$MARIAN_VERSION
+RUN find src templates migrations static build.rs -exec touch {} + \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
     && cp target/x86_64-unknown-linux-musl/release/marian /marian \
     && file /marian | grep -Eq "statically linked|static-pie linked"
 
 FROM scratch
+ARG MARIAN_VERSION
+LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=build /marian /marian
 USER 65532:65532
 ENV PORT=8080 \

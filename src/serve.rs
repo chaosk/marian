@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Form, MatchedPath, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -114,7 +114,11 @@ pub fn run() -> anyhow::Result<()> {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Marian is listening on {addr}");
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
         Ok(())
     })
 }
@@ -222,14 +226,29 @@ impl<B> tower_http::trace::MakeSpan<B> for HttpSpan {
             .map(MatchedPath::as_str)
             .unwrap_or("unmatched");
         let name = format!("{} {route}", request.method());
-        tracing::info_span!(
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        let user_agent = user_agent(request.headers());
+        let client_ip = client_ip(request.headers(), peer);
+        let span = tracing::info_span!(
             "http",
             otel.name = name.as_str(),
             "http.method" = %request.method(),
             "http.route" = route,
             "http.status_code" = tracing::field::Empty,
+            "http.user_agent" = tracing::field::Empty,
+            "http.client_ip" = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
-        )
+        );
+        if let Some(value) = user_agent.as_deref() {
+            span.record("http.user_agent", value);
+        }
+        if let Some(value) = client_ip.as_deref() {
+            span.record("http.client_ip", value);
+        }
+        span
     }
 }
 
@@ -262,6 +281,48 @@ fn http_trace() -> tower_http::trace::TraceLayer<
         .on_request(())
         .on_response(HttpStatus)
         .on_failure(())
+}
+
+fn user_agent(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::USER_AGENT)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(256).collect())
+}
+
+/// The address the proxy accepted, then the original client in
+/// `X-Forwarded-For`, then the socket peer.
+fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
+    header_ip(headers, "x-real-ip")
+        .or_else(|| forwarded_for(headers))
+        .or_else(|| peer.map(|addr| addr.ip().to_canonical().to_string()))
+}
+
+fn header_ip(headers: &HeaderMap, name: &str) -> Option<String> {
+    parse_ip(headers.get(name)?.to_str().ok()?.trim())
+}
+
+fn forwarded_for(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
+    value.split(',').find_map(|part| parse_ip(part.trim()))
+}
+
+fn parse_ip(text: &str) -> Option<String> {
+    let text = text.trim().trim_matches('"');
+    let ip = if let Some(inside) = text
+        .strip_prefix('[')
+        .and_then(|rest| rest.split(']').next())
+    {
+        inside.parse().ok()?
+    } else if let Ok(ip) = text.parse::<std::net::IpAddr>() {
+        ip
+    } else if let Ok(addr) = text.parse::<SocketAddr>() {
+        addr.ip()
+    } else {
+        return None;
+    };
+    Some(ip.to_canonical().to_string())
 }
 
 fn quiet_path(path: &str) -> bool {
@@ -2234,6 +2295,52 @@ mod tests {
         assert_eq!(ids, vec![4, 12]);
     }
 
+    #[test]
+    fn the_span_keeps_the_user_agent_and_the_client_address() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "MarianTest/1".parse().unwrap());
+        assert_eq!(user_agent(&headers).as_deref(), Some("MarianTest/1"));
+        headers.insert(header::USER_AGENT, "  ".parse().unwrap());
+        assert_eq!(user_agent(&headers), None);
+        let long = "a".repeat(300);
+        headers.insert(header::USER_AGENT, HeaderValue::from_str(&long).unwrap());
+        assert_eq!(user_agent(&headers).unwrap().chars().count(), 256);
+
+        let peer = "10.0.0.8:443".parse().unwrap();
+        headers.insert("x-real-ip", "203.0.113.5".parse().unwrap());
+        headers.insert("x-forwarded-for", "1.2.3.4, 203.0.113.5".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers, Some(peer)).as_deref(),
+            Some("203.0.113.5")
+        );
+
+        headers.remove("x-real-ip");
+        assert_eq!(client_ip(&headers, Some(peer)).as_deref(), Some("1.2.3.4"));
+
+        headers.insert(
+            "x-forwarded-for",
+            "not-an-ip, 198.51.100.20".parse().unwrap(),
+        );
+        assert_eq!(
+            client_ip(&headers, Some(peer)).as_deref(),
+            Some("198.51.100.20")
+        );
+
+        headers.insert("x-forwarded-for", "[2001:db8::1]:443".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers, Some(peer)).as_deref(),
+            Some("2001:db8::1")
+        );
+
+        headers.remove("x-forwarded-for");
+        assert_eq!(client_ip(&headers, Some(peer)).as_deref(), Some("10.0.0.8"));
+        let mapped = "[::ffff:127.0.0.1]:9".parse().unwrap();
+        assert_eq!(
+            client_ip(&headers, Some(mapped)).as_deref(),
+            Some("127.0.0.1")
+        );
+    }
+
     #[tokio::test]
     async fn sign_in_is_required() {
         let mut conn = store::open_memory().unwrap();
@@ -2274,7 +2381,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
