@@ -7,10 +7,11 @@ mod discord;
 mod event;
 mod lifecycle;
 mod model;
+mod routine;
 mod series;
 mod signup;
+mod template;
 mod tick;
-mod vote;
 
 pub use access::{can_create, can_delete, can_edit};
 pub use catalog::{
@@ -22,20 +23,22 @@ pub use discord::{
     remember_discord_message, status_label, Attendance, AttendanceWork,
 };
 pub use event::save_event;
-pub use lifecycle::{archive_event, delete_event, duplicate_event, end_series, skip_event};
+pub use lifecycle::{
+    archive_event, delete_event, duplicate_event, end_series, save_series_repeat, skip_event,
+};
 pub use model::{
     ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventInput, OptionInput,
-    PresetBody, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport, VoteQuestion,
-    VoteSpec,
+    PresetBody, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
+};
+pub use routine::{
+    cast_run, count_active, create_routine, list_routines, maintain as maintain_routines,
+    remember_routine_message, routine_in_guild, routine_page_data, routine_post, save_routine,
+    save_run_days, save_usual_days, stop_routine, DayCheck, PollButton, RoutineEffect, RoutinePost,
+    RoutineSummary, RoutineView, RunHistory, RunView,
 };
 pub use signup::{organizer_response, signup};
+pub use template::series_template;
 pub use tick::{rebase, tick};
-pub use vote::{
-    cast_round, cast_series, close_series, closes_label, open_round_id, pin_series, poll_post,
-    question_fields, questions_from_map, remember_poll_message, remember_poll_thread,
-    remember_questions_message, save_vote_settings, save_week, spec_from_map, vote_panel,
-    weekday_name, ChoiceFields, PollButton, PollPost, QuestionFields, VoteEffect,
-};
 
 #[cfg(test)]
 mod tests {
@@ -117,7 +120,6 @@ mod tests {
             action,
             post_at: None,
             apply_series: false,
-            vote: None,
         }
     }
 
@@ -326,6 +328,154 @@ mod tests {
             .max()
             .unwrap();
         assert!(max_index > 48, "series stopped at date {max_index}");
+    }
+
+    #[test]
+    fn changing_the_cadence_moves_upcoming_dates() {
+        let mut conn = world();
+        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let mut event = input("Vault", anchor, SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: "weekly".into(),
+            end_on: None,
+            max_occurrences: Some(4),
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        let dates = store::events_in_series(&conn, series_id).unwrap();
+        conn.execute(
+            "UPDATE events SET starts_at = ? WHERE id = ?",
+            params![clock::stamp(anchor + Duration::days(8)), dates[1].id],
+        )
+        .unwrap();
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "biweekly".into(),
+                end_on: None,
+                max_occurrences: Some(4),
+            },
+        )
+        .unwrap();
+        let dates = store::events_in_series(&conn, series_id).unwrap();
+        assert_eq!(dates.len(), 4);
+        assert_eq!(dates[0].status, "posted");
+        assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
+        assert_eq!(
+            clock::parse_stamp(&dates[1].starts_at).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
+        );
+        assert_eq!(
+            clock::parse_stamp(&dates[3].starts_at).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 26, 19, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_shorter_series_drops_upcoming_dates_and_a_longer_one_brings_them_back() {
+        let mut conn = world();
+        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let mut event = input("Vault", anchor, SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: "weekly".into(),
+            end_on: None,
+            max_occurrences: Some(4),
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "weekly".into(),
+                end_on: None,
+                max_occurrences: Some(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(store::events_in_series(&conn, series_id).unwrap().len(), 2);
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "weekly".into(),
+                end_on: None,
+                max_occurrences: Some(4),
+            },
+        )
+        .unwrap();
+        let dates = store::events_in_series(&conn, series_id).unwrap();
+        assert_eq!(dates.len(), 4);
+        assert_eq!(
+            clock::parse_stamp(&dates[2].starts_at).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
+        );
+        skip_event(&mut conn, dates[2].id, 1).unwrap();
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "weekly".into(),
+                end_on: None,
+                max_occurrences: Some(2),
+            },
+        )
+        .unwrap();
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "weekly".into(),
+                end_on: None,
+                max_occurrences: Some(4),
+            },
+        )
+        .unwrap();
+        let dates = store::events_in_series(&conn, series_id).unwrap();
+        assert_eq!(dates[2].status, "skipped");
+        assert_eq!(dates[3].status, "scheduled");
+        assert_eq!(
+            clock::parse_stamp(&dates[3].starts_at).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 5, 19, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_end_date_drops_dates_after_it() {
+        let mut conn = world();
+        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let mut event = input("Vault", anchor, SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: "weekly".into(),
+            end_on: None,
+            max_occurrences: Some(4),
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        save_series_repeat(
+            &mut conn,
+            series_id,
+            1,
+            RepeatSpec {
+                cadence: "weekly".into(),
+                end_on: Some(Utc.with_ymd_and_hms(2026, 10, 25, 23, 59, 0).unwrap()),
+                max_occurrences: None,
+            },
+        )
+        .unwrap();
+        let dates = store::events_in_series(&conn, series_id).unwrap();
+        assert_eq!(dates.len(), 2);
+        assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
+        assert_eq!(
+            clock::parse_stamp(&dates[1].starts_at).unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 22, 19, 0, 0).unwrap()
+        );
     }
 
     #[test]

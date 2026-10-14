@@ -14,8 +14,8 @@ pub enum DiscordJob {
         event_id: i64,
         tries: u8,
     },
-    Poll {
-        round_id: i64,
+    Routine {
+        run_id: i64,
         tries: u8,
     },
 }
@@ -37,8 +37,8 @@ impl DiscordJob {
         Self::Attend { event_id, tries: 0 }
     }
 
-    pub fn poll(round_id: i64) -> Self {
-        Self::Poll { round_id, tries: 0 }
+    pub fn routine(run_id: i64) -> Self {
+        Self::Routine { run_id, tries: 0 }
     }
 
     pub fn event_id(&self) -> i64 {
@@ -46,7 +46,7 @@ impl DiscordJob {
             Self::Sync { event_id, .. }
             | Self::Remind { event_id, .. }
             | Self::Attend { event_id, .. } => *event_id,
-            Self::Poll { .. } => 0,
+            Self::Routine { .. } => 0,
         }
     }
 
@@ -69,8 +69,8 @@ impl DiscordJob {
                 event_id,
                 tries: tries + 1,
             }),
-            Self::Poll { round_id, tries } if tries < 8 => Some(Self::Poll {
-                round_id,
+            Self::Routine { run_id, tries } if tries < 8 => Some(Self::Routine {
+                run_id,
                 tries: tries + 1,
             }),
             _ => None,

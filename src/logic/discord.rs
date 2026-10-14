@@ -444,7 +444,6 @@ pub fn status_label(status: &str) -> &'static str {
         "cancelled" => "Cancelled",
         "skipped" => "Skipped",
         "failed" => "Post failed",
-        "ballot" => "Voting",
         _ => "Unknown",
     }
 }

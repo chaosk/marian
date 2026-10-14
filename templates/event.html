@@ -4,11 +4,7 @@
   <div>
     <p class="kicker">#{{ event.channel }} · {{ event.status_label }}</p>
     <h1>{{ event.title }}</h1>
-    {% if event.status == 'ballot' %}
-    <p class="lede">The day is chosen when voting closes. {{ event.when }} is the clock time. The signup post replaces the day vote then.</p>
-    {% else %}
     <p class="lede">{{ event.when }}–{{ event.end }} · {{ event.duration }} · {{ event.rel }}</p>
-    {% endif %}
   </div>
   <div class="actions">
     {% if can_edit %}<a class="ghost" href="{{ base }}/events/{{ event.id }}/edit">Edit</a>{% endif %}
@@ -24,14 +20,9 @@
     {% endif %}
   </div>
 </div>
-{% if event.series_note %}<p class="notice">{{ event.series_note }}</p>{% endif %}
-{% include "vote.html" %}
+{% if event.series_note %}<p class="notice">{{ event.series_note }}{% if series_id %} <a href="{{ base }}/recurring/{{ series_id }}">Change the repeat on the series.</a>{% endif %}</p>{% endif %}
 <div class="split">
   <section>
-    {% if event.status == 'ballot' %}
-    <p class="kicker">Discord</p>
-    <p>The day vote is the first message in the thread. Other questions are a reply. The signup post replaces the day vote when voting closes.</p>
-    {% else %}
     <p class="kicker">Discord message</p>
     <div class="discord">
       <div class="embed" style="border-color: {{ event.color }}">
@@ -76,14 +67,11 @@
       </div>
       <p class="why">Clicking as {{ user_name }}. {{ event.localize_note }}</p>
     </div>
-    {% endif %}
-    {% if event.status != 'ballot' %}
     <p class="meta" style="margin-top:10px">
       <a href="{{ event.google_url }}">Add to Google Calendar</a>
       · <a href="{{ base }}/calendar/{{ event.id }}.ics">Download .ics</a>
       {% if event.calendar_on %} · on the calendar feed{% endif %}
     </p>
-    {% endif %}
   </section>
   <div class="stack">
     <section class="panel">

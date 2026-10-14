@@ -36,49 +36,6 @@ pub struct ReminderInput {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoteQuestion {
-    pub prompt: String,
-    pub choices: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoteSpec {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub close_weekday: u8,
-    #[serde(default = "default_close_minutes")]
-    pub close_minutes: u16,
-    #[serde(default)]
-    pub default_weekday: u8,
-    #[serde(default = "default_days")]
-    pub days: Vec<u8>,
-    #[serde(default)]
-    pub questions: Vec<VoteQuestion>,
-}
-
-fn default_close_minutes() -> u16 {
-    18 * 60
-}
-
-fn default_days() -> Vec<u8> {
-    (0..7).collect()
-}
-
-impl Default for VoteSpec {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            close_weekday: 0,
-            close_minutes: default_close_minutes(),
-            default_weekday: 0,
-            days: default_days(),
-            questions: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct EventInput {
     pub id: Option<i64>,
@@ -104,7 +61,6 @@ pub struct EventInput {
     pub action: SaveAction,
     pub post_at: Option<DateTime<Utc>>,
     pub apply_series: bool,
-    pub vote: Option<VoteSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,8 +80,6 @@ pub struct SeriesTemplate {
     pub cutoff_offset_minutes: Option<i64>,
     pub options: Vec<OptionInput>,
     pub reminders: Vec<ReminderInput>,
-    #[serde(default)]
-    pub vote: VoteSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

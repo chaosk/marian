@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   repository: marian
-  tag: "0.1.0"
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -30,6 +30,12 @@ discord:
 
 # Custom status under the bot's name. Empty leaves it unset.
 status: ""
+
+# OpenTelemetry traces. An empty endpoint leaves export off.
+# The value is a base URL. Marian appends /v1/traces.
+tracing:
+  endpoint: ""
+  serviceName: marian
 
 # Dashboard URL linked from Discord embeds. Empty is fine.
 # When ingress is on and this is empty, the chart uses https://<ingress.host>.

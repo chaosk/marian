@@ -8,6 +8,7 @@ use super::db::{log, must_channel, must_event, must_guild, must_series};
 use super::event::replace_children;
 use super::model::*;
 use super::signup::sync_access;
+use super::template::{self, Spawn};
 use crate::clock::{self, occurrence_start};
 use crate::error::OpError;
 use crate::store::{self, Event};
@@ -24,17 +25,17 @@ pub(super) fn link_new_series(
     };
     let settings = store::settings(conn, event.guild_id)?;
     let template = template_from(input, clean);
-    let json = serde_json::to_string(&template)
-        .map_err(|err| OpError::message(format!("Could not store the series: {err}")))?;
+    let template_id = template::insert(conn, &template::from_series(event.guild_id, &template))?;
     conn.execute(
-        "INSERT INTO series (guild_id, cadence, end_on, max_occurrences, active, template_json, anchor_start, post_lead_hours, created_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
+        "INSERT INTO series (public_id, guild_id, cadence, end_on, max_occurrences, active, template_id, anchor_start, post_lead_hours, created_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
         params![
+            crate::ids::series_id(),
             event.guild_id,
             repeat.cadence,
             repeat.end_on.map(|dt| clock::stamp(dt)),
             repeat.max_occurrences,
-            json,
+            template_id,
             clock::stamp(input.starts_at),
             settings.post_lead_hours,
             clock::stamp(now),
@@ -73,8 +74,7 @@ fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
         channel_id: input.channel_id,
         color: input.color.clone(),
         image_url: clean.image_url.clone(),
-        thread_enabled: input.thread_enabled
-            || input.vote.as_ref().is_some_and(|vote| vote.enabled),
+        thread_enabled: input.thread_enabled,
         multiple_signups: input.multiple_signups,
         mention_everyone: input.mention_everyone,
         attendee_role_id: input.attendee_role_id,
@@ -83,7 +83,6 @@ fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
         cutoff_offset_minutes,
         options,
         reminders: clean.reminders.clone(),
-        vote: input.vote.clone().unwrap_or_default(),
     }
 }
 
@@ -94,17 +93,12 @@ pub(super) fn apply_series_template(
     input: &EventInput,
     clean: &CleanInput,
 ) -> Result<(), OpError> {
-    let mut template = template_from(input, clean);
-    if input.vote.is_none() {
-        let series = must_series(conn, series_id)?;
-        if let Ok(old) = serde_json::from_str::<SeriesTemplate>(&series.template_json) {
-            template.vote = old.vote;
-        }
-    }
-    let json = serde_json::to_string(&template).map_err(|err| OpError::message(err.to_string()))?;
-    conn.execute(
-        "UPDATE series SET template_json = ? WHERE id = ?",
-        params![json, series_id],
+    let series = must_series(conn, series_id)?;
+    let template = template_from(input, clean);
+    template::update(
+        conn,
+        series.template_id,
+        &template::from_series(series.guild_id, &template),
     )?;
     let events = store::events_in_series(conn, series_id)?;
     for event in events {
@@ -122,6 +116,8 @@ fn apply_template_to_event(
     template: &SeriesTemplate,
 ) -> Result<(), OpError> {
     let start = clock::parse_stamp(&event.starts_at)?;
+    let guild = must_guild(conn, event.guild_id)?;
+    let tz = clock::zone(&guild.timezone)?;
     let cutoff = template
         .cutoff_offset_minutes
         .map(|mins| clock::stamp(start - Duration::minutes(mins)));
@@ -133,8 +129,8 @@ fn apply_template_to_event(
          WHERE id = ?",
         params![
             template.channel_id,
-            template.title,
-            template.description,
+            template::fill(&template.title, start, tz),
+            template::fill(&template.description, start, tz),
             template.duration_minutes,
             template.color,
             template.image_url,
@@ -164,6 +160,111 @@ fn apply_template_to_event(
     Ok(())
 }
 
+pub(super) fn retune_series(
+    conn: &Connection,
+    series_id: i64,
+    repeat: &RepeatSpec,
+    now: DateTime<Utc>,
+) -> Result<(), OpError> {
+    let series = must_series(conn, series_id)?;
+    if !series.active {
+        return Err(OpError::message("This series has ended."));
+    }
+    if !matches!(
+        repeat.cadence.as_str(),
+        "daily" | "weekly" | "biweekly" | "monthly"
+    ) {
+        return Err(OpError::message(
+            "Repeat daily, weekly, every two weeks, or monthly.",
+        ));
+    }
+    if let Some(max) = repeat.max_occurrences {
+        if max < 2 {
+            return Err(OpError::message(
+                "A series needs at least 2 dates. Leave the count empty to keep going.",
+            ));
+        }
+    }
+    let guild = must_guild(conn, series.guild_id)?;
+    let tz = clock::zone(&guild.timezone)?;
+    let anchor = clock::parse_stamp(&series.anchor_start)?;
+    if let Some(end) = repeat.end_on {
+        if end < anchor {
+            return Err(OpError::message(
+                "The series end date is before the first event.",
+            ));
+        }
+    }
+    let cadence_changed = series.cadence != repeat.cadence;
+    conn.execute(
+        "UPDATE series SET cadence = ?, end_on = ?, max_occurrences = ? WHERE id = ?",
+        params![
+            repeat.cadence,
+            repeat.end_on.map(clock::stamp),
+            repeat.max_occurrences,
+            series_id,
+        ],
+    )?;
+    for event in store::events_in_series(conn, series_id)? {
+        let Some(index) = event.occurrence_index else {
+            continue;
+        };
+        if !matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
+            continue;
+        }
+        let mut start = clock::parse_stamp(&event.starts_at)?;
+        if cadence_changed {
+            let next = occurrence_start(anchor, index, &repeat.cadence, tz);
+            if next != start {
+                shift_occurrence(conn, &event, start, next, tz)?;
+                start = next;
+            }
+        }
+        let past_count = repeat.max_occurrences.is_some_and(|max| index > max);
+        let past_end = repeat.end_on.is_some_and(|end| start > end);
+        if past_count || past_end {
+            conn.execute("DELETE FROM events WHERE id = ?", [event.id])?;
+        }
+    }
+    ensure_series(conn, series_id, now)?;
+    Ok(())
+}
+
+fn shift_occurrence(
+    conn: &Connection,
+    event: &Event,
+    old: DateTime<Utc>,
+    new: DateTime<Utc>,
+    tz: Tz,
+) -> Result<(), OpError> {
+    let delta = new - old;
+    let post_at = event
+        .post_at
+        .as_deref()
+        .map(|raw| Ok::<_, OpError>(clock::stamp(clock::parse_stamp(raw)? + delta)))
+        .transpose()?;
+    let cutoff = event
+        .cutoff_at
+        .as_deref()
+        .map(|raw| Ok::<_, OpError>(clock::stamp(clock::parse_stamp(raw)? + delta)))
+        .transpose()?;
+    let old_day = clock::format_day(old.with_timezone(&tz).date_naive());
+    let new_day = clock::format_day(new.with_timezone(&tz).date_naive());
+    conn.execute(
+        "UPDATE events SET title = ?, description = ?, starts_at = ?, post_at = ?, cutoff_at = ?, updated_at = ? WHERE id = ?",
+        params![
+            event.title.replace(&old_day, &new_day),
+            event.description.replace(&old_day, &new_day),
+            clock::stamp(new),
+            post_at,
+            cutoff,
+            store::now_stamp(),
+            event.id,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(super) fn ensure_series(
     conn: &Connection,
     series_id: i64,
@@ -173,11 +274,7 @@ pub(super) fn ensure_series(
     if !series.active {
         return Ok(());
     }
-    let template: SeriesTemplate = serde_json::from_str(&series.template_json)
-        .map_err(|err| OpError::message(format!("The series template is unreadable: {err}")))?;
-    if template.vote.enabled {
-        return Ok(());
-    }
+    let template = template::series_template(conn, &series)?;
     let existing = store::events_in_series(conn, series_id)?;
     if !existing
         .iter()
@@ -237,57 +334,23 @@ pub(super) fn insert_occurrence(
     creator: i64,
     index: i64,
     start: DateTime<Utc>,
-    _tz: Tz,
+    tz: Tz,
 ) -> Result<i64, OpError> {
     let post_at = start - Duration::hours(series.post_lead_hours);
-    let cutoff = template
-        .cutoff_offset_minutes
-        .map(|mins| start - Duration::minutes(mins));
-    let stamp = store::now_stamp();
-    conn.execute(
-        "INSERT INTO events (
-            public_id, guild_id, channel_id, series_id, occurrence_index, title, description, starts_at,
-            duration_minutes, status, post_at, color, image_url, cutoff_at, mention_everyone,
-            attendee_role_id, thread_enabled, multiple_signups, created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            crate::ids::event_id(),
-            series.guild_id,
-            template.channel_id,
-            series.id,
-            index,
-            template.title,
-            template.description,
-            clock::stamp(start),
-            template.duration_minutes,
-            clock::stamp(post_at),
-            template.color,
-            template.image_url,
-            cutoff.map(|dt| clock::stamp(dt)),
-            store::i(template.mention_everyone),
-            template.attendee_role_id,
-            store::i(template.thread_enabled),
-            store::i(template.multiple_signups),
-            creator,
-            stamp,
-            stamp,
-        ],
-    )?;
-    let id = conn.last_insert_rowid();
-    replace_children(conn, id, &template.options, &template.reminders)?;
-    for role_id in &template.mention_role_ids {
-        conn.execute(
-            "INSERT INTO event_roles (event_id, role_id, kind) VALUES (?, ?, 'mention')",
-            params![id, role_id],
-        )?;
-    }
-    for role_id in &template.restrict_role_ids {
-        conn.execute(
-            "INSERT INTO event_roles (event_id, role_id, kind) VALUES (?, ?, 'restrict')",
-            params![id, role_id],
-        )?;
-    }
-    Ok(id)
+    let stored = template::from_series(series.guild_id, template);
+    template::spawn(
+        conn,
+        &stored,
+        &Spawn {
+            created_by: creator,
+            starts_at: start,
+            post_at: Some(post_at),
+            status: "scheduled",
+            series_id: Some(series.id),
+            occurrence_index: Some(index),
+            tz,
+        },
+    )
 }
 
 pub(super) fn mark_posted(conn: &Connection, id: i64, now: DateTime<Utc>) -> Result<(), OpError> {

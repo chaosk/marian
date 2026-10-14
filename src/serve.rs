@@ -47,12 +47,7 @@ struct Session {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "marian=info,tower_http=info".into()),
-        )
-        .init();
+    let _telemetry = crate::observe::init();
 
     let db_path = env::var("MARIAN_DB").unwrap_or_else(|_| "data/marian.db".into());
     let port: u16 = env::var("PORT")
@@ -97,6 +92,8 @@ pub fn run() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let span = tracing::info_span!("tick");
+                let _enter = span.enter();
                 let report = {
                     let mut guard = db.lock().expect("database lock");
                     logic::tick(&mut guard, Utc::now())
@@ -154,9 +151,26 @@ fn router(state: AppState) -> Router {
         .route("/servers/:guild_id/drafts", get(drafts))
         .route("/servers/:guild_id/scheduled", get(scheduled))
         .route("/servers/:guild_id/recurring", get(recurring))
-        .route("/servers/:guild_id/recurring/:id", get(series))
+        .route(
+            "/servers/:guild_id/recurring/:id",
+            get(series).post(save_series),
+        )
         .route("/servers/:guild_id/recurring/:id/end", post(end_series))
-        .route("/servers/:guild_id/recurring/:id/vote", post(series_vote))
+        .route(
+            "/servers/:guild_id/routines",
+            get(routines_page).post(create_routine),
+        )
+        .route("/servers/:guild_id/routines/new", get(new_routine))
+        .route(
+            "/servers/:guild_id/routines/:id",
+            get(show_routine).post(update_routine),
+        )
+        .route(
+            "/servers/:guild_id/routines/:id/days",
+            post(save_routine_days),
+        )
+        .route("/servers/:guild_id/routines/:id/vote", post(vote_routine))
+        .route("/servers/:guild_id/routines/:id/stop", post(stop_routine))
         .route("/servers/:guild_id/archive", get(archive_list))
         .route(
             "/servers/:guild_id/presets",
@@ -182,6 +196,7 @@ fn router(state: AppState) -> Router {
         .route("/drafts", get(legacy_drafts))
         .route("/scheduled", get(legacy_scheduled))
         .route("/recurring", get(legacy_recurring))
+        .route("/routines", get(legacy_routines))
         .route("/archive", get(legacy_archive))
         .route("/presets", get(legacy_presets))
         .route("/channels", get(legacy_channels))
@@ -192,7 +207,74 @@ fn router(state: AppState) -> Router {
         .route("/events/:id/edit", get(legacy_edit))
         .route("/calendar/:file", get(legacy_event_calendar))
         .layer(middleware::from_fn_with_state(state.clone(), require_login))
+        .layer(http_trace())
         .with_state(state)
+}
+
+#[derive(Clone, Copy)]
+struct HttpSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for HttpSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        if quiet_path(request.uri().path()) {
+            return tracing::Span::none();
+        }
+        tracing::info_span!(
+            "http",
+            "http.method" = %request.method(),
+            "http.route" = http_route(request.uri().path()),
+            "http.status_code" = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HttpStatus;
+
+impl<B> tower_http::trace::OnResponse<B> for HttpStatus {
+    fn on_response(
+        self,
+        response: &axum::response::Response<B>,
+        latency: std::time::Duration,
+        span: &tracing::Span,
+    ) {
+        span.record("http.status_code", response.status().as_u16());
+        span.record("duration_ms", latency.as_secs_f64() * 1000.0);
+    }
+}
+
+fn http_trace() -> tower_http::trace::TraceLayer<
+    tower_http::trace::HttpMakeClassifier,
+    HttpSpan,
+    (),
+    HttpStatus,
+    tower_http::trace::DefaultOnBodyChunk,
+    tower_http::trace::DefaultOnEos,
+    (),
+> {
+    tower_http::trace::TraceLayer::new_for_http()
+        .make_span_with(HttpSpan)
+        .on_request(())
+        .on_response(HttpStatus)
+        .on_failure(())
+}
+
+fn quiet_path(path: &str) -> bool {
+    path == "/healthz"
+        || path == "/readyz"
+        || path == "/favicon.svg"
+        || path.starts_with("/static/")
+}
+
+fn http_route(path: &str) -> &str {
+    if path.starts_with("/calendar/") {
+        "/calendar/:file"
+    } else if path.contains("/calendar/") {
+        "/servers/:guild_id/calendar/:file"
+    } else {
+        path
+    }
 }
 
 async fn health() -> &'static str {
@@ -646,14 +728,320 @@ async fn recurring(
     )
 }
 
+async fn routines_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(server): Path<String>,
+) -> Response {
+    html(
+        &state,
+        &headers,
+        &server,
+        "routines",
+        "Routines",
+        present::routines_page,
+    )
+}
+
+async fn new_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(server): Path<String>,
+) -> Response {
+    html(
+        &state,
+        &headers,
+        &server,
+        "routines",
+        "New routine",
+        present::routine_form,
+    )
+}
+
+async fn show_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((server, public_id)): Path<(String, String)>,
+) -> Response {
+    html(
+        &state,
+        &headers,
+        &server,
+        "routines",
+        "Routine",
+        move |page| present::routine_detail(page, &public_id),
+    )
+}
+
+async fn create_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(server): Path<String>,
+    Form(map): Form<HashMap<String, String>>,
+) -> Response {
+    let back = here(&server, "/routines/new");
+    let mut db = state.db.lock().expect("database lock");
+    let Some(mut session) = read_session(&db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let parsed = routine_input(&map);
+    let result = match parsed {
+        Ok(input) => logic::create_routine(
+            &mut db,
+            session.guild_id,
+            session.user_id,
+            input.channel_id,
+            &input.title,
+            &input.prompt,
+            &input.description,
+            input.duration,
+            input.start_minutes,
+            input.poll_weekday,
+            input.poll_minutes,
+            input.lock_weekday,
+            input.lock_minutes,
+            &input.days,
+            chrono::Utc::now(),
+        ),
+        Err(err) => Err(err),
+    };
+    match result {
+        Ok((_id, public_id, jobs)) => {
+            drop(db);
+            for job in jobs {
+                enqueue(&state.discord, job);
+            }
+            redirect(
+                &here(&server, &format!("/routines/{public_id}")),
+                "Saved the routine.",
+            )
+        }
+        Err(err) => redirect(&back, &err.to_string()),
+    }
+}
+
+async fn update_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((server, public_id)): Path<(String, String)>,
+    Form(map): Form<HashMap<String, String>>,
+) -> Response {
+    let back = here(&server, &format!("/routines/{public_id}"));
+    let mut db = state.db.lock().expect("database lock");
+    let Some(mut session) = read_session(&db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let result = (|| {
+        let id = logic::routine_in_guild(&db, session.guild_id, &public_id)?;
+        let input = routine_input(&map)?;
+        logic::save_routine(
+            &mut db,
+            id,
+            session.user_id,
+            input.channel_id,
+            &input.title,
+            &input.prompt,
+            &input.description,
+            input.duration,
+            input.start_minutes,
+            input.poll_weekday,
+            input.poll_minutes,
+            input.lock_weekday,
+            input.lock_minutes,
+            &input.days,
+            chrono::Utc::now(),
+        )
+    })();
+    match result {
+        Ok(effect) => {
+            drop(db);
+            for job in effect.jobs {
+                enqueue(&state.discord, job);
+            }
+            redirect(&back, &effect.notice)
+        }
+        Err(err) => redirect(&back, &err.to_string()),
+    }
+}
+
+async fn save_routine_days(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((server, public_id)): Path<(String, String)>,
+    Form(map): Form<HashMap<String, String>>,
+) -> Response {
+    let back = here(&server, &format!("/routines/{public_id}"));
+    let mut db = state.db.lock().expect("database lock");
+    let Some(mut session) = read_session(&db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let days = checked_days(&map);
+    let result = (|| {
+        let id = logic::routine_in_guild(&db, session.guild_id, &public_id)?;
+        if map.get("scope").map(String::as_str) == Some("usual") {
+            logic::save_usual_days(&mut db, id, session.user_id, &days)
+                .map(|notice| (notice, Vec::new()))
+        } else {
+            logic::save_run_days(&mut db, id, session.user_id, &days)
+                .map(|effect| (effect.notice, effect.jobs))
+        }
+    })();
+    match result {
+        Ok((notice, jobs)) => {
+            drop(db);
+            for job in jobs {
+                enqueue(&state.discord, job);
+            }
+            redirect(&back, &notice)
+        }
+        Err(err) => redirect(&back, &err.to_string()),
+    }
+}
+
+async fn vote_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((server, public_id)): Path<(String, String)>,
+    Form(map): Form<HashMap<String, String>>,
+) -> Response {
+    let back = here(&server, &format!("/routines/{public_id}"));
+    let mut db = state.db.lock().expect("database lock");
+    let Some(mut session) = read_session(&db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let Some(day) = map.get("day").and_then(|value| value.parse().ok()) else {
+        return redirect(&back, "Pick a day.");
+    };
+    let run_id = match logic::routine_in_guild(&db, session.guild_id, &public_id)
+        .and_then(|id| logic::routine_page_data(&db, id))
+    {
+        Ok(Some(view)) => view.run.map(|run| run.id),
+        Ok(None) => None,
+        Err(err) => return redirect(&back, &err.to_string()),
+    };
+    let Some(run_id) = run_id else {
+        return redirect(&back, "That poll is closed.");
+    };
+    match logic::cast_run(&mut db, run_id, session.user_id, day) {
+        Ok(effect) => {
+            drop(db);
+            for job in effect.jobs {
+                enqueue(&state.discord, job);
+            }
+            redirect(&back, &effect.notice)
+        }
+        Err(err) => redirect(&back, &err.to_string()),
+    }
+}
+
+async fn stop_routine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((server, public_id)): Path<(String, String)>,
+) -> Response {
+    mutate(
+        &state,
+        &headers,
+        &server,
+        &here(&server, &format!("/routines/{public_id}")),
+        move |db, session| {
+            let id = logic::routine_in_guild(db, session.guild_id, &public_id)?;
+            let notice = logic::stop_routine(db, id, session.user_id)?;
+            Ok((notice, None))
+        },
+    )
+}
+
+struct RoutineInput {
+    channel_id: i64,
+    title: String,
+    prompt: String,
+    description: String,
+    duration: i64,
+    start_minutes: u16,
+    poll_weekday: u8,
+    poll_minutes: u16,
+    lock_weekday: u8,
+    lock_minutes: u16,
+    days: Vec<u8>,
+}
+
+fn routine_input(map: &HashMap<String, String>) -> Result<RoutineInput, OpError> {
+    let channel_id = map
+        .get("channel")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| OpError::message("Pick a channel."))?;
+    let duration = map
+        .get("duration")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| OpError::message("Give the event a length in minutes."))?;
+    Ok(RoutineInput {
+        channel_id,
+        title: map.get("title").cloned().unwrap_or_default(),
+        prompt: map.get("prompt").cloned().unwrap_or_default(),
+        description: map.get("description").cloned().unwrap_or_default(),
+        duration,
+        start_minutes: clock_minutes(map.get("start_time").map(String::as_str).unwrap_or(""))?,
+        poll_weekday: weekday_field(map, "poll_weekday")?,
+        poll_minutes: clock_minutes(map.get("poll_time").map(String::as_str).unwrap_or(""))?,
+        lock_weekday: weekday_field(map, "lock_weekday")?,
+        lock_minutes: clock_minutes(map.get("lock_time").map(String::as_str).unwrap_or(""))?,
+        days: checked_days(map),
+    })
+}
+
+fn weekday_field(map: &HashMap<String, String>, key: &str) -> Result<u8, OpError> {
+    map.get(key)
+        .and_then(|value| value.parse().ok())
+        .filter(|day| *day < 7)
+        .ok_or_else(|| OpError::message("Pick a weekday."))
+}
+
+fn clock_minutes(raw: &str) -> Result<u16, OpError> {
+    let Some((hour, minute)) = raw.split_once(':') else {
+        return Err(OpError::message("Pick a time."));
+    };
+    let hour: u16 = hour.parse().map_err(|_| OpError::message("Pick a time."))?;
+    let minute: u16 = minute
+        .parse()
+        .map_err(|_| OpError::message("Pick a time."))?;
+    if hour > 23 || minute > 59 {
+        return Err(OpError::message("Pick a time."));
+    }
+    Ok(hour * 60 + minute)
+}
+
+fn checked_days(map: &HashMap<String, String>) -> Vec<u8> {
+    (0..7)
+        .filter(|day| map.contains_key(&format!("day_{day}")))
+        .collect()
+}
+
 async fn series(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((server, id)): Path<(String, i64)>,
+    Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
-    html(&state, &headers, &server, "recurring", "Series", |page| {
-        present::series_page(page, id)
-    })
+    html(
+        &state,
+        &headers,
+        &server,
+        "recurring",
+        "Series",
+        move |page| present::series_page(page, &public_id),
+    )
 }
 
 async fn presets_page(
@@ -734,16 +1122,14 @@ async fn new_event(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     html(&state, &headers, &server, "event", "New event", |page| {
-        let preset = query
-            .get("preset")
-            .and_then(|raw| raw.parse::<i64>().ok())
-            .and_then(|id| {
-                store::preset(page.conn, id)
-                    .ok()
-                    .flatten()
-                    .filter(|preset| preset.guild_id == page.guild_id)
-                    .and_then(|preset| serde_json::from_str::<PresetBody>(&preset.body).ok())
-            });
+        let preset = query.get("preset").and_then(|raw| {
+            let public_id = crate::ids::parse_event_id(raw)?;
+            store::preset_by_public(page.conn, public_id)
+                .ok()
+                .flatten()
+                .filter(|preset| preset.guild_id == page.guild_id)
+                .and_then(|preset| serde_json::from_str::<PresetBody>(&preset.body).ok())
+        });
         present::form_page(page, &present::blank_form(&server, preset))
     })
 }
@@ -844,30 +1230,9 @@ fn save_form(
                 .as_ref()
                 .map(|event| event.public_id.clone())
                 .unwrap_or_default();
-            let ballot = saved.as_ref().is_some_and(|event| event.status == "ballot");
-            let series_id = saved.as_ref().and_then(|event| event.series_id);
-            let once = series_id
-                .and_then(|id| store::series(&db, id).ok().flatten())
-                .is_some_and(|series| series.cadence == "once");
-            let round_id = series_id.and_then(|id| logic::open_round_id(&db, id).ok().flatten());
             drop(db);
-            if ballot {
-                if let Some(round_id) = round_id {
-                    enqueue(&state.discord, DiscordJob::poll(round_id));
-                }
-                let path = if once {
-                    format!("/events/{public_id}")
-                } else {
-                    format!("/recurring/{}", series_id.unwrap_or(0))
-                };
-                redirect(
-                    &here(server, &path),
-                    "Voting is open. The signup post replaces the day vote when voting closes.",
-                )
-            } else {
-                enqueue(&state.discord, DiscordJob::sync(event_id));
-                redirect(&here(server, &format!("/events/{public_id}")), "Saved.")
-            }
+            enqueue(&state.discord, DiscordJob::sync(event_id));
+            redirect(&here(server, &format!("/events/{public_id}")), "Saved.")
         }
         Err(OpError::NotFound) => render_missing(state, &db, &session),
         Err(err) => form_again(
@@ -1055,66 +1420,66 @@ async fn skip(
     )
 }
 
-async fn series_vote(
+async fn save_series(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((server, id)): Path<(String, i64)>,
+    Path((server, public_id)): Path<(String, String)>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
-    let back = vote_back(&db, &server, id);
-    let Some(mut session) = read_session(&db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let intent = map.get("intent").map(String::as_str).unwrap_or("cast");
-    let result = match intent {
-        "settings" => match logic::spec_from_map(&map) {
-            Ok(spec) => logic::save_vote_settings(&mut db, id, session.user_id, spec),
-            Err(err) => Err(err),
-        },
-        "week" => logic::save_week(&mut db, id, session.user_id, &map),
-        "close" => logic::close_series(&mut db, id, session.user_id),
-        "pin" => {
-            let Some(choice) = map.get("choice").and_then(|value| value.parse().ok()) else {
-                return redirect(&back, "Pick a choice.");
-            };
-            let poll = map.get("poll").cloned().unwrap_or_default();
-            logic::pin_series(&mut db, id, session.user_id, &poll, choice)
-        }
-        _ => {
-            let Some(choice) = map.get("choice").and_then(|value| value.parse().ok()) else {
-                return redirect(&back, "Pick a choice.");
-            };
-            let poll = map.get("poll").cloned().unwrap_or_default();
-            logic::cast_series(&mut db, id, session.user_id, &poll, choice)
-        }
-    };
-    match result {
-        Ok(effect) => {
-            drop(db);
-            for job in effect.jobs {
-                enqueue(&state.discord, job);
-            }
-            redirect(&back, &effect.notice)
-        }
-        Err(err) => redirect(&back, &err.to_string()),
-    }
+    let back = here(&server, &format!("/recurring/{public_id}"));
+    mutate(&state, &headers, &server, &back, move |db, session| {
+        let id = series_for_guild(db, session.guild_id, &public_id)?.id;
+        let guild = store::guild(db, session.guild_id)?.ok_or(OpError::NotFound)?;
+        let tz = clock::zone(&guild.timezone)?;
+        let cadence = map.get("repeat").map(|value| value.trim()).unwrap_or("");
+        let repeat_count = map
+            .get("repeat_count")
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let repeat_until = map
+            .get("repeat_until")
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let max_occurrences = if repeat_count.is_empty() {
+            None
+        } else {
+            Some(
+                repeat_count
+                    .parse()
+                    .map_err(|_| OpError::message("The date count needs to be a number."))?,
+            )
+        };
+        let end_on = if repeat_until.is_empty() {
+            None
+        } else {
+            Some(clock::parse_date(repeat_until, tz)?)
+        };
+        let notice = logic::save_series_repeat(
+            db,
+            id,
+            session.user_id,
+            logic::RepeatSpec {
+                cadence: cadence.to_string(),
+                end_on,
+                max_occurrences,
+            },
+        )?;
+        Ok((notice, None))
+    })
 }
 
 async fn end_series(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((server, id)): Path<(String, i64)>,
+    Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
     mutate(
         &state,
         &headers,
         &server,
-        &here(&server, &format!("/recurring/{id}")),
-        |db, session| {
+        &here(&server, &format!("/recurring/{public_id}")),
+        move |db, session| {
+            let id = series_for_guild(db, session.guild_id, &public_id)?.id;
             let notice = logic::end_series(db, id, session.user_id)?;
             Ok((notice, None))
         },
@@ -1157,15 +1522,22 @@ async fn save_preset(
 async fn delete_preset(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((server, id)): Path<(String, i64)>,
+    Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
     mutate(
         &state,
         &headers,
         &server,
         &here(&server, "/presets"),
-        |db, session| {
-            logic::delete_preset(db, id, session.user_id)?;
+        move |db, session| {
+            let Some(public_id) = crate::ids::parse_event_id(&public_id) else {
+                return Err(OpError::NotFound);
+            };
+            let preset = store::preset_by_public(db, public_id)?.ok_or(OpError::NotFound)?;
+            if preset.guild_id != session.guild_id {
+                return Err(OpError::NotFound);
+            }
+            logic::delete_preset(db, preset.id, session.user_id)?;
             Ok(("Removed the preset.".into(), None))
         },
     )
@@ -1428,6 +1800,21 @@ fn calendar_response(body: String) -> Response {
         .into_response()
 }
 
+fn series_for_guild(
+    conn: &Connection,
+    guild_id: i64,
+    public_id: &str,
+) -> Result<store::Series, OpError> {
+    let Some(public_id) = crate::ids::parse_event_id(public_id) else {
+        return Err(OpError::NotFound);
+    };
+    let series = store::series_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
+    if series.guild_id != guild_id {
+        return Err(OpError::NotFound);
+    }
+    Ok(series)
+}
+
 fn event_for_guild(
     conn: &Connection,
     guild_id: i64,
@@ -1447,29 +1834,7 @@ fn calendar_event(conn: &Connection, file: &str) -> Result<Option<store::Event>,
             return Ok(Some(event));
         }
     }
-    if let Ok(id) = token.parse::<i64>() {
-        return store::event(conn, id);
-    }
     Ok(None)
-}
-
-fn vote_back(conn: &Connection, server: &str, series_id: i64) -> String {
-    let once = store::series(conn, series_id)
-        .ok()
-        .flatten()
-        .is_some_and(|series| series.cadence == "once");
-    if once {
-        if let Ok(events) = store::events_in_series(conn, series_id) {
-            let event = events
-                .iter()
-                .find(|event| event.status == "ballot")
-                .or_else(|| events.first());
-            if let Some(event) = event {
-                return here(server, &format!("/events/{}", event.public_id));
-            }
-        }
-    }
-    here(server, &format!("/recurring/{series_id}"))
 }
 
 fn here(server: &str, rest: &str) -> String {
@@ -1528,6 +1893,10 @@ async fn legacy_scheduled(State(state): State<AppState>, headers: HeaderMap) -> 
 
 async fn legacy_recurring(State(state): State<AppState>, headers: HeaderMap) -> Response {
     legacy_redirect(&state, &headers, "/recurring")
+}
+
+async fn legacy_routines(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    legacy_redirect(&state, &headers, "/routines")
 }
 
 async fn legacy_archive(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1939,6 +2308,8 @@ mod tests {
         assert_eq!(home.status(), StatusCode::OK);
         let body = home.text().await.unwrap();
         assert!(body.contains("Sign in with Discord"));
+        assert!(body.contains("class=\"gate-actions\""));
+        assert!(body.contains("Invite Marian"));
         assert!(body.contains("Events for your server"));
         assert!(body.contains("/static/marian.png"));
 

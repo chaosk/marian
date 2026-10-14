@@ -28,6 +28,20 @@ pub const ZONES: &[&str] = &[
     "UTC",
 ];
 
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+pub fn weekday_name(day: u8) -> &'static str {
+    WEEKDAYS.get(day as usize).copied().unwrap_or("Monday")
+}
+
 pub fn zone(name: &str) -> Result<Tz, OpError> {
     name.parse()
         .map_err(|_| OpError::message("Pick a time zone from the list."))

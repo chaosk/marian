@@ -15,6 +15,7 @@
     </label>
     <label class="field span-2">Description
       <textarea name="description">{{ description }}</textarea>
+      <span class="meta">Use {date} for the event date.</span>
     </label>
     <label class="field">Channel
       <select name="channel_id">
@@ -30,8 +31,8 @@
         {% endfor %}
       </select>
     </label>
-    <label class="field"><span id="start-label">{% if vote_enabled %}Clock time{% else %}Starts{% endif %}</span>
-      <input id="start-input" type="{% if vote_enabled %}time{% else %}datetime-local{% endif %}" name="start" required value="{{ start }}">
+    <label class="field">Starts
+      <input type="datetime-local" name="start" required value="{{ start }}">
     </label>
     <label class="field">Duration in minutes
       <input name="duration" inputmode="numeric" value="{{ duration }}">
@@ -116,38 +117,6 @@
     </label>
   </div>
   <p>Leave both empty and the series keeps going.</p>
-  <h2>Vote</h2>
-  <label class="checks"><input type="checkbox" name="vote" value="1" {% if vote_enabled %}checked{% endif %}> Let people vote on the days they can make before this event is posted.</label>
-  <p>Works for a single event or a weekly series. People can pick more than one day. The clock time is when it starts that day. The signup message replaces the day vote when voting closes.</p>
-  <div class="grid">
-    <label class="field">Voting closes
-      <select name="vote_close_weekday">
-        {% for day in vote_days %}
-        <option value="{{ day.n }}" {% if day.n == vote_close_weekday %}selected{% endif %}>{{ day.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field">At
-      <input type="time" name="vote_close_time" value="{{ vote_close_time }}">
-    </label>
-    <label class="field">If nobody votes
-      <select name="vote_default_weekday">
-        {% for day in vote_days %}
-        <option value="{{ day.n }}" {% if day.n == vote_default_weekday %}selected{% endif %}>{{ day.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-  </div>
-  <p>Days people can choose</p>
-  <div class="checks">
-    {% for day in vote_days %}
-    <label><input type="checkbox" name="vote_day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
-    {% endfor %}
-  </div>
-  <p class="q-title">Other questions</p>
-  {% set question_prefix = "vote" %}
-  {% set question_rows = vote_question_rows %}
-  {% include "questions.html" %}
   {% endif %}
   {% if show_apply %}
   <label class="checks"><input type="checkbox" name="apply_series" value="1" {% if apply_series %}checked{% endif %}> Also update upcoming dates in this series. This date's start time stays its own.</label>

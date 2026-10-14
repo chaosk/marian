@@ -12,7 +12,31 @@
   </form>
   {% endif %}
 </div>
-{% include "vote.html" %}
+{% if active %}
+<form method="post" action="{{ base }}/recurring/{{ series_id }}">
+  <h2>Repeat</h2>
+  <div class="grid">
+    <label class="field">Cadence
+      <select name="repeat">
+        <option value="daily" {% if repeat == 'daily' %}selected{% endif %}>Daily</option>
+        <option value="weekly" {% if repeat == 'weekly' %}selected{% endif %}>Weekly</option>
+        <option value="biweekly" {% if repeat == 'biweekly' %}selected{% endif %}>Every two weeks</option>
+        <option value="monthly" {% if repeat == 'monthly' %}selected{% endif %}>Monthly</option>
+      </select>
+    </label>
+    <label class="field">Stop after
+      <input name="repeat_count" value="{{ repeat_count }}" placeholder="Leave empty to continue">
+    </label>
+    <label class="field">Or end on
+      <input type="date" name="repeat_until" value="{{ repeat_until }}">
+    </label>
+  </div>
+  <p>Leave both empty and the series keeps going. Changing the cadence moves upcoming dates onto the new rhythm. A shorter series drops upcoming dates that no longer fit, and a longer one adds them back. Posted dates stay, and a skipped date stays skipped.</p>
+  <div class="actions">
+    <button class="primary" type="submit">Save repeat</button>
+  </div>
+</form>
+{% endif %}
 <div class="stack">
   {% for row in rows %}
   <div class="card">

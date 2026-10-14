@@ -248,23 +248,10 @@ pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
     let once = series
         .as_ref()
         .is_some_and(|series| series.cadence == "once");
-    let series_note = if series.is_some() && !once && event.status != "ballot" {
+    let series_note = if series.is_some() && !once {
         "This is one date in a series. Moving this start time leaves the other dates where they are."
     } else {
         ""
-    };
-    let vote = match event.series_id {
-        Some(series_id) => {
-            let panel =
-                logic::vote_panel(page.conn, series_id, page.user_id, tz, settings.hour_24)?;
-            let open = panel.get("round").is_some_and(|round| !round.is_null());
-            if event.status == "ballot" || open {
-                panel
-            } else {
-                serde_json::Value::Null
-            }
-        }
-        None => serde_json::Value::Null,
     };
     let google = ics::google_link(&event, &format!("#{channel_name}")).unwrap_or_default();
     let plus = ics::calendar_template(&event).unwrap_or_default();
@@ -288,8 +275,12 @@ pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
         event.public_id
     );
     let mut ctx = shell(page)?;
-    ctx["vote"] = Value::from_serialize(&vote);
-    ctx["series_id"] = Value::from(event.series_id.unwrap_or(0));
+    ctx["series_id"] = Value::from(
+        series
+            .as_ref()
+            .map(|item| item.public_id.clone())
+            .unwrap_or_default(),
+    );
     ctx["can_edit"] = context_bool(can_edit);
     ctx["can_delete"] = context_bool(logic::can_delete(&user, &event, &settings, &roles));
     ctx["can_archive"] = context_bool(can_edit && event.status == "posted");
@@ -302,11 +293,7 @@ pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
         "id": event.public_id,
         "title": event.title,
         "description": event.description,
-        "when": if event.status == "ballot" {
-            clock::format_clock(start.with_timezone(&tz), settings.hour_24)
-        } else {
-            clock::format_when(start, tz, settings.hour_24)
-        },
+        "when": clock::format_when(start, tz, settings.hour_24),
         "end": clock::format_end(start, event.duration_minutes, tz, settings.hour_24),
         "rel": clock::format_rel(start, now),
         "channel": channel_name,
@@ -480,43 +467,20 @@ pub fn recurring(page: &Page<'_>) -> Result<String, OpError> {
         if series.cadence == "once" {
             continue;
         }
-        let template: logic::SeriesTemplate = serde_json::from_str(&series.template_json)
-            .unwrap_or(logic::SeriesTemplate {
-                title: "Series".into(),
-                description: String::new(),
-                duration_minutes: 60,
-                channel_id: 0,
-                color: "#1e3a6e".into(),
-                image_url: None,
-                thread_enabled: false,
-                multiple_signups: false,
-                mention_everyone: false,
-                attendee_role_id: None,
-                mention_role_ids: vec![],
-                restrict_role_ids: vec![],
-                cutoff_offset_minutes: None,
-                options: vec![],
-                reminders: vec![],
-                vote: logic::VoteSpec::default(),
-            });
+        let template = logic::series_template(page.conn, &series)?;
         let events = store::events_in_series(page.conn, series.id)?;
         let next = events
             .iter()
             .find(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "draft"));
-        let mut when = next
+        let when = next
             .and_then(|event| clock::parse_stamp(&event.starts_at).ok())
             .map(|dt| clock::format_when(dt, tz, settings.hour_24))
             .unwrap_or_else(|| "no upcoming date".into());
-        if template.vote.enabled {
-            if let Some(line) = logic::closes_label(page.conn, series.id, tz, settings.hour_24)? {
-                when = line;
-            }
-        }
         rows.push(serde_json::json!({
             "href": format!(
                 "/servers/{}/recurring/{}",
                 store::discord_server_id(page.conn, page.guild_id)?,
-                series.id
+                series.public_id
             ),
             "badge": if series.active { clock::cadence_label(&series.cadence) } else { "Ended" },
             "title": template.title,
@@ -542,21 +506,19 @@ pub fn recurring(page: &Page<'_>) -> Result<String, OpError> {
     render("list.html", ctx)
 }
 
-pub fn series_page(page: &Page<'_>, series_id: i64) -> Result<String, OpError> {
-    let series = store::series(page.conn, series_id)?.ok_or(OpError::NotFound)?;
+pub fn series_page(page: &Page<'_>, public_id: &str) -> Result<String, OpError> {
+    let Some(public_id) = crate::ids::parse_event_id(public_id) else {
+        return Err(OpError::NotFound);
+    };
+    let series = store::series_by_public(page.conn, public_id)?.ok_or(OpError::NotFound)?;
     if series.guild_id != page.guild_id {
         return Err(OpError::NotFound);
     }
     let (settings, tz) = zone_of(page)?;
-    let template: serde_json::Value = serde_json::from_str(&series.template_json)
-        .unwrap_or(serde_json::json!({"title": "Series"}));
-    let title = template
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Series")
-        .to_string();
+    let template = logic::series_template(page.conn, &series)?;
+    let title = template.title;
     let events = store::events_in_series(page.conn, series.id)?;
-    let rows = events.iter().filter(|event| event.status != "ballot").filter_map(|event| {
+    let rows = events.iter().filter_map(|event| {
         let start = clock::parse_stamp(&event.starts_at).ok()?;
         let post = event.post_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default();
         Some(serde_json::json!({
@@ -582,25 +544,30 @@ pub fn series_page(page: &Page<'_>, series_id: i64) -> Result<String, OpError> {
         ),
         None => "Nothing else is waiting to post.".into(),
     };
-    let vote = logic::vote_panel(page.conn, series.id, page.user_id, tz, settings.hour_24)?;
-    if let Some(closes) = vote
-        .get("round")
-        .and_then(|round| round.get("closes"))
-        .and_then(|value| value.as_str())
-    {
-        lede = format!("Voting closes {closes}.");
-    }
     if series.active && series.max_occurrences.is_none() && series.end_on.is_none() {
         lede.push_str(" This series keeps going.");
     }
+    let repeat_until = series
+        .end_on
+        .as_deref()
+        .and_then(|value| clock::parse_stamp(value).ok())
+        .map(|dt| clock::date_local(dt, tz))
+        .unwrap_or_default();
     let mut ctx = shell(page)?;
     ctx["heading"] = Value::from(title);
     ctx["cadence"] = Value::from(clock::cadence_label(&series.cadence));
     ctx["active"] = context_bool(series.active);
     ctx["lede"] = Value::from(lede);
-    ctx["series_id"] = Value::from(series.id);
+    ctx["series_id"] = Value::from(series.public_id.clone());
+    ctx["repeat"] = Value::from(series.cadence);
+    ctx["repeat_count"] = Value::from(
+        series
+            .max_occurrences
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
+    );
+    ctx["repeat_until"] = Value::from(repeat_until);
     ctx["rows"] = Value::from_serialize(&rows);
-    ctx["vote"] = Value::from_serialize(&vote);
     render("series.html", ctx)
 }
 
@@ -616,7 +583,9 @@ pub fn presets(page: &Page<'_>) -> Result<String, OpError> {
                     .join(", ")
             })
             .unwrap_or_else(|_| "Unreadable preset".into());
-        items.push(serde_json::json!({ "id": preset.id, "name": preset.name, "summary": summary }));
+        items.push(
+            serde_json::json!({ "id": preset.public_id, "name": preset.name, "summary": summary }),
+        );
     }
     let library = store::list_library(page.conn, page.guild_id)?;
     let mut ctx = shell(page)?;
@@ -666,11 +635,7 @@ pub fn commands_page(page: &Page<'_>) -> Result<String, OpError> {
     let sample = store::list_events(page.conn, page.guild_id)?
         .into_iter()
         .find(|event| event.status == "posted");
-    let mut examples = vec![
-        "/events".to_string(),
-        "/reminders off".to_string(),
-        r#"/event title:"Shore cleanup" start:"tomorrow at 4pm" channel:social"#.to_string(),
-    ];
+    let mut examples = vec!["/event".to_string(), "/reminders off".to_string()];
     if let Some(event) = sample {
         examples.push(format!(
             "/response add event:{} user:samir option:Accepted",
@@ -682,6 +647,68 @@ pub fn commands_page(page: &Page<'_>) -> Result<String, OpError> {
     ctx["help"] = Value::from(HELP);
     ctx["examples"] = Value::from_serialize(&examples);
     render("commands.html", ctx)
+}
+
+pub fn routines_page(page: &Page<'_>) -> Result<String, OpError> {
+    let routines = logic::list_routines(page.conn, page.guild_id)?;
+    let mut ctx = shell(page)?;
+    ctx.insert("creating", context_bool(false));
+    ctx.insert("routines", Value::from_serialize(&routines));
+    render("routines.html", ctx)
+}
+
+pub fn routine_form(page: &Page<'_>) -> Result<String, OpError> {
+    let channels = store::list_channels(page.conn, page.guild_id)?;
+    let mut ctx = shell(page)?;
+    ctx.insert("creating", context_bool(true));
+    ctx.insert(
+        "channels",
+        Value::from_serialize(
+            &channels
+                .iter()
+                .map(|channel| serde_json::json!({"id": channel.id, "name": channel.name}))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    ctx.insert("weekdays", Value::from_serialize(&weekday_options()));
+    render("routines.html", ctx)
+}
+
+pub fn routine_detail(page: &Page<'_>, public_id: &str) -> Result<String, OpError> {
+    let id = logic::routine_in_guild(page.conn, page.guild_id, public_id)?;
+    let routine = logic::routine_page_data(page.conn, id)?.ok_or(OpError::NotFound)?;
+    let channels = store::list_channels(page.conn, page.guild_id)?;
+    let mut ctx = shell(page)?;
+    ctx.insert("creating", context_bool(false));
+    ctx.insert("routine", Value::from_serialize(&routine));
+    ctx.insert(
+        "channels",
+        Value::from_serialize(
+            &channels
+                .iter()
+                .map(|channel| {
+                    serde_json::json!({
+                        "id": channel.id,
+                        "name": channel.name,
+                        "selected": channel.id == routine.channel_id,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+    );
+    ctx.insert("weekdays", Value::from_serialize(&weekday_options()));
+    render("routines.html", ctx)
+}
+
+fn weekday_options() -> Vec<serde_json::Value> {
+    (0..7)
+        .map(|n| {
+            serde_json::json!({
+                "n": n.to_string(),
+                "name": clock::weekday_name(n),
+            })
+        })
+        .collect()
 }
 
 pub fn settings_page(page: &Page<'_>) -> Result<String, OpError> {
@@ -761,23 +788,6 @@ pub fn form_page(page: &Page<'_>, draft: &FormDraft) -> Result<String, OpError> 
     ctx["repeat"] = Value::from(draft.repeat.clone());
     ctx["repeat_count"] = Value::from(draft.repeat_count.clone());
     ctx["repeat_until"] = Value::from(draft.repeat_until.clone());
-    ctx["vote_enabled"] = context_bool(draft.vote_enabled);
-    ctx["vote_close_weekday"] = Value::from(draft.vote_close_weekday.clone());
-    ctx["vote_close_time"] = Value::from(draft.vote_close_time.clone());
-    ctx["vote_default_weekday"] = Value::from(draft.vote_default_weekday.clone());
-    ctx["vote_question_rows"] =
-        Value::from_serialize(&logic::question_fields(&draft.vote_questions));
-    ctx["vote_days"] = Value::from_serialize(
-        &(0..7)
-            .map(|day| {
-                serde_json::json!({
-                    "n": day.to_string(),
-                    "name": logic::weekday_name(day as u8),
-                    "on": draft.vote_days.get(day).copied().unwrap_or(true),
-                })
-            })
-            .collect::<Vec<_>>(),
-    );
     ctx["show_apply"] = context_bool(draft.show_apply);
     ctx["apply_series"] = context_bool(draft.apply_series);
     ctx["show_draft"] = context_bool(draft.show_draft);
@@ -836,12 +846,6 @@ pub struct FormDraft {
     pub repeat: String,
     pub repeat_count: String,
     pub repeat_until: String,
-    pub vote_enabled: bool,
-    pub vote_close_weekday: String,
-    pub vote_close_time: String,
-    pub vote_default_weekday: String,
-    pub vote_days: Vec<bool>,
-    pub vote_questions: Vec<logic::VoteQuestion>,
     pub show_apply: bool,
     pub apply_series: bool,
     pub lock_options: bool,
@@ -882,12 +886,6 @@ pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft 
         repeat: "none".into(),
         repeat_count: String::new(),
         repeat_until: String::new(),
-        vote_enabled: false,
-        vote_close_weekday: "0".into(),
-        vote_close_time: "18:00".into(),
-        vote_default_weekday: "0".into(),
-        vote_days: vec![true; 7],
-        vote_questions: Vec::new(),
         show_apply: false,
         apply_series: false,
         lock_options: false,
@@ -977,7 +975,8 @@ pub fn form_from_event(conn: &Connection, event_id: i64, tz: Tz) -> Result<FormD
             .is_some_and(|series| series.cadence == "once")
     });
     draft.series_note = if event.series_id.is_some() && !once {
-        "This date keeps its own start time. The repeat cadence stays with the series.".into()
+        "This date keeps its own start time. Cadence, date count, and end date are on the series."
+            .into()
     } else {
         String::new()
     };
@@ -1012,29 +1011,6 @@ pub fn form_from_map(
     draft.repeat = map.get("repeat").cloned().unwrap_or_else(|| "none".into());
     draft.repeat_count = map.get("repeat_count").cloned().unwrap_or_default();
     draft.repeat_until = map.get("repeat_until").cloned().unwrap_or_default();
-    draft.vote_enabled = map.contains_key("vote");
-    draft.vote_close_weekday = map
-        .get("vote_close_weekday")
-        .cloned()
-        .unwrap_or_else(|| "0".into());
-    draft.vote_close_time = map
-        .get("vote_close_time")
-        .cloned()
-        .unwrap_or_else(|| "18:00".into());
-    draft.vote_default_weekday = map
-        .get("vote_default_weekday")
-        .cloned()
-        .unwrap_or_else(|| "0".into());
-    draft.vote_questions = logic::questions_from_map(map, "vote").unwrap_or_default();
-    if map.contains_key("vote") || map.keys().any(|key| key.starts_with("vote_day_")) {
-        let mut days: Vec<bool> = (0..7)
-            .map(|day| map.contains_key(&format!("vote_day_{day}")))
-            .collect();
-        if days.iter().all(|on| !on) {
-            days = vec![true; 7];
-        }
-        draft.vote_days = days;
-    }
     draft.apply_series = map.contains_key("apply_series");
     for key in map.keys() {
         if let Some(id) = key.strip_prefix("mention_") {
@@ -1108,16 +1084,7 @@ pub fn input_from_form(
     existing: Option<&Event>,
 ) -> Result<EventInput, OpError> {
     let draft = form_from_map(map, "", existing, String::new(), tz);
-    let start = if draft.vote_enabled && !draft.start.contains('T') {
-        if draft.start.trim().is_empty() {
-            return Err(OpError::message(
-                "Set the clock time. The day comes from the vote.",
-            ));
-        }
-        clock::anchor_at_clock(&draft.start, tz)?
-    } else {
-        clock::parse_local(&draft.start, tz)?
-    };
+    let start = clock::parse_local(&draft.start, tz)?;
     let duration = draft
         .duration
         .parse::<i64>()
@@ -1226,11 +1193,6 @@ pub fn input_from_form(
         action,
         post_at,
         apply_series: draft.apply_series,
-        vote: if map.contains_key("vote") {
-            Some(logic::spec_from_map(map)?)
-        } else {
-            None
-        },
     })
 }
 
@@ -1595,6 +1557,7 @@ fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
         ctx.insert("draft_count", Value::from(0));
         ctx.insert("scheduled_count", Value::from(0));
         ctx.insert("series_count", Value::from(0));
+        ctx.insert("routine_count", Value::from(0));
         ctx.insert("calendar_url", Value::from(""));
         return Ok(ctx);
     }
@@ -1662,6 +1625,10 @@ fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
         "series_count",
         Value::from(store::count_active_series(page.conn, page.guild_id)?),
     );
+    ctx.insert(
+        "routine_count",
+        Value::from(logic::count_active(page.conn, page.guild_id)?),
+    );
     let calendar_url = user
         .and_then(|person| person.discord_id.as_deref())
         .map(|discord_id| store::ensure_calendar_token(page.conn, discord_id))
@@ -1718,13 +1685,6 @@ fn templates() -> &'static Environment<'static> {
             .expect("list");
         env.add_template("series.html", include_str!("../templates/series.html"))
             .expect("series");
-        env.add_template("vote.html", include_str!("../templates/vote.html"))
-            .expect("vote");
-        env.add_template(
-            "questions.html",
-            include_str!("../templates/questions.html"),
-        )
-        .expect("questions");
         env.add_template("settings.html", include_str!("../templates/settings.html"))
             .expect("settings");
         env.add_template(
@@ -1738,6 +1698,8 @@ fn templates() -> &'static Environment<'static> {
             .expect("channels");
         env.add_template("commands.html", include_str!("../templates/commands.html"))
             .expect("commands");
+        env.add_template("routines.html", include_str!("../templates/routines.html"))
+            .expect("routines");
         env.add_template("notfound.html", include_str!("../templates/notfound.html"))
             .expect("notfound");
         env.add_template("landing.html", include_str!("../templates/landing.html"))
@@ -1749,6 +1711,7 @@ fn templates() -> &'static Environment<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use rusqlite::Connection;
 
     fn sample() -> Connection {
@@ -1806,7 +1769,6 @@ mod tests {
                 action: SaveAction::Publish,
                 post_at: None,
                 apply_series: false,
-                vote: None,
             },
         )
         .unwrap();
@@ -1847,21 +1809,21 @@ mod tests {
         assert!(body.contains("<strong>the hall</strong>"), "{body}");
         assert!(body.contains("&lt;script&gt;"), "{body}");
         let form = form_page(&page, &blank_form("99", None)).unwrap();
-        assert!(form.contains("single event or a weekly series"), "{form}");
-        assert!(form.contains("vote_q0_prompt"), "{form}");
-        assert!(form.contains("Add a question"), "{form}");
+        assert!(form.contains("Does not repeat"), "{form}");
+        assert!(form.contains("Post now"), "{form}");
         settings_page(&Page {
             nav: "settings",
             title: "Settings",
             ..page
         })
         .unwrap();
-        commands_page(&Page {
+        let desk = commands_page(&Page {
             nav: "commands",
             title: "Commands",
             ..page
         })
         .unwrap();
+        assert!(desk.contains("the account you signed in with"), "{desk}");
         let drafts = list_page(
             &Page {
                 nav: "drafts",
@@ -1885,6 +1847,109 @@ mod tests {
         assert!(activity.contains("Posted Raid."), "{activity}");
         assert!(!activity.contains(">Log<"), "{activity}");
         recurring(&page).unwrap();
+    }
+
+    #[test]
+    fn series_page_edits_the_repeat() {
+        let mut conn = sample();
+        let id = logic::save_event(
+            &mut conn,
+            EventInput {
+                id: None,
+                guild_id: 1,
+                actor_id: 1,
+                channel_id: 1,
+                title: "Vault".into(),
+                description: String::new(),
+                starts_at: Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap(),
+                duration_minutes: 60,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                cutoff_at: None,
+                attendee_role_id: None,
+                thread_enabled: false,
+                multiple_signups: false,
+                mention_everyone: false,
+                mention_role_ids: vec![],
+                restrict_role_ids: vec![],
+                options: vec![OptionInput {
+                    id: None,
+                    name: "Accepted".into(),
+                    emoji: String::new(),
+                    capacity: None,
+                    waitlist: false,
+                    role_id: None,
+                    reminders_enabled: true,
+                }],
+                reminders: vec![ReminderInput {
+                    offset_minutes: 15,
+                    message: String::new(),
+                }],
+                repeat: Some(RepeatSpec {
+                    cadence: "weekly".into(),
+                    end_on: None,
+                    max_occurrences: Some(3),
+                }),
+                action: SaveAction::Publish,
+                post_at: None,
+                apply_series: false,
+            },
+        )
+        .unwrap();
+        let event = store::event(&conn, id).unwrap().unwrap();
+        let series = store::series(&conn, event.series_id.unwrap())
+            .unwrap()
+            .unwrap();
+        logic::save_preset(
+            &mut conn,
+            1,
+            1,
+            "Raid",
+            &logic::PresetBody {
+                multiple_signups: false,
+                options: vec![OptionInput {
+                    id: None,
+                    name: "Accepted".into(),
+                    emoji: String::new(),
+                    capacity: None,
+                    waitlist: false,
+                    role_id: None,
+                    reminders_enabled: true,
+                }],
+            },
+        )
+        .unwrap();
+        let preset = store::list_presets(&conn, 1).unwrap().remove(0);
+        let page = Page {
+            conn: &conn,
+            guild_id: 1,
+            user_id: 1,
+            notice: None,
+            invite_url: "",
+            nav: "recurring",
+            title: "Series",
+            allowed_guilds: &[1],
+        };
+        assert!(series_page(&page, "1").is_err());
+        let html = series_page(&page, &series.public_id).unwrap();
+        assert!(
+            html.contains(&format!("/recurring/{}", series.public_id)),
+            "{html}"
+        );
+        assert!(html.contains("Save repeat"), "{html}");
+        assert!(html.contains("value=\"weekly\" selected"), "{html}");
+        assert!(html.contains("value=\"3\""), "{html}");
+        let shown = event_page(&page, event.id).unwrap();
+        assert!(
+            shown.contains(&format!("/recurring/{}", series.public_id)),
+            "{shown}"
+        );
+        let presets_html = presets(&page).unwrap();
+        assert!(
+            presets_html.contains(&format!("/presets/{}/delete", preset.public_id)),
+            "{presets_html}"
+        );
+        assert!(!presets_html.contains("/presets/1/"), "{presets_html}");
     }
 
     #[test]

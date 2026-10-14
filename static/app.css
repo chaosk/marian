@@ -196,12 +196,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: white;
 }
 .badge { font-size: 12px; border-radius: 999px; padding: 2px 8px; background: #efe6d4; }
-.vote { margin-bottom: 18px; }
-.vote h2 { margin: 18px 0 8px; font-size: 18px; }
-.vote h3 { margin: 14px 0 6px; font-size: 16px; }
 .vote-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
 .vote-choices form { margin: 0; }
-.vote-pin { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .q-title { margin: 16px 0 0; font-size: 16px; font-weight: 650; }
 .q-editor { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 12px; }
 .q-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-2); }
@@ -317,9 +313,15 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
   margin: 18px 0 10px;
 }
 .gate .brand { color: var(--blue-deep); }
+.gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
 .gate .discord {
   display: inline-flex;
-  margin-top: 18px;
   background: #5865f2;
   color: white;
   text-decoration: none;
@@ -327,7 +329,7 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
   border-radius: 999px;
   padding: 10px 16px;
 }
-.gate-invite { margin: 16px 0 0; }
+.gate-actions .ghost { padding: 10px 16px; font-weight: 700; }
 @keyframes drift-1 { to { transform: translate(1px, -1px); } }
 @keyframes drift-2 { to { transform: translate(-1px, 1px); } }
 @keyframes drift-3 { to { transform: translate(1px, 1px); } }

@@ -4,6 +4,18 @@
 
 use std::io::Read;
 
+pub fn routine_id() -> String {
+    event_id()
+}
+
+pub fn series_id() -> String {
+    event_id()
+}
+
+pub fn preset_id() -> String {
+    event_id()
+}
+
 pub fn event_id() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

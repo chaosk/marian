@@ -1,13 +1,15 @@
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use rusqlite::{params, Connection};
 
 use super::access::{can_delete, can_edit};
 use super::db::{log, must_channel, must_event, must_series, must_user};
 use super::event::save_event;
 use super::model::*;
+use super::series;
+use super::template;
 use crate::clock;
 use crate::error::OpError;
-use crate::store::{self, Event, Settings};
+use crate::store::{self, Event, Series, Settings, User};
 
 pub fn archive_event(
     conn: &mut Connection,
@@ -140,7 +142,6 @@ pub fn duplicate_event(
         action: SaveAction::Draft,
         post_at: None,
         apply_series: false,
-        vote: None,
     };
     save_event(conn, input)
 }
@@ -172,57 +173,66 @@ pub fn skip_event(conn: &mut Connection, event_id: i64, actor_id: i64) -> Result
     })
 }
 
+pub fn save_series_repeat(
+    conn: &mut Connection,
+    series_id: i64,
+    actor_id: i64,
+    repeat: RepeatSpec,
+) -> Result<String, OpError> {
+    store::with_tx(conn, |tx| {
+        let series = must_series(tx, series_id)?;
+        let actor = must_user(tx, actor_id)?;
+        may_change_series(tx, &series, &actor, "You can't change this series.")?;
+        series::retune_series(tx, series_id, &repeat, Utc::now())?;
+        let title = template::load(tx, series.template_id)
+            .map(|template| template.title)
+            .unwrap_or_else(|_| "Series".into());
+        let notice = format!("Saved the {title} repeat.");
+        log(tx, series.guild_id, None, &notice)?;
+        Ok(notice)
+    })
+}
+
 pub fn end_series(conn: &mut Connection, series_id: i64, actor_id: i64) -> Result<String, OpError> {
     store::with_tx(conn, |tx| {
         let series = must_series(tx, series_id)?;
         let actor = must_user(tx, actor_id)?;
-        if !actor.organizer && actor.guild_id == series.guild_id {
-            let settings = store::settings(tx, series.guild_id)?;
-            let roles = store::user_role_ids(tx, actor.id)?;
-            let events = store::events_in_series(tx, series_id)?;
-            let allowed = events
-                .iter()
-                .any(|event| can_edit(&actor, event, &settings, &roles));
-            if !allowed {
-                return Err(OpError::message("You can't end this series."));
-            }
-        }
-        if actor.guild_id != series.guild_id {
-            return Err(OpError::NotFound);
-        }
+        may_change_series(tx, &series, &actor, "You can't end this series.")?;
         tx.execute("UPDATE series SET active = 0 WHERE id = ?", [series_id])?;
         tx.execute(
-            "UPDATE rounds SET status = 'closed' WHERE series_id = ? AND status = 'open'",
-            [series_id],
-        )?;
-        tx.execute(
-            "UPDATE events SET status = 'skipped', updated_at = ? WHERE series_id = ? AND status IN ('scheduled', 'draft', 'ballot')",
+            "UPDATE events SET status = 'skipped', updated_at = ? WHERE series_id = ? AND status IN ('scheduled', 'draft')",
             params![store::now_stamp(), series_id],
         )?;
-        let template: SeriesTemplate =
-            serde_json::from_str(&series.template_json).unwrap_or(SeriesTemplate {
-                title: "Series".into(),
-                description: String::new(),
-                duration_minutes: 60,
-                channel_id: 0,
-                color: "#1e3a6e".into(),
-                image_url: None,
-                thread_enabled: false,
-                multiple_signups: false,
-                mention_everyone: false,
-                attendee_role_id: None,
-                mention_role_ids: vec![],
-                restrict_role_ids: vec![],
-                cutoff_offset_minutes: None,
-                options: vec![],
-                reminders: vec![],
-                vote: VoteSpec::default(),
-            });
-        let notice = format!(
-            "Ended the {} series. Upcoming dates were skipped.",
-            template.title
-        );
+        let title = super::template::load(tx, series.template_id)
+            .map(|template| template.title)
+            .unwrap_or_else(|_| "Series".into());
+        let notice = format!("Ended the {title} series. Upcoming dates were skipped.");
         log(tx, series.guild_id, None, &notice)?;
         Ok(notice)
     })
+}
+
+fn may_change_series(
+    conn: &Connection,
+    series: &Series,
+    actor: &User,
+    denied: &str,
+) -> Result<(), OpError> {
+    if actor.guild_id != series.guild_id {
+        return Err(OpError::NotFound);
+    }
+    if actor.organizer {
+        return Ok(());
+    }
+    let settings = store::settings(conn, series.guild_id)?;
+    let roles = store::user_role_ids(conn, actor.id)?;
+    let events = store::events_in_series(conn, series.id)?;
+    if events
+        .iter()
+        .any(|event| can_edit(actor, event, &settings, &roles))
+    {
+        Ok(())
+    } else {
+        Err(OpError::message(denied))
+    }
 }

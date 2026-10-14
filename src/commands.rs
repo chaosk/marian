@@ -14,35 +14,58 @@ use crate::store::{self, Event};
 use rusqlite::OptionalExtension;
 
 pub const HELP: &str = "\
-/event title:\"Thursday vault\" start:\"next thursday at 7pm\" channel:raids
-/edit 12 title:\"New name\"
-/events
+/event
+/edit EVENT title:\"New name\" description:\"Bring dice.\" start:\"friday 7pm\" duration:90 channel:events
 /reminders off
-/response add event:12 user:june option:Healer
-/response remove event:12 user:june option:Healer
-/response move event:12 user:june option:DPS
-In Discord, /response add, /response remove, and /response move each ask for the event, the person, and the signup option, and list the choices.
+/response add event:EVENT user:june option:Accepted
+/response remove event:EVENT user:june option:Accepted
+/response move event:EVENT user:june option:Declined
+In Discord, /response add, /response remove, and /response move each ask for the event, the person, and the signup option, and list the choices. EVENT is the id in the event address.
 /settings reminder_interval 30
 /settings show_attendees off
+/settings 24_hour_time on
+/settings event_threads on
+/settings thread_reminders on
+/settings auto_archive on
+/settings auto_archive_interval 24
+/settings auto_join_threads on
+/settings localize_time on
+/settings purge off
+/settings temp_roles off
+/settings park_clock off
+/settings digest weekly
+/settings post_lead 48
 /settings role delete Officer
+/signup_options
 /signup_options add emoji:🛡️ name:Tank
 /signup_options remove Tank
 /signup_presets
 /channel name:briefing kind:event
 /google authorize
 /google auto_sync on
-/google sync 12
+/google sync EVENT
 /sort
 /help
 
+Signup options start as Accepted, Declined, and Tentative. Digest is off, daily, or weekly.
+A weekly poll is a routine on the website.
 Times can look like \"tomorrow at 7pm\", \"friday 9am\", \"oct 20 at 8:00pm\", or \"in 2 hours\".
-The website is where presets, waitlists, and per-option roles are easier to set up.
+Presets, waitlists, and per-option roles are on the website.
 ";
 
 pub fn execute(conn: &mut rusqlite::Connection, guild_id: i64, user_id: i64, line: &str) -> String {
     let line = line.trim();
     let reply = if line.is_empty() {
         "Type /help to see the command desk.".to_string()
+    } else if !line.starts_with('/') {
+        match desk_answer(conn, user_id, line) {
+            Ok(Some(text)) => text,
+            Ok(None) => match dispatch(conn, guild_id, user_id, line) {
+                Ok(text) => text,
+                Err(err) => err.to_string(),
+            },
+            Err(err) => err.to_string(),
+        }
     } else {
         match dispatch(conn, guild_id, user_id, line) {
             Ok(text) => text,
@@ -63,13 +86,6 @@ fn event_path(guild: &store::Guild, public_id: &str) -> String {
 fn find_event(conn: &rusqlite::Connection, guild_id: i64, token: &str) -> Result<Event, OpError> {
     if let Some(public_id) = crate::ids::parse_event_id(token) {
         if let Some(event) = store::event_by_public(conn, public_id)? {
-            if event.guild_id == guild_id {
-                return Ok(event);
-            }
-        }
-    }
-    if let Ok(id) = token.parse::<i64>() {
-        if let Some(event) = store::event(conn, id)? {
             if event.guild_id == guild_id {
                 return Ok(event);
             }
@@ -116,9 +132,8 @@ fn dispatch(
     let (pos, map) = fields(rest);
     match cmd {
         "help" | "" => Ok(HELP.to_string()),
-        "event" => cmd_event(conn, guild_id, user_id, &pos, &map),
+        "event" => cmd_event(conn, guild_id, user_id, rest),
         "edit" => cmd_edit(conn, guild_id, user_id, &pos, &map),
-        "events" => cmd_events(conn, guild_id),
         "reminders" => cmd_reminders(conn, user_id, &pos, &map),
         "response" => cmd_response(conn, user_id, &pos, &map),
         "settings" => cmd_settings(conn, guild_id, user_id, &pos, &map),
@@ -135,125 +150,61 @@ fn cmd_event(
     conn: &mut rusqlite::Connection,
     guild_id: i64,
     user_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
+    rest: &str,
 ) -> Result<String, OpError> {
-    let title = map
-        .get("title")
-        .cloned()
-        .or_else(|| pos.first().cloned())
-        .ok_or_else(|| OpError::message("Give the event a title."))?;
-    let start_raw = map
-        .get("start")
-        .cloned()
-        .or_else(|| pos.get(1).cloned())
-        .ok_or_else(|| OpError::message("Give a start time, like tomorrow at 7pm."))?;
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
-    let tz = clock::zone(&guild.timezone)?;
-    let starts_at = parse::parse_when(&start_raw, Utc::now(), tz).ok_or_else(|| {
-        OpError::message(format!("Marian couldn't read the time \"{start_raw}\"."))
-    })?;
-    let channels = store::list_channels(conn, guild_id)?;
-    let channel = if let Some(name) = map.get("channel").or_else(|| pos.get(2)) {
-        store::channel_by_name(conn, guild_id, name)?
-            .ok_or_else(|| OpError::message(format!("No channel named {name}.")))?
-    } else {
-        channels
-            .first()
-            .cloned()
-            .ok_or_else(|| OpError::message("Create a channel before posting an event."))?
-    };
-    let duration = map
-        .get("duration")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(60);
-    let description = map.get("description").cloned().unwrap_or_default();
-    let mut options = yes_no_maybe();
-    let mut multiple = false;
-    if let Some(preset_name) = map.get("preset") {
-        if let Some(preset) = store::list_presets(conn, guild_id)?
-            .into_iter()
-            .find(|preset| preset.name.eq_ignore_ascii_case(preset_name))
-        {
-            if let Ok(body) = serde_json::from_str::<PresetBody>(&preset.body) {
-                options = body.options;
-                multiple = body.multiple_signups;
-            }
-        }
+    if !rest.trim().is_empty() {
+        return Err(OpError::message(
+            "/event doesn't take options. Run /event and answer the questions.",
+        ));
     }
-    let mut repeat = None;
-    if let Some(cadence) = map.get("repeat") {
-        let cadence = match cadence.to_lowercase().as_str() {
-            "daily" | "day" => "daily",
-            "weekly" | "week" => "weekly",
-            "biweekly" => "biweekly",
-            "monthly" | "month" => "monthly",
-            other => {
-                return Err(OpError::message(format!(
-                    "Repeat can be daily, weekly, biweekly, or monthly. Not {other}."
-                )))
-            }
-        };
-        repeat = Some(RepeatSpec {
-            cadence: cadence.into(),
-            end_on: None,
-            max_occurrences: map.get("count").and_then(|value| value.parse().ok()),
-        });
+    if store::list_channels(conn, guild_id)?.is_empty() {
+        return Err(OpError::message(
+            "Create a channel before posting an event.",
+        ));
     }
-    let draft = matches!(
-        map.get("draft").map(String::as_str),
-        Some("yes" | "true" | "on")
-    );
-    let post_at = if let Some(raw) = map.get("post") {
-        Some(parse::parse_when(raw, Utc::now(), tz).ok_or_else(|| {
-            OpError::message(format!("Marian couldn't read the post time \"{raw}\"."))
-        })?)
-    } else {
-        None
-    };
-    let action = if draft {
-        SaveAction::Draft
-    } else if post_at.is_some() {
-        SaveAction::Schedule
-    } else {
-        SaveAction::Publish
-    };
-    let id = logic::save_event(
-        conn,
-        EventInput {
-            id: None,
-            guild_id,
-            actor_id: user_id,
-            channel_id: channel.id,
-            title,
-            description,
-            starts_at,
-            duration_minutes: duration,
-            color: "#1e3a6e".into(),
-            image_url: None,
-            cutoff_at: None,
-            attendee_role_id: None,
-            thread_enabled: store::settings(conn, guild_id)?.event_threads,
-            multiple_signups: multiple,
-            mention_everyone: false,
-            mention_role_ids: vec![],
-            restrict_role_ids: vec![],
-            options,
-            reminders: vec![],
-            repeat,
-            action,
-            post_at,
-            apply_series: false,
-            vote: None,
-        },
+    let discord_user_id = prompt_key(conn, user_id)?;
+    conn.execute(
+        "INSERT INTO event_prompts (
+            discord_user_id, guild_id, user_id, step, title, start_raw, channel_name, source_channel, source_discord, draft
+         ) VALUES (?, ?, ?, 'channel', NULL, NULL, NULL, NULL, NULL, NULL)
+         ON CONFLICT(discord_user_id) DO UPDATE SET
+           guild_id = excluded.guild_id,
+           user_id = excluded.user_id,
+           step = 'channel',
+           title = NULL,
+           start_raw = NULL,
+           channel_name = NULL,
+           source_channel = NULL,
+           source_discord = NULL,
+           draft = NULL",
+        rusqlite::params![discord_user_id, guild_id, user_id],
     )?;
-    let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
-    Ok(format!(
-        "{} \"{}\" for {}. Open {} to set options, reminders, and roles.",
-        logic::status_label(&event.status),
-        event.title,
-        clock::format_when(starts_at, tz, store::settings(conn, guild_id)?.hour_24),
-        event_path(&guild, &event.public_id)
+    Ok(where_to_post(conn, guild_id, &None, &None)?.to_string())
+}
+
+fn prompt_key(conn: &rusqlite::Connection, user_id: i64) -> Result<String, OpError> {
+    let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
+    Ok(user
+        .discord_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| format!("user:{user_id}")))
+}
+
+fn desk_answer(
+    conn: &mut rusqlite::Connection,
+    user_id: i64,
+    line: &str,
+) -> Result<Option<String>, OpError> {
+    let key = prompt_key(conn, user_id)?;
+    let Some(replies) = answer_event_dm(conn, &key, line, "")? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        replies
+            .into_iter()
+            .map(|reply| reply.to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
     ))
 }
 
@@ -1279,7 +1230,6 @@ fn finish_event(
             action,
             post_at,
             apply_series: false,
-            vote: None,
         },
     );
     let id = match saved {
@@ -1522,7 +1472,7 @@ fn cmd_edit(
         .get("id")
         .or_else(|| pos.first())
         .map(String::as_str)
-        .ok_or_else(|| OpError::message("Say which event, like /edit 12 title:\"New name\"."))?;
+        .ok_or_else(|| OpError::message("Say which event, like /edit EVENT title:\"New name\"."))?;
     let event = find_event(conn, guild_id, token)?;
     let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
@@ -1554,31 +1504,6 @@ fn cmd_edit(
         event.title,
         event_path(&guild, &event.public_id)
     ))
-}
-
-fn cmd_events(conn: &rusqlite::Connection, guild_id: i64) -> Result<String, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
-    let tz = clock::zone(&guild.timezone)?;
-    let settings = store::settings(conn, guild_id)?;
-    let mut lines = Vec::new();
-    for event in store::list_events(conn, guild_id)? {
-        if !matches!(event.status.as_str(), "posted" | "scheduled" | "draft") {
-            continue;
-        }
-        let start = clock::parse_stamp(&event.starts_at)?;
-        lines.push(format!(
-            "{}  {}  {}  {}",
-            event.public_id,
-            logic::status_label(&event.status),
-            clock::format_when(start, tz, settings.hour_24),
-            event.title
-        ));
-    }
-    if lines.is_empty() {
-        Ok("Nothing upcoming. /event title:\"Game night\" start:\"friday at 7pm\"".into())
-    } else {
-        Ok(lines.join("\n"))
-    }
 }
 
 fn cmd_reminders(
@@ -1747,11 +1672,6 @@ fn resolve_option(
         .find(|opt| opt.name.eq_ignore_ascii_case(token))
     {
         return Ok(opt.clone());
-    }
-    if let Ok(id) = token.parse::<i64>() {
-        if let Some(opt) = options.into_iter().find(|opt| opt.id == id) {
-            return Ok(opt);
-        }
     }
     Err(OpError::message(format!("No option named {token}.")))
 }
@@ -2040,12 +1960,13 @@ fn cmd_google(
             Ok("Turned automatic calendar marking off.".into())
         }
         "sync" => {
-            let id: i64 = pos
-                .get(1)
-                .and_then(|value| value.parse().ok())
-                .or_else(|| map.get("event").and_then(|value| value.parse().ok()))
+            let token = map
+                .get("event")
+                .map(String::as_str)
+                .or_else(|| pos.get(1).map(String::as_str))
                 .ok_or_else(|| OpError::message("Say which event to sync."))?;
-            logic::manual_calendar_sync(conn, id, user_id)
+            let event = find_event(conn, guild_id, token)?;
+            logic::manual_calendar_sync(conn, event.id, user_id)
         }
         other => Err(OpError::message(format!("Unknown google command {other}."))),
     }
@@ -2107,7 +2028,6 @@ fn input_from(
             .map(clock::parse_stamp)
             .transpose()?,
         apply_series: false,
-        vote: None,
     })
 }
 
@@ -2192,7 +2112,18 @@ mod tests {
     }
 
     #[test]
-    fn event_command_creates_a_posted_event() {
+    fn help_uses_the_event_id_and_the_default_options() {
+        assert!(HELP.contains("option:Accepted"));
+        assert!(HELP.contains("option:Declined"));
+        assert!(HELP.contains("/settings digest weekly"));
+        assert!(HELP.contains("/google sync EVENT"));
+        assert!(HELP.contains("A weekly poll is a routine on the website."));
+        assert!(!HELP.contains("Healer"));
+        assert!(!HELP.contains("event:12"));
+    }
+
+    #[test]
+    fn event_on_the_desk_asks_the_same_questions() {
         let mut conn = store::open_memory().unwrap();
         conn.execute_batch(
             "
@@ -2204,13 +2135,23 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&conn, 1).unwrap();
-        let reply = execute(
+        let rejected = execute(
             &mut conn,
             1,
             1,
-            r#"/event title:"Shore cleanup" start:"tomorrow at 4pm" channel:social duration:90"#,
+            r#"/event title:"Shore cleanup" start:"tomorrow at 4pm" channel:social"#,
         );
-        assert!(reply.contains("Shore cleanup"), "{reply}");
+        assert!(rejected.contains("doesn't take options"), "{rejected}");
+        let first = execute(&mut conn, 1, 1, "/event");
+        assert!(
+            first.contains("Where would you like to post this event?"),
+            "{first}"
+        );
+        assert!(first.contains("#social"), "{first}");
+        let title = execute(&mut conn, 1, 1, "1");
+        assert!(title.contains("Enter the event title"), "{title}");
+        let missing = execute(&mut conn, 1, 1, "/events");
+        assert!(missing.contains("Unknown command /events"), "{missing}");
     }
 
     #[test]

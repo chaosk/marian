@@ -7,6 +7,7 @@ use std::time::Duration;
 use poise::serenity_prelude as serenity;
 use rusqlite::Connection;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tracing::Instrument;
 
 use crate::commands;
 use crate::jobs::DiscordJob;
@@ -72,20 +73,35 @@ async fn job_loop(
             requeue(retry.clone(), job);
             continue;
         }
-        let result = match &job {
-            DiscordJob::Sync { event_id, .. } => {
-                push_sync(&db, &http, &public_url, *event_id).await
+        let (kind, id) = job_kind(&job);
+        let span = tracing::info_span!("discord_job", job = kind, id);
+        let result = async {
+            match &job {
+                DiscordJob::Sync { event_id, .. } => {
+                    push_sync(&db, &http, &public_url, *event_id).await
+                }
+                DiscordJob::Remind { event_id, text, .. } => {
+                    push_remind(&db, &http, *event_id, text).await
+                }
+                DiscordJob::Attend { event_id, .. } => push_attendance(&db, &http, *event_id).await,
+                DiscordJob::Routine { run_id, .. } => push_routine(&db, &http, *run_id).await,
             }
-            DiscordJob::Remind { event_id, text, .. } => {
-                push_remind(&db, &http, *event_id, text).await
-            }
-            DiscordJob::Attend { event_id, .. } => push_attendance(&db, &http, *event_id).await,
-            DiscordJob::Poll { round_id, .. } => push_poll(&db, &http, *round_id).await,
-        };
+        }
+        .instrument(span)
+        .await;
         if let Err(err) = result {
             tracing::warn!("Discord job failed: {err}");
             requeue(retry.clone(), job);
         }
+    }
+}
+
+fn job_kind(job: &DiscordJob) -> (&'static str, i64) {
+    match job {
+        DiscordJob::Sync { event_id, .. } => ("sync", *event_id),
+        DiscordJob::Remind { event_id, .. } => ("remind", *event_id),
+        DiscordJob::Attend { event_id, .. } => ("attend", *event_id),
+        DiscordJob::Routine { run_id, .. } => ("routine", *run_id),
     }
 }
 
@@ -111,7 +127,6 @@ async fn connect(
             commands: vec![
                 event(),
                 edit(),
-                events(),
                 reminders(),
                 response(),
                 settings(),
@@ -328,70 +343,18 @@ async fn handle_button(
             event_id,
             option_id,
         } => signup_from_button(ctx, component, data, event_id, option_id).await,
-        ButtonAction::Vote {
-            round_id,
-            poll,
-            choice,
-        } => vote_from_button(ctx, component, data, round_id, &poll, choice).await,
-        ButtonAction::CloseVote { round_id } => {
-            close_from_button(ctx, component, data, round_id).await
+        ButtonAction::Routine { run_id, day } => {
+            routine_from_button(ctx, component, data, run_id, day).await
         }
     }
 }
 
-async fn close_from_button(
+async fn routine_from_button(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
     data: &Data,
-    round_id: i64,
-) -> Result<(), Error> {
-    let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
-        return Ok(());
-    };
-    let closed = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
-        let series_id: i64 = conn.query_row(
-            "SELECT series_id FROM rounds WHERE id = ?",
-            [round_id],
-            |row| row.get(0),
-        )?;
-        logic::close_series(&mut conn, series_id, user_id)
-    };
-    match closed {
-        Ok(effect) => {
-            for job in effect.jobs {
-                let result = match job {
-                    DiscordJob::Sync { event_id, .. } => {
-                        push_sync(&data.db, &data.http, &data.public_url, event_id).await
-                    }
-                    DiscordJob::Attend { event_id, .. } => {
-                        push_attendance(&data.db, &data.http, event_id).await
-                    }
-                    DiscordJob::Poll { round_id, .. } => {
-                        push_poll(&data.db, &data.http, round_id).await
-                    }
-                    DiscordJob::Remind { .. } => Ok(()),
-                };
-                if let Err(err) = result {
-                    tracing::warn!("could not finish closing the vote: {err}");
-                }
-            }
-            followup(ctx, component, "Voting is closed. This result is posted.").await?;
-        }
-        Err(err) => followup(ctx, component, &err.to_string()).await?,
-    }
-    Ok(())
-}
-
-async fn vote_from_button(
-    ctx: &serenity::Context,
-    component: &serenity::ComponentInteraction,
-    data: &Data,
-    round_id: i64,
-    poll: &str,
-    choice: usize,
+    run_id: i64,
+    day: u8,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
         followup(ctx, component, "Use that button inside a server.").await?;
@@ -400,18 +363,18 @@ async fn vote_from_button(
     let saved = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
         let user_id = bind_clicker(&mut conn, &click)?;
-        logic::cast_round(&mut conn, round_id, user_id, poll, choice)
+        logic::cast_run(&mut conn, run_id, user_id, day)
     };
     let notice = match saved {
-        Ok(notice) => notice,
-        Err(err) => return followup(ctx, component, &err.to_string()).await,
+        Ok(effect) => {
+            if let Err(err) = push_routine(&data.db, &data.http, run_id).await {
+                tracing::warn!("could not refresh the routine poll: {err}");
+            }
+            effect.notice
+        }
+        Err(err) => err.to_string(),
     };
-    if let Err(err) = push_poll(&data.db, &data.http, round_id).await {
-        tracing::warn!("could not refresh the vote: {err}");
-    }
-    if poll == "d" {
-        followup(ctx, component, &notice).await?;
-    }
+    followup(ctx, component, &notice).await?;
     Ok(())
 }
 
@@ -650,24 +613,10 @@ async fn followup(
 }
 
 enum ButtonAction {
-    Signup {
-        event_id: i64,
-        option_id: i64,
-    },
-    Edit {
-        event_id: i64,
-    },
-    Delete {
-        event_id: i64,
-    },
-    Vote {
-        round_id: i64,
-        poll: String,
-        choice: usize,
-    },
-    CloseVote {
-        round_id: i64,
-    },
+    Signup { event_id: i64, option_id: i64 },
+    Edit { event_id: i64 },
+    Delete { event_id: i64 },
+    Routine { run_id: i64, day: u8 },
 }
 
 fn action_button(event_id: i64, button: &logic::DiscordButton) -> serenity::CreateButton {
@@ -702,18 +651,10 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
         return None;
     }
     let head = parts.next()?;
-    if head == "v" {
-        let round_id = parts.next()?.parse().ok()?;
-        let poll = parts.next()?.to_string();
-        if poll == "close" {
-            return Some(ButtonAction::CloseVote { round_id });
-        }
-        let choice = parts.next()?.parse().ok()?;
-        return Some(ButtonAction::Vote {
-            round_id,
-            poll,
-            choice,
-        });
+    if head == "w" {
+        let run_id = parts.next()?.parse().ok()?;
+        let day = parts.next()?.parse().ok()?;
+        return Some(ButtonAction::Routine { run_id, day });
     }
     let event_id = head.parse().ok()?;
     match parts.next()? {
@@ -818,14 +759,14 @@ async fn push_sync(
     Ok(())
 }
 
-async fn push_poll(
+async fn push_routine(
     db: &Arc<Mutex<Connection>>,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
-    round_id: i64,
+    run_id: i64,
 ) -> Result<(), Error> {
     let post = {
         let conn = db.lock().map_err(|_| "database lock")?;
-        logic::poll_post(&conn, round_id)?
+        logic::routine_post(&conn, run_id)?
     };
     let Some(post) = post else {
         return Ok(());
@@ -836,113 +777,23 @@ async fn push_poll(
         .clone()
         .ok_or("Discord is not connected")?;
     let channel_id = serenity::ChannelId::new(post.channel_discord_id.parse()?);
-    let mut day_message_id = post.message_id.clone();
-    let mut thread_id = post.thread_discord_id.clone();
-    if !post.closed {
-        let embed = serenity::CreateEmbed::new()
-            .title(clip(&post.title, 250))
-            .description(clip(&post.body, 4000))
-            .color(serenity::Colour::new(post.color));
-        let sent = upsert_message(
-            &http,
-            channel_id,
-            day_message_id.as_deref(),
-            embed,
-            vote_rows(&post.buttons, post.close_id.as_deref()),
-        )
-        .await?;
-        if let Some(message) = sent {
-            day_message_id = Some(message.id.get().to_string());
-            let conn = db.lock().map_err(|_| "database lock")?;
-            logic::remember_poll_message(&conn, round_id, day_message_id.as_deref().unwrap())?;
-        }
-    }
-    if thread_id.is_none() {
-        if let Some(message_id) = day_message_id
-            .as_deref()
-            .and_then(|value| value.parse().ok())
-        {
-            let name = clip(&post.thread_name, 100);
-            let name = if name.is_empty() {
-                "Event".to_string()
-            } else {
-                name
-            };
-            let created = channel_id
-                .create_thread_from_message(
-                    &http,
-                    serenity::MessageId::new(message_id),
-                    serenity::CreateThread::new(name)
-                        .kind(serenity::ChannelType::PublicThread)
-                        .auto_archive_duration(serenity::AutoArchiveDuration::OneWeek),
-                )
-                .await;
-            let created_id = match created {
-                Ok(thread) => thread.id.get(),
-                Err(err) => {
-                    match existing_thread(&http, channel_id, serenity::MessageId::new(message_id))
-                        .await
-                    {
-                        Some(id) => id,
-                        None => return Err(err.into()),
-                    }
-                }
-            };
-            thread_id = Some(created_id.to_string());
-            let conn = db.lock().map_err(|_| "database lock")?;
-            logic::remember_poll_thread(&conn, round_id, thread_id.as_deref().unwrap())?;
-        }
-    }
-    if !post.has_questions {
-        if let (Some(thread_id), Some(message_id)) =
-            (thread_id.as_deref(), post.questions_message_id.as_deref())
-        {
-            let thread = serenity::ChannelId::new(thread_id.parse()?);
-            let message = serenity::MessageId::new(message_id.parse()?);
-            let _ = thread.delete_message(&http, message).await;
-            let conn = db.lock().map_err(|_| "database lock")?;
-            logic::remember_questions_message(&conn, round_id, None)?;
-        }
-        return Ok(());
-    }
-    let Some(thread_id) = thread_id else {
-        return Ok(());
-    };
-    let thread = serenity::ChannelId::new(thread_id.parse()?);
     let embed = serenity::CreateEmbed::new()
-        .title(clip(&post.questions_title, 250))
-        .description(clip(&post.questions_body, 4000))
+        .title(clip(&post.title, 250))
+        .description(clip(&post.body, 4000))
         .color(serenity::Colour::new(post.color));
     let sent = upsert_message(
         &http,
-        thread,
-        post.questions_message_id.as_deref(),
+        channel_id,
+        post.message_id.as_deref(),
         embed,
-        vote_rows(&post.question_buttons, post.close_id.as_deref()),
+        button_rows(&post.buttons),
     )
     .await?;
     if let Some(message) = sent {
         let conn = db.lock().map_err(|_| "database lock")?;
-        logic::remember_questions_message(&conn, round_id, Some(&message.id.get().to_string()))?;
+        logic::remember_routine_message(&conn, run_id, &message.id.get().to_string())?;
     }
     Ok(())
-}
-
-fn vote_rows(
-    buttons: &[logic::PollButton],
-    close_id: Option<&str>,
-) -> Vec<serenity::CreateActionRow> {
-    let mut rows = button_rows(buttons);
-    if let Some(id) = close_id {
-        if rows.len() < 5 {
-            rows.push(serenity::CreateActionRow::Buttons(vec![
-                serenity::CreateButton::new(id)
-                    .style(serenity::ButtonStyle::Danger)
-                    .label("Close vote"),
-            ]));
-        }
-    }
-    rows
 }
 
 fn button_rows(buttons: &[logic::PollButton]) -> Vec<serenity::CreateActionRow> {
@@ -1412,18 +1263,9 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
 )]
 async fn edit(
     ctx: Context<'_>,
-    #[description = "12 title:\"New name\""] line: String,
+    #[description = "EVENT title:\"New name\""] line: String,
 ) -> Result<(), Error> {
     desk(ctx, &format!("/edit {line}")).await
-}
-
-#[poise::command(
-    slash_command,
-    guild_only,
-    description_localized("en-US", "List upcoming events")
-)]
-async fn events(ctx: Context<'_>) -> Result<(), Error> {
-    desk(ctx, "/events").await
 }
 
 #[poise::command(
@@ -1655,7 +1497,7 @@ async fn channel(
 )]
 async fn google(
     ctx: Context<'_>,
-    #[description = "authorize, auto_sync on, or sync 12"] line: Option<String>,
+    #[description = "authorize, auto_sync on, or sync EVENT"] line: Option<String>,
 ) -> Result<(), Error> {
     let line = match line {
         Some(line) => format!("/google {line}"),

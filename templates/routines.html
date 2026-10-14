@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block content %}
+{% if creating %}
+<div class="page-head">
+  <div>
+    <h1>New routine</h1>
+    <p class="lede">A poll opens on one weekday. On a later weekday Marian locks the winning day and posts the event.</p>
+  </div>
+</div>
+<form method="post" action="{{ base }}/routines" class="grid">
+  <label class="field"><span>Event title</span><input name="title" required maxlength="120"></label>
+  <label class="field"><span>Channel</span>
+    <select name="channel" required>
+      {% for channel in channels %}
+      <option value="{{ channel.id }}">#{{ channel.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field span-2"><span>Poll question</span><input name="prompt" required maxlength="200" value="Which day should we play?"></label>
+  <label class="field span-2"><span>Event description</span><textarea name="description" maxlength="2000" rows="4"></textarea><span class="meta">Use {date} for the event date.</span></label>
+  <label class="field"><span>Poll opens</span>
+    <select name="poll_weekday">
+      {% for day in weekdays %}
+      <option value="{{ day.n }}" {% if day.n == "6" %}selected{% endif %}>{{ day.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>Poll time</span><input type="time" name="poll_time" value="10:00" required></label>
+  <label class="field"><span>Poll locks</span>
+    <select name="lock_weekday">
+      {% for day in weekdays %}
+      <option value="{{ day.n }}" {% if day.n == "1" %}selected{% endif %}>{{ day.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>Lock time</span><input type="time" name="lock_time" value="18:00" required></label>
+  <label class="field"><span>Event starts at</span><input type="time" name="start_time" value="19:00" required></label>
+  <label class="field"><span>Length in minutes</span><input type="number" name="duration" min="15" max="1440" value="120" required></label>
+  <fieldset class="span-2">
+    <legend>Days people can vote for</legend>
+    <div class="checks">
+      {% for day in weekdays %}
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" checked> {{ day.name }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <div class="actions span-2"><button class="primary" type="submit">Save routine</button></div>
+</form>
+{% elif routine is defined %}
+<div class="page-head">
+  <div>
+    <p class="kicker">#{{ routine.channel }}{% if routine.active %} · active{% else %} · stopped{% endif %}</p>
+    <h1>{{ routine.title }}</h1>
+    <p class="lede">{{ routine.prompt }} The poll opens {{ routine.poll_when }} and locks {{ routine.lock_when }}. The event starts at {{ routine.event_when }} and lasts {{ routine.duration_minutes }} minutes.</p>
+  </div>
+  {% if routine.active %}
+  <form method="post" action="{{ base }}/routines/{{ routine.id }}/stop" data-confirm="Stop this routine?">
+    <button class="danger" type="submit">Stop</button>
+  </form>
+  {% endif %}
+</div>
+{% if routine.run %}
+<section class="panel">
+  <h3>{% if routine.run.open %}Days people can pick now{% else %}Days for the next poll{% endif %}</h3>
+  <form method="post" action="{{ base }}/routines/{{ routine.id }}/days">
+    <input type="hidden" name="scope" value="run">
+    <div class="checks">
+      {% for day in routine.run.days %}
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}{% if routine.run.open %} · {{ day.votes }}{% endif %}</label>
+      {% endfor %}
+    </div>
+    <div class="actions"><button class="primary" type="submit">Save these days</button></div>
+  </form>
+  {% if routine.run.open %}
+  <form method="post" action="{{ base }}/routines/{{ routine.id }}/vote" class="vote-choices">
+    {% for day in routine.run.days %}
+    {% if day.on %}
+    <button class="{% if day.votes %}primary{% else %}ghost{% endif %}" name="day" value="{{ day.n }}" type="submit">{{ day.name }}</button>
+    {% endif %}
+    {% endfor %}
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+<form method="post" action="{{ base }}/routines/{{ routine.id }}" class="grid">
+  <label class="field"><span>Event title</span><input name="title" required maxlength="120" value="{{ routine.title }}"></label>
+  <label class="field"><span>Channel</span>
+    <select name="channel" required>
+      {% for channel in channels %}
+      <option value="{{ channel.id }}" {% if channel.selected %}selected{% endif %}>#{{ channel.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field span-2"><span>Poll question</span><input name="prompt" required maxlength="200" value="{{ routine.prompt }}"></label>
+    <label class="field span-2"><span>Event description</span><textarea name="description" maxlength="2000" rows="4">{{ routine.description }}</textarea><span class="meta">Use {date} for the event date.</span></label>
+  <label class="field"><span>Poll opens</span>
+    <select name="poll_weekday">
+      {% for day in weekdays %}
+      <option value="{{ day.n }}" {% if day.n == routine.poll_weekday %}selected{% endif %}>{{ day.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>Poll time</span><input type="time" name="poll_time" value="{{ routine.poll_time }}" required></label>
+  <label class="field"><span>Poll locks</span>
+    <select name="lock_weekday">
+      {% for day in weekdays %}
+      <option value="{{ day.n }}" {% if day.n == routine.lock_weekday %}selected{% endif %}>{{ day.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>Lock time</span><input type="time" name="lock_time" value="{{ routine.lock_time }}" required></label>
+  <label class="field"><span>Event starts at</span><input type="time" name="start_time" value="{{ routine.start_time }}" required></label>
+  <label class="field"><span>Length in minutes</span><input type="number" name="duration" min="15" max="1440" value="{{ routine.duration_minutes }}" required></label>
+  <fieldset class="span-2">
+    <legend>{% if routine.run %}Days later weeks start from{% else %}Days people can vote for{% endif %}</legend>
+    <div class="checks">
+      {% for day in routine.usual %}
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <div class="actions span-2"><button class="primary" type="submit">Save routine</button></div>
+</form>
+{% if routine.history %}
+<div class="stack">
+  {% for row in routine.history %}
+  <a class="card" href="{{ row.event_id }}">{{ row.winner }} · {{ row.when }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+{% else %}
+<div class="page-head">
+  <div>
+    <h1>Routines</h1>
+    <p class="lede">A routine opens a poll on one weekday and posts the event on the day that wins.</p>
+  </div>
+  <a class="primary" href="{{ base }}/routines/new">New routine</a>
+</div>
+<div class="stack">
+  {% for row in routines %}
+  <a class="card" href="{{ base }}/routines/{{ row.id }}">
+    <span class="badge">{% if row.active %}Active{% else %}Stopped{% endif %}</span>
+    <h3>{{ row.title }}</h3>
+    <p class="meta">#{{ row.channel }} · {{ row.next }}</p>
+  </a>
+  {% else %}
+  <p class="empty">No routines yet.</p>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

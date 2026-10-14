@@ -72,14 +72,36 @@ CREATE TABLE user_roles (
   PRIMARY KEY (user_id, role_id)
 );
 
+CREATE TABLE event_templates (
+  id INTEGER PRIMARY KEY,
+  guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  channel_id INTEGER NOT NULL REFERENCES channels(id),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  duration_minutes INTEGER NOT NULL,
+  color TEXT NOT NULL DEFAULT '#1e3a6e',
+  image_url TEXT,
+  thread_enabled INTEGER NOT NULL DEFAULT 0,
+  multiple_signups INTEGER NOT NULL DEFAULT 0,
+  mention_everyone INTEGER NOT NULL DEFAULT 0,
+  attendee_role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL,
+  cutoff_offset_minutes INTEGER,
+  options_json TEXT NOT NULL DEFAULT '[]',
+  reminders_json TEXT NOT NULL DEFAULT '[]',
+  mention_role_ids TEXT NOT NULL DEFAULT '[]',
+  restrict_role_ids TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE series (
   id INTEGER PRIMARY KEY,
+  public_id TEXT NOT NULL,
   guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   cadence TEXT NOT NULL,
   end_on TEXT,
   max_occurrences INTEGER,
   active INTEGER NOT NULL DEFAULT 1,
-  template_json TEXT NOT NULL,
+  template_id INTEGER NOT NULL REFERENCES event_templates(id),
   anchor_start TEXT NOT NULL,
   post_lead_hours INTEGER NOT NULL DEFAULT 48,
   created_at TEXT NOT NULL
@@ -189,6 +211,7 @@ CREATE TABLE role_grants (
 
 CREATE TABLE presets (
   id INTEGER PRIMARY KEY,
+  public_id TEXT NOT NULL,
   guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   body TEXT NOT NULL
@@ -253,33 +276,52 @@ CREATE TABLE calendar_feeds (
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE rounds (
+CREATE TABLE routines (
   id INTEGER PRIMARY KEY,
-  series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
-  closes_at TEXT NOT NULL,
-  status TEXT NOT NULL,
-  event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
-  discord_message_id TEXT,
-  pins TEXT NOT NULL DEFAULT '{}',
-  spec_json TEXT,
-  questions_message_id TEXT,
-  thread_discord_id TEXT,
+  public_id TEXT NOT NULL,
+  guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  template_id INTEGER NOT NULL REFERENCES event_templates(id),
+  prompt TEXT NOT NULL,
+  start_minutes INTEGER NOT NULL,
+  poll_weekday INTEGER NOT NULL,
+  poll_minutes INTEGER NOT NULL,
+  lock_weekday INTEGER NOT NULL,
+  lock_minutes INTEGER NOT NULL,
+  days_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX idx_rounds_open ON rounds (series_id) WHERE status = 'open';
+CREATE UNIQUE INDEX idx_routines_public_id ON routines (public_id);
 
-CREATE TABLE round_votes (
+CREATE TABLE routine_runs (
   id INTEGER PRIMARY KEY,
-  round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
-  poll_key TEXT NOT NULL,
+  routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  opens_at TEXT NOT NULL,
+  locks_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  days_json TEXT NOT NULL,
+  winner_weekday INTEGER,
+  event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+  discord_message_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_routine_runs_window ON routine_runs (routine_id, opens_at);
+
+CREATE TABLE routine_votes (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES routine_runs(id) ON DELETE CASCADE,
   choice TEXT NOT NULL,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,
-  UNIQUE (round_id, poll_key, user_id, choice)
+  UNIQUE (run_id, user_id, choice)
 );
 
 CREATE UNIQUE INDEX idx_events_public_id ON events (public_id);
+CREATE UNIQUE INDEX idx_series_public_id ON series (public_id);
+CREATE UNIQUE INDEX idx_presets_public_id ON presets (public_id);
 CREATE INDEX idx_events_guild_status ON events (guild_id, status, starts_at);
 CREATE INDEX idx_events_series ON events (series_id, occurrence_index);
 CREATE INDEX idx_signups_event ON signups (event_id, option_id, state);

@@ -109,8 +109,8 @@ pub fn save_preset(
     }
     let json = serde_json::to_string(body).map_err(|err| OpError::message(err.to_string()))?;
     conn.execute(
-        "INSERT INTO presets (guild_id, name, body) VALUES (?, ?, ?)",
-        params![guild_id, name, json],
+        "INSERT INTO presets (public_id, guild_id, name, body) VALUES (?, ?, ?, ?)",
+        params![crate::ids::preset_id(), guild_id, name, json],
     )?;
     Ok(conn.last_insert_rowid())
 }

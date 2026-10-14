@@ -17,14 +17,19 @@
     </div>
     {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
     <h1>Events for your server.</h1>
-    <p class="lede">Sign in with Discord. Marian opens a server you're in, once the bot is there.</p>
-    {% if ready %}
-    <a class="discord" href="/auth/discord?next={{ next }}">Sign in with Discord</a>
-    {% else %}
+    <p class="lede">The only human-made thing in here is the logo.</p>
+    {% if not ready %}
     <p class="notice">Sign-in is not configured yet.</p>
     {% endif %}
-    {% if invite_url %}
-    <p class="gate-invite"><a href="{{ invite_url }}">Invite Marian to a server</a></p>
+    {% if ready or invite_url %}
+    <div class="gate-actions">
+      {% if ready %}
+      <a class="discord" href="/auth/discord?next={{ next }}">Sign in with Discord</a>
+      {% endif %}
+      {% if invite_url %}
+      <a class="ghost" href="{{ invite_url }}">Invite Marian</a>
+      {% endif %}
+    </div>
     {% endif %}
   </main>
 </body>

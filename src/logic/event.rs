@@ -8,6 +8,7 @@ use super::db::{log, must_channel, must_event, must_role, must_user};
 use super::model::*;
 use super::series::{apply_series_template, ensure_series, link_new_series, mark_posted};
 use super::signup::{fill_all, sync_access};
+use super::template;
 use crate::clock;
 use crate::error::OpError;
 use crate::store;
@@ -33,23 +34,14 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
             id
         };
 
-        if voting_create(&input) {
-            tx.execute(
-                "UPDATE events SET status = 'ballot', thread_enabled = 1, updated_at = ? WHERE id = ?",
-                params![clock::stamp(now), id],
-            )?;
-        } else {
-            transition(tx, id, &input, now)?;
-        }
+        transition(tx, id, &input, now)?;
 
         let event = must_event(tx, id)?;
-        let linked = once_vote(&input);
-        let repeat_input = linked.as_ref().unwrap_or(&input);
-        if repeat_input.repeat.is_some()
+        if input.repeat.is_some()
             && event.series_id.is_none()
             && clean.existing.as_ref().and_then(|e| e.series_id).is_none()
         {
-            link_new_series(tx, &event, repeat_input, &clean, now)?;
+            link_new_series(tx, &event, &input, &clean, now)?;
         }
         let event = must_event(tx, id)?;
         if input.apply_series {
@@ -58,11 +50,7 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
             }
         }
         let event = must_event(tx, id)?;
-        if voting_create(&input) {
-            if let Some(series_id) = event.series_id {
-                super::vote::open_next(tx, series_id, now)?;
-            }
-        } else if let Some(series_id) = event.series_id {
+        if let Some(series_id) = event.series_id {
             if matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
                 ensure_series(tx, series_id, now)?;
             }
@@ -167,22 +155,11 @@ fn normalize(conn: &Connection, input: &EventInput) -> Result<CleanInput, OpErro
             return Err(OpError::message("A selected role isn't from this server."));
         }
     }
-    let voting = input.vote.as_ref().is_some_and(|vote| vote.enabled);
     if let Some(cutoff) = input.cutoff_at {
-        if !voting && cutoff > input.starts_at {
+        if cutoff > input.starts_at {
             return Err(OpError::message(
                 "The signup cutoff has to be before the event starts.",
             ));
-        }
-    }
-    if input.vote.as_ref().is_some_and(|vote| vote.enabled) {
-        if input.id.is_some() || !vote_cadence(input) {
-            return Err(OpError::message(
-                "Voting for the day is for a single event or a weekly series.",
-            ));
-        }
-        if let Some(vote) = input.vote.as_ref() {
-            super::vote::check_vote(vote)?;
         }
     }
 
@@ -359,8 +336,8 @@ fn insert_event_row(
             crate::ids::event_id(),
             input.guild_id,
             input.channel_id,
-            clean.title,
-            clean.description,
+            template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?,
+            template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?,
             clock::stamp(input.starts_at),
             input.duration_minutes,
             input.color,
@@ -393,8 +370,8 @@ fn update_event_row(
          WHERE id = ?",
         params![
             input.channel_id,
-            clean.title,
-            clean.description,
+            template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?,
+            template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?,
             clock::stamp(input.starts_at),
             input.duration_minutes,
             input.color,
@@ -522,34 +499,6 @@ fn replace_roles(conn: &Connection, event_id: i64, input: &EventInput) -> Result
         )?;
     }
     Ok(())
-}
-
-fn voting_create(input: &EventInput) -> bool {
-    input.id.is_none()
-        && input.vote.as_ref().is_some_and(|vote| vote.enabled)
-        && vote_cadence(input)
-}
-
-fn vote_cadence(input: &EventInput) -> bool {
-    matches!(
-        input.repeat.as_ref().map(|repeat| repeat.cadence.as_str()),
-        None | Some("weekly") | Some("once")
-    )
-}
-
-fn once_vote(input: &EventInput) -> Option<EventInput> {
-    if voting_create(input) && input.repeat.is_none() {
-        Some(EventInput {
-            repeat: Some(RepeatSpec {
-                cadence: "once".into(),
-                end_on: None,
-                max_occurrences: Some(1),
-            }),
-            ..input.clone()
-        })
-    } else {
-        None
-    }
 }
 
 fn transition(

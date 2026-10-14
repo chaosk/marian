@@ -107,12 +107,13 @@ pub struct Event {
 #[derive(Debug, Clone)]
 pub struct Series {
     pub id: i64,
+    pub public_id: String,
     pub guild_id: i64,
     pub cadence: String,
     pub end_on: Option<String>,
     pub max_occurrences: Option<i64>,
     pub active: bool,
-    pub template_json: String,
+    pub template_id: i64,
     pub anchor_start: String,
     pub post_lead_hours: i64,
     pub created_at: String,
@@ -162,6 +163,7 @@ pub struct Activity {
 #[derive(Debug, Clone)]
 pub struct Preset {
     pub id: i64,
+    pub public_id: String,
     pub guild_id: i64,
     pub name: String,
     pub body: String,
@@ -202,25 +204,26 @@ pub fn open(path: &Path) -> Result<Connection, OpError> {
             })?;
         }
     }
-    let conn = Connection::open(path)?;
-    tune(&conn, true)?;
+    let mut conn = Connection::open(path)?;
+    tune(&mut conn, true)?;
     migrate(&conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> Result<Connection, OpError> {
-    let conn = Connection::open_in_memory()?;
-    tune(&conn, false)?;
+    let mut conn = Connection::open_in_memory()?;
+    tune(&mut conn, false)?;
     migrate(&conn)?;
     Ok(conn)
 }
 
-fn tune(conn: &Connection, file: bool) -> Result<(), OpError> {
+fn tune(conn: &mut Connection, file: bool) -> Result<(), OpError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
     if file {
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
     }
+    crate::observe::install_query_trace(conn);
     Ok(())
 }
 
@@ -303,43 +306,302 @@ pub fn migrate(conn: &Connection) -> Result<(), OpError> {
             token TEXT PRIMARY KEY,
             discord_user_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS rounds (
+        )",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS event_templates (
             id INTEGER PRIMARY KEY,
-            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
-            closes_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
-            discord_message_id TEXT,
-            pins TEXT NOT NULL DEFAULT '{}',
-            spec_json TEXT,
-            questions_message_id TEXT,
-            thread_discord_id TEXT,
+            guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL REFERENCES channels(id),
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            duration_minutes INTEGER NOT NULL,
+            color TEXT NOT NULL DEFAULT '#1e3a6e',
+            image_url TEXT,
+            thread_enabled INTEGER NOT NULL DEFAULT 0,
+            multiple_signups INTEGER NOT NULL DEFAULT 0,
+            mention_everyone INTEGER NOT NULL DEFAULT 0,
+            attendee_role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL,
+            cutoff_offset_minutes INTEGER,
+            options_json TEXT NOT NULL DEFAULT '[]',
+            reminders_json TEXT NOT NULL DEFAULT '[]',
+            mention_role_ids TEXT NOT NULL DEFAULT '[]',
+            restrict_role_ids TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_rounds_open ON rounds (series_id) WHERE status = 'open';
-        CREATE TABLE IF NOT EXISTS round_votes (
+        CREATE TABLE IF NOT EXISTS routines (
             id INTEGER PRIMARY KEY,
-            round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
-            poll_key TEXT NOT NULL,
+            public_id TEXT NOT NULL,
+            guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+            template_id INTEGER NOT NULL REFERENCES event_templates(id),
+            prompt TEXT NOT NULL,
+            start_minutes INTEGER NOT NULL,
+            poll_weekday INTEGER NOT NULL,
+            poll_minutes INTEGER NOT NULL,
+            lock_weekday INTEGER NOT NULL,
+            lock_minutes INTEGER NOT NULL,
+            days_json TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_by INTEGER NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS routine_runs (
+            id INTEGER PRIMARY KEY,
+            routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+            opens_at TEXT NOT NULL,
+            locks_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            days_json TEXT NOT NULL,
+            winner_weekday INTEGER,
+            event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+            discord_message_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_runs_window ON routine_runs (routine_id, opens_at);
+        CREATE TABLE IF NOT EXISTS routine_votes (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES routine_runs(id) ON DELETE CASCADE,
             choice TEXT NOT NULL,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             created_at TEXT NOT NULL,
-            UNIQUE (round_id, poll_key, user_id, choice)
+            UNIQUE (run_id, user_id, choice)
         )",
     )?;
-    allow_several_day_votes(conn)?;
-    if !has_column(conn, "rounds", "spec_json")? {
-        conn.execute("ALTER TABLE rounds ADD COLUMN spec_json TEXT", [])?;
-    }
-    if !has_column(conn, "rounds", "questions_message_id")? {
+    if !has_column(conn, "routines", "description")? {
         conn.execute(
-            "ALTER TABLE rounds ADD COLUMN questions_message_id TEXT",
+            "ALTER TABLE routines ADD COLUMN description TEXT NOT NULL DEFAULT ''",
             [],
         )?;
     }
-    if !has_column(conn, "rounds", "thread_discord_id")? {
-        conn.execute("ALTER TABLE rounds ADD COLUMN thread_discord_id TEXT", [])?;
+    if !has_column(conn, "routines", "public_id")? {
+        conn.execute("ALTER TABLE routines ADD COLUMN public_id TEXT", [])?;
+    }
+    if !has_column(conn, "series", "template_id")? {
+        conn.execute(
+            "ALTER TABLE series ADD COLUMN template_id INTEGER REFERENCES event_templates(id)",
+            [],
+        )?;
+    }
+    if !has_column(conn, "routines", "template_id")? {
+        conn.execute(
+            "ALTER TABLE routines ADD COLUMN template_id INTEGER REFERENCES event_templates(id)",
+            [],
+        )?;
+    }
+    backfill_event_templates(conn)?;
+    backfill_routine_ids(conn)?;
+    if !has_column(conn, "series", "public_id")? {
+        conn.execute("ALTER TABLE series ADD COLUMN public_id TEXT", [])?;
+    }
+    if !has_column(conn, "presets", "public_id")? {
+        conn.execute("ALTER TABLE presets ADD COLUMN public_id TEXT", [])?;
+    }
+    backfill_series_ids(conn)?;
+    backfill_preset_ids(conn)?;
+    conn.execute(
+        "UPDATE events SET status = 'scheduled' WHERE status = 'ballot'",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_series_public_id ON series (public_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_presets_public_id ON presets (public_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_routines_public_id ON routines (public_id)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn backfill_event_templates(conn: &Connection) -> Result<(), OpError> {
+    if has_column(conn, "series", "template_json")? && has_column(conn, "series", "template_id")? {
+        let mut stmt = conn
+            .prepare("SELECT id, guild_id, template_json FROM series WHERE template_id IS NULL")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (id, guild_id, raw) in rows {
+            let value: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+            let template_id = insert_template_value(conn, guild_id, &value, None)?;
+            conn.execute(
+                "UPDATE series SET template_id = ? WHERE id = ?",
+                params![template_id, id],
+            )?;
+        }
+    }
+    if has_column(conn, "routines", "title")? && has_column(conn, "routines", "template_id")? {
+        let mut stmt = conn.prepare(
+            "SELECT id, guild_id, channel_id, title, description, duration_minutes
+             FROM routines WHERE template_id IS NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let options = serde_json::json!([
+            {"name":"Accepted","emoji":"✅","waitlist":false,"reminders_enabled":true},
+            {"name":"Declined","emoji":"❌","waitlist":false,"reminders_enabled":true},
+            {"name":"Tentative","emoji":"❔","waitlist":false,"reminders_enabled":true}
+        ]);
+        for (id, guild_id, channel_id, title, description, duration) in rows {
+            let value = serde_json::json!({
+                "channel_id": channel_id,
+                "title": title,
+                "description": description,
+                "duration_minutes": duration,
+                "color": "#1e3a6e",
+                "thread_enabled": true,
+                "options": options,
+                "reminders": [{"offset_minutes": 15, "message": ""}],
+            });
+            let template_id = insert_template_value(conn, guild_id, &value, Some(channel_id))?;
+            conn.execute(
+                "UPDATE routines SET template_id = ? WHERE id = ?",
+                params![template_id, id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_template_value(
+    conn: &Connection,
+    guild_id: i64,
+    value: &serde_json::Value,
+    channel_override: Option<i64>,
+) -> Result<i64, OpError> {
+    let channel_id = channel_override
+        .or_else(|| value.get("channel_id").and_then(|item| item.as_i64()))
+        .unwrap_or(0);
+    let title = value
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or("Event");
+    let description = value
+        .get("description")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    let duration = value
+        .get("duration_minutes")
+        .and_then(|item| item.as_i64())
+        .unwrap_or(60);
+    let color = value
+        .get("color")
+        .and_then(|item| item.as_str())
+        .unwrap_or("#1e3a6e");
+    let image = value
+        .get("image_url")
+        .and_then(|item| item.as_str())
+        .filter(|item| !item.is_empty());
+    let flag = |key: &str| {
+        value
+            .get(key)
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false)
+    };
+    let list = |key: &str| {
+        value
+            .get(key)
+            .cloned()
+            .unwrap_or(serde_json::json!([]))
+            .to_string()
+    };
+    conn.execute(
+        "INSERT INTO event_templates (
+            guild_id, channel_id, title, description, duration_minutes, color, image_url,
+            thread_enabled, multiple_signups, mention_everyone, attendee_role_id,
+            cutoff_offset_minutes, options_json, reminders_json, mention_role_ids,
+            restrict_role_ids, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            guild_id,
+            channel_id,
+            title,
+            description,
+            duration,
+            color,
+            image,
+            i(flag("thread_enabled")),
+            i(flag("multiple_signups")),
+            i(flag("mention_everyone")),
+            value.get("attendee_role_id").and_then(|item| item.as_i64()),
+            value
+                .get("cutoff_offset_minutes")
+                .and_then(|item| item.as_i64()),
+            list("options"),
+            list("reminders"),
+            list("mention_role_ids"),
+            list("restrict_role_ids"),
+            now_stamp(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn backfill_routine_ids(conn: &Connection) -> Result<(), OpError> {
+    if !has_column(conn, "routines", "public_id")? {
+        return Ok(());
+    }
+    let mut stmt =
+        conn.prepare("SELECT id FROM routines WHERE public_id IS NULL OR public_id = ''")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for id in ids {
+        conn.execute(
+            "UPDATE routines SET public_id = ? WHERE id = ?",
+            params![crate::ids::routine_id(), id],
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_series_ids(conn: &Connection) -> Result<(), OpError> {
+    fill_public_ids(conn, "series")
+}
+
+fn backfill_preset_ids(conn: &Connection) -> Result<(), OpError> {
+    fill_public_ids(conn, "presets")
+}
+
+fn fill_public_ids(conn: &Connection, table: &str) -> Result<(), OpError> {
+    if !has_column(conn, table, "public_id")? {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM {table} WHERE public_id IS NULL OR public_id = ''"
+    ))?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for id in ids {
+        conn.execute(
+            &format!("UPDATE {table} SET public_id = ? WHERE id = ?"),
+            params![crate::ids::event_id(), id],
+        )?;
     }
     Ok(())
 }
@@ -357,38 +619,6 @@ fn backfill_public_ids(conn: &Connection) -> Result<(), OpError> {
             params![crate::ids::event_id(), id],
         )?;
     }
-    Ok(())
-}
-
-fn allow_several_day_votes(conn: &Connection) -> Result<(), OpError> {
-    let sql: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'round_votes'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(sql) = sql else {
-        return Ok(());
-    };
-    if sql.contains("user_id, choice)") || sql.contains("user_id,choice)") {
-        return Ok(());
-    }
-    conn.execute_batch(
-        "CREATE TABLE round_votes_next (
-            id INTEGER PRIMARY KEY,
-            round_id INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
-            poll_key TEXT NOT NULL,
-            choice TEXT NOT NULL,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            created_at TEXT NOT NULL,
-            UNIQUE (round_id, poll_key, user_id, choice)
-        );
-        INSERT INTO round_votes_next (id, round_id, poll_key, choice, user_id, created_at)
-            SELECT id, round_id, poll_key, choice, user_id, created_at FROM round_votes;
-        DROP TABLE round_votes;
-        ALTER TABLE round_votes_next RENAME TO round_votes;",
-    )?;
     Ok(())
 }
 
@@ -820,15 +1050,26 @@ pub fn series(conn: &Connection, id: i64) -> Result<Option<Series>, OpError> {
         .optional()?)
 }
 
+pub fn series_by_public(conn: &Connection, public_id: &str) -> Result<Option<Series>, OpError> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM series WHERE public_id = ?",
+            [public_id],
+            map_series,
+        )
+        .optional()?)
+}
+
 fn map_series(row: &Row<'_>) -> rusqlite::Result<Series> {
     Ok(Series {
         id: row.get("id")?,
+        public_id: row.get("public_id")?,
         guild_id: row.get("guild_id")?,
         cadence: row.get("cadence")?,
         end_on: row.get("end_on")?,
         max_occurrences: row.get("max_occurrences")?,
         active: flag(row, "active")?,
-        template_json: row.get("template_json")?,
+        template_id: row.get("template_id")?,
         anchor_start: row.get("anchor_start")?,
         post_lead_hours: row.get("post_lead_hours")?,
         created_at: row.get("created_at")?,
@@ -950,9 +1191,20 @@ pub fn preset(conn: &Connection, id: i64) -> Result<Option<Preset>, OpError> {
         .optional()?)
 }
 
+pub fn preset_by_public(conn: &Connection, public_id: &str) -> Result<Option<Preset>, OpError> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM presets WHERE public_id = ?",
+            [public_id],
+            map_preset,
+        )
+        .optional()?)
+}
+
 fn map_preset(row: &Row<'_>) -> rusqlite::Result<Preset> {
     Ok(Preset {
         id: row.get("id")?,
+        public_id: row.get("public_id")?,
         guild_id: row.get("guild_id")?,
         name: row.get("name")?,
         body: row.get("body")?,

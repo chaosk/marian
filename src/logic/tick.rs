@@ -72,7 +72,7 @@ fn tick_guild(conn: &Connection, guild_id: i64, now: DateTime<Utc>) -> Result<Ti
 
     report
         .jobs
-        .extend(super::vote::maintain(conn, guild_id, now)?);
+        .extend(super::routine::maintain(conn, guild_id, now)?);
 
     let events = store::list_events(conn, guild_id)?;
     for event in &events {
@@ -347,6 +347,29 @@ fn shift_guild(conn: &mut Connection, guild_id: i64, delta: Duration) -> Result<
                     moved_opt(series.end_on, delta)?,
                     moved(&series.created_at, delta)?,
                     series.id,
+                ],
+            )?;
+        }
+        let mut stmt = tx.prepare(
+            "SELECT routine_runs.id, routine_runs.opens_at, routine_runs.locks_at, routine_runs.created_at
+             FROM routine_runs
+             JOIN routines ON routines.id = routine_runs.routine_id
+             WHERE routines.guild_id = ?",
+        )?;
+        let runs: Vec<(i64, String, String, String)> = stmt
+            .query_map([guild_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (id, opens, locks, created) in runs {
+            tx.execute(
+                "UPDATE routine_runs SET opens_at = ?, locks_at = ?, created_at = ? WHERE id = ?",
+                params![
+                    moved(&opens, delta)?,
+                    moved(&locks, delta)?,
+                    moved(&created, delta)?,
+                    id
                 ],
             )?;
         }

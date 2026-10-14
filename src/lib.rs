@@ -10,6 +10,7 @@ mod ids;
 pub mod jobs;
 pub mod logic;
 mod markdown;
+mod observe;
 pub mod parse;
 pub mod present;
 pub mod serve;
