@@ -78,6 +78,9 @@ pub fn init() -> Telemetry {
 fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
     use opentelemetry_otlp::WithExportConfig;
 
+    // with_endpoint posts to the URL as given. The SDK only appends /v1/traces
+    // when it reads OTEL_EXPORTER_OTLP_ENDPOINT itself.
+    let endpoint = traces_endpoint(endpoint);
     let built = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_endpoint(endpoint)
@@ -104,6 +107,17 @@ fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
             .with_resource(resource)
             .build(),
     )
+}
+
+/// OTLP/HTTP traces are posted to `{base}/v1/traces`. A value that already
+/// ends in that path is left alone.
+fn traces_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with("/v1/traces") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1/traces")
+    }
 }
 
 fn trace_filter() -> EnvFilter {
@@ -222,7 +236,7 @@ fn push_limited(out: &mut String, c: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::statement_shape;
+    use super::{statement_shape, traces_endpoint};
 
     #[test]
     fn statement_shape_hides_values() {
@@ -241,5 +255,29 @@ mod tests {
         let long = format!("SELECT '{}'", "n".repeat(600));
         assert!(statement_shape(&long).len() <= 500);
         assert!(!statement_shape(&long).contains('n'));
+    }
+
+    #[test]
+    fn traces_endpoint_appends_the_signal_path() {
+        assert_eq!(
+            traces_endpoint("http://tempo:4318"),
+            "http://tempo:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://tempo:4318/"),
+            "http://tempo:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector.example/otlp"),
+            "http://collector.example/otlp/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://tempo:4318/v1/traces"),
+            "http://tempo:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://tempo:4318/v1/traces/"),
+            "http://tempo:4318/v1/traces"
+        );
     }
 }
