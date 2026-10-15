@@ -4,15 +4,16 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use diesel::prelude::*;
 use poise::serenity_prelude as serenity;
-use rusqlite::Connection;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::Instrument;
 
 use crate::commands;
 use crate::jobs::DiscordJob;
 use crate::logic;
-use crate::store;
+use crate::schema;
+use crate::store::{self, Connection};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
@@ -209,7 +210,7 @@ async fn on_event(
                     &new_message.content,
                     &public_url,
                 )?;
-                let posts = commands::channel_posts_waiting(&conn, &author)?;
+                let posts = commands::channel_posts_waiting(&mut conn, &author)?;
                 (replies, posts)
             };
             for event_id in posts {
@@ -285,7 +286,7 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
             continue;
         }
         ensure_role(
-            &conn,
+            &mut conn,
             stored.id,
             &role.name,
             &role.colour.hex(),
@@ -296,7 +297,7 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
 }
 
 fn ensure_role(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     name: &str,
     colour: &str,
@@ -310,16 +311,22 @@ fn ensure_role(
         format!("#{colour}")
     };
     if let Some(role) = store::role_by_name(conn, guild_id, name)? {
-        conn.execute(
-            "UPDATE roles SET discord_id = ?, color = ? WHERE id = ?",
-            rusqlite::params![discord_id, color, role.id],
-        )?;
+        diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
+            .set((
+                schema::roles::discord_id.eq(discord_id),
+                schema::roles::color.eq(&color),
+            ))
+            .execute(conn)?;
         return Ok(());
     }
-    conn.execute(
-        "INSERT INTO roles (guild_id, name, color, discord_id) VALUES (?, ?, ?, ?)",
-        rusqlite::params![guild_id, name, color, discord_id],
-    )?;
+    diesel::insert_into(schema::roles::table)
+        .values((
+            schema::roles::guild_id.eq(guild_id),
+            schema::roles::name.eq(name),
+            schema::roles::color.eq(&color),
+            schema::roles::discord_id.eq(discord_id),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -419,9 +426,9 @@ async fn edit_from_button(
     let text = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
         let user_id = bind_clicker(&mut conn, &click)?;
-        match store::event(&conn, event_id)? {
+        match store::event(&mut conn, event_id)? {
             Some(event) if event.created_by == user_id => {
-                Some(event_link(&conn, &data.public_url, &event)?)
+                Some(event_link(&mut conn, &data.public_url, &event)?)
             }
             Some(_) => None,
             None => Some("That event isn't here.".to_string()),
@@ -446,12 +453,12 @@ async fn delete_from_button(
     let removed = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
         let user_id = bind_clicker(&mut conn, &click)?;
-        match store::event(&conn, event_id)? {
+        match store::event(&mut conn, event_id)? {
             None => Err("That event isn't here.".to_string()),
             Some(event) if event.created_by != user_id => Ok(None),
             Some(event) => {
-                let channel_discord =
-                    store::channel(&conn, event.channel_id)?.and_then(|channel| channel.discord_id);
+                let channel_discord = store::channel(&mut conn, event.channel_id)?
+                    .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
                 match logic::delete_event(&mut conn, event_id, user_id) {
                     Ok(_) => Ok(Some((channel_discord, message_id))),
@@ -484,11 +491,10 @@ async fn delete_from_button(
         tracing::warn!("could not remove the Discord post: {err}");
         return Ok(());
     }
-    let conn = data.db.lock().map_err(|_| "database lock")?;
-    conn.execute(
-        "UPDATE events SET discord_message_id = NULL WHERE id = ?",
-        [event_id],
-    )?;
+    let mut conn = data.db.lock().map_err(|_| "database lock")?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
+        .set(schema::events::discord_message_id.eq(None::<String>))
+        .execute(&mut *conn)?;
     Ok(())
 }
 
@@ -553,7 +559,9 @@ fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
     let user = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
     if click.manage {
-        conn.execute("UPDATE users SET organizer = 1 WHERE id = ?", [user.id])?;
+        diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
+            .set(schema::users::organizer.eq(true))
+            .execute(conn)?;
     }
     if let Some(roles) = &click.roles {
         sync_roles(conn, guild.id, user.id, roles)?;
@@ -561,7 +569,11 @@ fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
     Ok(user.id)
 }
 
-fn event_link(conn: &Connection, public_url: &str, event: &store::Event) -> Result<String, Error> {
+fn event_link(
+    conn: &mut Connection,
+    public_url: &str,
+    event: &store::Event,
+) -> Result<String, Error> {
     let server = store::discord_server_id(conn, event.guild_id).unwrap_or_default();
     let path = if server.is_empty() {
         format!("/events/{}", event.public_id)
@@ -577,21 +589,25 @@ fn event_link(conn: &Connection, public_url: &str, event: &store::Event) -> Resu
 }
 
 fn sync_roles(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     roles: &[(String, String, String)],
 ) -> Result<(), Error> {
-    conn.execute("DELETE FROM user_roles WHERE user_id = ?", [user_id])?;
+    diesel::delete(schema::user_roles::table.filter(schema::user_roles::user_id.eq(user_id)))
+        .execute(conn)?;
     for (name, colour, discord_id) in roles {
         ensure_role(conn, guild_id, name, colour, discord_id)?;
         let Some(role) = store::role_by_name(conn, guild_id, name)? else {
             continue;
         };
-        conn.execute(
-            "INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)",
-            rusqlite::params![user_id, role.id],
-        )?;
+        diesel::insert_into(schema::user_roles::table)
+            .values((
+                schema::user_roles::user_id.eq(user_id),
+                schema::user_roles::role_id.eq(role.id),
+            ))
+            .on_conflict_do_nothing()
+            .execute(conn)?;
     }
     Ok(())
 }
@@ -674,8 +690,8 @@ async fn push_sync(
     event_id: i64,
 ) -> Result<(), Error> {
     let view = {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        logic::discord_view(&conn, event_id, public_url)?
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        logic::discord_view(&mut conn, event_id, public_url)?
     };
     let Some(view) = view else {
         return Ok(());
@@ -753,8 +769,8 @@ async fn push_sync(
         )
     };
     if let Some(message) = sent {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        logic::remember_discord_message(&conn, event_id, &message.id.get().to_string())?;
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string())?;
     }
     Ok(())
 }
@@ -765,8 +781,8 @@ async fn push_routine(
     run_id: i64,
 ) -> Result<(), Error> {
     let post = {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        logic::routine_post(&conn, run_id)?
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        logic::routine_post(&mut conn, run_id)?
     };
     let Some(post) = post else {
         return Ok(());
@@ -790,8 +806,8 @@ async fn push_routine(
     )
     .await?;
     if let Some(message) = sent {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        logic::remember_routine_message(&conn, run_id, &message.id.get().to_string())?;
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        logic::remember_routine_message(&mut conn, run_id, &message.id.get().to_string())?;
     }
     Ok(())
 }
@@ -860,8 +876,8 @@ async fn push_attendance(
     event_id: i64,
 ) -> Result<(), Error> {
     let work = {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        match logic::attendance(&conn, event_id)? {
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        match logic::attendance(&mut conn, event_id)? {
             logic::Attendance::Idle => return Ok(()),
             logic::Attendance::Waiting => {
                 return Err("the Discord post is not up yet".into());
@@ -883,28 +899,28 @@ async fn push_attendance(
         .ok_or("Discord is not connected")?;
     if !work.thread_add.is_empty() || !work.thread_remove.is_empty() {
         if work.thread_discord_id.is_none() && work.thread_add.is_empty() {
-            let conn = db.lock().map_err(|_| "database lock")?;
+            let mut conn = db.lock().map_err(|_| "database lock")?;
             for user_id in &work.thread_remove {
-                store::clear_applied(&conn, event_id, "thread", user_id)?;
+                store::clear_applied(&mut conn, event_id, "thread", user_id)?;
             }
         } else {
             let thread_id = open_thread(db, &http, event_id, &work).await?;
             for user_id in &work.thread_add {
                 join_thread(&http, thread_id, user_id).await?;
-                let conn = db.lock().map_err(|_| "database lock")?;
-                store::mark_applied(&conn, event_id, "thread", user_id)?;
+                let mut conn = db.lock().map_err(|_| "database lock")?;
+                store::mark_applied(&mut conn, event_id, "thread", user_id)?;
             }
             for user_id in &work.thread_remove {
                 leave_thread(&http, thread_id, user_id).await?;
-                let conn = db.lock().map_err(|_| "database lock")?;
-                store::clear_applied(&conn, event_id, "thread", user_id)?;
+                let mut conn = db.lock().map_err(|_| "database lock")?;
+                store::clear_applied(&mut conn, event_id, "thread", user_id)?;
             }
         }
     }
     if work.role_discord_id.is_none() && work.role_add.is_empty() {
-        let conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.lock().map_err(|_| "database lock")?;
         for user_id in &work.role_remove {
-            store::clear_applied(&conn, event_id, "role", user_id)?;
+            store::clear_applied(&mut conn, event_id, "role", user_id)?;
         }
     } else if !work.role_add.is_empty() || !work.role_remove.is_empty() {
         let role_id = open_role(db, &http, &work).await?;
@@ -916,8 +932,8 @@ async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let conn = db.lock().map_err(|_| "database lock")?;
-            store::mark_applied(&conn, event_id, "role", user_id)?;
+            let mut conn = db.lock().map_err(|_| "database lock")?;
+            store::mark_applied(&mut conn, event_id, "role", user_id)?;
         }
         for user_id in &work.role_remove {
             let user = serenity::UserId::new(user_id.parse()?);
@@ -926,8 +942,8 @@ async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let conn = db.lock().map_err(|_| "database lock")?;
-            store::clear_applied(&conn, event_id, "role", user_id)?;
+            let mut conn = db.lock().map_err(|_| "database lock")?;
+            store::clear_applied(&mut conn, event_id, "role", user_id)?;
         }
     }
     Ok(())
@@ -965,8 +981,8 @@ async fn open_thread(
             None => return Err(err.into()),
         },
     };
-    let conn = db.lock().map_err(|_| "database lock")?;
-    store::set_thread_discord_id(&conn, event_id, &thread_id.to_string())?;
+    let mut conn = db.lock().map_err(|_| "database lock")?;
+    store::set_thread_discord_id(&mut conn, event_id, &thread_id.to_string())?;
     Ok(thread_id)
 }
 
@@ -1022,8 +1038,8 @@ async fn open_role(
                 .colour(work.role_color),
         )
         .await?;
-    let conn = db.lock().map_err(|_| "database lock")?;
-    store::set_role_discord_id(&conn, stored_role_id, &role.id.get().to_string())?;
+    let mut conn = db.lock().map_err(|_| "database lock")?;
+    store::set_role_discord_id(&mut conn, stored_role_id, &role.id.get().to_string())?;
     Ok(role.id)
 }
 
@@ -1039,9 +1055,10 @@ async fn push_remind(
     text: &str,
 ) -> Result<(), Error> {
     let channel = {
-        let conn = db.lock().map_err(|_| "database lock")?;
-        let event = store::event(&conn, event_id)?.ok_or_else(|| "event missing".to_string())?;
-        let channel = store::channel(&conn, event.channel_id)?
+        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let event =
+            store::event(&mut conn, event_id)?.ok_or_else(|| "event missing".to_string())?;
+        let channel = store::channel(&mut conn, event.channel_id)?
             .ok_or_else(|| "channel missing".to_string())?;
         channel.discord_id
     };
@@ -1092,7 +1109,9 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
     let user = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
     if manage {
-        conn.execute("UPDATE users SET organizer = 1 WHERE id = ?", [user.id])?;
+        diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
+            .set(schema::users::organizer.eq(true))
+            .execute(&mut *conn)?;
     }
     Ok(Some(Actor {
         guild_id: guild.id,
@@ -1111,7 +1130,7 @@ async fn desk(ctx: Context<'_>, line: &str) -> Result<(), Error> {
     let (reply, refresh) = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
         let reply = crate::commands::execute(&mut conn, actor.guild_id, actor.user_id, line);
-        let refresh = crate::serve::events_to_refresh(&conn, line, &reply);
+        let refresh = crate::serve::events_to_refresh(&mut conn, line, &reply);
         (reply, refresh)
     };
     for event_id in refresh {
@@ -1355,13 +1374,13 @@ async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoco
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    let Ok(conn) = ctx.data().db.lock() else {
+    let Ok(mut conn) = ctx.data().db.lock() else {
         return Vec::new();
     };
-    let Ok(Some(guild)) = store::guild_by_discord(&conn, &guild_id.get().to_string()) else {
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::response_events(&conn, guild.id, partial, chrono::Utc::now())
+    commands::response_events(&mut conn, guild.id, partial, chrono::Utc::now())
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -1375,13 +1394,13 @@ async fn complete_option(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoc
     let Some(event) = slash_arg(&ctx, "event") else {
         return Vec::new();
     };
-    let Ok(conn) = ctx.data().db.lock() else {
+    let Ok(mut conn) = ctx.data().db.lock() else {
         return Vec::new();
     };
-    let Ok(Some(guild)) = store::guild_by_discord(&conn, &guild_id.get().to_string()) else {
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::response_options(&conn, guild.id, &event, partial)
+    commands::response_options(&mut conn, guild.id, &event, partial)
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))

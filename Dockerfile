@@ -46,6 +46,6 @@ LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=build /marian /marian
 USER 65532:65532
 ENV PORT=8080 \
-    MARIAN_DB=/data/marian.db
+    DATABASE_URL=sqlite:///data/marian.db
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

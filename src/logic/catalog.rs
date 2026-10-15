@@ -1,10 +1,12 @@
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
+use diesel::upsert::excluded;
 
 use super::access::{can_create, can_edit};
 use super::db::{log, must_event, must_user};
 use super::model::*;
 use crate::error::OpError;
-use crate::store;
+use crate::schema;
+use crate::store::{self, Connection};
 
 pub fn set_user_reminders(
     conn: &mut Connection,
@@ -12,10 +14,9 @@ pub fn set_user_reminders(
     enabled: bool,
 ) -> Result<String, OpError> {
     let user = must_user(conn, user_id)?;
-    conn.execute(
-        "UPDATE users SET reminders_enabled = ? WHERE id = ?",
-        params![store::i(enabled), user_id],
-    )?;
+    diesel::update(schema::users::table.filter(schema::users::id.eq(user_id)))
+        .set(schema::users::reminders_enabled.eq(enabled))
+        .execute(conn)?;
     Ok(if enabled {
         format!("Reminders are on for {}.", user.name)
     } else {
@@ -49,16 +50,21 @@ pub fn create_channel(
         return Err(OpError::message(format!("#{slug} already exists.")));
     }
     let kind = if kind == "event" { "event" } else { "text" };
-    let position: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position), 0) + 1 FROM channels WHERE guild_id = ?",
-        [guild_id],
-        |row| row.get(0),
-    )?;
-    conn.execute(
-        "INSERT INTO channels (guild_id, name, kind, position) VALUES (?, ?, ?, ?)",
-        params![guild_id, slug, kind, position],
-    )?;
-    let id = conn.last_insert_rowid();
+    let position = schema::channels::table
+        .filter(schema::channels::guild_id.eq(guild_id))
+        .select(diesel::dsl::max(schema::channels::position))
+        .first::<Option<i64>>(conn)?
+        .unwrap_or(0)
+        + 1;
+    let id = diesel::insert_into(schema::channels::table)
+        .values((
+            schema::channels::guild_id.eq(guild_id),
+            schema::channels::name.eq(&slug),
+            schema::channels::kind.eq(kind),
+            schema::channels::position.eq(position),
+        ))
+        .returning(schema::channels::id)
+        .get_result(conn)?;
     log(conn, guild_id, None, &format!("Created #{slug}."))?;
     Ok(id)
 }
@@ -108,11 +114,16 @@ pub fn save_preset(
         return Err(OpError::message("A preset needs at least one option."));
     }
     let json = serde_json::to_string(body).map_err(|err| OpError::message(err.to_string()))?;
-    conn.execute(
-        "INSERT INTO presets (public_id, guild_id, name, body) VALUES (?, ?, ?, ?)",
-        params![crate::ids::preset_id(), guild_id, name, json],
-    )?;
-    Ok(conn.last_insert_rowid())
+    let id = diesel::insert_into(schema::presets::table)
+        .values((
+            schema::presets::public_id.eq(crate::ids::preset_id()),
+            schema::presets::guild_id.eq(guild_id),
+            schema::presets::name.eq(name),
+            schema::presets::body.eq(json),
+        ))
+        .returning(schema::presets::id)
+        .get_result(conn)?;
+    Ok(id)
 }
 
 pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Result<(), OpError> {
@@ -132,7 +143,8 @@ pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Re
             return Err(OpError::message("You can't remove presets."));
         }
     }
-    conn.execute("DELETE FROM presets WHERE id = ?", [preset_id])?;
+    diesel::delete(schema::presets::table.filter(schema::presets::id.eq(preset_id)))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -153,11 +165,19 @@ pub fn library_add(
     } else {
         emoji.trim()
     };
-    conn.execute(
-        "INSERT INTO option_library (guild_id, name, emoji) VALUES (?, ?, ?)
-         ON CONFLICT(guild_id, name) DO UPDATE SET emoji = excluded.emoji",
-        params![guild_id, name, emoji],
-    )?;
+    diesel::insert_into(schema::option_library::table)
+        .values((
+            schema::option_library::guild_id.eq(guild_id),
+            schema::option_library::name.eq(name),
+            schema::option_library::emoji.eq(emoji),
+        ))
+        .on_conflict((
+            schema::option_library::guild_id,
+            schema::option_library::name,
+        ))
+        .do_update()
+        .set(schema::option_library::emoji.eq(excluded(schema::option_library::emoji)))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -168,14 +188,20 @@ pub fn library_remove(
     name: &str,
 ) -> Result<(), OpError> {
     require_option_editor(conn, guild_id, actor_id)?;
-    conn.execute(
-        "DELETE FROM option_library WHERE guild_id = ? AND lower(name) = lower(?)",
-        params![guild_id, name.trim()],
-    )?;
+    diesel::delete(
+        schema::option_library::table
+            .filter(schema::option_library::guild_id.eq(guild_id))
+            .filter(schema::lower(schema::option_library::name).eq(schema::lower(name.trim()))),
+    )
+    .execute(conn)?;
     Ok(())
 }
 
-fn require_option_editor(conn: &Connection, guild_id: i64, actor_id: i64) -> Result<(), OpError> {
+fn require_option_editor(
+    conn: &mut Connection,
+    guild_id: i64,
+    actor_id: i64,
+) -> Result<(), OpError> {
     let actor = must_user(conn, actor_id)?;
     if actor.guild_id != guild_id {
         return Err(OpError::NotFound);
@@ -216,25 +242,29 @@ pub fn manual_calendar_sync(
         ));
     }
     let stamp = store::now_stamp();
-    conn.execute(
-        "UPDATE events SET calendar_synced_at = ? WHERE id = ?",
-        params![stamp, event.id],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set(schema::events::calendar_synced_at.eq(stamp))
+        .execute(conn)?;
     let notice = format!("Marked {} for the calendar feed.", event.title);
     log(conn, event.guild_id, Some(event.id), &notice)?;
     Ok(notice)
 }
 
 pub fn record_command(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     line: &str,
     reply: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "INSERT INTO command_log (guild_id, user_id, line, reply, created_at) VALUES (?, ?, ?, ?, ?)",
-        params![guild_id, user_id, line, reply, store::now_stamp()],
-    )?;
+    diesel::insert_into(schema::command_log::table)
+        .values((
+            schema::command_log::guild_id.eq(guild_id),
+            schema::command_log::user_id.eq(user_id),
+            schema::command_log::line.eq(line),
+            schema::command_log::reply.eq(reply),
+            schema::command_log::created_at.eq(store::now_stamp()),
+        ))
+        .execute(conn)?;
     Ok(())
 }

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
@@ -11,7 +10,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
-use rusqlite::Connection;
+use diesel::prelude::*;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::assets;
@@ -23,7 +22,8 @@ use crate::ics;
 use crate::jobs::DiscordJob;
 use crate::logic::{self, OptionInput, PresetBody};
 use crate::present::{self, Page};
-use crate::store::{self, Settings};
+use crate::schema;
+use crate::store::{self, Connection, Settings};
 
 #[derive(Clone)]
 struct AppState {
@@ -48,7 +48,7 @@ struct Session {
 pub fn run() -> anyhow::Result<()> {
     let _telemetry = crate::observe::init();
 
-    let db_path = env::var("MARIAN_DB").unwrap_or_else(|_| "data/marian.db".into());
+    let database_url = store::database_url();
     let port: u16 = env::var("PORT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -67,7 +67,7 @@ pub fn run() -> anyhow::Result<()> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let mut conn = store::open(&PathBuf::from(&db_path))?;
+    let mut conn = store::open(&database_url)?;
     logic::rebase(&mut conn, Utc::now())?;
     let db = Arc::new(Mutex::new(conn));
 
@@ -235,6 +235,7 @@ impl<B> tower_http::trace::MakeSpan<B> for HttpSpan {
         let span = tracing::info_span!(
             "http",
             otel.name = name.as_str(),
+            otel.kind = "server",
             "http.method" = %request.method(),
             "http.route" = route,
             "http.status_code" = tracing::field::Empty,
@@ -337,8 +338,9 @@ async fn health() -> &'static str {
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    let ok = state.db.lock().map(|conn| {
-        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+    let ok = state.db.lock().map(|mut conn| {
+        diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
+            .get_result::<i32>(&mut *conn)
             .is_ok()
     });
     if ok.unwrap_or(false) {
@@ -362,17 +364,17 @@ async fn schedule(
 ) -> Response {
     let notice = cookie(&headers, "marian_notice").map(|value| percent_decode(&value));
     let signed_in = {
-        let db = state.db.lock().expect("database lock");
-        read_session(&db, &headers).is_some()
+        let mut db = state.db.lock().expect("database lock");
+        read_session(&mut db, &headers).is_some()
     };
     if !signed_in {
         return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
     }
-    let db = state.db.lock().expect("database lock");
-    let Some(session) = read_session(&db, &headers) else {
+    let mut db = state.db.lock().expect("database lock");
+    let Some(session) = read_session(&mut db, &headers) else {
         return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
     };
-    let server = match store::discord_server_id(&db, session.guild_id) {
+    let server = match store::discord_server_id(&mut db, session.guild_id) {
         Ok(server) => server,
         Err(err) => return plain_error(err),
     };
@@ -418,8 +420,8 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         return next.run(request).await;
     }
     let signed_in = {
-        let db = state.db.lock().expect("database lock");
-        read_session(&db, request.headers()).is_some()
+        let mut db = state.db.lock().expect("database lock");
+        read_session(&mut db, request.headers()).is_some()
     };
     if signed_in {
         return next.run(request).await;
@@ -510,7 +512,7 @@ async fn auth_callback(
         Err(err) => return redirect("/", &err),
     };
     let mut db = state.db.lock().expect("database lock");
-    let guilds = match store::list_guilds(&db) {
+    let guilds = match store::list_guilds(&mut db) {
         Ok(guilds) => guilds,
         Err(err) => return plain_error(err),
     };
@@ -560,8 +562,8 @@ async fn auth_callback(
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie(&headers, "marian_session") {
-        let db = state.db.lock().expect("database lock");
-        let _ = store::delete_web_session(&db, &token);
+        let mut db = state.db.lock().expect("database lock");
+        let _ = store::delete_web_session(&mut db, &token);
     }
     let mut response = Redirect::to("/").into_response();
     clear_cookie(&mut response, "marian_session");
@@ -843,7 +845,7 @@ async fn create_routine(
 ) -> Response {
     let back = here(&server, "/routines/new");
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
@@ -893,14 +895,14 @@ async fn update_routine(
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
         return guild_error(err);
     }
     let result = (|| {
-        let id = logic::routine_in_guild(&db, session.guild_id, &public_id)?;
+        let id = logic::routine_in_guild(&mut db, session.guild_id, &public_id)?;
         let input = routine_input(&map)?;
         logic::save_routine(
             &mut db,
@@ -940,7 +942,7 @@ async fn save_routine_days(
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
@@ -948,7 +950,7 @@ async fn save_routine_days(
     }
     let days = checked_days(&map);
     let result = (|| {
-        let id = logic::routine_in_guild(&db, session.guild_id, &public_id)?;
+        let id = logic::routine_in_guild(&mut db, session.guild_id, &public_id)?;
         if map.get("scope").map(String::as_str) == Some("usual") {
             logic::save_usual_days(&mut db, id, session.user_id, &days)
                 .map(|notice| (notice, Vec::new()))
@@ -977,7 +979,7 @@ async fn vote_routine(
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
@@ -986,8 +988,8 @@ async fn vote_routine(
     let Some(day) = map.get("day").and_then(|value| value.parse().ok()) else {
         return redirect(&back, "Pick a day.");
     };
-    let run_id = match logic::routine_in_guild(&db, session.guild_id, &public_id)
-        .and_then(|id| logic::routine_page_data(&db, id))
+    let run_id = match logic::routine_in_guild(&mut db, session.guild_id, &public_id)
+        .and_then(|id| logic::routine_page_data(&mut db, id))
     {
         Ok(Some(view)) => view.run.map(|run| run.id),
         Ok(None) => None,
@@ -1213,7 +1215,8 @@ async fn edit_event(
             let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
             let tz = clock::zone(&guild.timezone)?;
             let event = event_for_guild(page.conn, page.guild_id, &public_id)?;
-            present::form_page(page, &present::form_from_event(page.conn, event.id, tz)?)
+            let draft = present::form_from_event(page.conn, event.id, tz)?;
+            present::form_page(page, &draft)
         },
     )
 }
@@ -1244,23 +1247,23 @@ fn save_form(
     map: HashMap<String, String>,
 ) -> Response {
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, headers) else {
+    let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, server) {
         return guild_error(err);
     }
     let existing = match id.as_deref() {
-        Some(public_id) => match store::event_by_public(&db, public_id) {
+        Some(public_id) => match store::event_by_public(&mut db, public_id) {
             Ok(Some(event)) if event.guild_id == session.guild_id => Some(event),
-            Ok(_) => return render_missing(state, &db, &session),
+            Ok(_) => return render_missing(state, &mut db, &session),
             Err(err) => return plain_error(err),
         },
         None => None,
     };
-    let guild = match store::guild(&db, session.guild_id) {
+    let guild = match store::guild(&mut db, session.guild_id) {
         Ok(Some(guild)) => guild,
-        Ok(None) => return render_missing(state, &db, &session),
+        Ok(None) => return render_missing(state, &mut db, &session),
         Err(err) => return plain_error(err),
     };
     let tz = match clock::zone(&guild.timezone) {
@@ -1278,7 +1281,7 @@ fn save_form(
         Err(err) => {
             return form_again(
                 state,
-                &db,
+                &mut db,
                 &session,
                 &map,
                 existing.as_ref(),
@@ -1289,7 +1292,7 @@ fn save_form(
     };
     match logic::save_event(&mut db, input) {
         Ok(event_id) => {
-            let saved = store::event(&db, event_id).ok().flatten();
+            let saved = store::event(&mut db, event_id).ok().flatten();
             let public_id = saved
                 .as_ref()
                 .map(|event| event.public_id.clone())
@@ -1298,10 +1301,10 @@ fn save_form(
             enqueue(&state.discord, DiscordJob::sync(event_id));
             redirect(&here(server, &format!("/events/{public_id}")), "Saved.")
         }
-        Err(OpError::NotFound) => render_missing(state, &db, &session),
+        Err(OpError::NotFound) => render_missing(state, &mut db, &session),
         Err(err) => form_again(
             state,
-            &db,
+            &mut db,
             &session,
             &map,
             existing.as_ref(),
@@ -1313,7 +1316,7 @@ fn save_form(
 
 fn form_again(
     state: &AppState,
-    db: &Connection,
+    db: &mut Connection,
     session: &Session,
     map: &HashMap<String, String>,
     existing: Option<&store::Event>,
@@ -1322,8 +1325,8 @@ fn form_again(
 ) -> Response {
     let server = store::discord_server_id(db, session.guild_id).unwrap_or_default();
     let draft = present::form_from_map(map, &server, existing, error, tz);
-    let page = page_for(state, db, session, "event", "Edit event");
-    match present::form_page(&page, &draft) {
+    let mut page = page_for(state, db, session, "event", "Edit event");
+    match present::form_page(&mut page, &draft) {
         Ok(body) => html_ok(body, session.notice.is_some()),
         Err(err) => plain_error(err),
     }
@@ -1411,8 +1414,8 @@ async fn delete_event(
     Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
     let gone = {
-        let db = state.db.lock().expect("database lock");
-        store::event_by_public(&db, &public_id)
+        let mut db = state.db.lock().expect("database lock");
+        store::event_by_public(&mut db, &public_id)
             .ok()
             .flatten()
             .map(|event| matches!(event.status.as_str(), "draft" | "scheduled" | "failed"))
@@ -1435,20 +1438,20 @@ async fn duplicate(
     Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
         return guild_error(err);
     }
-    let id = match event_for_guild(&db, session.guild_id, &public_id) {
+    let id = match event_for_guild(&mut db, session.guild_id, &public_id) {
         Ok(event) => event.id,
-        Err(OpError::NotFound) => return render_missing(&state, &db, &session),
+        Err(OpError::NotFound) => return render_missing(&state, &mut db, &session),
         Err(err) => return plain_error(err),
     };
     match logic::duplicate_event(&mut db, id, session.user_id) {
         Ok(new_id) => {
-            let copy = store::event(&db, new_id)
+            let copy = store::event(&mut db, new_id)
                 .ok()
                 .flatten()
                 .map(|event| event.public_id)
@@ -1627,7 +1630,7 @@ async fn save_library(
     )
 }
 
-fn library_option(conn: &Connection, guild_id: i64, name: &str) -> OptionInput {
+fn library_option(conn: &mut Connection, guild_id: i64, name: &str) -> OptionInput {
     let known = store::list_library(conn, guild_id).ok().and_then(|rows| {
         rows.into_iter()
             .find(|row| row.name.eq_ignore_ascii_case(name))
@@ -1670,7 +1673,7 @@ async fn run_command(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
@@ -1678,7 +1681,7 @@ async fn run_command(
     }
     let line = map.get("line").cloned().unwrap_or_default();
     let reply = commands::execute(&mut db, session.guild_id, session.user_id, &line);
-    let ids = events_to_refresh(&db, &line, &reply);
+    let ids = events_to_refresh(&mut db, &line, &reply);
     drop(db);
     for id in ids {
         enqueue(&state.discord, DiscordJob::sync(id));
@@ -1695,13 +1698,13 @@ async fn save_settings(
 ) -> Response {
     let back = here(&server, "/settings");
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, &headers) else {
+    let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
         return guild_error(err);
     }
-    let user = match store::user(&db, session.user_id) {
+    let user = match store::user(&mut db, session.user_id) {
         Ok(Some(user)) => user,
         _ => return redirect(&back, "Sign in again before changing settings."),
     };
@@ -1711,7 +1714,7 @@ async fn save_settings(
             "Only someone who runs the server can change settings.",
         );
     }
-    let mut settings = match store::settings(&db, session.guild_id) {
+    let mut settings = match store::settings(&mut db, session.guild_id) {
         Ok(settings) => settings,
         Err(err) => return redirect(&back, &err.to_string()),
     };
@@ -1723,13 +1726,14 @@ async fn save_settings(
         Ok(()) => {}
         Err(err) => return redirect(&back, &err.to_string()),
     }
-    if let Err(err) = db.execute(
-        "UPDATE guilds SET timezone = ? WHERE id = ?",
-        rusqlite::params![timezone, session.guild_id],
-    ) {
+    if let Err(err) =
+        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(session.guild_id)))
+            .set(schema::guilds::timezone.eq(&timezone))
+            .execute(&mut *db)
+    {
         return redirect(&back, &err.to_string());
     }
-    if let Err(err) = store::update_settings(&db, &settings) {
+    if let Err(err) = store::update_settings(&mut db, &settings) {
         return redirect(&back, &err.to_string());
     }
     drop(db);
@@ -1806,17 +1810,17 @@ async fn event_calendar(
     State(state): State<AppState>,
     Path((server, file)): Path<(String, String)>,
 ) -> Response {
-    let db = state.db.lock().expect("database lock");
-    let Some(guild) = store::guild_by_discord(&db, &server).ok().flatten() else {
+    let mut db = state.db.lock().expect("database lock");
+    let Some(guild) = store::guild_by_discord(&mut db, &server).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "No server").into_response();
     };
-    let Some(event) = calendar_event(&db, &file).ok().flatten() else {
+    let Some(event) = calendar_event(&mut db, &file).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "No event").into_response();
     };
     if event.guild_id != guild.id {
         return (StatusCode::NOT_FOUND, "No event").into_response();
     }
-    match ics::one_event(&db, event.id) {
+    match ics::one_event(&mut db, event.id) {
         Ok(body) => calendar_response(body),
         Err(OpError::NotFound) => (StatusCode::NOT_FOUND, "No event").into_response(),
         Err(err) => plain_error(err),
@@ -1827,20 +1831,20 @@ async fn legacy_event_calendar(
     State(state): State<AppState>,
     Path(file): Path<String>,
 ) -> Response {
-    let db = state.db.lock().expect("database lock");
+    let mut db = state.db.lock().expect("database lock");
     if let Some(token) = personal_token(&file) {
-        let Some(discord_id) = store::calendar_discord_id(&db, token).ok().flatten() else {
+        let Some(discord_id) = store::calendar_discord_id(&mut db, token).ok().flatten() else {
             return (StatusCode::NOT_FOUND, "No calendar").into_response();
         };
-        return match ics::user_feed(&db, &discord_id) {
+        return match ics::user_feed(&mut db, &discord_id) {
             Ok(body) => calendar_response(body),
             Err(err) => plain_error(err),
         };
     }
-    let Some(event) = calendar_event(&db, &file).ok().flatten() else {
+    let Some(event) = calendar_event(&mut db, &file).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "No event").into_response();
     };
-    match ics::one_event(&db, event.id) {
+    match ics::one_event(&mut db, event.id) {
         Ok(body) => calendar_response(body),
         Err(OpError::NotFound) => (StatusCode::NOT_FOUND, "No event").into_response(),
         Err(err) => plain_error(err),
@@ -1865,7 +1869,7 @@ fn calendar_response(body: String) -> Response {
 }
 
 fn series_for_guild(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     public_id: &str,
 ) -> Result<store::Series, OpError> {
@@ -1880,7 +1884,7 @@ fn series_for_guild(
 }
 
 fn event_for_guild(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     public_id: &str,
 ) -> Result<store::Event, OpError> {
@@ -1891,7 +1895,7 @@ fn event_for_guild(
     Ok(event)
 }
 
-fn calendar_event(conn: &Connection, file: &str) -> Result<Option<store::Event>, OpError> {
+fn calendar_event(conn: &mut Connection, file: &str) -> Result<Option<store::Event>, OpError> {
     let token = file.trim_end_matches(".ics");
     if let Some(public_id) = crate::ids::parse_event_id(token) {
         if let Some(event) = store::event_by_public(conn, public_id)? {
@@ -1936,11 +1940,11 @@ fn guild_error(err: OpError) -> Response {
 }
 
 fn legacy_redirect(state: &AppState, headers: &HeaderMap, rest: &str) -> Response {
-    let db = state.db.lock().expect("database lock");
-    let Some(session) = read_session(&db, headers) else {
+    let mut db = state.db.lock().expect("database lock");
+    let Some(session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
-    let server = match store::discord_server_id(&db, session.guild_id) {
+    let server = match store::discord_server_id(&mut db, session.guild_id) {
         Ok(server) => server,
         Err(err) => return plain_error(err),
     };
@@ -2004,11 +2008,11 @@ async fn legacy_edit(
 }
 
 fn legacy_event_path(state: &AppState, headers: &HeaderMap, id: &str, suffix: &str) -> Response {
-    let db = state.db.lock().expect("database lock");
-    let Some(session) = read_session(&db, headers) else {
+    let mut db = state.db.lock().expect("database lock");
+    let Some(session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
-    let event = match calendar_event(&db, id) {
+    let event = match calendar_event(&mut db, id) {
         Ok(Some(event)) => event,
         Ok(None) => return (StatusCode::NOT_FOUND, "No event").into_response(),
         Err(err) => return plain_error(err),
@@ -2016,7 +2020,7 @@ fn legacy_event_path(state: &AppState, headers: &HeaderMap, id: &str, suffix: &s
     if !session.allowed.contains(&event.guild_id) {
         return (StatusCode::NOT_FOUND, "No event").into_response();
     }
-    let server = match store::discord_server_id(&db, event.guild_id) {
+    let server = match store::discord_server_id(&mut db, event.guild_id) {
         Ok(server) => server,
         Err(err) => return plain_error(err),
     };
@@ -2035,7 +2039,7 @@ fn mutate(
     body: impl FnOnce(&mut Connection, &Session) -> Result<(String, Option<i64>), OpError>,
 ) -> Response {
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, headers) else {
+    let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, server) {
@@ -2060,19 +2064,19 @@ fn html(
     server: &str,
     nav: &str,
     title: &str,
-    render: impl FnOnce(&Page<'_>) -> Result<String, OpError>,
+    render: impl FnOnce(&mut Page<'_>) -> Result<String, OpError>,
 ) -> Response {
     let mut db = state.db.lock().expect("database lock");
-    let Some(mut session) = read_session(&db, headers) else {
+    let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
     if let Err(err) = bind_server(&mut db, &mut session, server) {
         return guild_error(err);
     }
-    let page = page_for(state, &db, &session, nav, title);
-    match render(&page) {
+    let mut page = page_for(state, &mut db, &session, nav, title);
+    match render(&mut page) {
         Ok(body) => html_ok(body, session.notice.is_some()),
-        Err(OpError::NotFound) => match present::not_found(&page) {
+        Err(OpError::NotFound) => match present::not_found(&mut page) {
             Ok(body) => {
                 let mut response = Html(body).into_response();
                 *response.status_mut() = StatusCode::NOT_FOUND;
@@ -2087,9 +2091,9 @@ fn html(
     }
 }
 
-fn render_missing(state: &AppState, db: &Connection, session: &Session) -> Response {
-    let page = page_for(state, db, session, "event", "Missing");
-    match present::not_found(&page) {
+fn render_missing(state: &AppState, db: &mut Connection, session: &Session) -> Response {
+    let mut page = page_for(state, db, session, "event", "Missing");
+    match present::not_found(&mut page) {
         Ok(body) => {
             let mut response = Html(body).into_response();
             *response.status_mut() = StatusCode::NOT_FOUND;
@@ -2101,7 +2105,7 @@ fn render_missing(state: &AppState, db: &Connection, session: &Session) -> Respo
 
 fn page_for<'a>(
     state: &'a AppState,
-    db: &'a Connection,
+    db: &'a mut Connection,
     session: &'a Session,
     nav: &'a str,
     title: &'a str,
@@ -2165,7 +2169,7 @@ fn clear_cookie(response: &mut Response, name: &str) {
     }
 }
 
-fn read_session(conn: &Connection, headers: &HeaderMap) -> Option<Session> {
+fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
     let token = cookie(headers, "marian_session")?;
     let row = store::web_session(conn, &token).ok()??;
     let fresh = clock::parse_stamp(&row.created_at)
@@ -2219,7 +2223,7 @@ pub fn mentioned_events(line: &str, reply: &str) -> Vec<i64> {
     ids
 }
 
-pub fn events_to_refresh(conn: &Connection, line: &str, reply: &str) -> Vec<i64> {
+pub fn events_to_refresh(conn: &mut Connection, line: &str, reply: &str) -> Vec<i64> {
     let mut ids = mentioned_events(line, reply);
     for public_id in public_ids_in(line).into_iter().chain(public_ids_in(reply)) {
         if let Ok(Some(event)) = store::event_by_public(conn, &public_id) {
@@ -2374,19 +2378,29 @@ mod tests {
     #[tokio::test]
     async fn sign_in_is_required() {
         let mut conn = store::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99')",
-            [],
-        )
-        .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
-        conn.execute(
-            "INSERT INTO users (guild_id, name, handle, color, reminders_enabled, organizer, discord_id)
-             VALUES (1, 'Nell', 'nell', '#1e3a6e', 1, 1, '42')",
-            [],
-        )
-        .unwrap();
-        let user_id = conn.last_insert_rowid();
+        diesel::insert_into(schema::guilds::table)
+            .values((
+                schema::guilds::id.eq(1),
+                schema::guilds::name.eq("Guild"),
+                schema::guilds::timezone.eq("UTC"),
+                schema::guilds::discord_id.eq("99"),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let user_id = diesel::insert_into(schema::users::table)
+            .values((
+                schema::users::guild_id.eq(1),
+                schema::users::name.eq("Nell"),
+                schema::users::handle.eq("nell"),
+                schema::users::color.eq("#1e3a6e"),
+                schema::users::reminders_enabled.eq(true),
+                schema::users::organizer.eq(true),
+                schema::users::discord_id.eq("42"),
+            ))
+            .returning(schema::users::id)
+            .get_result::<i64>(&mut conn)
+            .unwrap();
         store::insert_web_session(
             &mut conn,
             "session-token-value",

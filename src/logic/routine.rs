@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension};
+use diesel::prelude::*;
 use serde::Serialize;
 
 use super::access::can_create;
@@ -13,7 +13,8 @@ use super::template::{self, Spawn};
 use crate::clock;
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
-use crate::store;
+use crate::schema;
+use crate::store::{self, Connection};
 
 #[derive(Debug, Clone)]
 pub struct RoutineEffect {
@@ -145,45 +146,45 @@ pub fn create_routine(
                 restrict_role_ids: Vec::new(),
             },
         )?;
-        tx.execute(
-            "INSERT INTO routines (
-                guild_id, template_id, prompt, start_minutes,
-                poll_weekday, poll_minutes, lock_weekday, lock_minutes, days_json,
-                active, created_by, created_at, public_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-            params![
-                guild_id,
-                template_id,
-                prompt,
-                start_minutes,
-                poll_weekday,
-                poll_minutes,
-                lock_weekday,
-                lock_minutes,
-                serde_json::to_string(&days).unwrap_or_else(|_| "[]".into()),
-                actor_id,
-                stamp,
-                public_id,
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
+        let id = diesel::insert_into(schema::routines::table)
+            .values((
+                schema::routines::guild_id.eq(guild_id),
+                schema::routines::template_id.eq(template_id),
+                schema::routines::prompt.eq(&prompt),
+                schema::routines::start_minutes.eq(i64::from(start_minutes)),
+                schema::routines::poll_weekday.eq(i64::from(poll_weekday)),
+                schema::routines::poll_minutes.eq(i64::from(poll_minutes)),
+                schema::routines::lock_weekday.eq(i64::from(lock_weekday)),
+                schema::routines::lock_minutes.eq(i64::from(lock_minutes)),
+                schema::routines::days_json.eq(days_json(&days)),
+                schema::routines::active.eq(true),
+                schema::routines::created_by.eq(actor_id),
+                schema::routines::created_at.eq(&stamp),
+                schema::routines::public_id.eq(&public_id),
+            ))
+            .returning(schema::routines::id)
+            .get_result(tx)?;
         log(tx, guild_id, None, &format!("Saved the {title} routine."))?;
         let jobs = progress_one(tx, id, now)?;
         Ok((id, public_id, jobs))
     })
 }
 
-pub fn routine_in_guild(conn: &Connection, guild_id: i64, public_id: &str) -> Result<i64, OpError> {
+pub fn routine_in_guild(
+    conn: &mut Connection,
+    guild_id: i64,
+    public_id: &str,
+) -> Result<i64, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Err(OpError::NotFound);
     };
-    conn.query_row(
-        "SELECT id FROM routines WHERE guild_id = ? AND public_id = ?",
-        params![guild_id, public_id],
-        |row| row.get(0),
-    )
-    .optional()?
-    .ok_or(OpError::NotFound)
+    schema::routines::table
+        .filter(schema::routines::guild_id.eq(guild_id))
+        .filter(schema::routines::public_id.eq(public_id))
+        .select(schema::routines::id)
+        .first(conn)
+        .optional()?
+        .ok_or(OpError::NotFound)
 }
 
 pub fn save_routine(
@@ -231,22 +232,17 @@ pub fn save_routine(
             &description,
             duration_minutes,
         )?;
-        tx.execute(
-            "UPDATE routines SET
-                prompt = ?, start_minutes = ?, poll_weekday = ?, poll_minutes = ?,
-                lock_weekday = ?, lock_minutes = ?, days_json = ?
-             WHERE id = ?",
-            params![
-                prompt,
-                start_minutes,
-                poll_weekday,
-                poll_minutes,
-                lock_weekday,
-                lock_minutes,
-                serde_json::to_string(&days).unwrap_or_else(|_| "[]".into()),
-                routine.id,
-            ],
-        )?;
+        diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
+            .set((
+                schema::routines::prompt.eq(&prompt),
+                schema::routines::start_minutes.eq(i64::from(start_minutes)),
+                schema::routines::poll_weekday.eq(i64::from(poll_weekday)),
+                schema::routines::poll_minutes.eq(i64::from(poll_minutes)),
+                schema::routines::lock_weekday.eq(i64::from(lock_weekday)),
+                schema::routines::lock_minutes.eq(i64::from(lock_minutes)),
+                schema::routines::days_json.eq(days_json(&days)),
+            ))
+            .execute(tx)?;
         let routine = must_routine(tx, routine.id)?;
         let jobs = align_schedule(tx, &routine, previous_channel, now)?;
         log(
@@ -272,13 +268,9 @@ pub fn save_usual_days(
     store::with_tx(conn, |tx| {
         let routine = must_routine(tx, routine_id)?;
         require_owner(tx, &routine, actor_id)?;
-        tx.execute(
-            "UPDATE routines SET days_json = ? WHERE id = ?",
-            params![
-                serde_json::to_string(&days).unwrap_or_else(|_| "[]".into()),
-                routine.id
-            ],
-        )?;
+        diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
+            .set(schema::routines::days_json.eq(days_json(&days)))
+            .execute(tx)?;
         Ok("Later weeks will offer these days.".into())
     })
 }
@@ -296,21 +288,23 @@ pub fn save_run_days(
         let Some(run) = editable_run(tx, routine.id)? else {
             return Err(OpError::message("There isn't a poll to change yet."));
         };
-        tx.execute(
-            "UPDATE routine_runs SET days_json = ? WHERE id = ?",
-            params![
-                serde_json::to_string(&days).unwrap_or_else(|_| "[]".into()),
-                run.id
-            ],
-        )?;
+        diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
+            .set(schema::routine_runs::days_json.eq(days_json(&days)))
+            .execute(tx)?;
         let allowed: Vec<String> = days.iter().map(|day| day.to_string()).collect();
-        let marks = allowed.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!("DELETE FROM routine_votes WHERE run_id = ? AND choice NOT IN ({marks})");
-        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&run.id];
-        for choice in &allowed {
-            values.push(choice);
+        if allowed.is_empty() {
+            diesel::delete(
+                schema::routine_votes::table.filter(schema::routine_votes::run_id.eq(run.id)),
+            )
+            .execute(tx)?;
+        } else {
+            diesel::delete(
+                schema::routine_votes::table
+                    .filter(schema::routine_votes::run_id.eq(run.id))
+                    .filter(schema::routine_votes::choice.ne_all(allowed)),
+            )
+            .execute(tx)?;
         }
-        tx.execute(&sql, values.as_slice())?;
         let jobs = if run.status == "open" {
             vec![DiscordJob::routine(run.id)]
         } else {
@@ -343,23 +337,30 @@ pub fn cast_run(
             return Err(OpError::message("That person isn't in this server."));
         }
         let choice = day.to_string();
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM routine_votes WHERE run_id = ? AND user_id = ? AND choice = ?",
-                params![run.id, user_id, choice],
-                |row| row.get(0),
-            )
+        let existing: Option<i64> = schema::routine_votes::table
+            .filter(schema::routine_votes::run_id.eq(run.id))
+            .filter(schema::routine_votes::user_id.eq(user_id))
+            .filter(schema::routine_votes::choice.eq(&choice))
+            .select(schema::routine_votes::id)
+            .first(tx)
             .optional()?;
         if existing.is_some() {
-            tx.execute(
-                "DELETE FROM routine_votes WHERE run_id = ? AND user_id = ? AND choice = ?",
-                params![run.id, user_id, choice],
-            )?;
+            diesel::delete(
+                schema::routine_votes::table
+                    .filter(schema::routine_votes::run_id.eq(run.id))
+                    .filter(schema::routine_votes::user_id.eq(user_id))
+                    .filter(schema::routine_votes::choice.eq(&choice)),
+            )
+            .execute(tx)?;
         } else {
-            tx.execute(
-                "INSERT INTO routine_votes (run_id, choice, user_id, created_at) VALUES (?, ?, ?, ?)",
-                params![run.id, choice, user_id, store::now_stamp()],
-            )?;
+            diesel::insert_into(schema::routine_votes::table)
+                .values((
+                    schema::routine_votes::run_id.eq(run.id),
+                    schema::routine_votes::choice.eq(&choice),
+                    schema::routine_votes::user_id.eq(user_id),
+                    schema::routine_votes::created_at.eq(store::now_stamp()),
+                ))
+                .execute(tx)?;
         }
         let mine = selected_days(tx, run.id, user_id)?;
         let notice = if mine.is_empty() {
@@ -387,11 +388,15 @@ pub fn stop_routine(
     store::with_tx(conn, |tx| {
         let routine = must_routine(tx, routine_id)?;
         require_owner(tx, &routine, actor_id)?;
-        tx.execute("UPDATE routines SET active = 0 WHERE id = ?", [routine.id])?;
-        tx.execute(
-            "DELETE FROM routine_runs WHERE routine_id = ? AND status = 'scheduled'",
-            [routine.id],
-        )?;
+        diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
+            .set(schema::routines::active.eq(false))
+            .execute(tx)?;
+        diesel::delete(
+            schema::routine_runs::table
+                .filter(schema::routine_runs::routine_id.eq(routine.id))
+                .filter(schema::routine_runs::status.eq("scheduled")),
+        )
+        .execute(tx)?;
         Ok(format!(
             "Stopped {}. An open poll still locks on schedule.",
             routine.title
@@ -400,7 +405,7 @@ pub fn stop_routine(
 }
 
 pub fn maintain(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
@@ -425,7 +430,7 @@ pub fn maintain(
     Ok(jobs)
 }
 
-pub fn routine_post(conn: &Connection, run_id: i64) -> Result<Option<RoutinePost>, OpError> {
+pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<RoutinePost>, OpError> {
     let run = must_run(conn, run_id)?;
     let routine = must_routine(conn, run.routine_id)?;
     let Some(channel) = store::channel(conn, routine.channel_id)? else {
@@ -492,19 +497,18 @@ pub fn routine_post(conn: &Connection, run_id: i64) -> Result<Option<RoutinePost
 }
 
 pub fn remember_routine_message(
-    conn: &Connection,
+    conn: &mut Connection,
     run_id: i64,
     message_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE routine_runs SET discord_message_id = ? WHERE id = ?",
-        params![message_id, run_id],
-    )?;
+    diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run_id)))
+        .set(schema::routine_runs::discord_message_id.eq(message_id))
+        .execute(conn)?;
     Ok(())
 }
 
 pub fn routine_page_data(
-    conn: &Connection,
+    conn: &mut Connection,
     routine_id: i64,
 ) -> Result<Option<RoutineView>, OpError> {
     let Some(routine) = load_routine(conn, routine_id)? else {
@@ -604,18 +608,19 @@ pub struct RunHistory {
     pub event_id: String,
 }
 
-pub fn list_routines(conn: &Connection, guild_id: i64) -> Result<Vec<RoutineSummary>, OpError> {
+pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<RoutineSummary>, OpError> {
     let guild = must_guild(conn, guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
     let settings = store::settings(conn, guild_id)?;
-    let mut stmt = conn.prepare(
-        "SELECT r.id FROM routines r
-         JOIN event_templates t ON t.id = r.template_id
-         WHERE r.guild_id = ? ORDER BY r.active DESC, t.title COLLATE NOCASE",
-    )?;
-    let ids: Vec<i64> = stmt
-        .query_map([guild_id], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let ids: Vec<i64> = schema::routines::table
+        .inner_join(schema::event_templates::table)
+        .filter(schema::routines::guild_id.eq(guild_id))
+        .order(schema::routines::active.desc())
+        .then_order_by(diesel::dsl::sql::<diesel::sql_types::Text>(
+            "event_templates.title COLLATE NOCASE",
+        ))
+        .select(schema::routines::id)
+        .load(conn)?;
     let mut rows = Vec::new();
     for id in ids {
         let routine = must_routine(conn, id)?;
@@ -661,17 +666,16 @@ pub struct RoutineSummary {
     pub next: String,
 }
 
-pub fn count_active(conn: &Connection, guild_id: i64) -> Result<i64, OpError> {
-    conn.query_row(
-        "SELECT count(*) FROM routines WHERE guild_id = ? AND active = 1",
-        [guild_id],
-        |row| row.get(0),
-    )
-    .map_err(OpError::from)
+pub fn count_active(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+    Ok(schema::routines::table
+        .filter(schema::routines::guild_id.eq(guild_id))
+        .filter(schema::routines::active.eq(true))
+        .select(diesel::dsl::count_star())
+        .first(conn)?)
 }
 
 fn align_schedule(
-    conn: &Connection,
+    conn: &mut Connection,
     routine: &Routine,
     previous_channel: i64,
     now: DateTime<Utc>,
@@ -689,16 +693,18 @@ fn align_schedule(
             );
             let locks_stamp = clock::stamp(locks);
             if locks_stamp != run.locks_at {
-                conn.execute(
-                    "UPDATE routine_runs SET locks_at = ? WHERE id = ?",
-                    params![locks_stamp, run.id],
-                )?;
+                diesel::update(
+                    schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
+                )
+                .set(schema::routine_runs::locks_at.eq(&locks_stamp))
+                .execute(conn)?;
             }
             if routine.channel_id != previous_channel {
-                conn.execute(
-                    "UPDATE routine_runs SET discord_message_id = NULL WHERE id = ?",
-                    [run.id],
-                )?;
+                diesel::update(
+                    schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
+                )
+                .set(schema::routine_runs::discord_message_id.eq(None::<String>))
+                .execute(conn)?;
             }
             jobs.push(DiscordJob::routine(run.id));
         } else if run.status == "scheduled" {
@@ -713,12 +719,16 @@ fn align_schedule(
             let opens_stamp = clock::stamp(opens);
             let locks_stamp = clock::stamp(locks);
             if run.opens_at != opens_stamp {
-                conn.execute("DELETE FROM routine_runs WHERE id = ?", [run.id])?;
+                diesel::delete(
+                    schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
+                )
+                .execute(conn)?;
             } else if run.locks_at != locks_stamp {
-                conn.execute(
-                    "UPDATE routine_runs SET locks_at = ? WHERE id = ?",
-                    params![locks_stamp, run.id],
-                )?;
+                diesel::update(
+                    schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
+                )
+                .set(schema::routine_runs::locks_at.eq(&locks_stamp))
+                .execute(conn)?;
             }
         }
     }
@@ -727,7 +737,7 @@ fn align_schedule(
 }
 
 fn progress_one(
-    conn: &Connection,
+    conn: &mut Connection,
     routine_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
@@ -742,7 +752,7 @@ fn progress_one(
 }
 
 fn advance(
-    conn: &Connection,
+    conn: &mut Connection,
     routine: &Routine,
     mut runs: Vec<Run>,
     tz: Option<Tz>,
@@ -758,10 +768,11 @@ fn advance(
                 jobs.extend(lock_run(conn, routine, run, now)?);
                 run.status = "locked".to_string();
             } else {
-                conn.execute(
-                    "UPDATE routine_runs SET status = 'open' WHERE id = ?",
-                    [run.id],
-                )?;
+                diesel::update(
+                    schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
+                )
+                .set(schema::routine_runs::status.eq("open"))
+                .execute(conn)?;
                 run.status = "open".to_string();
                 log(
                     conn,
@@ -788,21 +799,19 @@ fn advance(
             .iter()
             .any(|run| run.opens_at == opens_stamp && run.status != "locked");
         if !already && locks > now {
-            let days_json = serde_json::to_string(&routine.days).unwrap_or_else(|_| "[]".into());
+            let days_json = days_json(&routine.days);
             let status = if opens <= now { "open" } else { "scheduled" };
-            conn.execute(
-                "INSERT INTO routine_runs (routine_id, opens_at, locks_at, status, days_json, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                params![
-                    routine.id,
-                    opens_stamp,
-                    clock::stamp(locks),
-                    status,
-                    days_json,
-                    clock::stamp(now)
-                ],
-            )?;
-            let id = conn.last_insert_rowid();
+            let id = diesel::insert_into(schema::routine_runs::table)
+                .values((
+                    schema::routine_runs::routine_id.eq(routine.id),
+                    schema::routine_runs::opens_at.eq(&opens_stamp),
+                    schema::routine_runs::locks_at.eq(clock::stamp(locks)),
+                    schema::routine_runs::status.eq(status),
+                    schema::routine_runs::days_json.eq(&days_json),
+                    schema::routine_runs::created_at.eq(clock::stamp(now)),
+                ))
+                .returning(schema::routine_runs::id)
+                .get_result(conn)?;
             if status == "open" {
                 log(
                     conn,
@@ -818,7 +827,7 @@ fn advance(
 }
 
 fn lock_run(
-    conn: &Connection,
+    conn: &mut Connection,
     routine: &Routine,
     run: &Run,
     now: DateTime<Utc>,
@@ -839,10 +848,13 @@ fn lock_run(
         tz,
     );
     let event_id = insert_event(conn, routine, start, tz, now)?;
-    conn.execute(
-        "UPDATE routine_runs SET status = 'locked', winner_weekday = ?, event_id = ? WHERE id = ?",
-        params![winner, event_id, run.id],
-    )?;
+    diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
+        .set((
+            schema::routine_runs::status.eq("locked"),
+            schema::routine_runs::winner_weekday.eq(i64::from(winner)),
+            schema::routine_runs::event_id.eq(event_id),
+        ))
+        .execute(conn)?;
     log(
         conn,
         routine.guild_id,
@@ -861,7 +873,7 @@ fn lock_run(
 }
 
 fn insert_event(
-    conn: &Connection,
+    conn: &mut Connection,
     routine: &Routine,
     start: DateTime<Utc>,
     tz: Tz,
@@ -1043,7 +1055,7 @@ fn check_clock(weekday: u8, minutes: u16) -> Result<(), OpError> {
     Ok(())
 }
 
-fn require_owner(conn: &Connection, routine: &Routine, actor_id: i64) -> Result<(), OpError> {
+fn require_owner(conn: &mut Connection, routine: &Routine, actor_id: i64) -> Result<(), OpError> {
     let actor = must_user(conn, actor_id)?;
     if actor.id == routine.created_by || actor.organizer {
         return Ok(());
@@ -1053,15 +1065,14 @@ fn require_owner(conn: &Connection, routine: &Routine, actor_id: i64) -> Result<
     ))
 }
 
-fn vote_counts(conn: &Connection, run_id: i64) -> Result<HashMap<u8, i64>, OpError> {
-    let mut stmt = conn
-        .prepare("SELECT choice, count(*) FROM routine_votes WHERE run_id = ? GROUP BY choice")?;
-    let rows = stmt.query_map([run_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
+fn vote_counts(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, i64>, OpError> {
+    let rows: Vec<(String, i64)> = schema::routine_votes::table
+        .filter(schema::routine_votes::run_id.eq(run_id))
+        .group_by(schema::routine_votes::choice)
+        .select((schema::routine_votes::choice, diesel::dsl::count_star()))
+        .load(conn)?;
     let mut counts = HashMap::new();
-    for row in rows {
-        let (choice, count) = row?;
+    for (choice, count) in rows {
         if let Ok(day) = choice.parse::<u8>() {
             counts.insert(day, count);
         }
@@ -1069,14 +1080,16 @@ fn vote_counts(conn: &Connection, run_id: i64) -> Result<HashMap<u8, i64>, OpErr
     Ok(counts)
 }
 
-fn selected_days(conn: &Connection, run_id: i64, user_id: i64) -> Result<Vec<u8>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT choice FROM routine_votes WHERE run_id = ? AND user_id = ? ORDER BY choice",
-    )?;
-    let rows = stmt.query_map(params![run_id, user_id], |row| row.get::<_, String>(0))?;
+fn selected_days(conn: &mut Connection, run_id: i64, user_id: i64) -> Result<Vec<u8>, OpError> {
+    let rows: Vec<String> = schema::routine_votes::table
+        .filter(schema::routine_votes::run_id.eq(run_id))
+        .filter(schema::routine_votes::user_id.eq(user_id))
+        .order(schema::routine_votes::choice.asc())
+        .select(schema::routine_votes::choice)
+        .load(conn)?;
     let mut days = Vec::new();
-    for row in rows {
-        if let Ok(day) = row?.parse::<u8>() {
+    for choice in rows {
+        if let Ok(day) = choice.parse::<u8>() {
             days.push(day);
         }
     }
@@ -1084,7 +1097,7 @@ fn selected_days(conn: &Connection, run_id: i64, user_id: i64) -> Result<Vec<u8>
     Ok(days)
 }
 
-fn editable_run(conn: &Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
+fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
     for run in runs_for(conn, routine_id)? {
         if run.status == "open" || run.status == "scheduled" {
             return Ok(Some(run));
@@ -1094,7 +1107,7 @@ fn editable_run(conn: &Connection, routine_id: i64) -> Result<Option<Run>, OpErr
 }
 
 fn recent_runs(
-    conn: &Connection,
+    conn: &mut Connection,
     routine_id: i64,
     tz: Tz,
     hour24: bool,
@@ -1127,109 +1140,240 @@ fn event_path(guild: &store::Guild, public_id: &str) -> String {
     }
 }
 
-fn runs_for(conn: &Connection, routine_id: i64) -> Result<Vec<Run>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, routine_id, opens_at, locks_at, status, days_json, winner_weekday, event_id, discord_message_id
-         FROM routine_runs WHERE routine_id = ? ORDER BY opens_at",
-    )?;
-    let rows = stmt.query_map([routine_id], read_run)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
+fn runs_for(conn: &mut Connection, routine_id: i64) -> Result<Vec<Run>, OpError> {
+    let rows: Vec<RunRow> = schema::routine_runs::table
+        .filter(schema::routine_runs::routine_id.eq(routine_id))
+        .order(schema::routine_runs::opens_at.asc())
+        .select(run_columns())
+        .load(conn)?;
+    Ok(rows.into_iter().map(run_from_row).collect())
 }
 
-fn runs_for_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Run>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT routine_runs.id, routine_runs.routine_id, routine_runs.opens_at, routine_runs.locks_at,
-                routine_runs.status, routine_runs.days_json, routine_runs.winner_weekday,
-                routine_runs.event_id, routine_runs.discord_message_id
-         FROM routine_runs
-         JOIN routines ON routines.id = routine_runs.routine_id
-         WHERE routines.guild_id = ?
-         ORDER BY routine_runs.routine_id, routine_runs.opens_at",
-    )?;
-    let rows = stmt.query_map([guild_id], read_run)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
+fn runs_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Run>, OpError> {
+    let rows: Vec<RunRow> = schema::routine_runs::table
+        .inner_join(schema::routines::table)
+        .filter(schema::routines::guild_id.eq(guild_id))
+        .order((
+            schema::routine_runs::routine_id.asc(),
+            schema::routine_runs::opens_at.asc(),
+        ))
+        .select(run_columns())
+        .load(conn)?;
+    Ok(rows.into_iter().map(run_from_row).collect())
 }
 
-fn routines_for_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Routine>, OpError> {
-    let mut stmt = conn.prepare(&format!("{ROUTINE_SQL} WHERE r.guild_id = ? ORDER BY r.id"))?;
-    let rows = stmt.query_map([guild_id], map_routine)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
+fn routines_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine>, OpError> {
+    let rows: Vec<RoutineRow> = schema::routines::table
+        .inner_join(schema::event_templates::table)
+        .filter(schema::routines::guild_id.eq(guild_id))
+        .order(schema::routines::id.asc())
+        .select(routine_columns())
+        .load(conn)?;
+    Ok(rows.into_iter().map(routine_from_row).collect())
 }
 
-fn must_run(conn: &Connection, id: i64) -> Result<Run, OpError> {
-    conn.query_row(
-        "SELECT id, routine_id, opens_at, locks_at, status, days_json, winner_weekday, event_id, discord_message_id
-         FROM routine_runs WHERE id = ?",
-        [id],
-        read_run,
-    )
-    .optional()?
-    .ok_or(OpError::NotFound)
+fn must_run(conn: &mut Connection, id: i64) -> Result<Run, OpError> {
+    load_run(conn, id)?.ok_or(OpError::NotFound)
 }
 
-fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
-    let raw: String = row.get(5)?;
-    Ok(Run {
-        id: row.get(0)?,
-        routine_id: row.get(1)?,
-        opens_at: row.get(2)?,
-        locks_at: row.get(3)?,
-        status: row.get(4)?,
-        days: serde_json::from_str(&raw).unwrap_or_default(),
-        winner_weekday: row.get(6)?,
-        event_id: row.get(7)?,
-        discord_message_id: row.get(8)?,
-    })
+fn load_run(conn: &mut Connection, id: i64) -> Result<Option<Run>, OpError> {
+    let row: Option<RunRow> = schema::routine_runs::table
+        .filter(schema::routine_runs::id.eq(id))
+        .select(run_columns())
+        .first(conn)
+        .optional()?;
+    Ok(row.map(run_from_row))
 }
 
-fn must_routine(conn: &Connection, id: i64) -> Result<Routine, OpError> {
+type RunRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+fn run_from_row(row: RunRow) -> Run {
+    let (
+        id,
+        routine_id,
+        opens_at,
+        locks_at,
+        status,
+        days_json,
+        winner_weekday,
+        event_id,
+        discord_message_id,
+    ) = row;
+    Run {
+        id,
+        routine_id,
+        opens_at,
+        locks_at,
+        status,
+        days: serde_json::from_str(&days_json).unwrap_or_default(),
+        winner_weekday: winner_weekday.map(|day| day as u8),
+        event_id,
+        discord_message_id,
+    }
+}
+
+fn must_routine(conn: &mut Connection, id: i64) -> Result<Routine, OpError> {
     load_routine(conn, id)?.ok_or(OpError::NotFound)
 }
 
-const ROUTINE_SQL: &str =
-    "SELECT r.id, r.public_id, r.guild_id, r.template_id, t.channel_id, t.title, r.prompt,
-        t.description, t.duration_minutes, r.start_minutes, r.poll_weekday, r.poll_minutes,
-        r.lock_weekday, r.lock_minutes, r.days_json, r.active, r.created_by
- FROM routines r
- JOIN event_templates t ON t.id = r.template_id";
+type RoutineRow = (
+    i64,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+    bool,
+    i64,
+);
 
-fn map_routine(row: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
-    let raw: String = row.get(14)?;
-    Ok(Routine {
-        id: row.get(0)?,
-        public_id: row.get(1)?,
-        guild_id: row.get(2)?,
-        template_id: row.get(3)?,
-        channel_id: row.get(4)?,
-        title: row.get(5)?,
-        prompt: row.get(6)?,
-        description: row.get(7)?,
-        duration_minutes: row.get(8)?,
-        start_minutes: row.get(9)?,
-        poll_weekday: row.get(10)?,
-        poll_minutes: row.get(11)?,
-        lock_weekday: row.get(12)?,
-        lock_minutes: row.get(13)?,
-        days: serde_json::from_str(&raw).unwrap_or_default(),
-        active: row.get::<_, i64>(15)? != 0,
-        created_by: row.get(16)?,
-    })
+fn routine_from_row(row: RoutineRow) -> Routine {
+    let (
+        id,
+        public_id,
+        guild_id,
+        template_id,
+        channel_id,
+        title,
+        prompt,
+        description,
+        duration_minutes,
+        start_minutes,
+        poll_weekday,
+        poll_minutes,
+        lock_weekday,
+        lock_minutes,
+        days_json,
+        active,
+        created_by,
+    ) = row;
+    Routine {
+        id,
+        public_id,
+        guild_id,
+        template_id,
+        channel_id,
+        title,
+        prompt,
+        description,
+        duration_minutes,
+        start_minutes: start_minutes as u16,
+        poll_weekday: poll_weekday as u8,
+        poll_minutes: poll_minutes as u16,
+        lock_weekday: lock_weekday as u8,
+        lock_minutes: lock_minutes as u16,
+        days: serde_json::from_str(&days_json).unwrap_or_default(),
+        active,
+        created_by,
+    }
 }
 
-fn load_routine(conn: &Connection, id: i64) -> Result<Option<Routine>, OpError> {
-    conn.query_row(&format!("{ROUTINE_SQL} WHERE r.id = ?"), [id], map_routine)
-        .optional()
-        .map_err(OpError::from)
+fn load_routine(conn: &mut Connection, id: i64) -> Result<Option<Routine>, OpError> {
+    let row: Option<RoutineRow> = schema::routines::table
+        .inner_join(schema::event_templates::table)
+        .filter(schema::routines::id.eq(id))
+        .select(routine_columns())
+        .first(conn)
+        .optional()?;
+    Ok(row.map(routine_from_row))
+}
+
+fn days_json(days: &[u8]) -> String {
+    serde_json::to_string(days).unwrap_or_else(|_| "[]".into())
+}
+
+fn run_columns() -> (
+    schema::routine_runs::id,
+    schema::routine_runs::routine_id,
+    schema::routine_runs::opens_at,
+    schema::routine_runs::locks_at,
+    schema::routine_runs::status,
+    schema::routine_runs::days_json,
+    schema::routine_runs::winner_weekday,
+    schema::routine_runs::event_id,
+    schema::routine_runs::discord_message_id,
+) {
+    (
+        schema::routine_runs::id,
+        schema::routine_runs::routine_id,
+        schema::routine_runs::opens_at,
+        schema::routine_runs::locks_at,
+        schema::routine_runs::status,
+        schema::routine_runs::days_json,
+        schema::routine_runs::winner_weekday,
+        schema::routine_runs::event_id,
+        schema::routine_runs::discord_message_id,
+    )
+}
+
+fn routine_columns() -> (
+    schema::routines::id,
+    schema::routines::public_id,
+    schema::routines::guild_id,
+    schema::routines::template_id,
+    schema::event_templates::channel_id,
+    schema::event_templates::title,
+    schema::routines::prompt,
+    schema::event_templates::description,
+    schema::event_templates::duration_minutes,
+    schema::routines::start_minutes,
+    schema::routines::poll_weekday,
+    schema::routines::poll_minutes,
+    schema::routines::lock_weekday,
+    schema::routines::lock_minutes,
+    schema::routines::days_json,
+    schema::routines::active,
+    schema::routines::created_by,
+) {
+    (
+        schema::routines::id,
+        schema::routines::public_id,
+        schema::routines::guild_id,
+        schema::routines::template_id,
+        schema::event_templates::channel_id,
+        schema::event_templates::title,
+        schema::routines::prompt,
+        schema::event_templates::description,
+        schema::event_templates::duration_minutes,
+        schema::routines::start_minutes,
+        schema::routines::poll_weekday,
+        schema::routines::poll_minutes,
+        schema::routines::lock_weekday,
+        schema::routines::lock_minutes,
+        schema::routines::days_json,
+        schema::routines::active,
+        schema::routines::created_by,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use diesel::connection::SimpleConnection;
 
     fn world() -> Connection {
-        let conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'play', 'text', 0);
@@ -1239,7 +1383,7 @@ mod tests {
             ",
         )
         .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
         conn
     }
 
@@ -1273,7 +1417,7 @@ mod tests {
                 .any(|job| matches!(job, DiscordJob::Routine { .. })),
             "{jobs:?}"
         );
-        let open = editable_run(&conn, id).unwrap().unwrap();
+        let open = editable_run(&mut conn, id).unwrap().unwrap();
         assert_eq!(open.status, "open");
         assert_eq!(open.days, vec![3, 4]);
 
@@ -1282,7 +1426,7 @@ mod tests {
         cast_run(&mut conn, open.id, 2, 5).unwrap();
         cast_run(&mut conn, open.id, 1, 4).unwrap();
 
-        let jobs = maintain(&conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
         assert!(jobs
             .iter()
             .any(|job| matches!(job, DiscordJob::Sync { .. })));
@@ -1293,18 +1437,18 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let event = store::event(&conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.status, "posted");
         assert_eq!(event.title, "Game night");
         assert!(event.description.starts_with("Bring dice on "));
         assert!(!event.description.contains("{date}"));
         assert_eq!(event.starts_at, "2026-10-16T19:00:00Z");
-        let next = editable_run(&conn, id).unwrap().unwrap();
+        let next = editable_run(&mut conn, id).unwrap().unwrap();
         assert_eq!(next.status, "scheduled");
         assert_eq!(next.days, vec![3, 4]);
         let page = crate::present::routine_detail(
-            &crate::present::Page {
-                conn: &conn,
+            &mut crate::present::Page {
+                conn: &mut conn,
                 guild_id: 1,
                 user_id: 1,
                 notice: None,
@@ -1345,16 +1489,16 @@ mod tests {
             at(2026, 10, 13, 18, 0),
         )
         .unwrap();
-        let next = editable_run(&conn, id).unwrap().unwrap();
+        let next = editable_run(&mut conn, id).unwrap().unwrap();
         assert_eq!(next.status, "scheduled");
         assert_eq!(next.locks_at, locks);
         assert_eq!(next.days, vec![3, 4]);
-        let event = store::event(&conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.title, "Game night");
         assert!(event.description.starts_with("Bring dice on "));
         let page = crate::present::routine_detail(
-            &crate::present::Page {
-                conn: &conn,
+            &mut crate::present::Page {
+                conn: &mut conn,
                 guild_id: 1,
                 user_id: 1,
                 notice: None,
@@ -1369,8 +1513,8 @@ mod tests {
         assert!(page.contains("Late night"), "{page}");
         assert!(page.contains("Bring snacks."), "{page}");
         assert!(page.contains(&public_id), "{page}");
-        let list = crate::present::routines_page(&crate::present::Page {
-            conn: &conn,
+        let list = crate::present::routines_page(&mut crate::present::Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 1,
             notice: None,
@@ -1406,9 +1550,9 @@ mod tests {
             at(2026, 10, 12, 12, 0),
         )
         .unwrap();
-        let open = editable_run(&conn, id).unwrap().unwrap();
+        let open = editable_run(&mut conn, id).unwrap().unwrap();
         cast_run(&mut conn, open.id, 1, 0).unwrap();
-        let jobs = maintain(&conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
         let event_id = jobs
             .iter()
             .find_map(|job| match job {
@@ -1416,7 +1560,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let event = store::event(&conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.starts_at, "2026-10-19T19:00:00Z");
     }
 }

@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use minijinja::{Environment, Value};
-use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::clock::{self, zone_label};
@@ -11,10 +10,10 @@ use crate::commands::HELP;
 use crate::error::OpError;
 use crate::ics;
 use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction};
-use crate::store::{self, Event, Settings, User};
+use crate::store::{self, Connection, Event, Settings, User};
 
 pub struct Page<'a> {
-    pub conn: &'a Connection,
+    pub conn: &'a mut Connection,
     pub guild_id: i64,
     pub user_id: i64,
     pub notice: Option<&'a str>,
@@ -34,7 +33,7 @@ pub fn landing(invite_url: &str, next: &str, notice: &str, ready: bool) -> Resul
     render("landing.html", ctx)
 }
 
-pub fn home(page: &Page<'_>) -> Result<String, OpError> {
+pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
     if page.guild_id == 0 {
         let mut ctx = shell(page)?;
         ctx.insert("empty_server", context_bool(true));
@@ -154,7 +153,7 @@ fn week_window(now: DateTime<Utc>, tz: Tz) -> (NaiveDate, NaiveDate) {
     (start, start + Duration::days(7))
 }
 
-pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
+pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError> {
     let event = store::event(page.conn, event_id)?.ok_or(OpError::NotFound)?;
     if event.guild_id != page.guild_id {
         return Err(OpError::NotFound);
@@ -431,7 +430,7 @@ impl ListQuery {
 
 const LIST_PAGE_SIZE: usize = 25;
 
-pub fn list_page(page: &Page<'_>, kind: &str, query: ListQuery) -> Result<String, OpError> {
+pub fn list_page(page: &mut Page<'_>, kind: &str, query: ListQuery) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let server = store::discord_server_id(page.conn, page.guild_id)?;
     let events = store::list_events(page.conn, page.guild_id)?;
@@ -488,7 +487,7 @@ pub fn list_page(page: &Page<'_>, kind: &str, query: ListQuery) -> Result<String
 }
 
 fn render_rows(
-    page: &Page<'_>,
+    page: &mut Page<'_>,
     heading: &str,
     empty_title: &str,
     empty_body: &str,
@@ -598,7 +597,7 @@ fn query_escape(value: &str) -> String {
     out
 }
 
-pub fn recurring(page: &Page<'_>, query: ListQuery) -> Result<String, OpError> {
+pub fn recurring(page: &mut Page<'_>, query: ListQuery) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let mut rows = Vec::new();
     for series in store::list_series(page.conn, page.guild_id)? {
@@ -643,7 +642,11 @@ pub fn recurring(page: &Page<'_>, query: ListQuery) -> Result<String, OpError> {
     )
 }
 
-pub fn series_page(page: &Page<'_>, public_id: &str, query: ListQuery) -> Result<String, OpError> {
+pub fn series_page(
+    page: &mut Page<'_>,
+    public_id: &str,
+    query: ListQuery,
+) -> Result<String, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Err(OpError::NotFound);
     };
@@ -715,7 +718,7 @@ pub fn series_page(page: &Page<'_>, public_id: &str, query: ListQuery) -> Result
     render("series.html", ctx)
 }
 
-pub fn presets(page: &Page<'_>) -> Result<String, OpError> {
+pub fn presets(page: &mut Page<'_>) -> Result<String, OpError> {
     let mut items = Vec::new();
     for preset in store::list_presets(page.conn, page.guild_id)? {
         let summary = serde_json::from_str::<logic::PresetBody>(&preset.body)
@@ -743,7 +746,7 @@ pub fn presets(page: &Page<'_>) -> Result<String, OpError> {
     render("presets.html", ctx)
 }
 
-pub fn channels(page: &Page<'_>) -> Result<String, OpError> {
+pub fn channels(page: &mut Page<'_>) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let events = store::list_events(page.conn, page.guild_id)?;
     let mut rows = Vec::new();
@@ -764,7 +767,7 @@ pub fn channels(page: &Page<'_>) -> Result<String, OpError> {
     render("channels.html", ctx)
 }
 
-pub fn commands_page(page: &Page<'_>) -> Result<String, OpError> {
+pub fn commands_page(page: &mut Page<'_>) -> Result<String, OpError> {
     let rows = store::list_commands(page.conn, page.guild_id, 30)?;
     let users = store::list_users(page.conn, page.guild_id)?;
     let mut log = Vec::new();
@@ -793,7 +796,7 @@ pub fn commands_page(page: &Page<'_>) -> Result<String, OpError> {
     render("commands.html", ctx)
 }
 
-pub fn routines_page(page: &Page<'_>) -> Result<String, OpError> {
+pub fn routines_page(page: &mut Page<'_>) -> Result<String, OpError> {
     let routines = logic::list_routines(page.conn, page.guild_id)?;
     let mut ctx = shell(page)?;
     ctx.insert("creating", context_bool(false));
@@ -801,7 +804,7 @@ pub fn routines_page(page: &Page<'_>) -> Result<String, OpError> {
     render("routines.html", ctx)
 }
 
-pub fn routine_form(page: &Page<'_>) -> Result<String, OpError> {
+pub fn routine_form(page: &mut Page<'_>) -> Result<String, OpError> {
     let channels = store::list_channels(page.conn, page.guild_id)?;
     let mut ctx = shell(page)?;
     ctx.insert("creating", context_bool(true));
@@ -818,7 +821,7 @@ pub fn routine_form(page: &Page<'_>) -> Result<String, OpError> {
     render("routines.html", ctx)
 }
 
-pub fn routine_detail(page: &Page<'_>, public_id: &str) -> Result<String, OpError> {
+pub fn routine_detail(page: &mut Page<'_>, public_id: &str) -> Result<String, OpError> {
     let id = logic::routine_in_guild(page.conn, page.guild_id, public_id)?;
     let routine = logic::routine_page_data(page.conn, id)?.ok_or(OpError::NotFound)?;
     let channels = store::list_channels(page.conn, page.guild_id)?;
@@ -855,7 +858,7 @@ fn weekday_options() -> Vec<serde_json::Value> {
         .collect()
 }
 
-pub fn settings_page(page: &Page<'_>) -> Result<String, OpError> {
+pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     if page.guild_id == 0 {
         let mut ctx = shell(page)?;
         ctx.insert("empty_server", context_bool(true));
@@ -905,7 +908,7 @@ pub fn settings_page(page: &Page<'_>) -> Result<String, OpError> {
     render("settings.html", ctx)
 }
 
-pub fn form_page(page: &Page<'_>, draft: &FormDraft) -> Result<String, OpError> {
+pub fn form_page(page: &mut Page<'_>, draft: &FormDraft) -> Result<String, OpError> {
     let (channels, roles) = form_refs(page, draft)?;
     let mut ctx = shell(page)?;
     ctx["heading"] = Value::from(draft.heading.clone());
@@ -941,7 +944,7 @@ pub fn form_page(page: &Page<'_>, draft: &FormDraft) -> Result<String, OpError> 
     render("form.html", ctx)
 }
 
-pub fn not_found(page: &Page<'_>) -> Result<String, OpError> {
+pub fn not_found(page: &mut Page<'_>) -> Result<String, OpError> {
     render("notfound.html", shell(page)?)
 }
 
@@ -1050,7 +1053,7 @@ pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft 
     draft
 }
 
-pub fn form_from_event(conn: &Connection, event_id: i64, tz: Tz) -> Result<FormDraft, OpError> {
+pub fn form_from_event(conn: &mut Connection, event_id: i64, tz: Tz) -> Result<FormDraft, OpError> {
     let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
     let options = store::options_for(conn, event_id)?;
     let reminders = store::reminders_for(conn, event_id)?;
@@ -1470,7 +1473,7 @@ fn default_options() -> Vec<OptionInput> {
     ]
 }
 
-fn form_refs(page: &Page<'_>, draft: &FormDraft) -> Result<(Value, Value), OpError> {
+fn form_refs(page: &mut Page<'_>, draft: &FormDraft) -> Result<(Value, Value), OpError> {
     let channels = store::list_channels(page.conn, page.guild_id)?;
     let roles = store::list_roles(page.conn, page.guild_id)?;
     let channel_values = channels.iter().map(|channel| serde_json::json!({
@@ -1558,7 +1561,7 @@ fn rows_for(
 }
 
 fn card_value(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &Event,
     settings: &Settings,
     tz: Tz,
@@ -1568,7 +1571,7 @@ fn card_value(
     let start = clock::parse_stamp(&event.starts_at)?;
     let options = store::options_for(conn, event.id)?;
     let signups = store::signups_for(conn, event.id)?;
-    let spots: Vec<String> = options
+    let spots: Vec<serde_json::Value> = options
         .iter()
         .map(|opt| {
             let confirmed = signups
@@ -1579,15 +1582,14 @@ fn card_value(
                 .iter()
                 .filter(|s| s.option_id == opt.id && s.state == "waitlisted")
                 .count();
-            let main = match opt.capacity {
-                Some(cap) => format!("{} {}/{}", opt.emoji, confirmed, cap),
-                None => format!("{} {}", opt.emoji, confirmed),
+            let mut count = match opt.capacity {
+                Some(cap) => format!("{confirmed}/{cap}"),
+                None => confirmed.to_string(),
             };
             if waiting > 0 {
-                format!("{main} +{waiting} waiting")
-            } else {
-                main
+                count = format!("{count} +{waiting} waiting");
             }
+            serde_json::json!({"emoji": opt.emoji, "count": count})
         })
         .collect();
     let channel = store::channel(conn, event.channel_id)?
@@ -1639,7 +1641,7 @@ fn people(users: &[User], ids: &[i64]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn activity_rows(page: &Page<'_>, limit: i64) -> Result<Vec<serde_json::Value>, OpError> {
+fn activity_rows(page: &mut Page<'_>, limit: i64) -> Result<Vec<serde_json::Value>, OpError> {
     let now = Utc::now();
     let mut rows = Vec::new();
     for item in store::list_activity(page.conn, page.guild_id, limit)? {
@@ -1668,13 +1670,13 @@ fn cutoff_passed(event: &Event, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-fn zone_of(page: &Page<'_>) -> Result<(Settings, Tz), OpError> {
+fn zone_of(page: &mut Page<'_>) -> Result<(Settings, Tz), OpError> {
     let settings = store::settings(page.conn, page.guild_id)?;
     let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
     Ok((settings, clock::zone(&guild.timezone)?))
 }
 
-fn must_user(page: &Page<'_>) -> Result<User, OpError> {
+fn must_user(page: &mut Page<'_>) -> Result<User, OpError> {
     store::user(page.conn, page.user_id)?.ok_or(OpError::NotFound)
 }
 
@@ -1706,7 +1708,7 @@ impl std::ops::IndexMut<&str> for Bag {
     }
 }
 
-fn shell(page: &Page<'_>) -> Result<Bag, OpError> {
+fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
     let mut ctx = Bag::new();
     asset_context(&mut ctx);
     ctx.insert("title", Value::from(page.title));
@@ -1907,12 +1909,15 @@ fn templates() -> &'static Environment<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema;
+    use crate::store::Connection;
     use chrono::TimeZone;
-    use rusqlite::Connection;
+    use diesel::connection::SimpleConnection;
+    use diesel::prelude::*;
 
     fn sample() -> Connection {
-        let conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
@@ -1921,7 +1926,7 @@ mod tests {
             ",
         )
         .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
         conn
     }
 
@@ -1968,13 +1973,22 @@ mod tests {
             },
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO activity (guild_id, body, created_at) VALUES (1, 'Posted Raid.', '2026-10-13T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        let page = Page {
-            conn: &conn,
+        diesel::insert_into(schema::activity::table)
+            .values((
+                schema::activity::guild_id.eq(1),
+                schema::activity::body.eq("Posted Raid."),
+                schema::activity::created_at.eq("2026-10-13T00:00:00Z"),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        let event_id = store::list_events(&mut conn, 1)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.status == "posted")
+            .unwrap()
+            .id;
+        let mut page = Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 1,
             notice: None,
@@ -1983,22 +1997,14 @@ mod tests {
             title: "This week",
             allowed_guilds: &[1],
         };
-        let home = home(&page).unwrap();
+        let home = home(&mut page).unwrap();
         assert!(
             home.contains("<title>This week · Guild · Marian</title>"),
             "{home}"
         );
-        let event = store::list_events(&conn, 1)
-            .unwrap()
-            .into_iter()
-            .find(|e| e.status == "posted")
-            .unwrap();
-        let page = Page {
-            nav: "event",
-            title: "Event",
-            ..page
-        };
-        let body = event_page(&page, event.id).unwrap();
+        page.nav = "event";
+        page.title = "Event";
+        let body = event_page(&mut page, event_id).unwrap();
         assert!(body.contains("d-kicker"), "{body}");
         assert!(body.contains("Time"), "{body}");
         assert!(body.contains("Created by Nell"), "{body}");
@@ -2008,7 +2014,7 @@ mod tests {
         assert!(body.contains("✅"), "{body}");
         assert!(body.contains("<strong>the hall</strong>"), "{body}");
         assert!(body.contains("&lt;script&gt;"), "{body}");
-        let form = form_page(&page, &blank_form("99", None)).unwrap();
+        let form = form_page(&mut page, &blank_form("99", None)).unwrap();
         assert!(form.contains("Does not repeat"), "{form}");
         assert!(form.contains("Post now"), "{form}");
         assert!(form.contains("Add option"), "{form}");
@@ -2030,12 +2036,9 @@ mod tests {
             4,
             "{form}"
         );
-        let settings = settings_page(&Page {
-            nav: "settings",
-            title: "Settings",
-            ..page
-        })
-        .unwrap();
+        page.nav = "settings";
+        page.title = "Settings";
+        let settings = settings_page(&mut page).unwrap();
         assert!(
             settings.contains("Reminders post in the event thread."),
             "{settings}"
@@ -2044,39 +2047,24 @@ mod tests {
             settings.contains("Every event stays the same distance from now."),
             "{settings}"
         );
-        let desk = commands_page(&Page {
-            nav: "commands",
-            title: "Commands",
-            ..page
-        })
-        .unwrap();
+        page.nav = "commands";
+        page.title = "Commands";
+        let desk = commands_page(&mut page).unwrap();
         assert!(desk.contains("command-line"), "{desk}");
-        let drafts = list_page(
-            &Page {
-                nav: "drafts",
-                title: "Drafts",
-                ..page
-            },
-            "drafts",
-            ListQuery::default(),
-        )
-        .unwrap();
+        page.nav = "drafts";
+        page.title = "Drafts";
+        let drafts = list_page(&mut page, "drafts", ListQuery::default()).unwrap();
         assert!(!drafts.contains("log-list"), "{drafts}");
         assert!(drafts.contains("No drafts."), "{drafts}");
-        let activity = list_page(
-            &Page {
-                nav: "activity",
-                title: "Activity",
-                ..page
-            },
-            "activity",
-            ListQuery::default(),
-        )
-        .unwrap();
+        page.nav = "activity";
+        page.title = "Activity";
+        let activity = list_page(&mut page, "activity", ListQuery::default()).unwrap();
         assert!(activity.contains("log-list"), "{activity}");
         assert!(activity.contains("Posted Raid."), "{activity}");
         assert!(!activity.contains(">Log<"), "{activity}");
-        recurring(&page, ListQuery::default()).unwrap();
+        page.nav = "event";
+        page.title = "Event";
+        recurring(&mut page, ListQuery::default()).unwrap();
         assert!(!activity.contains("<table"), "{activity}");
     }
 
@@ -2098,8 +2086,8 @@ mod tests {
             );
         }
         publish(&mut conn, "Next month", deadline + Duration::days(14), 60);
-        let page = Page {
-            conn: &conn,
+        let mut page = Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 1,
             notice: None,
@@ -2108,7 +2096,7 @@ mod tests {
             title: "This week",
             allowed_guilds: &[1],
         };
-        let home = home(&page).unwrap();
+        let home = home(&mut page).unwrap();
         for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
             assert!(
                 home.contains(&format!("<h3>{name}</h3>")),
@@ -2210,8 +2198,8 @@ mod tests {
             )
             .unwrap();
         }
-        let page = Page {
-            conn: &conn,
+        let mut page = Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 1,
             notice: None,
@@ -2220,7 +2208,7 @@ mod tests {
             title: "Scheduled posts",
             allowed_guilds: &[1],
         };
-        let first = list_page(&page, "scheduled", ListQuery::default()).unwrap();
+        let first = list_page(&mut page, "scheduled", ListQuery::default()).unwrap();
         assert!(first.contains("<table"), "{first}");
         assert!(first.contains("Slot 01"), "{first}");
         assert!(first.contains("Slot 25"), "{first}");
@@ -2229,18 +2217,18 @@ mod tests {
         assert!(first.contains("href=\"?page=2\""), "{first}");
         assert!(!first.contains("Previous"), "{first}");
 
-        let second = list_page(&page, "scheduled", ListQuery::new("", 2)).unwrap();
+        let second = list_page(&mut page, "scheduled", ListQuery::new("", 2)).unwrap();
         assert!(second.contains("Slot 26"), "{second}");
         assert!(!second.contains("Slot 01"), "{second}");
         assert!(second.contains("26–26 of 26"), "{second}");
         assert!(second.contains("Previous"), "{second}");
 
-        let found = list_page(&page, "scheduled", ListQuery::new("slot 26", 1)).unwrap();
+        let found = list_page(&mut page, "scheduled", ListQuery::new("slot 26", 1)).unwrap();
         assert!(found.contains("Slot 26"), "{found}");
         assert!(!found.contains("Slot 01"), "{found}");
         assert!(found.contains("1–1 of 1"), "{found}");
 
-        let none = list_page(&page, "scheduled", ListQuery::new("no such", 1)).unwrap();
+        let none = list_page(&mut page, "scheduled", ListQuery::new("no such", 1)).unwrap();
         assert!(none.contains("No matches."), "{none}");
         assert!(none.contains("value=\"no such\""), "{none}");
     }
@@ -2318,8 +2306,8 @@ mod tests {
             },
         )
         .unwrap();
-        let event = store::event(&conn, id).unwrap().unwrap();
-        let series = store::series(&conn, event.series_id.unwrap())
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let series = store::series(&mut conn, event.series_id.unwrap())
             .unwrap()
             .unwrap();
         logic::save_preset(
@@ -2341,9 +2329,9 @@ mod tests {
             },
         )
         .unwrap();
-        let preset = store::list_presets(&conn, 1).unwrap().remove(0);
-        let page = Page {
-            conn: &conn,
+        let preset = store::list_presets(&mut conn, 1).unwrap().remove(0);
+        let mut page = Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 1,
             notice: None,
@@ -2352,8 +2340,8 @@ mod tests {
             title: "Series",
             allowed_guilds: &[1],
         };
-        assert!(series_page(&page, "1", ListQuery::default()).is_err());
-        let html = series_page(&page, &series.public_id, ListQuery::default()).unwrap();
+        assert!(series_page(&mut page, "1", ListQuery::default()).is_err());
+        let html = series_page(&mut page, &series.public_id, ListQuery::default()).unwrap();
         assert!(
             html.contains(&format!("/recurring/{}", series.public_id)),
             "{html}"
@@ -2362,16 +2350,17 @@ mod tests {
         assert!(html.contains("<table"), "{html}");
         assert!(html.contains("Vault"), "{html}");
         assert!(html.contains("aria-label=\"Search\""), "{html}");
-        let missed = series_page(&page, &series.public_id, ListQuery::new("no such", 1)).unwrap();
+        let missed =
+            series_page(&mut page, &series.public_id, ListQuery::new("no such", 1)).unwrap();
         assert!(missed.contains("No matches."), "{missed}");
         assert!(html.contains("value=\"weekly\" selected"), "{html}");
         assert!(html.contains("value=\"3\""), "{html}");
-        let shown = event_page(&page, event.id).unwrap();
+        let shown = event_page(&mut page, event.id).unwrap();
         assert!(
             shown.contains(&format!("/recurring/{}", series.public_id)),
             "{shown}"
         );
-        let presets_html = presets(&page).unwrap();
+        let presets_html = presets(&mut page).unwrap();
         assert!(
             presets_html.contains(&format!("/presets/{}/delete", preset.public_id)),
             "{presets_html}"
@@ -2381,15 +2370,19 @@ mod tests {
 
     #[test]
     fn settings_render_for_a_server_with_no_people() {
-        let conn = store::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99')",
-            [],
-        )
-        .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
-        let page = Page {
-            conn: &conn,
+        let mut conn = store::open_memory().unwrap();
+        diesel::insert_into(schema::guilds::table)
+            .values((
+                schema::guilds::id.eq(1),
+                schema::guilds::name.eq("Guild"),
+                schema::guilds::timezone.eq("UTC"),
+                schema::guilds::discord_id.eq("99"),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let mut page = Page {
+            conn: &mut conn,
             guild_id: 1,
             user_id: 0,
             notice: None,
@@ -2398,7 +2391,7 @@ mod tests {
             title: "Settings",
             allowed_guilds: &[],
         };
-        let body = settings_page(&page).unwrap();
+        let body = settings_page(&mut page).unwrap();
         assert!(
             body.contains("Nobody from this server has used Marian yet"),
             "{body}"

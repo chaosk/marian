@@ -1,10 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
+use diesel::prelude::*;
 
 use crate::clock;
 use crate::error::OpError;
-use crate::store::{self, Event};
+use crate::schema::{events, signup_options, signups, users};
+use crate::store::{self, Connection, Event};
 
-pub fn user_feed(conn: &rusqlite::Connection, discord_user_id: &str) -> Result<String, OpError> {
+pub fn user_feed(conn: &mut Connection, discord_user_id: &str) -> Result<String, OpError> {
     let mut body = String::from(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Marian//Discord Scheduler//EN\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:Marian\r\n",
     );
@@ -15,31 +17,34 @@ pub fn user_feed(conn: &rusqlite::Connection, discord_user_id: &str) -> Result<S
     Ok(body)
 }
 
-fn events_for_person(
-    conn: &rusqlite::Connection,
-    discord_user_id: &str,
-) -> Result<Vec<Event>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT e.id
-         FROM events e
-         JOIN users u ON u.guild_id = e.guild_id AND u.discord_id = ?
-         LEFT JOIN signups s ON s.event_id = e.id AND s.user_id = u.id AND s.state = 'confirmed'
-         LEFT JOIN signup_options o ON o.id = s.option_id AND o.reminders_enabled = 1
-         WHERE e.status IN ('posted', 'scheduled', 'archived')
-           AND (e.created_by = u.id OR o.id IS NOT NULL)
-         ORDER BY e.starts_at, e.id",
-    )?;
-    let ids = stmt.query_map([discord_user_id], |row| row.get::<_, i64>(0))?;
-    let mut events = Vec::new();
-    for id in ids {
-        if let Some(event) = store::event(conn, id?)? {
-            events.push(event);
-        }
-    }
-    Ok(events)
+fn events_for_person(conn: &mut Connection, discord_user_id: &str) -> Result<Vec<Event>, OpError> {
+    Ok(events::table
+        .inner_join(users::table.on(users::guild_id.eq(events::guild_id)))
+        .left_join(
+            signups::table.on(signups::event_id
+                .eq(events::id)
+                .and(signups::user_id.eq(users::id))
+                .and(signups::state.eq("confirmed"))),
+        )
+        .left_join(
+            signup_options::table.on(signup_options::id
+                .eq(signups::option_id)
+                .and(signup_options::reminders_enabled.eq(true))),
+        )
+        .filter(users::discord_id.eq(discord_user_id))
+        .filter(events::status.eq_any(["posted", "scheduled", "archived"]))
+        .filter(
+            events::created_by
+                .eq(users::id)
+                .or(signup_options::id.is_not_null()),
+        )
+        .select(Event::as_select())
+        .distinct()
+        .order((events::starts_at.asc(), events::id.asc()))
+        .load(conn)?)
 }
 
-pub fn one_event(conn: &rusqlite::Connection, event_id: i64) -> Result<String, OpError> {
+pub fn one_event(conn: &mut Connection, event_id: i64) -> Result<String, OpError> {
     let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
     let mut body = String::from(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Marian//Discord Scheduler//EN\r\nCALSCALE:GREGORIAN\r\n",
@@ -49,7 +54,7 @@ pub fn one_event(conn: &rusqlite::Connection, event_id: i64) -> Result<String, O
     Ok(body)
 }
 
-fn event_body(conn: &rusqlite::Connection, event: &Event) -> Result<String, OpError> {
+fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
     let start = clock::parse_stamp(&event.starts_at)?;
     let end = start + Duration::minutes(event.duration_minutes);
     let channel = store::channel(conn, event.channel_id)?
@@ -111,11 +116,12 @@ fn fold_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diesel::connection::SimpleConnection;
 
     #[test]
     fn a_personal_feed_lists_accepted_and_created_events() {
-        let conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
             INSERT INTO channels (id, guild_id, name) VALUES (1, 1, 'social');
@@ -135,15 +141,18 @@ mod tests {
             ",
         )
         .unwrap();
-        let feed = user_feed(&conn, "u1").unwrap();
+        let feed = user_feed(&mut conn, "u1").unwrap();
         assert!(feed.contains("Nell hosts"), "{feed}");
         assert!(feed.contains("June hosts accepted"), "{feed}");
         assert!(!feed.contains("June hosts declined"), "{feed}");
-        let token = store::ensure_calendar_token(&conn, "u1").unwrap();
+        let token = store::ensure_calendar_token(&mut conn, "u1").unwrap();
         assert_eq!(token.len(), 64);
-        assert_eq!(store::ensure_calendar_token(&conn, "u1").unwrap(), token);
         assert_eq!(
-            store::calendar_discord_id(&conn, &token)
+            store::ensure_calendar_token(&mut conn, "u1").unwrap(),
+            token
+        );
+        assert_eq!(
+            store::calendar_discord_id(&mut conn, &token)
                 .unwrap()
                 .as_deref(),
             Some("u1")
@@ -152,25 +161,18 @@ mod tests {
 
     #[test]
     fn calendar_template_keeps_the_slash_between_dates() {
-        let event = store::event(
-            &{
-                let conn = store::open_memory().unwrap();
-                conn.execute_batch(
-                    "
-                    INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
-                    INSERT INTO channels (id, guild_id, name) VALUES (1, 1, 'social');
-                    INSERT INTO users (id, guild_id, name, handle, color) VALUES (1, 1, 'Nell', 'nell', '#112233');
-                    INSERT INTO events (public_id, guild_id, channel_id, title, starts_at, duration_minutes, status, created_by, created_at, updated_at)
-                    VALUES ('01900000-0000-7000-8000-000000000009', 1, 1, 'BotC #135', '2026-10-14T15:30:00Z', 105, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
-                    ",
-                )
-                .unwrap();
-                conn
-            },
-            1,
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
+            INSERT INTO channels (id, guild_id, name) VALUES (1, 1, 'social');
+            INSERT INTO users (id, guild_id, name, handle, color) VALUES (1, 1, 'Nell', 'nell', '#112233');
+            INSERT INTO events (public_id, guild_id, channel_id, title, starts_at, duration_minutes, status, created_by, created_at, updated_at)
+            VALUES ('01900000-0000-7000-8000-000000000009', 1, 1, 'BotC #135', '2026-10-14T15:30:00Z', 105, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
+            ",
         )
-        .unwrap()
         .unwrap();
+        let event = store::event(&mut conn, 1).unwrap().unwrap();
         let link = calendar_template(&event).unwrap();
         assert_eq!(
             link,

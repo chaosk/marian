@@ -40,7 +40,7 @@
       <p class="meta">{{ event.when }}–{{ event.end }} · #{{ event.channel }} · {{ event.rel }}</p>
       <div class="pills">
         {% for spot in event.spots %}
-        <span class="pill">{{ spot }}</span>
+        <span class="pill"><span>{{ spot.emoji }}</span><span>{{ spot.count }}</span></span>
         {% endfor %}
       </div>
     </a>

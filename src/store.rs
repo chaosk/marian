@@ -1,13 +1,23 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use diesel::connection::Connection as DbConnection;
+use diesel::connection::SimpleConnection;
+use diesel::migration::{MigrationConnection, MigrationSource};
+use diesel::prelude::*;
+use diesel::sql_query;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use crate::clock;
 use crate::error::OpError;
+use crate::schema;
 
-const SCHEMA: &str = include_str!("../migrations/001_init.sql");
+pub use diesel::sqlite::SqliteConnection as Connection;
 
-#[derive(Debug, Clone)]
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::guilds)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Guild {
     pub id: i64,
     pub name: String,
@@ -15,7 +25,9 @@ pub struct Guild {
     pub discord_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::settings)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Settings {
     pub guild_id: i64,
     pub default_reminder_minutes: i64,
@@ -40,7 +52,9 @@ pub struct Settings {
     pub park_clock: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::users)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct User {
     pub id: i64,
     pub guild_id: i64,
@@ -52,7 +66,9 @@ pub struct User {
     pub discord_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::roles)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Role {
     pub id: i64,
     pub guild_id: i64,
@@ -61,7 +77,9 @@ pub struct Role {
     pub discord_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::channels)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Channel {
     pub id: i64,
     pub guild_id: i64,
@@ -72,7 +90,9 @@ pub struct Channel {
     pub discord_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::events)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Event {
     pub id: i64,
     pub public_id: String,
@@ -104,7 +124,9 @@ pub struct Event {
     pub discord_message_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::series)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Series {
     pub id: i64,
     pub public_id: String,
@@ -119,7 +141,9 @@ pub struct Series {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::signup_options)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct SignupOption {
     pub id: i64,
     pub event_id: i64,
@@ -132,7 +156,9 @@ pub struct SignupOption {
     pub position: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::signups)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Signup {
     pub id: i64,
     pub event_id: i64,
@@ -142,7 +168,9 @@ pub struct Signup {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::reminders)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Reminder {
     pub id: i64,
     pub event_id: i64,
@@ -151,7 +179,9 @@ pub struct Reminder {
     pub sent_at: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::activity)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Activity {
     pub id: i64,
     pub guild_id: i64,
@@ -160,7 +190,9 @@ pub struct Activity {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::presets)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Preset {
     pub id: i64,
     pub public_id: String,
@@ -169,7 +201,9 @@ pub struct Preset {
     pub body: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::option_library)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct LibraryOption {
     pub id: i64,
     pub guild_id: i64,
@@ -177,7 +211,9 @@ pub struct LibraryOption {
     pub emoji: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::thread_messages)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct ThreadMessage {
     pub id: i64,
     pub event_id: i64,
@@ -186,7 +222,9 @@ pub struct ThreadMessage {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::command_log)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct CommandRow {
     pub id: i64,
     pub guild_id: i64,
@@ -196,56 +234,235 @@ pub struct CommandRow {
     pub created_at: String,
 }
 
-pub fn open(path: &Path) -> Result<Connection, OpError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                OpError::message(format!("Could not create the data folder: {err}"))
-            })?;
-        }
+pub fn open(database_url: &str) -> Result<Connection, OpError> {
+    let target = parse_database_url(database_url)?;
+    if let Some(directory) = &target.directory {
+        std::fs::create_dir_all(directory)
+            .map_err(|err| OpError::message(format!("Could not create the data folder: {err}")))?;
     }
-    let mut conn = Connection::open(path)?;
-    tune(&mut conn, true)?;
-    migrate(&conn)?;
+    let mut conn = Connection::establish(&target.establish)
+        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))?;
+    tune(&mut conn, target.file, target.system)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> Result<Connection, OpError> {
-    let mut conn = Connection::open_in_memory()?;
-    tune(&mut conn, false)?;
-    migrate(&conn)?;
-    Ok(conn)
+    open("sqlite::memory:")
 }
 
-fn tune(conn: &mut Connection, file: bool) -> Result<(), OpError> {
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "busy_timeout", "5000")?;
+fn tune(conn: &mut Connection, file: bool, system: &'static str) -> Result<(), OpError> {
+    conn.batch_execute("PRAGMA foreign_keys = ON")?;
+    conn.batch_execute("PRAGMA busy_timeout = 5000")?;
     if file {
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.batch_execute("PRAGMA journal_mode = WAL");
     }
-    crate::observe::install_query_trace(conn);
+    crate::observe::install_query_trace(conn, system);
     Ok(())
 }
 
-pub fn migrate(conn: &Connection) -> Result<(), OpError> {
-    let exists: i64 = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
-        [],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
-        conn.execute_batch(SCHEMA)?;
+#[derive(Debug)]
+struct DatabaseUrl {
+    establish: String,
+    directory: Option<std::path::PathBuf>,
+    file: bool,
+    system: &'static str,
+}
+
+fn parse_database_url(database_url: &str) -> Result<DatabaseUrl, OpError> {
+    let database_url = database_url.trim();
+    if database_url.is_empty() {
+        return Err(OpError::message(
+            "Set DATABASE_URL to a database connection string, such as sqlite://data/marian.db.",
+        ));
     }
+    let database_url = normalize_scheme(database_url);
+    if database_url == ":memory:" || database_url == "sqlite::memory:" {
+        return Ok(memory_url());
+    }
+    if let Some(spec) = database_url.strip_prefix("sqlite:") {
+        return sqlite_url(spec);
+    }
+    if let Some(spec) = database_url.strip_prefix("file:") {
+        return file_url(&database_url, spec);
+    }
+    if let Some((scheme, _)) = database_url.split_once("://") {
+        if !scheme.is_empty() {
+            return Err(OpError::message(format!(
+                "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db. The scheme is {scheme}."
+            )));
+        }
+    }
+    file_on_disk(database_url.clone(), &database_url)
+}
+
+fn normalize_scheme(database_url: &str) -> String {
+    let Some((scheme, rest)) = database_url.split_once(':') else {
+        return database_url.to_string();
+    };
+    if scheme.is_empty() || !scheme.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return database_url.to_string();
+    }
+    format!("{}:{rest}", scheme.to_ascii_lowercase())
+}
+
+fn memory_url() -> DatabaseUrl {
+    DatabaseUrl {
+        establish: ":memory:".into(),
+        directory: None,
+        file: false,
+        system: "sqlite",
+    }
+}
+
+fn sqlite_url(spec: &str) -> Result<DatabaseUrl, OpError> {
+    let (body, query) = split_query(spec);
+    if body == ":memory:"
+        || body == "//:memory:"
+        || body == "///:memory:"
+        || query_requests_memory(query)
+    {
+        return Ok(memory_url());
+    }
+    let (establish, path) = if let Some(rest) = body.strip_prefix("//") {
+        (format!("sqlite://{rest}{query}"), rest.to_string())
+    } else if let Some(path) = body.strip_prefix('/') {
+        (format!("sqlite:///{path}{query}"), format!("/{path}"))
+    } else if body.is_empty() {
+        return Err(OpError::message(
+            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
+        ));
+    } else {
+        (format!("sqlite://{body}{query}"), body.to_string())
+    };
+    file_on_disk(establish, &path)
+}
+
+fn file_url(original: &str, spec: &str) -> Result<DatabaseUrl, OpError> {
+    let (body, query) = split_query(spec);
+    if body == ":memory:" || query_requests_memory(query) {
+        return Ok(memory_url());
+    }
+    let path = if let Some(rest) = body.strip_prefix("//") {
+        match rest.split_once('/') {
+            Some((host, path)) if host.is_empty() || host.eq_ignore_ascii_case("localhost") => {
+                format!("/{path}")
+            }
+            Some(_) => body.to_string(),
+            None => rest.to_string(),
+        }
+    } else {
+        body.to_string()
+    };
+    if path.is_empty() {
+        return Err(OpError::message(
+            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
+        ));
+    }
+    file_on_disk(original.to_string(), &path)
+}
+
+fn file_on_disk(establish: impl Into<String>, path: &str) -> Result<DatabaseUrl, OpError> {
+    if path.is_empty() {
+        return Err(OpError::message(
+            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
+        ));
+    }
+    let directory = Path::new(path).parent().and_then(|parent| {
+        if parent.as_os_str().is_empty() {
+            None
+        } else {
+            Some(parent.to_path_buf())
+        }
+    });
+    Ok(DatabaseUrl {
+        establish: establish.into(),
+        directory,
+        file: true,
+        system: "sqlite",
+    })
+}
+
+fn split_query(spec: &str) -> (&str, &str) {
+    match spec.split_once('?') {
+        Some((body, _)) => (body, &spec[body.len()..]),
+        None => (spec, ""),
+    }
+}
+
+fn query_requests_memory(query: &str) -> bool {
+    query.trim_start_matches('?').split('&').any(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        key == "mode" && value == "memory"
+    })
+}
+
+pub fn database_url() -> String {
+    choose_database_url(env_value("DATABASE_URL"), env_value("MARIAN_DB"))
+}
+
+fn choose_database_url(database_url: Option<String>, legacy: Option<String>) -> String {
+    database_url
+        .or(legacy)
+        .unwrap_or_else(|| "sqlite://data/marian.db".into())
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
+    if table_exists(conn, "meta")? && !table_exists(conn, "__diesel_schema_migrations")? {
+        legacy_upgrade(conn)?;
+        record_applied_migrations(conn)?;
+    }
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|err| OpError::message(format!("Could not update the database: {err}")))?;
+    Ok(())
+}
+
+fn table_exists(conn: &mut Connection, table: &str) -> Result<bool, OpError> {
+    #[derive(QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let count: i64 =
+        sql_query("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind::<diesel::sql_types::Text, _>(table)
+            .get_result::<CountRow>(conn)?
+            .count;
+    Ok(count > 0)
+}
+
+fn record_applied_migrations(conn: &mut Connection) -> Result<(), OpError> {
+    MigrationConnection::setup(conn)?;
+    let migrations =
+        <EmbeddedMigrations as MigrationSource<diesel::sqlite::Sqlite>>::migrations(&MIGRATIONS)
+            .map_err(|err| OpError::message(format!("Could not update the database: {err}")))?;
+    for migration in migrations {
+        let version = migration.name().version().to_string();
+        sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES (?)")
+            .bind::<diesel::sql_types::Text, _>(version)
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
+fn legacy_upgrade(conn: &mut Connection) -> Result<(), OpError> {
     if has_column(conn, "settings", "premium")? {
-        conn.execute("ALTER TABLE settings DROP COLUMN premium", [])?;
+        sql_query("ALTER TABLE settings DROP COLUMN premium").execute(conn)?;
     }
     if !has_column(conn, "roles", "discord_id")? {
-        conn.execute("ALTER TABLE roles ADD COLUMN discord_id TEXT", [])?;
+        sql_query("ALTER TABLE roles ADD COLUMN discord_id TEXT").execute(conn)?;
     }
     if !has_column(conn, "threads", "discord_id")? {
-        conn.execute("ALTER TABLE threads ADD COLUMN discord_id TEXT", [])?;
+        sql_query("ALTER TABLE threads ADD COLUMN discord_id TEXT").execute(conn)?;
     }
-    conn.execute_batch(
+    conn.batch_execute(
         "CREATE TABLE IF NOT EXISTS applied_access (
             event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
             discord_user_id TEXT NOT NULL,
@@ -266,29 +483,21 @@ pub fn migrate(conn: &Connection) -> Result<(), OpError> {
         )",
     )?;
     if !has_column(conn, "event_prompts", "source_channel")? {
-        conn.execute(
-            "ALTER TABLE event_prompts ADD COLUMN source_channel TEXT",
-            [],
-        )?;
+        sql_query("ALTER TABLE event_prompts ADD COLUMN source_channel TEXT").execute(conn)?;
     }
     if !has_column(conn, "event_prompts", "source_discord")? {
-        conn.execute(
-            "ALTER TABLE event_prompts ADD COLUMN source_discord TEXT",
-            [],
-        )?;
+        sql_query("ALTER TABLE event_prompts ADD COLUMN source_discord TEXT").execute(conn)?;
     }
     if !has_column(conn, "event_prompts", "draft")? {
-        conn.execute("ALTER TABLE event_prompts ADD COLUMN draft TEXT", [])?;
+        sql_query("ALTER TABLE event_prompts ADD COLUMN draft TEXT").execute(conn)?;
     }
     if !has_column(conn, "events", "public_id")? {
-        conn.execute("ALTER TABLE events ADD COLUMN public_id TEXT", [])?;
+        sql_query("ALTER TABLE events ADD COLUMN public_id TEXT").execute(conn)?;
     }
     backfill_public_ids(conn)?;
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_public_id ON events (public_id)",
-        [],
-    )?;
-    conn.execute_batch(
+    sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_public_id ON events (public_id)")
+        .execute(conn)?;
+    conn.batch_execute(
         "CREATE TABLE IF NOT EXISTS web_sessions (
             token TEXT PRIMARY KEY,
             discord_user_id TEXT NOT NULL,
@@ -308,7 +517,7 @@ pub fn migrate(conn: &Connection) -> Result<(), OpError> {
             created_at TEXT NOT NULL
         )",
     )?;
-    conn.execute_batch(
+    conn.batch_execute(
         "CREATE TABLE IF NOT EXISTS event_templates (
             id INTEGER PRIMARY KEY,
             guild_id INTEGER NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
@@ -368,125 +577,130 @@ pub fn migrate(conn: &Connection) -> Result<(), OpError> {
         )",
     )?;
     if !has_column(conn, "routines", "description")? {
-        conn.execute(
-            "ALTER TABLE routines ADD COLUMN description TEXT NOT NULL DEFAULT ''",
-            [],
-        )?;
+        sql_query("ALTER TABLE routines ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            .execute(conn)?;
     }
     if !has_column(conn, "routines", "public_id")? {
-        conn.execute("ALTER TABLE routines ADD COLUMN public_id TEXT", [])?;
+        sql_query("ALTER TABLE routines ADD COLUMN public_id TEXT").execute(conn)?;
     }
     if !has_column(conn, "series", "template_id")? {
-        conn.execute(
+        sql_query(
             "ALTER TABLE series ADD COLUMN template_id INTEGER REFERENCES event_templates(id)",
-            [],
-        )?;
+        )
+        .execute(conn)?;
     }
     if !has_column(conn, "routines", "template_id")? {
-        conn.execute(
+        sql_query(
             "ALTER TABLE routines ADD COLUMN template_id INTEGER REFERENCES event_templates(id)",
-            [],
-        )?;
+        )
+        .execute(conn)?;
     }
     backfill_event_templates(conn)?;
     backfill_routine_ids(conn)?;
     if !has_column(conn, "series", "public_id")? {
-        conn.execute("ALTER TABLE series ADD COLUMN public_id TEXT", [])?;
+        sql_query("ALTER TABLE series ADD COLUMN public_id TEXT").execute(conn)?;
     }
     if !has_column(conn, "presets", "public_id")? {
-        conn.execute("ALTER TABLE presets ADD COLUMN public_id TEXT", [])?;
+        sql_query("ALTER TABLE presets ADD COLUMN public_id TEXT").execute(conn)?;
     }
     backfill_series_ids(conn)?;
     backfill_preset_ids(conn)?;
-    conn.execute(
-        "UPDATE events SET status = 'scheduled' WHERE status = 'ballot'",
-        [],
-    )?;
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_series_public_id ON series (public_id)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_presets_public_id ON presets (public_id)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_routines_public_id ON routines (public_id)",
-        [],
-    )?;
+    sql_query("UPDATE events SET status = 'scheduled' WHERE status = 'ballot'").execute(conn)?;
+    sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_series_public_id ON series (public_id)")
+        .execute(conn)?;
+    sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_presets_public_id ON presets (public_id)")
+        .execute(conn)?;
+    sql_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_routines_public_id ON routines (public_id)")
+        .execute(conn)?;
     Ok(())
 }
 
-fn backfill_event_templates(conn: &Connection) -> Result<(), OpError> {
+fn backfill_event_templates(conn: &mut Connection) -> Result<(), OpError> {
     if has_column(conn, "series", "template_json")? && has_column(conn, "series", "template_id")? {
-        let mut stmt = conn
-            .prepare("SELECT id, guild_id, template_json FROM series WHERE template_id IS NULL")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-        for (id, guild_id, raw) in rows {
+        let rows =
+            sql_query("SELECT id, guild_id, template_json FROM series WHERE template_id IS NULL")
+                .load::<OldSeries>(conn)?;
+        for row in rows {
             let value: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-            let template_id = insert_template_value(conn, guild_id, &value, None)?;
-            conn.execute(
-                "UPDATE series SET template_id = ? WHERE id = ?",
-                params![template_id, id],
-            )?;
+                serde_json::from_str(&row.template_json).unwrap_or(serde_json::json!({}));
+            let template_id = insert_template_value(conn, row.guild_id, &value, None)?;
+            diesel::update(schema::series::table.filter(schema::series::id.eq(row.id)))
+                .set(schema::series::template_id.eq(template_id))
+                .execute(conn)?;
         }
     }
     if has_column(conn, "routines", "title")? && has_column(conn, "routines", "template_id")? {
-        let mut stmt = conn.prepare(
+        let rows = sql_query(
             "SELECT id, guild_id, channel_id, title, description, duration_minutes
              FROM routines WHERE template_id IS NULL",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
+        )
+        .load::<OldRoutine>(conn)?;
         let options = serde_json::json!([
             {"name":"Accepted","emoji":"✅","waitlist":false,"reminders_enabled":true},
             {"name":"Declined","emoji":"❌","waitlist":false,"reminders_enabled":true},
             {"name":"Tentative","emoji":"❔","waitlist":false,"reminders_enabled":true}
         ]);
-        for (id, guild_id, channel_id, title, description, duration) in rows {
+        for row in rows {
             let value = serde_json::json!({
-                "channel_id": channel_id,
-                "title": title,
-                "description": description,
-                "duration_minutes": duration,
+                "channel_id": row.channel_id,
+                "title": row.title,
+                "description": row.description,
+                "duration_minutes": row.duration_minutes,
                 "color": "#1e3a6e",
                 "thread_enabled": true,
                 "options": options,
                 "reminders": [{"offset_minutes": 15, "message": ""}],
             });
-            let template_id = insert_template_value(conn, guild_id, &value, Some(channel_id))?;
-            conn.execute(
-                "UPDATE routines SET template_id = ? WHERE id = ?",
-                params![template_id, id],
-            )?;
+            let template_id =
+                insert_template_value(conn, row.guild_id, &value, Some(row.channel_id))?;
+            diesel::update(schema::routines::table.filter(schema::routines::id.eq(row.id)))
+                .set(schema::routines::template_id.eq(template_id))
+                .execute(conn)?;
         }
     }
     Ok(())
 }
 
+#[derive(QueryableByName)]
+struct OldSeries {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    id: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    guild_id: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    template_json: String,
+}
+
+#[derive(QueryableByName)]
+struct OldRoutine {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    id: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    guild_id: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    channel_id: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    title: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    description: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    duration_minutes: i64,
+}
+
+#[derive(QueryableByName)]
+struct IdRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    id: i64,
+}
+
+#[derive(QueryableByName)]
+struct ColName {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+}
+
 fn insert_template_value(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     value: &serde_json::Value,
     channel_override: Option<i64>,
@@ -527,172 +741,123 @@ fn insert_template_value(
             .unwrap_or(serde_json::json!([]))
             .to_string()
     };
-    conn.execute(
-        "INSERT INTO event_templates (
-            guild_id, channel_id, title, description, duration_minutes, color, image_url,
-            thread_enabled, multiple_signups, mention_everyone, attendee_role_id,
-            cutoff_offset_minutes, options_json, reminders_json, mention_role_ids,
-            restrict_role_ids, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            guild_id,
-            channel_id,
-            title,
-            description,
-            duration,
-            color,
-            image,
-            i(flag("thread_enabled")),
-            i(flag("multiple_signups")),
-            i(flag("mention_everyone")),
-            value.get("attendee_role_id").and_then(|item| item.as_i64()),
-            value
+    let id = diesel::insert_into(schema::event_templates::table)
+        .values((
+            schema::event_templates::guild_id.eq(guild_id),
+            schema::event_templates::channel_id.eq(channel_id),
+            schema::event_templates::title.eq(title),
+            schema::event_templates::description.eq(description),
+            schema::event_templates::duration_minutes.eq(duration),
+            schema::event_templates::color.eq(color),
+            schema::event_templates::image_url.eq(image),
+            schema::event_templates::thread_enabled.eq(flag("thread_enabled")),
+            schema::event_templates::multiple_signups.eq(flag("multiple_signups")),
+            schema::event_templates::mention_everyone.eq(flag("mention_everyone")),
+            schema::event_templates::attendee_role_id
+                .eq(value.get("attendee_role_id").and_then(|item| item.as_i64())),
+            schema::event_templates::cutoff_offset_minutes.eq(value
                 .get("cutoff_offset_minutes")
-                .and_then(|item| item.as_i64()),
-            list("options"),
-            list("reminders"),
-            list("mention_role_ids"),
-            list("restrict_role_ids"),
-            now_stamp(),
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
+                .and_then(|item| item.as_i64())),
+            schema::event_templates::options_json.eq(list("options")),
+            schema::event_templates::reminders_json.eq(list("reminders")),
+            schema::event_templates::mention_role_ids.eq(list("mention_role_ids")),
+            schema::event_templates::restrict_role_ids.eq(list("restrict_role_ids")),
+            schema::event_templates::created_at.eq(now_stamp()),
+        ))
+        .returning(schema::event_templates::id)
+        .get_result(conn)?;
+    Ok(id)
 }
 
-fn backfill_routine_ids(conn: &Connection) -> Result<(), OpError> {
-    if !has_column(conn, "routines", "public_id")? {
-        return Ok(());
-    }
-    let mut stmt =
-        conn.prepare("SELECT id FROM routines WHERE public_id IS NULL OR public_id = ''")?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    for id in ids {
-        conn.execute(
-            "UPDATE routines SET public_id = ? WHERE id = ?",
-            params![crate::ids::routine_id(), id],
-        )?;
-    }
-    Ok(())
+fn backfill_routine_ids(conn: &mut Connection) -> Result<(), OpError> {
+    fill_public_ids(conn, "routines")
 }
 
-fn backfill_series_ids(conn: &Connection) -> Result<(), OpError> {
+fn backfill_series_ids(conn: &mut Connection) -> Result<(), OpError> {
     fill_public_ids(conn, "series")
 }
 
-fn backfill_preset_ids(conn: &Connection) -> Result<(), OpError> {
+fn backfill_preset_ids(conn: &mut Connection) -> Result<(), OpError> {
     fill_public_ids(conn, "presets")
 }
 
-fn fill_public_ids(conn: &Connection, table: &str) -> Result<(), OpError> {
+fn fill_public_ids(conn: &mut Connection, table: &str) -> Result<(), OpError> {
     if !has_column(conn, table, "public_id")? {
         return Ok(());
     }
-    let mut stmt = conn.prepare(&format!(
+    let ids = sql_query(format!(
         "SELECT id FROM {table} WHERE public_id IS NULL OR public_id = ''"
-    ))?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    for id in ids {
-        conn.execute(
-            &format!("UPDATE {table} SET public_id = ? WHERE id = ?"),
-            params![crate::ids::event_id(), id],
-        )?;
+    ))
+    .load::<IdRow>(conn)?;
+    for row in ids {
+        let public_id = if table == "routines" {
+            crate::ids::routine_id()
+        } else {
+            crate::ids::event_id()
+        };
+        sql_query(format!("UPDATE {table} SET public_id = ? WHERE id = ?"))
+            .bind::<diesel::sql_types::Text, _>(public_id)
+            .bind::<diesel::sql_types::BigInt, _>(row.id)
+            .execute(conn)?;
     }
     Ok(())
 }
 
-fn backfill_public_ids(conn: &Connection) -> Result<(), OpError> {
-    let mut stmt =
-        conn.prepare("SELECT id FROM events WHERE public_id IS NULL OR public_id = ''")?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    for id in ids {
-        conn.execute(
-            "UPDATE events SET public_id = ? WHERE id = ?",
-            params![crate::ids::event_id(), id],
-        )?;
-    }
-    Ok(())
+fn backfill_public_ids(conn: &mut Connection) -> Result<(), OpError> {
+    fill_public_ids(conn, "events")
 }
 
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, OpError> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for name in rows {
-        if name? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+fn has_column(conn: &mut Connection, table: &str, column: &str) -> Result<bool, OpError> {
+    let rows = sql_query(format!("PRAGMA table_info({table})")).load::<ColName>(conn)?;
+    Ok(rows.iter().any(|row| row.name == column))
 }
 
 pub fn with_tx<T>(
     conn: &mut Connection,
-    body: impl FnOnce(&Connection) -> Result<T, OpError>,
+    body: impl FnOnce(&mut Connection) -> Result<T, OpError>,
 ) -> Result<T, OpError> {
-    let tx = conn.transaction()?;
-    let value = body(&tx)?;
-    tx.commit()?;
-    Ok(value)
+    conn.transaction(body)
 }
 
-fn flag(row: &Row<'_>, name: &str) -> rusqlite::Result<bool> {
-    Ok(row.get::<_, i64>(name)? != 0)
-}
-
-pub fn meta(conn: &Connection, key: &str) -> Result<Option<String>, OpError> {
-    Ok(conn
-        .query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
-            row.get(0)
-        })
+pub fn meta(conn: &mut Connection, key: &str) -> Result<Option<String>, OpError> {
+    Ok(schema::meta::table
+        .filter(schema::meta::key.eq(key))
+        .select(schema::meta::value)
+        .first(conn)
         .optional()?)
 }
 
-pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<(), OpError> {
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
+pub fn set_meta(conn: &mut Connection, key: &str, value: &str) -> Result<(), OpError> {
+    diesel::insert_into(schema::meta::table)
+        .values((schema::meta::key.eq(key), schema::meta::value.eq(value)))
+        .on_conflict(schema::meta::key)
+        .do_update()
+        .set(schema::meta::value.eq(value))
+        .execute(conn)?;
     Ok(())
 }
 
-pub fn list_guilds(conn: &Connection) -> Result<Vec<Guild>, OpError> {
-    let mut stmt = conn.prepare("SELECT * FROM guilds ORDER BY id")?;
-    let rows = stmt.query_map([], map_guild)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+pub fn list_guilds(conn: &mut Connection) -> Result<Vec<Guild>, OpError> {
+    Ok(schema::guilds::table
+        .order(schema::guilds::id.asc())
+        .select(Guild::as_select())
+        .load(conn)?)
 }
 
-pub fn guild(conn: &Connection, id: i64) -> Result<Option<Guild>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM guilds WHERE id = ?", [id], map_guild)
+pub fn guild(conn: &mut Connection, id: i64) -> Result<Option<Guild>, OpError> {
+    Ok(schema::guilds::table
+        .filter(schema::guilds::id.eq(id))
+        .select(Guild::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn guild_by_discord(conn: &Connection, discord_id: &str) -> Result<Option<Guild>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM guilds WHERE discord_id = ?",
-            [discord_id],
-            map_guild,
-        )
+pub fn guild_by_discord(conn: &mut Connection, discord_id: &str) -> Result<Option<Guild>, OpError> {
+    Ok(schema::guilds::table
+        .filter(schema::guilds::discord_id.eq(discord_id))
+        .select(Guild::as_select())
+        .first(conn)
         .optional()?)
-}
-
-fn map_guild(row: &Row<'_>) -> rusqlite::Result<Guild> {
-    Ok(Guild {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        timezone: row.get("timezone")?,
-        discord_id: row.get("discord_id")?,
-    })
 }
 
 pub fn default_settings(guild_id: i64) -> Settings {
@@ -721,262 +886,200 @@ pub fn default_settings(guild_id: i64) -> Settings {
     }
 }
 
-pub fn insert_default_settings(conn: &Connection, guild_id: i64) -> Result<(), OpError> {
-    conn.execute("INSERT INTO settings (guild_id) VALUES (?)", [guild_id])?;
+pub fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+    diesel::insert_into(schema::settings::table)
+        .values(schema::settings::guild_id.eq(guild_id))
+        .execute(conn)?;
     Ok(())
 }
 
-pub fn settings(conn: &Connection, guild_id: i64) -> Result<Settings, OpError> {
-    conn.query_row(
-        "SELECT * FROM settings WHERE guild_id = ?",
-        [guild_id],
-        map_settings,
+pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpError> {
+    schema::settings::table
+        .filter(schema::settings::guild_id.eq(guild_id))
+        .select(Settings::as_select())
+        .first(conn)
+        .optional()?
+        .ok_or_else(|| OpError::message("This server has no settings yet."))
+}
+
+pub fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
+    diesel::update(
+        schema::settings::table.filter(schema::settings::guild_id.eq(settings.guild_id)),
     )
-    .optional()?
-    .ok_or_else(|| OpError::message("This server has no settings yet."))
-}
-
-fn map_settings(row: &Row<'_>) -> rusqlite::Result<Settings> {
-    Ok(Settings {
-        guild_id: row.get("guild_id")?,
-        default_reminder_minutes: row.get("default_reminder_minutes")?,
-        thread_reminders: flag(row, "thread_reminders")?,
-        auto_archive: flag(row, "auto_archive")?,
-        auto_archive_hours: row.get("auto_archive_hours")?,
-        event_threads: flag(row, "event_threads")?,
-        auto_join_threads: flag(row, "auto_join_threads")?,
-        show_attendees: flag(row, "show_attendees")?,
-        hour_24: flag(row, "hour_24")?,
-        localize_time: flag(row, "localize_time")?,
-        purge_channels: flag(row, "purge_channels")?,
-        temp_roles: flag(row, "temp_roles")?,
-        calendar_auto_sync: flag(row, "calendar_auto_sync")?,
-        role_event: row.get("role_event")?,
-        role_edit: row.get("role_edit")?,
-        role_delete: row.get("role_delete")?,
-        role_channel: row.get("role_channel")?,
-        role_signup: row.get("role_signup")?,
-        post_lead_hours: row.get("post_lead_hours")?,
-        digest: row.get("digest")?,
-        park_clock: flag(row, "park_clock")?,
-    })
-}
-
-pub fn update_settings(conn: &Connection, settings: &Settings) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE settings SET
-            default_reminder_minutes = ?, thread_reminders = ?,
-            auto_archive = ?, auto_archive_hours = ?, event_threads = ?,
-            auto_join_threads = ?, show_attendees = ?, hour_24 = ?, localize_time = ?,
-            purge_channels = ?, temp_roles = ?, calendar_auto_sync = ?,
-            role_event = ?, role_edit = ?, role_delete = ?, role_channel = ?, role_signup = ?,
-            post_lead_hours = ?, digest = ?, park_clock = ?
-         WHERE guild_id = ?",
-        params![
-            settings.default_reminder_minutes,
-            i(settings.thread_reminders),
-            i(settings.auto_archive),
-            settings.auto_archive_hours,
-            i(settings.event_threads),
-            i(settings.auto_join_threads),
-            i(settings.show_attendees),
-            i(settings.hour_24),
-            i(settings.localize_time),
-            i(settings.purge_channels),
-            i(settings.temp_roles),
-            i(settings.calendar_auto_sync),
-            settings.role_event,
-            settings.role_edit,
-            settings.role_delete,
-            settings.role_channel,
-            settings.role_signup,
-            settings.post_lead_hours,
-            settings.digest,
-            i(settings.park_clock),
-            settings.guild_id,
-        ],
-    )?;
+    .set((
+        schema::settings::default_reminder_minutes.eq(settings.default_reminder_minutes),
+        schema::settings::thread_reminders.eq(settings.thread_reminders),
+        schema::settings::auto_archive.eq(settings.auto_archive),
+        schema::settings::auto_archive_hours.eq(settings.auto_archive_hours),
+        schema::settings::event_threads.eq(settings.event_threads),
+        schema::settings::auto_join_threads.eq(settings.auto_join_threads),
+        schema::settings::show_attendees.eq(settings.show_attendees),
+        schema::settings::hour_24.eq(settings.hour_24),
+        schema::settings::localize_time.eq(settings.localize_time),
+        schema::settings::purge_channels.eq(settings.purge_channels),
+        schema::settings::temp_roles.eq(settings.temp_roles),
+        schema::settings::calendar_auto_sync.eq(settings.calendar_auto_sync),
+        schema::settings::role_event.eq(settings.role_event),
+        schema::settings::role_edit.eq(settings.role_edit),
+        schema::settings::role_delete.eq(settings.role_delete),
+        schema::settings::role_channel.eq(settings.role_channel),
+        schema::settings::role_signup.eq(settings.role_signup),
+        schema::settings::post_lead_hours.eq(settings.post_lead_hours),
+        schema::settings::digest.eq(&settings.digest),
+        schema::settings::park_clock.eq(settings.park_clock),
+    ))
+    .execute(conn)?;
     Ok(())
 }
 
-pub fn list_roles(conn: &Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM roles WHERE guild_id = ? ORDER BY id",
-        [guild_id],
-        map_role,
-    )
+pub fn list_roles(conn: &mut Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
+    Ok(schema::roles::table
+        .filter(schema::roles::guild_id.eq(guild_id))
+        .order(schema::roles::id.asc())
+        .select(Role::as_select())
+        .load(conn)?)
 }
 
-pub fn role(conn: &Connection, id: i64) -> Result<Option<Role>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM roles WHERE id = ?", [id], map_role)
+pub fn role(conn: &mut Connection, id: i64) -> Result<Option<Role>, OpError> {
+    Ok(schema::roles::table
+        .filter(schema::roles::id.eq(id))
+        .select(Role::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn role_by_name(conn: &Connection, guild_id: i64, name: &str) -> Result<Option<Role>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM roles WHERE guild_id = ? AND lower(name) = lower(?)",
-            params![guild_id, name],
-            map_role,
-        )
+pub fn role_by_name(
+    conn: &mut Connection,
+    guild_id: i64,
+    name: &str,
+) -> Result<Option<Role>, OpError> {
+    Ok(schema::roles::table
+        .filter(schema::roles::guild_id.eq(guild_id))
+        .filter(schema::lower(schema::roles::name).eq(schema::lower(name)))
+        .select(Role::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_role(row: &Row<'_>) -> rusqlite::Result<Role> {
-    Ok(Role {
-        id: row.get("id")?,
-        guild_id: row.get("guild_id")?,
-        name: row.get("name")?,
-        color: row.get("color")?,
-        discord_id: row.get("discord_id")?,
-    })
+pub fn list_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
+    Ok(schema::channels::table
+        .filter(schema::channels::guild_id.eq(guild_id))
+        .order((schema::channels::position.asc(), schema::channels::id.asc()))
+        .select(Channel::as_select())
+        .load(conn)?)
 }
 
-pub fn list_channels(conn: &Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM channels WHERE guild_id = ? ORDER BY position, id",
-        [guild_id],
-        map_channel,
-    )
-}
-
-pub fn channel(conn: &Connection, id: i64) -> Result<Option<Channel>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM channels WHERE id = ?", [id], map_channel)
+pub fn channel(conn: &mut Connection, id: i64) -> Result<Option<Channel>, OpError> {
+    Ok(schema::channels::table
+        .filter(schema::channels::id.eq(id))
+        .select(Channel::as_select())
+        .first(conn)
         .optional()?)
 }
 
 pub fn channel_by_name(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     name: &str,
 ) -> Result<Option<Channel>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM channels WHERE guild_id = ? AND lower(name) = lower(?)",
-            params![guild_id, name.trim_start_matches('#')],
-            map_channel,
-        )
+    let name = name.trim_start_matches('#');
+    Ok(schema::channels::table
+        .filter(schema::channels::guild_id.eq(guild_id))
+        .filter(schema::lower(schema::channels::name).eq(schema::lower(name)))
+        .select(Channel::as_select())
+        .first(conn)
         .optional()?)
 }
 
 pub fn channel_by_discord(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
 ) -> Result<Option<Channel>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM channels WHERE guild_id = ? AND discord_id = ?",
-            params![guild_id, discord_id],
-            map_channel,
-        )
+    Ok(schema::channels::table
+        .filter(schema::channels::guild_id.eq(guild_id))
+        .filter(schema::channels::discord_id.eq(discord_id))
+        .select(Channel::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_channel(row: &Row<'_>) -> rusqlite::Result<Channel> {
-    Ok(Channel {
-        id: row.get("id")?,
-        guild_id: row.get("guild_id")?,
-        name: row.get("name")?,
-        kind: row.get("kind")?,
-        position: row.get("position")?,
-        purged_at: row.get("purged_at")?,
-        discord_id: row.get("discord_id")?,
-    })
+pub fn list_users(conn: &mut Connection, guild_id: i64) -> Result<Vec<User>, OpError> {
+    Ok(schema::users::table
+        .filter(schema::users::guild_id.eq(guild_id))
+        .order(schema::users::name.asc())
+        .select(User::as_select())
+        .load(conn)?)
 }
 
-pub fn list_users(conn: &Connection, guild_id: i64) -> Result<Vec<User>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM users WHERE guild_id = ? ORDER BY name",
-        [guild_id],
-        map_user,
-    )
-}
-
-pub fn user(conn: &Connection, id: i64) -> Result<Option<User>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM users WHERE id = ?", [id], map_user)
+pub fn user(conn: &mut Connection, id: i64) -> Result<Option<User>, OpError> {
+    Ok(schema::users::table
+        .filter(schema::users::id.eq(id))
+        .select(User::as_select())
+        .first(conn)
         .optional()?)
 }
 
 pub fn user_by_handle(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     handle: &str,
 ) -> Result<Option<User>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM users WHERE guild_id = ? AND lower(handle) = lower(?)",
-            params![guild_id, handle.trim_start_matches('@')],
-            map_user,
-        )
+    let handle = handle.trim_start_matches('@');
+    Ok(schema::users::table
+        .filter(schema::users::guild_id.eq(guild_id))
+        .filter(schema::lower(schema::users::handle).eq(schema::lower(handle)))
+        .select(User::as_select())
+        .first(conn)
         .optional()?)
 }
 
 pub fn user_by_discord(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
 ) -> Result<Option<User>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM users WHERE guild_id = ? AND discord_id = ?",
-            params![guild_id, discord_id],
-            map_user,
-        )
+    Ok(schema::users::table
+        .filter(schema::users::guild_id.eq(guild_id))
+        .filter(schema::users::discord_id.eq(discord_id))
+        .select(User::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_user(row: &Row<'_>) -> rusqlite::Result<User> {
-    Ok(User {
-        id: row.get("id")?,
-        guild_id: row.get("guild_id")?,
-        name: row.get("name")?,
-        handle: row.get("handle")?,
-        color: row.get("color")?,
-        reminders_enabled: flag(row, "reminders_enabled")?,
-        organizer: flag(row, "organizer")?,
-        discord_id: row.get("discord_id")?,
-    })
+pub fn user_role_ids(conn: &mut Connection, user_id: i64) -> Result<Vec<i64>, OpError> {
+    Ok(schema::user_roles::table
+        .filter(schema::user_roles::user_id.eq(user_id))
+        .select(schema::user_roles::role_id)
+        .load(conn)?)
 }
 
-pub fn user_role_ids(conn: &Connection, user_id: i64) -> Result<Vec<i64>, OpError> {
-    let mut stmt = conn.prepare("SELECT role_id FROM user_roles WHERE user_id = ?")?;
-    let rows = stmt.query_map([user_id], |row| row.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn user_has_role(conn: &Connection, user_id: i64, role_id: i64) -> Result<bool, OpError> {
-    let n: i64 = conn.query_row(
-        "SELECT count(*) FROM user_roles WHERE user_id = ? AND role_id = ?",
-        params![user_id, role_id],
-        |row| row.get(0),
-    )?;
+pub fn user_has_role(conn: &mut Connection, user_id: i64, role_id: i64) -> Result<bool, OpError> {
+    let n: i64 = schema::user_roles::table
+        .filter(schema::user_roles::user_id.eq(user_id))
+        .filter(schema::user_roles::role_id.eq(role_id))
+        .count()
+        .get_result(conn)?;
     Ok(n > 0)
 }
 
-pub fn event(conn: &Connection, id: i64) -> Result<Option<Event>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM events WHERE id = ?", [id], map_event)
+pub fn event(conn: &mut Connection, id: i64) -> Result<Option<Event>, OpError> {
+    Ok(schema::events::table
+        .filter(schema::events::id.eq(id))
+        .select(Event::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn event_by_public(conn: &Connection, public_id: &str) -> Result<Option<Event>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM events WHERE public_id = ?",
-            [public_id],
-            map_event,
-        )
+pub fn event_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Event>, OpError> {
+    Ok(schema::events::table
+        .filter(schema::events::public_id.eq(public_id))
+        .select(Event::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn discord_server_id(conn: &Connection, guild_id: i64) -> Result<String, OpError> {
+pub fn discord_server_id(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
     let guild = guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     guild
         .discord_id
@@ -984,347 +1087,242 @@ pub fn discord_server_id(conn: &Connection, guild_id: i64) -> Result<String, OpE
         .ok_or(OpError::NotFound)
 }
 
-pub fn list_events(conn: &Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM events WHERE guild_id = ? ORDER BY starts_at, id",
-        [guild_id],
-        map_event,
-    )
+pub fn list_events(conn: &mut Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
+    Ok(schema::events::table
+        .filter(schema::events::guild_id.eq(guild_id))
+        .order((schema::events::starts_at.asc(), schema::events::id.asc()))
+        .select(Event::as_select())
+        .load(conn)?)
 }
 
-pub fn events_in_series(conn: &Connection, series_id: i64) -> Result<Vec<Event>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM events WHERE series_id = ? ORDER BY occurrence_index, id",
-        [series_id],
-        map_event,
-    )
+pub fn events_in_series(conn: &mut Connection, series_id: i64) -> Result<Vec<Event>, OpError> {
+    Ok(schema::events::table
+        .filter(schema::events::series_id.eq(series_id))
+        .order((
+            schema::events::occurrence_index.asc(),
+            schema::events::id.asc(),
+        ))
+        .select(Event::as_select())
+        .load(conn)?)
 }
 
-fn map_event(row: &Row<'_>) -> rusqlite::Result<Event> {
-    Ok(Event {
-        id: row.get("id")?,
-        public_id: row.get("public_id")?,
-        guild_id: row.get("guild_id")?,
-        channel_id: row.get("channel_id")?,
-        series_id: row.get("series_id")?,
-        occurrence_index: row.get("occurrence_index")?,
-        title: row.get("title")?,
-        description: row.get("description")?,
-        starts_at: row.get("starts_at")?,
-        duration_minutes: row.get("duration_minutes")?,
-        status: row.get("status")?,
-        post_at: row.get("post_at")?,
-        posted_at: row.get("posted_at")?,
-        archived_at: row.get("archived_at")?,
-        color: row.get("color")?,
-        image_url: row.get("image_url")?,
-        cutoff_at: row.get("cutoff_at")?,
-        mention_everyone: flag(row, "mention_everyone")?,
-        attendee_role_id: row.get("attendee_role_id")?,
-        thread_enabled: flag(row, "thread_enabled")?,
-        multiple_signups: flag(row, "multiple_signups")?,
-        created_by: row.get("created_by")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        calendar_synced_at: row.get("calendar_synced_at")?,
-        signups_closed: flag(row, "signups_closed")?,
-        post_attempts: row.get("post_attempts")?,
-        discord_message_id: row.get("discord_message_id")?,
-    })
+pub fn list_series(conn: &mut Connection, guild_id: i64) -> Result<Vec<Series>, OpError> {
+    Ok(schema::series::table
+        .filter(schema::series::guild_id.eq(guild_id))
+        .order(schema::series::id.desc())
+        .select(Series::as_select())
+        .load(conn)?)
 }
 
-pub fn list_series(conn: &Connection, guild_id: i64) -> Result<Vec<Series>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM series WHERE guild_id = ? ORDER BY id DESC",
-        [guild_id],
-        map_series,
-    )
-}
-
-pub fn series(conn: &Connection, id: i64) -> Result<Option<Series>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM series WHERE id = ?", [id], map_series)
+pub fn series(conn: &mut Connection, id: i64) -> Result<Option<Series>, OpError> {
+    Ok(schema::series::table
+        .filter(schema::series::id.eq(id))
+        .select(Series::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn series_by_public(conn: &Connection, public_id: &str) -> Result<Option<Series>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM series WHERE public_id = ?",
-            [public_id],
-            map_series,
-        )
+pub fn series_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Series>, OpError> {
+    Ok(schema::series::table
+        .filter(schema::series::public_id.eq(public_id))
+        .select(Series::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_series(row: &Row<'_>) -> rusqlite::Result<Series> {
-    Ok(Series {
-        id: row.get("id")?,
-        public_id: row.get("public_id")?,
-        guild_id: row.get("guild_id")?,
-        cadence: row.get("cadence")?,
-        end_on: row.get("end_on")?,
-        max_occurrences: row.get("max_occurrences")?,
-        active: flag(row, "active")?,
-        template_id: row.get("template_id")?,
-        anchor_start: row.get("anchor_start")?,
-        post_lead_hours: row.get("post_lead_hours")?,
-        created_at: row.get("created_at")?,
-    })
+pub fn options_for(conn: &mut Connection, event_id: i64) -> Result<Vec<SignupOption>, OpError> {
+    Ok(schema::signup_options::table
+        .filter(schema::signup_options::event_id.eq(event_id))
+        .order((
+            schema::signup_options::position.asc(),
+            schema::signup_options::id.asc(),
+        ))
+        .select(SignupOption::as_select())
+        .load(conn)?)
 }
 
-pub fn options_for(conn: &Connection, event_id: i64) -> Result<Vec<SignupOption>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM signup_options WHERE event_id = ? ORDER BY position, id",
-        [event_id],
-        map_option,
-    )
-}
-
-pub fn option(conn: &Connection, id: i64) -> Result<Option<SignupOption>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM signup_options WHERE id = ?",
-            [id],
-            map_option,
-        )
+pub fn option(conn: &mut Connection, id: i64) -> Result<Option<SignupOption>, OpError> {
+    Ok(schema::signup_options::table
+        .filter(schema::signup_options::id.eq(id))
+        .select(SignupOption::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_option(row: &Row<'_>) -> rusqlite::Result<SignupOption> {
-    Ok(SignupOption {
-        id: row.get("id")?,
-        event_id: row.get("event_id")?,
-        name: row.get("name")?,
-        emoji: row.get("emoji")?,
-        capacity: row.get("capacity")?,
-        waitlist: flag(row, "waitlist")?,
-        role_id: row.get("role_id")?,
-        reminders_enabled: flag(row, "reminders_enabled")?,
-        position: row.get("position")?,
-    })
+pub fn signups_for(conn: &mut Connection, event_id: i64) -> Result<Vec<Signup>, OpError> {
+    Ok(schema::signups::table
+        .filter(schema::signups::event_id.eq(event_id))
+        .order((schema::signups::created_at.asc(), schema::signups::id.asc()))
+        .select(Signup::as_select())
+        .load(conn)?)
 }
 
-pub fn signups_for(conn: &Connection, event_id: i64) -> Result<Vec<Signup>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM signups WHERE event_id = ? ORDER BY created_at, id",
-        [event_id],
-        map_signup,
-    )
+pub fn reminders_for(conn: &mut Connection, event_id: i64) -> Result<Vec<Reminder>, OpError> {
+    Ok(schema::reminders::table
+        .filter(schema::reminders::event_id.eq(event_id))
+        .order((
+            schema::reminders::offset_minutes.desc(),
+            schema::reminders::id.asc(),
+        ))
+        .select(Reminder::as_select())
+        .load(conn)?)
 }
 
-fn map_signup(row: &Row<'_>) -> rusqlite::Result<Signup> {
-    Ok(Signup {
-        id: row.get("id")?,
-        event_id: row.get("event_id")?,
-        option_id: row.get("option_id")?,
-        user_id: row.get("user_id")?,
-        state: row.get("state")?,
-        created_at: row.get("created_at")?,
-    })
+pub fn reminders_in_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Reminder>, OpError> {
+    Ok(schema::reminders::table
+        .inner_join(schema::events::table)
+        .filter(schema::events::guild_id.eq(guild_id))
+        .order((
+            schema::reminders::event_id.asc(),
+            schema::reminders::offset_minutes.desc(),
+            schema::reminders::id.asc(),
+        ))
+        .select(Reminder::as_select())
+        .load(conn)?)
 }
 
-pub fn reminders_for(conn: &Connection, event_id: i64) -> Result<Vec<Reminder>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM reminders WHERE event_id = ? ORDER BY offset_minutes DESC, id",
-        [event_id],
-        map_reminder,
-    )
+pub fn events_in_active_series(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<Vec<Event>, OpError> {
+    Ok(schema::events::table
+        .inner_join(schema::series::table)
+        .filter(schema::events::guild_id.eq(guild_id))
+        .filter(schema::series::active.eq(true))
+        .order((
+            schema::events::series_id.asc(),
+            schema::events::occurrence_index.asc(),
+            schema::events::id.asc(),
+        ))
+        .select(Event::as_select())
+        .load(conn)?)
 }
 
-pub fn reminders_in_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Reminder>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT reminders.* FROM reminders
-         JOIN events ON events.id = reminders.event_id
-         WHERE events.guild_id = ?
-         ORDER BY reminders.event_id, reminders.offset_minutes DESC, reminders.id",
-    )?;
-    let rows = stmt.query_map([guild_id], map_reminder)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn events_in_active_series(conn: &Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT events.* FROM events
-         JOIN series ON series.id = events.series_id
-         WHERE events.guild_id = ? AND series.active = 1
-         ORDER BY events.series_id, events.occurrence_index, events.id",
-    )?;
-    let rows = stmt.query_map([guild_id], map_event)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-fn map_reminder(row: &Row<'_>) -> rusqlite::Result<Reminder> {
-    Ok(Reminder {
-        id: row.get("id")?,
-        event_id: row.get("event_id")?,
-        offset_minutes: row.get("offset_minutes")?,
-        message: row.get("message")?,
-        sent_at: row.get("sent_at")?,
-    })
-}
-
-pub fn event_role_ids(conn: &Connection, event_id: i64, kind: &str) -> Result<Vec<i64>, OpError> {
-    let mut stmt =
-        conn.prepare("SELECT role_id FROM event_roles WHERE event_id = ? AND kind = ?")?;
-    let rows = stmt.query_map(params![event_id, kind], |row| row.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+pub fn event_role_ids(
+    conn: &mut Connection,
+    event_id: i64,
+    kind: &str,
+) -> Result<Vec<i64>, OpError> {
+    Ok(schema::event_roles::table
+        .filter(schema::event_roles::event_id.eq(event_id))
+        .filter(schema::event_roles::kind.eq(kind))
+        .select(schema::event_roles::role_id)
+        .load(conn)?)
 }
 
 pub fn list_activity(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     limit: i64,
 ) -> Result<Vec<Activity>, OpError> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM activity WHERE guild_id = ? ORDER BY id DESC LIMIT ?")?;
-    let rows = stmt.query_map(params![guild_id, limit], map_activity)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(schema::activity::table
+        .filter(schema::activity::guild_id.eq(guild_id))
+        .order(schema::activity::id.desc())
+        .limit(limit)
+        .select(Activity::as_select())
+        .load(conn)?)
 }
 
-fn map_activity(row: &Row<'_>) -> rusqlite::Result<Activity> {
-    Ok(Activity {
-        id: row.get("id")?,
-        guild_id: row.get("guild_id")?,
-        event_id: row.get("event_id")?,
-        body: row.get("body")?,
-        created_at: row.get("created_at")?,
-    })
+pub fn list_presets(conn: &mut Connection, guild_id: i64) -> Result<Vec<Preset>, OpError> {
+    Ok(schema::presets::table
+        .filter(schema::presets::guild_id.eq(guild_id))
+        .order(schema::presets::name.asc())
+        .select(Preset::as_select())
+        .load(conn)?)
 }
 
-pub fn list_presets(conn: &Connection, guild_id: i64) -> Result<Vec<Preset>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM presets WHERE guild_id = ? ORDER BY name",
-        [guild_id],
-        map_preset,
-    )
-}
-
-pub fn preset(conn: &Connection, id: i64) -> Result<Option<Preset>, OpError> {
-    Ok(conn
-        .query_row("SELECT * FROM presets WHERE id = ?", [id], map_preset)
+pub fn preset(conn: &mut Connection, id: i64) -> Result<Option<Preset>, OpError> {
+    Ok(schema::presets::table
+        .filter(schema::presets::id.eq(id))
+        .select(Preset::as_select())
+        .first(conn)
         .optional()?)
 }
 
-pub fn preset_by_public(conn: &Connection, public_id: &str) -> Result<Option<Preset>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM presets WHERE public_id = ?",
-            [public_id],
-            map_preset,
-        )
+pub fn preset_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Preset>, OpError> {
+    Ok(schema::presets::table
+        .filter(schema::presets::public_id.eq(public_id))
+        .select(Preset::as_select())
+        .first(conn)
         .optional()?)
 }
 
-fn map_preset(row: &Row<'_>) -> rusqlite::Result<Preset> {
-    Ok(Preset {
-        id: row.get("id")?,
-        public_id: row.get("public_id")?,
-        guild_id: row.get("guild_id")?,
-        name: row.get("name")?,
-        body: row.get("body")?,
-    })
+pub fn list_library(conn: &mut Connection, guild_id: i64) -> Result<Vec<LibraryOption>, OpError> {
+    Ok(schema::option_library::table
+        .filter(schema::option_library::guild_id.eq(guild_id))
+        .order(schema::option_library::name.asc())
+        .select(LibraryOption::as_select())
+        .load(conn)?)
 }
 
-pub fn list_library(conn: &Connection, guild_id: i64) -> Result<Vec<LibraryOption>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM option_library WHERE guild_id = ? ORDER BY name",
-        [guild_id],
-        |row| {
-            Ok(LibraryOption {
-                id: row.get("id")?,
-                guild_id: row.get("guild_id")?,
-                name: row.get("name")?,
-                emoji: row.get("emoji")?,
-            })
-        },
-    )
+pub fn thread_messages(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Vec<ThreadMessage>, OpError> {
+    Ok(schema::thread_messages::table
+        .filter(schema::thread_messages::event_id.eq(event_id))
+        .order(schema::thread_messages::id.asc())
+        .select(ThreadMessage::as_select())
+        .load(conn)?)
 }
 
-pub fn thread_messages(conn: &Connection, event_id: i64) -> Result<Vec<ThreadMessage>, OpError> {
-    collect(
-        conn,
-        "SELECT * FROM thread_messages WHERE event_id = ? ORDER BY id",
-        [event_id],
-        |row| {
-            Ok(ThreadMessage {
-                id: row.get("id")?,
-                event_id: row.get("event_id")?,
-                body: row.get("body")?,
-                place: row.get("place")?,
-                created_at: row.get("created_at")?,
-            })
-        },
-    )
+pub fn thread_member_ids(conn: &mut Connection, event_id: i64) -> Result<Vec<i64>, OpError> {
+    Ok(schema::thread_members::table
+        .filter(schema::thread_members::event_id.eq(event_id))
+        .select(schema::thread_members::user_id)
+        .load(conn)?)
 }
 
-pub fn thread_member_ids(conn: &Connection, event_id: i64) -> Result<Vec<i64>, OpError> {
-    let mut stmt = conn.prepare("SELECT user_id FROM thread_members WHERE event_id = ?")?;
-    let rows = stmt.query_map([event_id], |row| row.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+pub fn grant_user_ids(conn: &mut Connection, event_id: i64) -> Result<Vec<i64>, OpError> {
+    Ok(schema::role_grants::table
+        .filter(schema::role_grants::event_id.eq(event_id))
+        .select(schema::role_grants::user_id)
+        .load(conn)?)
 }
 
-pub fn grant_user_ids(conn: &Connection, event_id: i64) -> Result<Vec<i64>, OpError> {
-    let mut stmt = conn.prepare("SELECT user_id FROM role_grants WHERE event_id = ?")?;
-    let rows = stmt.query_map([event_id], |row| row.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn thread_discord_id(conn: &Connection, event_id: i64) -> Result<Option<String>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT discord_id FROM threads WHERE event_id = ?",
-            [event_id],
-            |row| row.get(0),
-        )
+pub fn thread_discord_id(conn: &mut Connection, event_id: i64) -> Result<Option<String>, OpError> {
+    Ok(schema::threads::table
+        .filter(schema::threads::event_id.eq(event_id))
+        .select(schema::threads::discord_id)
+        .first(conn)
         .optional()?
         .flatten())
 }
 
 pub fn set_thread_discord_id(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     discord_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE threads SET discord_id = ? WHERE event_id = ?",
-        params![discord_id, event_id],
-    )?;
+    diesel::update(schema::threads::table.filter(schema::threads::event_id.eq(event_id)))
+        .set(schema::threads::discord_id.eq(discord_id))
+        .execute(conn)?;
     Ok(())
 }
 
 pub fn set_role_discord_id(
-    conn: &Connection,
+    conn: &mut Connection,
     role_id: i64,
     discord_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE roles SET discord_id = ? WHERE id = ?",
-        params![discord_id, role_id],
-    )?;
+    diesel::update(schema::roles::table.filter(schema::roles::id.eq(role_id)))
+        .set(schema::roles::discord_id.eq(discord_id))
+        .execute(conn)?;
     Ok(())
 }
 
-pub fn discord_ids_for_users(conn: &Connection, user_ids: &[i64]) -> Result<Vec<String>, OpError> {
+pub fn discord_ids_for_users(
+    conn: &mut Connection,
+    user_ids: &[i64],
+) -> Result<Vec<String>, OpError> {
     let mut ids = Vec::new();
     for user_id in user_ids {
-        let discord_id: Option<String> = conn
-            .query_row(
-                "SELECT discord_id FROM users WHERE id = ?",
-                [user_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-        if let Some(discord_id) = discord_id {
+        let discord_id: Option<Option<String>> = schema::users::table
+            .filter(schema::users::id.eq(user_id))
+            .select(schema::users::discord_id)
+            .first(conn)
+            .optional()?;
+        if let Some(Some(discord_id)) = discord_id {
             ids.push(discord_id);
         }
     }
@@ -1334,80 +1332,81 @@ pub fn discord_ids_for_users(conn: &Connection, user_ids: &[i64]) -> Result<Vec<
 }
 
 pub fn applied_user_ids(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     kind: &str,
 ) -> Result<Vec<String>, OpError> {
-    let mut stmt = conn.prepare(
-        "SELECT discord_user_id FROM applied_access WHERE event_id = ? AND kind = ? ORDER BY discord_user_id",
-    )?;
-    let rows = stmt.query_map(params![event_id, kind], |row| row.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(schema::applied_access::table
+        .filter(schema::applied_access::event_id.eq(event_id))
+        .filter(schema::applied_access::kind.eq(kind))
+        .order(schema::applied_access::discord_user_id.asc())
+        .select(schema::applied_access::discord_user_id)
+        .load(conn)?)
 }
 
 pub fn mark_applied(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     kind: &str,
     discord_user_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO applied_access (event_id, discord_user_id, kind) VALUES (?, ?, ?)",
-        params![event_id, discord_user_id, kind],
-    )?;
+    diesel::insert_into(schema::applied_access::table)
+        .values((
+            schema::applied_access::event_id.eq(event_id),
+            schema::applied_access::discord_user_id.eq(discord_user_id),
+            schema::applied_access::kind.eq(kind),
+        ))
+        .on_conflict_do_nothing()
+        .execute(conn)?;
     Ok(())
 }
 
 pub fn clear_applied(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     kind: &str,
     discord_user_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "DELETE FROM applied_access WHERE event_id = ? AND kind = ? AND discord_user_id = ?",
-        params![event_id, kind, discord_user_id],
-    )?;
+    diesel::delete(
+        schema::applied_access::table
+            .filter(schema::applied_access::event_id.eq(event_id))
+            .filter(schema::applied_access::kind.eq(kind))
+            .filter(schema::applied_access::discord_user_id.eq(discord_user_id)),
+    )
+    .execute(conn)?;
     Ok(())
 }
 
 pub fn list_commands(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     limit: i64,
 ) -> Result<Vec<CommandRow>, OpError> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM command_log WHERE guild_id = ? ORDER BY id DESC LIMIT ?")?;
-    let rows = stmt.query_map(params![guild_id, limit], |row| {
-        Ok(CommandRow {
-            id: row.get("id")?,
-            guild_id: row.get("guild_id")?,
-            user_id: row.get("user_id")?,
-            line: row.get("line")?,
-            reply: row.get("reply")?,
-            created_at: row.get("created_at")?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(schema::command_log::table
+        .filter(schema::command_log::guild_id.eq(guild_id))
+        .order(schema::command_log::id.desc())
+        .limit(limit)
+        .select(CommandRow::as_select())
+        .load(conn)?)
 }
 
-pub fn count_status(conn: &Connection, guild_id: i64, status: &str) -> Result<i64, OpError> {
-    Ok(conn.query_row(
-        "SELECT count(*) FROM events WHERE guild_id = ? AND status = ?",
-        params![guild_id, status],
-        |row| row.get(0),
-    )?)
+pub fn count_status(conn: &mut Connection, guild_id: i64, status: &str) -> Result<i64, OpError> {
+    Ok(schema::events::table
+        .filter(schema::events::guild_id.eq(guild_id))
+        .filter(schema::events::status.eq(status))
+        .count()
+        .get_result(conn)?)
 }
 
-pub fn count_active_series(conn: &Connection, guild_id: i64) -> Result<i64, OpError> {
-    Ok(conn.query_row(
-        "SELECT count(*) FROM series WHERE guild_id = ? AND active = 1 AND cadence != 'once'",
-        [guild_id],
-        |row| row.get(0),
-    )?)
+pub fn count_active_series(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+    Ok(schema::series::table
+        .filter(schema::series::guild_id.eq(guild_id))
+        .filter(schema::series::active.eq(true))
+        .filter(schema::series::cadence.ne("once"))
+        .count()
+        .get_result(conn)?)
 }
 
-#[derive(Debug, Clone)]
 pub struct WebSession {
     pub token: String,
     pub discord_user_id: String,
@@ -1427,122 +1426,221 @@ pub fn insert_web_session(
     user_id: i64,
     guilds: &[i64],
 ) -> Result<(), OpError> {
-    let tx = conn.transaction()?;
-    tx.execute(
-        "INSERT INTO web_sessions
-            (token, discord_user_id, display_name, guild_id, user_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-        params![
-            token,
-            discord_user_id,
-            display_name,
-            guild_id,
-            user_id,
-            now_stamp()
-        ],
-    )?;
-    for guild in guilds {
-        tx.execute(
-            "INSERT INTO web_session_guilds (token, guild_id) VALUES (?, ?)",
-            params![token, guild],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
+    let token = token.to_string();
+    let discord_user_id = discord_user_id.to_string();
+    let display_name = display_name.to_string();
+    let guilds = guilds.to_vec();
+    conn.transaction(|conn| {
+        diesel::insert_into(schema::web_sessions::table)
+            .values((
+                schema::web_sessions::token.eq(&token),
+                schema::web_sessions::discord_user_id.eq(&discord_user_id),
+                schema::web_sessions::display_name.eq(&display_name),
+                schema::web_sessions::guild_id.eq(guild_id),
+                schema::web_sessions::user_id.eq(user_id),
+                schema::web_sessions::created_at.eq(now_stamp()),
+            ))
+            .execute(conn)?;
+        for guild in &guilds {
+            diesel::insert_into(schema::web_session_guilds::table)
+                .values((
+                    schema::web_session_guilds::token.eq(&token),
+                    schema::web_session_guilds::guild_id.eq(guild),
+                ))
+                .execute(conn)?;
+        }
+        Ok(())
+    })
 }
 
-pub fn web_session(conn: &Connection, token: &str) -> Result<Option<WebSession>, OpError> {
-    let row = conn.query_row(
-        "SELECT token, discord_user_id, display_name, guild_id, user_id, created_at
-         FROM web_sessions WHERE token = ?",
-        [token],
-        |row| {
-            Ok(WebSession {
-                token: row.get(0)?,
-                discord_user_id: row.get(1)?,
-                display_name: row.get(2)?,
-                guild_id: row.get(3)?,
-                user_id: row.get(4)?,
-                created_at: row.get(5)?,
-                guilds: Vec::new(),
-            })
-        },
-    );
-    let mut session = match row {
-        Ok(session) => session,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-        Err(err) => return Err(err.into()),
+pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSession>, OpError> {
+    let row: Option<(String, String, String, i64, i64, String)> = schema::web_sessions::table
+        .filter(schema::web_sessions::token.eq(token))
+        .select((
+            schema::web_sessions::token,
+            schema::web_sessions::discord_user_id,
+            schema::web_sessions::display_name,
+            schema::web_sessions::guild_id,
+            schema::web_sessions::user_id,
+            schema::web_sessions::created_at,
+        ))
+        .first(conn)
+        .optional()?;
+    let Some((token, discord_user_id, display_name, guild_id, user_id, created_at)) = row else {
+        return Ok(None);
     };
-    let mut stmt = conn.prepare("SELECT guild_id FROM web_session_guilds WHERE token = ?")?;
-    let guilds = stmt.query_map([token], |row| row.get::<_, i64>(0))?;
-    session.guilds = guilds.collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(session))
+    let guilds = schema::web_session_guilds::table
+        .filter(schema::web_session_guilds::token.eq(&token))
+        .select(schema::web_session_guilds::guild_id)
+        .load(conn)?;
+    Ok(Some(WebSession {
+        token,
+        discord_user_id,
+        display_name,
+        guild_id,
+        user_id,
+        created_at,
+        guilds,
+    }))
 }
 
 pub fn move_web_session(
-    conn: &Connection,
+    conn: &mut Connection,
     token: &str,
     guild_id: i64,
     user_id: i64,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE web_sessions SET guild_id = ?, user_id = ? WHERE token = ?",
-        params![guild_id, user_id, token],
-    )?;
+    diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
+        .set((
+            schema::web_sessions::guild_id.eq(guild_id),
+            schema::web_sessions::user_id.eq(user_id),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
-pub fn delete_web_session(conn: &Connection, token: &str) -> Result<(), OpError> {
-    conn.execute("DELETE FROM web_sessions WHERE token = ?", [token])?;
+pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
+    diesel::delete(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
+        .execute(conn)?;
     Ok(())
 }
 
-pub fn ensure_calendar_token(conn: &Connection, discord_user_id: &str) -> Result<String, OpError> {
-    if let Some(token) = conn
-        .query_row(
-            "SELECT token FROM calendar_feeds WHERE discord_user_id = ?",
-            [discord_user_id],
-            |row| row.get(0),
-        )
-        .optional()?
-    {
+pub fn ensure_calendar_token(
+    conn: &mut Connection,
+    discord_user_id: &str,
+) -> Result<String, OpError> {
+    let existing: Option<String> = schema::calendar_feeds::table
+        .filter(schema::calendar_feeds::discord_user_id.eq(discord_user_id))
+        .select(schema::calendar_feeds::token)
+        .first(conn)
+        .optional()?;
+    if let Some(token) = existing {
         return Ok(token);
     }
     let token = crate::auth::random_token()?;
-    conn.execute(
-        "INSERT INTO calendar_feeds (token, discord_user_id, created_at) VALUES (?, ?, ?)",
-        params![token, discord_user_id, now_stamp()],
-    )?;
+    diesel::insert_into(schema::calendar_feeds::table)
+        .values((
+            schema::calendar_feeds::token.eq(&token),
+            schema::calendar_feeds::discord_user_id.eq(discord_user_id),
+            schema::calendar_feeds::created_at.eq(now_stamp()),
+        ))
+        .execute(conn)?;
     Ok(token)
 }
 
-pub fn calendar_discord_id(conn: &Connection, token: &str) -> Result<Option<String>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT discord_user_id FROM calendar_feeds WHERE token = ?",
-            [token],
-            |row| row.get(0),
-        )
+pub fn calendar_discord_id(conn: &mut Connection, token: &str) -> Result<Option<String>, OpError> {
+    Ok(schema::calendar_feeds::table
+        .filter(schema::calendar_feeds::token.eq(token))
+        .select(schema::calendar_feeds::discord_user_id)
+        .first(conn)
         .optional()?)
-}
-
-fn collect<T, F>(conn: &Connection, sql: &str, id: [i64; 1], map: F) -> Result<Vec<T>, OpError>
-where
-    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
-{
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(id, map)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn i(value: bool) -> i64 {
-    if value {
-        1
-    } else {
-        0
-    }
 }
 
 pub fn now_stamp() -> String {
     clock::stamp(chrono::Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::prelude::{QueryableByName, RunQueryDsl};
+
+    use super::*;
+
+    #[test]
+    fn a_connection_string_names_the_database() {
+        let url = parse_database_url("sqlite://data/marian.db").unwrap();
+        assert_eq!(url.establish, "sqlite://data/marian.db");
+        assert_eq!(url.directory.as_deref(), Some(Path::new("data")));
+        assert!(url.file);
+        assert_eq!(url.system, "sqlite");
+
+        let url = parse_database_url("sqlite:///data/marian.db?mode=rwc").unwrap();
+        assert_eq!(url.establish, "sqlite:///data/marian.db?mode=rwc");
+        assert_eq!(url.directory.as_deref(), Some(Path::new("/data")));
+
+        let url = parse_database_url("  SQLITE::memory: ").unwrap();
+        assert_eq!(url.establish, ":memory:");
+        assert!(!url.file);
+
+        let url = parse_database_url("file:///tmp/marian.db").unwrap();
+        assert_eq!(url.establish, "file:///tmp/marian.db");
+        assert_eq!(url.directory.as_deref(), Some(Path::new("/tmp")));
+
+        let url = parse_database_url("/data/marian.db").unwrap();
+        assert_eq!(url.establish, "/data/marian.db");
+
+        let err = parse_database_url("postgres://user:secret@localhost/marian").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("postgres"));
+        assert!(!text.contains("secret"));
+
+        assert_eq!(
+            choose_database_url(Some("sqlite://chosen.db".into()), Some("legacy.db".into())),
+            "sqlite://chosen.db"
+        );
+        assert_eq!(
+            choose_database_url(None, Some("legacy.db".into())),
+            "legacy.db"
+        );
+        assert_eq!(choose_database_url(None, None), "sqlite://data/marian.db");
+    }
+
+    #[test]
+    fn a_sqlite_url_opens_that_file() {
+        let dir = std::env::temp_dir().join(format!("marian-url-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("marian.db");
+        let url = format!("sqlite://{}", path.display());
+        let mut conn = open(&url).unwrap();
+        assert!(path.is_file());
+        assert!(list_guilds(&mut conn).unwrap().is_empty());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_database_keeps_its_rows() {
+        let dir = std::env::temp_dir().join(format!("marian-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("marian.db");
+        let url = format!("sqlite://{}", path.display());
+        {
+            let mut conn = Connection::establish(&url).unwrap();
+            conn.batch_execute(include_str!("../migrations/20261015131400_init/up.sql"))
+                .unwrap();
+            diesel::insert_into(schema::guilds::table)
+                .values((
+                    schema::guilds::id.eq(1),
+                    schema::guilds::name.eq("Guild"),
+                    schema::guilds::timezone.eq("UTC"),
+                ))
+                .execute(&mut conn)
+                .unwrap();
+        }
+        let mut conn = open(&url).unwrap();
+        let guilds = list_guilds(&mut conn).unwrap();
+        assert_eq!(guilds.len(), 1);
+        assert_eq!(guilds[0].name, "Guild");
+        #[derive(QueryableByName)]
+        struct VersionRow {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            version: String,
+        }
+        let versions = sql_query("SELECT version FROM __diesel_schema_migrations")
+            .load::<VersionRow>(&mut conn)
+            .unwrap();
+        assert_eq!(
+            versions
+                .iter()
+                .map(|row| row.version.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20261015131400"]
+        );
+        drop(conn);
+        let mut conn = open(&url).unwrap();
+        assert_eq!(list_guilds(&mut conn).unwrap().len(), 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

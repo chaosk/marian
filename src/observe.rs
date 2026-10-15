@@ -6,11 +6,11 @@ use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
-use opentelemetry::trace::{Span, Tracer, TracerProvider};
+use diesel::connection::{Connection, Instrumentation, InstrumentationEvent};
+use opentelemetry::trace::{Span, SpanKind, Tracer, TracerProvider};
 use opentelemetry::{global, Context, KeyValue};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
-use rusqlite::Connection;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -24,6 +24,7 @@ struct PendingQuery {
     start: SystemTime,
     statement: String,
     operation: String,
+    system: &'static str,
 }
 
 thread_local! {
@@ -131,16 +132,32 @@ fn trace_filter() -> EnvFilter {
         .add_directive("tonic=off".parse().expect("tonic filter"))
 }
 
-pub fn install_query_trace(conn: &mut Connection) {
-    conn.trace(Some(start_query));
-    conn.profile(Some(finish_query));
+pub fn install_query_trace(conn: &mut impl Connection, system: &'static str) {
+    conn.set_instrumentation(QueryTrace { system });
 }
 
-fn start_query(sql: &str) {
+struct QueryTrace {
+    system: &'static str,
+}
+
+impl Instrumentation for QueryTrace {
+    fn on_connection_event(&mut self, event: InstrumentationEvent<'_>) {
+        match event {
+            InstrumentationEvent::StartQuery { query, .. } => {
+                start_query(self.system, &query.to_string())
+            }
+            InstrumentationEvent::FinishQuery { .. } => finish_query(),
+            _ => {}
+        }
+    }
+}
+
+fn start_query(system: &'static str, sql: &str) {
     let pending = PendingQuery {
         start: SystemTime::now(),
         statement: statement_shape(sql),
         operation: operation(sql),
+        system,
     };
     QUERIES.with(|stack| {
         if let Ok(mut stack) = stack.try_borrow_mut() {
@@ -149,7 +166,7 @@ fn start_query(sql: &str) {
     });
 }
 
-fn finish_query(_sql: &str, duration: Duration) {
+fn finish_query() {
     let pending = QUERIES.with(|stack| {
         stack
             .try_borrow_mut()
@@ -159,26 +176,28 @@ fn finish_query(_sql: &str, duration: Duration) {
     let Some(pending) = pending else {
         return;
     };
+    let duration = pending.start.elapsed().unwrap_or_default();
     if duration < Duration::from_millis(1) {
         return;
     }
     let millis = duration.as_secs_f64() * 1000.0;
     tracing::debug!(
-        "db.system" = "sqlite",
+        "db.system" = pending.system,
         "db.operation" = pending.operation.as_str(),
         "db.statement" = pending.statement.as_str(),
         "db.duration_ms" = millis,
-        "sqlite query"
+        "query"
     );
     if !EXPORT.load(Ordering::Relaxed) {
         return;
     }
     let tracer = global::tracer("marian");
     let mut span = tracer
-        .span_builder("sqlite")
+        .span_builder(pending.system)
+        .with_kind(SpanKind::Client)
         .with_start_time(pending.start)
         .with_attributes([
-            KeyValue::new("db.system", "sqlite"),
+            KeyValue::new("db.system", pending.system),
             KeyValue::new("db.operation", pending.operation),
             KeyValue::new("db.statement", pending.statement),
             KeyValue::new("db.duration_ms", millis),

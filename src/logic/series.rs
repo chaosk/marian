@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
 
 use super::db::{log, must_channel, must_event, must_guild, must_series};
 use super::event::replace_children;
@@ -11,10 +11,11 @@ use super::signup::sync_access;
 use super::template::{self, Spawn};
 use crate::clock::{self, occurrence_start};
 use crate::error::OpError;
-use crate::store::{self, Event};
+use crate::schema;
+use crate::store::{self, Connection, Event};
 
 pub(super) fn link_new_series(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &Event,
     input: &EventInput,
     clean: &CleanInput,
@@ -26,26 +27,27 @@ pub(super) fn link_new_series(
     let settings = store::settings(conn, event.guild_id)?;
     let template = template_from(input, clean);
     let template_id = template::insert(conn, &template::from_series(event.guild_id, &template))?;
-    conn.execute(
-        "INSERT INTO series (public_id, guild_id, cadence, end_on, max_occurrences, active, template_id, anchor_start, post_lead_hours, created_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-        params![
-            crate::ids::series_id(),
-            event.guild_id,
-            repeat.cadence,
-            repeat.end_on.map(|dt| clock::stamp(dt)),
-            repeat.max_occurrences,
-            template_id,
-            clock::stamp(input.starts_at),
-            settings.post_lead_hours,
-            clock::stamp(now),
-        ],
-    )?;
-    let series_id = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE events SET series_id = ?, occurrence_index = 1 WHERE id = ?",
-        params![series_id, event.id],
-    )?;
+    let series_id: i64 = diesel::insert_into(schema::series::table)
+        .values((
+            schema::series::public_id.eq(crate::ids::series_id()),
+            schema::series::guild_id.eq(event.guild_id),
+            schema::series::cadence.eq(&repeat.cadence),
+            schema::series::end_on.eq(repeat.end_on.map(|dt| clock::stamp(dt))),
+            schema::series::max_occurrences.eq(repeat.max_occurrences),
+            schema::series::active.eq(true),
+            schema::series::template_id.eq(template_id),
+            schema::series::anchor_start.eq(clock::stamp(input.starts_at)),
+            schema::series::post_lead_hours.eq(settings.post_lead_hours),
+            schema::series::created_at.eq(clock::stamp(now)),
+        ))
+        .returning(schema::series::id)
+        .get_result(conn)?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set((
+            schema::events::series_id.eq(series_id),
+            schema::events::occurrence_index.eq(1_i64),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -87,7 +89,7 @@ fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
 }
 
 pub(super) fn apply_series_template(
-    conn: &Connection,
+    conn: &mut Connection,
     series_id: i64,
     source_id: i64,
     input: &EventInput,
@@ -111,7 +113,7 @@ pub(super) fn apply_series_template(
 }
 
 fn apply_template_to_event(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &Event,
     template: &SeriesTemplate,
 ) -> Result<(), OpError> {
@@ -121,47 +123,48 @@ fn apply_template_to_event(
     let cutoff = template
         .cutoff_offset_minutes
         .map(|mins| clock::stamp(start - Duration::minutes(mins)));
-    conn.execute(
-        "UPDATE events SET
-            channel_id = ?, title = ?, description = ?, duration_minutes = ?, color = ?, image_url = ?,
-            cutoff_at = ?, mention_everyone = ?, attendee_role_id = ?, thread_enabled = ?, multiple_signups = ?,
-            updated_at = ?
-         WHERE id = ?",
-        params![
-            template.channel_id,
-            template::fill(&template.title, start, tz),
-            template::fill(&template.description, start, tz),
-            template.duration_minutes,
-            template.color,
-            template.image_url,
-            cutoff,
-            store::i(template.mention_everyone),
-            template.attendee_role_id,
-            store::i(template.thread_enabled),
-            store::i(template.multiple_signups),
-            store::now_stamp(),
-            event.id,
-        ],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set((
+            schema::events::channel_id.eq(template.channel_id),
+            schema::events::title.eq(template::fill(&template.title, start, tz)),
+            schema::events::description.eq(template::fill(&template.description, start, tz)),
+            schema::events::duration_minutes.eq(template.duration_minutes),
+            schema::events::color.eq(&template.color),
+            schema::events::image_url.eq(template.image_url.as_deref()),
+            schema::events::cutoff_at.eq(cutoff.as_deref()),
+            schema::events::mention_everyone.eq(template.mention_everyone),
+            schema::events::attendee_role_id.eq(template.attendee_role_id),
+            schema::events::thread_enabled.eq(template.thread_enabled),
+            schema::events::multiple_signups.eq(template.multiple_signups),
+            schema::events::updated_at.eq(store::now_stamp()),
+        ))
+        .execute(conn)?;
     replace_children(conn, event.id, &template.options, &template.reminders)?;
-    conn.execute("DELETE FROM event_roles WHERE event_id = ?", [event.id])?;
+    diesel::delete(schema::event_roles::table.filter(schema::event_roles::event_id.eq(event.id)))
+        .execute(conn)?;
     for role_id in &template.mention_role_ids {
-        conn.execute(
-            "INSERT INTO event_roles (event_id, role_id, kind) VALUES (?, ?, 'mention')",
-            params![event.id, role_id],
-        )?;
+        diesel::insert_into(schema::event_roles::table)
+            .values((
+                schema::event_roles::event_id.eq(event.id),
+                schema::event_roles::role_id.eq(role_id),
+                schema::event_roles::kind.eq("mention"),
+            ))
+            .execute(conn)?;
     }
     for role_id in &template.restrict_role_ids {
-        conn.execute(
-            "INSERT INTO event_roles (event_id, role_id, kind) VALUES (?, ?, 'restrict')",
-            params![event.id, role_id],
-        )?;
+        diesel::insert_into(schema::event_roles::table)
+            .values((
+                schema::event_roles::event_id.eq(event.id),
+                schema::event_roles::role_id.eq(role_id),
+                schema::event_roles::kind.eq("restrict"),
+            ))
+            .execute(conn)?;
     }
     Ok(())
 }
 
 pub(super) fn retune_series(
-    conn: &Connection,
+    conn: &mut Connection,
     series_id: i64,
     repeat: &RepeatSpec,
     now: DateTime<Utc>,
@@ -196,15 +199,13 @@ pub(super) fn retune_series(
         }
     }
     let cadence_changed = series.cadence != repeat.cadence;
-    conn.execute(
-        "UPDATE series SET cadence = ?, end_on = ?, max_occurrences = ? WHERE id = ?",
-        params![
-            repeat.cadence,
-            repeat.end_on.map(clock::stamp),
-            repeat.max_occurrences,
-            series_id,
-        ],
-    )?;
+    diesel::update(schema::series::table.filter(schema::series::id.eq(series_id)))
+        .set((
+            schema::series::cadence.eq(&repeat.cadence),
+            schema::series::end_on.eq(repeat.end_on.map(clock::stamp)),
+            schema::series::max_occurrences.eq(repeat.max_occurrences),
+        ))
+        .execute(conn)?;
     for event in store::events_in_series(conn, series_id)? {
         let Some(index) = event.occurrence_index else {
             continue;
@@ -223,7 +224,8 @@ pub(super) fn retune_series(
         let past_count = repeat.max_occurrences.is_some_and(|max| index > max);
         let past_end = repeat.end_on.is_some_and(|end| start > end);
         if past_count || past_end {
-            conn.execute("DELETE FROM events WHERE id = ?", [event.id])?;
+            diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
+                .execute(conn)?;
         }
     }
     ensure_series(conn, series_id, now)?;
@@ -231,7 +233,7 @@ pub(super) fn retune_series(
 }
 
 fn shift_occurrence(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &Event,
     old: DateTime<Utc>,
     new: DateTime<Utc>,
@@ -250,23 +252,21 @@ fn shift_occurrence(
         .transpose()?;
     let old_day = clock::format_day(old.with_timezone(&tz).date_naive());
     let new_day = clock::format_day(new.with_timezone(&tz).date_naive());
-    conn.execute(
-        "UPDATE events SET title = ?, description = ?, starts_at = ?, post_at = ?, cutoff_at = ?, updated_at = ? WHERE id = ?",
-        params![
-            event.title.replace(&old_day, &new_day),
-            event.description.replace(&old_day, &new_day),
-            clock::stamp(new),
-            post_at,
-            cutoff,
-            store::now_stamp(),
-            event.id,
-        ],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set((
+            schema::events::title.eq(event.title.replace(&old_day, &new_day)),
+            schema::events::description.eq(event.description.replace(&old_day, &new_day)),
+            schema::events::starts_at.eq(clock::stamp(new)),
+            schema::events::post_at.eq(post_at),
+            schema::events::cutoff_at.eq(cutoff),
+            schema::events::updated_at.eq(store::now_stamp()),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
 pub(super) fn ensure_series(
-    conn: &Connection,
+    conn: &mut Connection,
     series_id: i64,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
@@ -279,7 +279,7 @@ pub(super) fn ensure_series(
 
 /// `existing` is that series' dates, oldest occurrence first.
 pub(super) fn fill_series(
-    conn: &Connection,
+    conn: &mut Connection,
     series: &store::Series,
     existing: &[Event],
     tz: Tz,
@@ -350,7 +350,7 @@ pub(super) fn fill_series(
 }
 
 pub(super) fn insert_occurrence(
-    conn: &Connection,
+    conn: &mut Connection,
     series: &store::Series,
     template: &SeriesTemplate,
     creator: i64,
@@ -375,29 +375,39 @@ pub(super) fn insert_occurrence(
     )
 }
 
-pub(super) fn mark_posted(conn: &Connection, id: i64, now: DateTime<Utc>) -> Result<(), OpError> {
+pub(super) fn mark_posted(
+    conn: &mut Connection,
+    id: i64,
+    now: DateTime<Utc>,
+) -> Result<(), OpError> {
     let event = must_event(conn, id)?;
     if event.status == "posted" {
         return Ok(());
     }
     let stamp = clock::stamp(now);
-    conn.execute(
-        "UPDATE events SET status = 'posted', posted_at = ?, post_attempts = 0, updated_at = ? WHERE id = ?",
-        params![stamp, stamp, id],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+        .set((
+            schema::events::status.eq("posted"),
+            schema::events::posted_at.eq(&stamp),
+            schema::events::post_attempts.eq(0),
+            schema::events::updated_at.eq(&stamp),
+        ))
+        .execute(conn)?;
     let event = must_event(conn, id)?;
     if event.thread_enabled {
-        conn.execute(
-            "INSERT OR IGNORE INTO threads (event_id, name) VALUES (?, ?)",
-            params![id, event.title],
-        )?;
+        diesel::insert_into(schema::threads::table)
+            .values((
+                schema::threads::event_id.eq(id),
+                schema::threads::name.eq(&event.title),
+            ))
+            .on_conflict_do_nothing()
+            .execute(conn)?;
     }
     let settings = store::settings(conn, event.guild_id)?;
     if settings.calendar_auto_sync {
-        conn.execute(
-            "UPDATE events SET calendar_synced_at = ? WHERE id = ?",
-            params![stamp, id],
-        )?;
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::calendar_synced_at.eq(&stamp))
+            .execute(conn)?;
     }
     let channel = must_channel(conn, event.channel_id)?;
     log(

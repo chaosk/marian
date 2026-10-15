@@ -15,7 +15,7 @@ Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot jo
 | Variable | Default | Role |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
-| `MARIAN_DB` | `data/marian.db` | SQLite file |
+| `DATABASE_URL` | `sqlite://data/marian.db` | Database connection string. `MARIAN_DB` is read when this is empty. A path with no scheme is a sqlite file |
 | `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
 | `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
@@ -68,12 +68,12 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.2.4 -t ghcr.io/you/marian:0.2.4 .
-docker push ghcr.io/you/marian:0.2.4
+docker build --build-arg MARIAN_VERSION=0.3.0 -t ghcr.io/you/marian:0.3.0 .
+docker push ghcr.io/you/marian:0.3.0
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.2.4 \
+  --set image.tag=0.3.0 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \
@@ -83,7 +83,7 @@ helm upgrade --install marian ./deploy/marian \
 
 `discord.token` or `discord.existingSecret` is required. Use `existingSecret` and `discord.secretKey` when the token already lives in the cluster. `discord.clientSecret` is the OAuth secret when the chart creates the Secret. With `existingSecret`, set `discord.clientSecretKey` to the key that already holds it. `imagePullSecrets` is a list of `{name: ...}` objects.
 
-The Deployment is a single replica with `strategy: Recreate`. SQLite has one writer, so do not scale it. The root filesystem is read-only; the database is at `/data/marian.db` on a PersistentVolumeClaim (1Gi unless you change `persistence.size`). Set `persistence.existingClaim` to bring your own volume.
+The Deployment is a single replica with `strategy: Recreate`. The database URL is `sqlite:///data/marian.db` on a PersistentVolumeClaim (1Gi unless you change `persistence.size`). A sqlite file has one writer, so keep the replica count at 1. The root filesystem is read-only. Set `persistence.existingClaim` to bring your own volume.
 
 Probes call `/healthz` and `/readyz`. The pod runs as uid 65532.
 

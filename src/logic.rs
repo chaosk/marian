@@ -44,13 +44,15 @@ pub use tick::{rebase, tick};
 mod tests {
     use super::*;
     use crate::clock;
-    use crate::store;
+    use crate::schema;
+    use crate::store::{self, Connection};
     use chrono::{DateTime, Duration, TimeZone, Utc};
-    use rusqlite::{params, Connection};
+    use diesel::connection::SimpleConnection;
+    use diesel::prelude::*;
 
     fn world() -> Connection {
-        let conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Test', 'UTC');
             INSERT INTO settings (guild_id) VALUES (1);
@@ -137,12 +139,12 @@ mod tests {
             reminders_enabled: true,
         }];
         let id = save_event(&mut conn, event).unwrap();
-        let option = store::options_for(&conn, id).unwrap()[0].id;
+        let option = store::options_for(&mut conn, id).unwrap()[0].id;
         signup(&mut conn, id, option, 2).unwrap();
         let waiting = signup(&mut conn, id, option, 3).unwrap();
         assert!(waiting.contains("waiting"));
         signup(&mut conn, id, option, 2).unwrap();
-        let signups = store::signups_for(&conn, id).unwrap();
+        let signups = store::signups_for(&mut conn, id).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].user_id, 3);
         assert_eq!(signups[0].state, "confirmed");
@@ -158,7 +160,7 @@ mod tests {
         );
         gated.options[0].role_id = Some(2);
         let gated_id = save_event(&mut conn, gated).unwrap();
-        let gated_option = store::options_for(&conn, gated_id).unwrap()[0].id;
+        let gated_option = store::options_for(&mut conn, gated_id).unwrap()[0].id;
         let err = signup(&mut conn, gated_id, gated_option, 3)
             .unwrap_err()
             .to_string();
@@ -170,7 +172,7 @@ mod tests {
         let mut closed = input("Late", Utc::now() + Duration::hours(4), SaveAction::Publish);
         closed.cutoff_at = Some(Utc::now() - Duration::minutes(1));
         let closed_id = save_event(&mut conn, closed).unwrap();
-        let closed_option = store::options_for(&conn, closed_id).unwrap()[0].id;
+        let closed_option = store::options_for(&mut conn, closed_id).unwrap()[0].id;
         let err = signup(&mut conn, closed_id, closed_option, 2)
             .unwrap_err()
             .to_string();
@@ -180,34 +182,41 @@ mod tests {
     #[test]
     fn marking_attendance_is_what_discord_hears() {
         let mut conn = world();
-        conn.execute("UPDATE guilds SET discord_id = 'g1' WHERE id = 1", [])
+        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
+            .set(schema::guilds::discord_id.eq("g1"))
+            .execute(&mut conn)
             .unwrap();
-        conn.execute("UPDATE channels SET discord_id = 'c1' WHERE id = 1", [])
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
+            .set(schema::channels::discord_id.eq("c1"))
+            .execute(&mut conn)
             .unwrap();
-        conn.execute("UPDATE users SET discord_id = 'u2' WHERE id = 2", [])
+        diesel::update(schema::users::table.filter(schema::users::id.eq(2)))
+            .set(schema::users::discord_id.eq("u2"))
+            .execute(&mut conn)
             .unwrap();
-        conn.execute("UPDATE roles SET discord_id = 'r2' WHERE id = 2", [])
+        diesel::update(schema::roles::table.filter(schema::roles::id.eq(2)))
+            .set(schema::roles::discord_id.eq("r2"))
+            .execute(&mut conn)
             .unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.attendee_role_id = Some(2);
         let id = save_event(&mut conn, event).unwrap();
-        conn.execute(
-            "UPDATE events SET discord_message_id = 'm1' WHERE id = ?",
-            [id],
-        )
-        .unwrap();
-        let options = store::options_for(&conn, id).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::discord_message_id.eq("m1"))
+            .execute(&mut conn)
+            .unwrap();
+        let options = store::options_for(&mut conn, id).unwrap();
         signup(&mut conn, id, options[0].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&conn, id).unwrap() else {
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert_eq!(work.thread_add, vec!["u2".to_string()]);
         assert_eq!(work.role_add, vec!["u2".to_string()]);
         assert_eq!(work.role_discord_id.as_deref(), Some("r2"));
-        store::mark_applied(&conn, id, "thread", "u2").unwrap();
-        store::mark_applied(&conn, id, "role", "u2").unwrap();
+        store::mark_applied(&mut conn, id, "thread", "u2").unwrap();
+        store::mark_applied(&mut conn, id, "role", "u2").unwrap();
         signup(&mut conn, id, options[1].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&conn, id).unwrap() else {
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert!(work.thread_add.is_empty());
@@ -227,11 +236,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let options = store::options_for(&conn, id).unwrap();
+        let options = store::options_for(&mut conn, id).unwrap();
         signup(&mut conn, id, options[0].id, 2).unwrap();
         let moved = signup(&mut conn, id, options[1].id, 2).unwrap();
         assert!(moved.contains("moved"));
-        let signups = store::signups_for(&conn, id).unwrap();
+        let signups = store::signups_for(&mut conn, id).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
     }
@@ -242,14 +251,10 @@ mod tests {
         let mut scheduled = input("Q&A", Utc::now() + Duration::days(3), SaveAction::Schedule);
         scheduled.post_at = Some(Utc::now() + Duration::hours(2));
         let scheduled_id = save_event(&mut conn, scheduled).unwrap();
-        conn.execute(
-            "UPDATE events SET post_at = ? WHERE id = ?",
-            params![
-                clock::stamp(Utc::now() - Duration::minutes(1)),
-                scheduled_id
-            ],
-        )
-        .unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
+            .set(schema::events::post_at.eq(clock::stamp(Utc::now() - Duration::minutes(1))))
+            .execute(&mut conn)
+            .unwrap();
         let mut soon = input(
             "Dock",
             Utc::now() + Duration::minutes(10),
@@ -260,14 +265,17 @@ mod tests {
             message: "Boots on.".into(),
         }];
         let soon_id = save_event(&mut conn, soon).unwrap();
-        let option_id = store::options_for(&conn, soon_id).unwrap()[0].id;
+        let option_id = store::options_for(&mut conn, soon_id).unwrap()[0].id;
         signup(&mut conn, soon_id, option_id, 2).unwrap();
         let report = tick(&mut conn, Utc::now()).unwrap();
         assert_eq!(
-            store::event(&conn, scheduled_id).unwrap().unwrap().status,
+            store::event(&mut conn, scheduled_id)
+                .unwrap()
+                .unwrap()
+                .status,
             "posted"
         );
-        let reminder = store::reminders_for(&conn, soon_id).unwrap();
+        let reminder = store::reminders_for(&mut conn, soon_id).unwrap();
         assert!(reminder[0].sent_at.is_some());
         assert!(report.notes.iter().any(|note| note.contains("Dock")));
     }
@@ -283,19 +291,21 @@ mod tests {
             max_occurrences: Some(3),
         });
         let id = save_event(&mut conn, event).unwrap();
-        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 3);
         let third = clock::parse_stamp(&dates[2].starts_at).unwrap();
-        conn.execute(
-            "UPDATE events SET starts_at = ? WHERE id = ?",
-            params![
-                clock::stamp(clock::parse_stamp(&dates[1].starts_at).unwrap() + Duration::days(1)),
-                dates[1].id
-            ],
-        )
-        .unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
+            .set(schema::events::starts_at.eq(clock::stamp(
+                clock::parse_stamp(&dates[1].starts_at).unwrap() + Duration::days(1),
+            )))
+            .execute(&mut conn)
+            .unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(clock::parse_stamp(&dates[2].starts_at).unwrap(), third);
     }
 
@@ -310,18 +320,21 @@ mod tests {
             max_occurrences: None,
         });
         let id = save_event(&mut conn, event).unwrap();
-        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
         let mut now = anchor;
         for _ in 0..8 {
-            conn.execute(
-                "UPDATE events SET status = 'posted' WHERE series_id = ?",
-                params![series_id],
-            )
-            .unwrap();
+            diesel::update(schema::events::table.filter(schema::events::series_id.eq(series_id)))
+                .set(schema::events::status.eq("posted"))
+                .execute(&mut conn)
+                .unwrap();
             now += Duration::days(8);
-            series::ensure_series(&conn, series_id, now).unwrap();
+            series::ensure_series(&mut conn, series_id, now).unwrap();
         }
-        let max_index = store::events_in_series(&conn, series_id)
+        let max_index = store::events_in_series(&mut conn, series_id)
             .unwrap()
             .iter()
             .filter_map(|event| event.occurrence_index)
@@ -341,13 +354,16 @@ mod tests {
             max_occurrences: Some(4),
         });
         let id = save_event(&mut conn, event).unwrap();
-        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
-        conn.execute(
-            "UPDATE events SET starts_at = ? WHERE id = ?",
-            params![clock::stamp(anchor + Duration::days(8)), dates[1].id],
-        )
-        .unwrap();
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
+            .set(schema::events::starts_at.eq(clock::stamp(anchor + Duration::days(8))))
+            .execute(&mut conn)
+            .unwrap();
         save_series_repeat(
             &mut conn,
             series_id,
@@ -359,7 +375,7 @@ mod tests {
             },
         )
         .unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(dates[0].status, "posted");
         assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
@@ -384,7 +400,11 @@ mod tests {
             max_occurrences: Some(4),
         });
         let id = save_event(&mut conn, event).unwrap();
-        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
         save_series_repeat(
             &mut conn,
             series_id,
@@ -396,7 +416,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(store::events_in_series(&conn, series_id).unwrap().len(), 2);
+        assert_eq!(
+            store::events_in_series(&mut conn, series_id).unwrap().len(),
+            2
+        );
         save_series_repeat(
             &mut conn,
             series_id,
@@ -408,7 +431,7 @@ mod tests {
             },
         )
         .unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(
             clock::parse_stamp(&dates[2].starts_at).unwrap(),
@@ -437,7 +460,7 @@ mod tests {
             },
         )
         .unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates[2].status, "skipped");
         assert_eq!(dates[3].status, "scheduled");
         assert_eq!(
@@ -457,7 +480,11 @@ mod tests {
             max_occurrences: Some(4),
         });
         let id = save_event(&mut conn, event).unwrap();
-        let series_id = store::event(&conn, id).unwrap().unwrap().series_id.unwrap();
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
         save_series_repeat(
             &mut conn,
             series_id,
@@ -469,7 +496,7 @@ mod tests {
             },
         )
         .unwrap();
-        let dates = store::events_in_series(&conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 2);
         assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
         assert_eq!(
@@ -487,13 +514,13 @@ mod tests {
             input("Later", t0 + Duration::hours(2), SaveAction::Publish),
         )
         .unwrap();
-        let mut settings = store::settings(&conn, 1).unwrap();
+        let mut settings = store::settings(&mut conn, 1).unwrap();
         settings.park_clock = true;
-        store::update_settings(&conn, &settings).unwrap();
-        store::set_meta(&conn, "anchor:1", &clock::stamp(t0)).unwrap();
+        store::update_settings(&mut conn, &settings).unwrap();
+        store::set_meta(&mut conn, "anchor:1", &clock::stamp(t0)).unwrap();
         rebase(&mut conn, t0 + Duration::hours(5)).unwrap();
         let start =
-            clock::parse_stamp(&store::event(&conn, id).unwrap().unwrap().starts_at).unwrap();
+            clock::parse_stamp(&store::event(&mut conn, id).unwrap().unwrap().starts_at).unwrap();
         let lead = start - (t0 + Duration::hours(5));
         assert!(
             (lead.num_minutes() - 120).abs() < 2,

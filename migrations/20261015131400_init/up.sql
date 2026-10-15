@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -290,7 +288,8 @@ CREATE TABLE routines (
   days_json TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
   created_by INTEGER NOT NULL REFERENCES users(id),
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT ''
 );
 
 CREATE UNIQUE INDEX idx_routines_public_id ON routines (public_id);

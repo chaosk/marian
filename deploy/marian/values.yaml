@@ -1,9 +1,9 @@
-# One process owns the SQLite database. Keep this at 1.
+# One process owns the database. Keep this at 1.
 replicaCount: 1
 
 image:
   repository: marian
-  tag: "0.2.4"
+  tag: "0.3.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

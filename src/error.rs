@@ -7,7 +7,7 @@ pub enum OpError {
     #[error("That record isn't here.")]
     NotFound,
     #[error("Something went wrong: {0}")]
-    Db(#[from] rusqlite::Error),
+    Db(#[from] diesel::result::Error),
 }
 
 impl OpError {

@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
 
 use super::access::{can_delete, can_edit};
 use super::db::{log, must_channel, must_event, must_series, must_user};
@@ -9,7 +9,8 @@ use super::series;
 use super::template;
 use crate::clock;
 use crate::error::OpError;
-use crate::store::{self, Event, Series, Settings, User};
+use crate::schema;
+use crate::store::{self, Connection, Event, Series, Settings, User};
 
 pub fn archive_event(
     conn: &mut Connection,
@@ -29,7 +30,7 @@ pub fn archive_event(
 }
 
 pub(super) fn archive_tx(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &Event,
     settings: &Settings,
 ) -> Result<String, OpError> {
@@ -37,16 +38,18 @@ pub(super) fn archive_tx(
         return Err(OpError::message("Only a posted event can be archived."));
     }
     let stamp = store::now_stamp();
-    conn.execute(
-        "UPDATE events SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?",
-        params![stamp, stamp, event.id],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set((
+            schema::events::status.eq("archived"),
+            schema::events::archived_at.eq(&stamp),
+            schema::events::updated_at.eq(&stamp),
+        ))
+        .execute(conn)?;
     let channel = must_channel(conn, event.channel_id)?;
     if settings.purge_channels && channel.kind == "event" {
-        conn.execute(
-            "UPDATE channels SET purged_at = ? WHERE id = ?",
-            params![stamp, channel.id],
-        )?;
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
+            .set(schema::channels::purged_at.eq(&stamp))
+            .execute(conn)?;
         log(
             conn,
             event.guild_id,
@@ -77,16 +80,20 @@ pub fn delete_event(
         }
         if matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
             let title = event.title.clone();
-            tx.execute("DELETE FROM events WHERE id = ?", [event.id])?;
+            diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
+                .execute(tx)?;
             let notice = format!("Deleted {title}.");
             log(tx, event.guild_id, None, &notice)?;
             Ok(notice)
         } else if event.status == "posted" {
             let stamp = store::now_stamp();
-            tx.execute(
-                "UPDATE events SET status = 'cancelled', archived_at = ?, updated_at = ? WHERE id = ?",
-                params![stamp, stamp, event.id],
-            )?;
+            diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+                .set((
+                    schema::events::status.eq("cancelled"),
+                    schema::events::archived_at.eq(&stamp),
+                    schema::events::updated_at.eq(&stamp),
+                ))
+                .execute(tx)?;
             let notice = format!("Cancelled {}.", event.title);
             log(tx, event.guild_id, Some(event.id), &notice)?;
             Ok(notice)
@@ -166,10 +173,12 @@ pub fn skip_event(conn: &mut Connection, event_id: i64, actor_id: i64) -> Result
                 "Only a date that hasn't been posted can be skipped.",
             ));
         }
-        tx.execute(
-            "UPDATE events SET status = 'skipped', updated_at = ? WHERE id = ?",
-            params![store::now_stamp(), event.id],
-        )?;
+        diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+            .set((
+                schema::events::status.eq("skipped"),
+                schema::events::updated_at.eq(store::now_stamp()),
+            ))
+            .execute(tx)?;
         let notice = format!("Skipped {}.", event.title);
         log(tx, event.guild_id, Some(event.id), &notice)?;
         Ok(notice)
@@ -201,11 +210,19 @@ pub fn end_series(conn: &mut Connection, series_id: i64, actor_id: i64) -> Resul
         let series = must_series(tx, series_id)?;
         let actor = must_user(tx, actor_id)?;
         may_change_series(tx, &series, &actor, "You can't end this series.")?;
-        tx.execute("UPDATE series SET active = 0 WHERE id = ?", [series_id])?;
-        tx.execute(
-            "UPDATE events SET status = 'skipped', updated_at = ? WHERE series_id = ? AND status IN ('scheduled', 'draft')",
-            params![store::now_stamp(), series_id],
-        )?;
+        diesel::update(schema::series::table.filter(schema::series::id.eq(series_id)))
+            .set(schema::series::active.eq(false))
+            .execute(tx)?;
+        diesel::update(
+            schema::events::table
+                .filter(schema::events::series_id.eq(series_id))
+                .filter(schema::events::status.eq_any(["scheduled", "draft"])),
+        )
+        .set((
+            schema::events::status.eq("skipped"),
+            schema::events::updated_at.eq(store::now_stamp()),
+        ))
+        .execute(tx)?;
         let title = super::template::load(tx, series.template_id)
             .map(|template| template.title)
             .unwrap_or_else(|_| "Series".into());
@@ -216,7 +233,7 @@ pub fn end_series(conn: &mut Connection, series_id: i64, actor_id: i64) -> Resul
 }
 
 fn may_change_series(
-    conn: &Connection,
+    conn: &mut Connection,
     series: &Series,
     actor: &User,
     denied: &str,

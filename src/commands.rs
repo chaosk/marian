@@ -4,14 +4,17 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
+use diesel::prelude::*;
+use diesel::upsert::excluded;
+
 use crate::clock;
 use crate::error::OpError;
 use crate::logic::{
     self, EventInput, OptionInput, PresetBody, ReminderInput, RepeatSpec, SaveAction,
 };
 use crate::parse::{self, tokenize};
-use crate::store::{self, Event};
-use rusqlite::OptionalExtension;
+use crate::schema;
+use crate::store::{self, Connection, Event};
 
 pub const HELP: &str = "\
 /event
@@ -53,7 +56,7 @@ Times can look like \"tomorrow at 7pm\", \"friday 9am\", \"oct 20 at 8:00pm\", o
 Presets, waitlists, and per-option roles are on the website.
 ";
 
-pub fn execute(conn: &mut rusqlite::Connection, guild_id: i64, user_id: i64, line: &str) -> String {
+pub fn execute(conn: &mut Connection, guild_id: i64, user_id: i64, line: &str) -> String {
     let line = line.trim();
     let reply = if line.is_empty() {
         "Type /help to see the command desk.".to_string()
@@ -83,7 +86,7 @@ fn event_path(guild: &store::Guild, public_id: &str) -> String {
     }
 }
 
-fn find_event(conn: &rusqlite::Connection, guild_id: i64, token: &str) -> Result<Event, OpError> {
+fn find_event(conn: &mut Connection, guild_id: i64, token: &str) -> Result<Event, OpError> {
     if let Some(public_id) = crate::ids::parse_event_id(token) {
         if let Some(event) = store::event_by_public(conn, public_id)? {
             if event.guild_id == guild_id {
@@ -95,15 +98,14 @@ fn find_event(conn: &rusqlite::Connection, guild_id: i64, token: &str) -> Result
 }
 
 pub fn channel_posts_waiting(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
 ) -> Result<Vec<i64>, OpError> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT draft FROM event_prompts WHERE discord_user_id = ? AND step = 'next'",
-            [discord_user_id],
-            |row| row.get(0),
-        )
+    let raw: Option<String> = schema::event_prompts::table
+        .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
+        .filter(schema::event_prompts::step.eq("next"))
+        .select(schema::event_prompts::draft.assume_not_null())
+        .first(conn)
         .optional()?;
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -123,7 +125,7 @@ pub fn channel_posts_waiting(
 }
 
 fn dispatch(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     line: &str,
@@ -147,7 +149,7 @@ fn dispatch(
 }
 
 fn cmd_event(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     rest: &str,
@@ -163,26 +165,37 @@ fn cmd_event(
         ));
     }
     let discord_user_id = prompt_key(conn, user_id)?;
-    conn.execute(
-        "INSERT INTO event_prompts (
-            discord_user_id, guild_id, user_id, step, title, start_raw, channel_name, source_channel, source_discord, draft
-         ) VALUES (?, ?, ?, 'channel', NULL, NULL, NULL, NULL, NULL, NULL)
-         ON CONFLICT(discord_user_id) DO UPDATE SET
-           guild_id = excluded.guild_id,
-           user_id = excluded.user_id,
-           step = 'channel',
-           title = NULL,
-           start_raw = NULL,
-           channel_name = NULL,
-           source_channel = NULL,
-           source_discord = NULL,
-           draft = NULL",
-        rusqlite::params![discord_user_id, guild_id, user_id],
-    )?;
+    diesel::insert_into(schema::event_prompts::table)
+        .values((
+            schema::event_prompts::discord_user_id.eq(&discord_user_id),
+            schema::event_prompts::guild_id.eq(guild_id),
+            schema::event_prompts::user_id.eq(user_id),
+            schema::event_prompts::step.eq("channel"),
+            schema::event_prompts::title.eq(None::<&str>),
+            schema::event_prompts::start_raw.eq(None::<&str>),
+            schema::event_prompts::channel_name.eq(None::<&str>),
+            schema::event_prompts::source_channel.eq(None::<&str>),
+            schema::event_prompts::source_discord.eq(None::<&str>),
+            schema::event_prompts::draft.eq(None::<&str>),
+        ))
+        .on_conflict(schema::event_prompts::discord_user_id)
+        .do_update()
+        .set((
+            schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
+            schema::event_prompts::user_id.eq(excluded(schema::event_prompts::user_id)),
+            schema::event_prompts::step.eq("channel"),
+            schema::event_prompts::title.eq(None::<&str>),
+            schema::event_prompts::start_raw.eq(None::<&str>),
+            schema::event_prompts::channel_name.eq(None::<&str>),
+            schema::event_prompts::source_channel.eq(None::<&str>),
+            schema::event_prompts::source_discord.eq(None::<&str>),
+            schema::event_prompts::draft.eq(None::<&str>),
+        ))
+        .execute(conn)?;
     Ok(where_to_post(conn, guild_id, &None, &None)?.to_string())
 }
 
-fn prompt_key(conn: &rusqlite::Connection, user_id: i64) -> Result<String, OpError> {
+fn prompt_key(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
     let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
     Ok(user
         .discord_id
@@ -190,11 +203,7 @@ fn prompt_key(conn: &rusqlite::Connection, user_id: i64) -> Result<String, OpErr
         .unwrap_or_else(|| format!("user:{user_id}")))
 }
 
-fn desk_answer(
-    conn: &mut rusqlite::Connection,
-    user_id: i64,
-    line: &str,
-) -> Result<Option<String>, OpError> {
+fn desk_answer(conn: &mut Connection, user_id: i64, line: &str) -> Result<Option<String>, OpError> {
     let key = prompt_key(conn, user_id)?;
     let Some(replies) = answer_event_dm(conn, &key, line, "")? else {
         return Ok(None);
@@ -240,7 +249,7 @@ impl std::fmt::Display for DmReply {
 }
 
 pub fn start_event_dm(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     discord_user_id: &str,
@@ -258,67 +267,93 @@ pub fn start_event_dm(
             "Create a channel before posting an event.",
         ));
     }
-    conn.execute(
-        "INSERT INTO event_prompts (
-            discord_user_id, guild_id, user_id, step, title, start_raw, channel_name, source_channel, source_discord, draft
-         ) VALUES (?, ?, ?, 'channel', NULL, NULL, NULL, ?, ?, NULL)
-         ON CONFLICT(discord_user_id) DO UPDATE SET
-           guild_id = excluded.guild_id,
-           user_id = excluded.user_id,
-           step = 'channel',
-           title = NULL,
-           start_raw = NULL,
-           channel_name = NULL,
-           source_channel = excluded.source_channel,
-           source_discord = excluded.source_discord,
-           draft = NULL",
-        rusqlite::params![
-            discord_user_id,
-            guild_id,
-            user_id,
-            source_channel,
-            source_discord
-        ],
-    )?;
+    diesel::insert_into(schema::event_prompts::table)
+        .values((
+            schema::event_prompts::discord_user_id.eq(discord_user_id),
+            schema::event_prompts::guild_id.eq(guild_id),
+            schema::event_prompts::user_id.eq(user_id),
+            schema::event_prompts::step.eq("channel"),
+            schema::event_prompts::title.eq(None::<&str>),
+            schema::event_prompts::start_raw.eq(None::<&str>),
+            schema::event_prompts::channel_name.eq(None::<&str>),
+            schema::event_prompts::source_channel.eq(source_channel),
+            schema::event_prompts::source_discord.eq(source_discord),
+            schema::event_prompts::draft.eq(None::<&str>),
+        ))
+        .on_conflict(schema::event_prompts::discord_user_id)
+        .do_update()
+        .set((
+            schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
+            schema::event_prompts::user_id.eq(excluded(schema::event_prompts::user_id)),
+            schema::event_prompts::step.eq("channel"),
+            schema::event_prompts::title.eq(None::<&str>),
+            schema::event_prompts::start_raw.eq(None::<&str>),
+            schema::event_prompts::channel_name.eq(None::<&str>),
+            schema::event_prompts::source_channel
+                .eq(excluded(schema::event_prompts::source_channel)),
+            schema::event_prompts::source_discord
+                .eq(excluded(schema::event_prompts::source_discord)),
+            schema::event_prompts::draft.eq(None::<&str>),
+        ))
+        .execute(conn)?;
     let source = Some(source_channel.to_string());
     let discord = source_discord.map(str::to_string);
     where_to_post(conn, guild_id, &source, &discord)
 }
 
-pub fn cancel_event_dm(conn: &rusqlite::Connection, discord_user_id: &str) -> Result<(), OpError> {
-    conn.execute(
-        "DELETE FROM event_prompts WHERE discord_user_id = ?",
-        [discord_user_id],
-    )?;
+pub fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
+    diesel::delete(
+        schema::event_prompts::table
+            .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+    )
+    .execute(conn)?;
     Ok(())
 }
 
 pub fn answer_event_dm(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     text: &str,
     public_url: &str,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let row = conn
-        .query_row(
-            "SELECT guild_id, user_id, step, title, start_raw, channel_name, source_channel, source_discord, draft
-             FROM event_prompts WHERE discord_user_id = ?",
-            [discord_user_id],
-            |row| {
-                Ok(EventPrompt {
-                    guild_id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    step: row.get(2)?,
-                    title: row.get(3)?,
-                    start_raw: row.get(4)?,
-                    channel_name: row.get(5)?,
-                    source_channel: row.get(6)?,
-                    source_discord: row.get(7)?,
-                    draft: row.get(8)?,
-                })
+    let row = schema::event_prompts::table
+        .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
+        .select((
+            schema::event_prompts::guild_id,
+            schema::event_prompts::user_id,
+            schema::event_prompts::step,
+            schema::event_prompts::title,
+            schema::event_prompts::start_raw,
+            schema::event_prompts::channel_name,
+            schema::event_prompts::source_channel,
+            schema::event_prompts::source_discord,
+            schema::event_prompts::draft,
+        ))
+        .first(conn)
+        .optional()?
+        .map(
+            |(
+                guild_id,
+                user_id,
+                step,
+                title,
+                start_raw,
+                channel_name,
+                source_channel,
+                source_discord,
+                draft,
+            )| EventPrompt {
+                guild_id,
+                user_id,
+                step,
+                title,
+                start_raw,
+                channel_name,
+                source_channel,
+                source_discord,
+                draft,
             },
-        )
-        .optional()?;
+        );
     let Some(prompt) = row else {
         return Ok(None);
     };
@@ -368,10 +403,15 @@ pub fn answer_event_dm(
                     "Give the event a title, up to 120 characters.",
                 ));
             }
-            conn.execute(
-                "UPDATE event_prompts SET title = ?, step = 'description' WHERE discord_user_id = ?",
-                rusqlite::params![text, discord_user_id],
-            )?;
+            diesel::update(
+                schema::event_prompts::table
+                    .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+            )
+            .set((
+                schema::event_prompts::title.eq(text),
+                schema::event_prompts::step.eq("description"),
+            ))
+            .execute(conn)?;
             just(description_card())
         }
         "description" => {
@@ -394,10 +434,9 @@ pub fn answer_event_dm(
             let Some(name) = choice.and_then(|n| clock::ZONES.get(n - 1)) else {
                 return just(timezone_card());
             };
-            conn.execute(
-                "UPDATE guilds SET timezone = ? WHERE id = ?",
-                rusqlite::params![name, guild_id],
-            )?;
+            diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
+                .set(schema::guilds::timezone.eq(*name))
+                .execute(conn)?;
             save_draft(conn, discord_user_id, "start", &draft)?;
             just(start_card(conn, guild_id)?)
         }
@@ -421,10 +460,15 @@ pub fn answer_event_dm(
                     "Marian couldn't read that time.",
                 ));
             };
-            conn.execute(
-                "UPDATE event_prompts SET start_raw = ?, step = 'end' WHERE discord_user_id = ?",
-                rusqlite::params![stored, discord_user_id],
-            )?;
+            diesel::update(
+                schema::event_prompts::table
+                    .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+            )
+            .set((
+                schema::event_prompts::start_raw.eq(&stored),
+                schema::event_prompts::step.eq("end"),
+            ))
+            .execute(conn)?;
             just(end_card())
         }
         "end" => {
@@ -765,7 +809,7 @@ fn next_card(note_line: Option<&str>) -> DmReply {
     )
 }
 
-fn start_card(conn: &rusqlite::Connection, guild_id: i64) -> Result<DmReply, OpError> {
+fn start_card(conn: &mut Connection, guild_id: i64) -> Result<DmReply, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let label = clock::zone_label(tz);
@@ -822,34 +866,44 @@ fn role_card(title: &str, roles: &[store::Role], extra: &str) -> DmReply {
 }
 
 fn save_draft(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     step: &str,
     draft: &EventDraft,
 ) -> Result<(), OpError> {
     let json = serde_json::to_string(draft)
         .map_err(|err| OpError::message(format!("Could not keep the draft: {err}")))?;
-    conn.execute(
-        "UPDATE event_prompts SET step = ?, draft = ? WHERE discord_user_id = ?",
-        rusqlite::params![step, json, discord_user_id],
-    )?;
+    diesel::update(
+        schema::event_prompts::table
+            .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+    )
+    .set((
+        schema::event_prompts::step.eq(step),
+        schema::event_prompts::draft.eq(json),
+    ))
+    .execute(conn)?;
     Ok(())
 }
 
 fn advance_to_title(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     channel: &str,
 ) -> Result<DmReply, OpError> {
-    conn.execute(
-        "UPDATE event_prompts SET channel_name = ?, step = 'title' WHERE discord_user_id = ?",
-        rusqlite::params![channel, discord_user_id],
-    )?;
+    diesel::update(
+        schema::event_prompts::table
+            .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+    )
+    .set((
+        schema::event_prompts::channel_name.eq(channel),
+        schema::event_prompts::step.eq("title"),
+    ))
+    .execute(conn)?;
     Ok(title_card())
 }
 
 fn answer_channel(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -878,10 +932,12 @@ fn answer_channel(
                     &discord_owned,
                 )?);
             }
-            conn.execute(
-                "UPDATE event_prompts SET step = 'channel_other' WHERE discord_user_id = ?",
-                [discord_user_id],
-            )?;
+            diesel::update(
+                schema::event_prompts::table
+                    .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
+            )
+            .set(schema::event_prompts::step.eq("channel_other"))
+            .execute(conn)?;
             just(other_channel_prompt(&others))
         }
         _ => just(where_to_post(
@@ -894,7 +950,7 @@ fn answer_channel(
 }
 
 fn answer_finish(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     user_id: i64,
@@ -989,7 +1045,7 @@ fn answer_finish(
 }
 
 fn answer_signup(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -1019,7 +1075,7 @@ fn answer_signup(
 }
 
 fn answer_mention(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -1055,7 +1111,7 @@ fn answer_mention(
 }
 
 fn answer_restrict(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -1084,7 +1140,7 @@ fn answer_restrict(
 }
 
 fn answer_attendee_role(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -1112,7 +1168,7 @@ fn answer_attendee_role(
 }
 
 fn answer_clock_field(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     text: &str,
@@ -1160,7 +1216,7 @@ fn answer_clock_field(
 }
 
 fn finish_event(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
     user_id: i64,
@@ -1204,6 +1260,7 @@ fn finish_event(
     } else {
         draft.duration_minutes
     };
+    let thread_enabled = store::settings(conn, guild_id)?.event_threads;
     let saved = logic::save_event(
         conn,
         EventInput {
@@ -1219,7 +1276,7 @@ fn finish_event(
             image_url: draft.image_url.clone(),
             cutoff_at,
             attendee_role_id: draft.attendee_role_id,
-            thread_enabled: store::settings(conn, guild_id)?.event_threads,
+            thread_enabled,
             multiple_signups: draft.multiple,
             mention_everyone: draft.mention_everyone,
             mention_role_ids: draft.mention_role_ids.clone(),
@@ -1253,7 +1310,7 @@ fn finish_event(
 }
 
 fn answer_next(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     user_id: i64,
     text: &str,
@@ -1280,7 +1337,8 @@ fn answer_next(
             just(next_card(Some(&line)))
         }
         "2" => {
-            conn.execute("DELETE FROM signups WHERE event_id = ?", [event_id])?;
+            diesel::delete(schema::signups::table.filter(schema::signups::event_id.eq(event_id)))
+                .execute(conn)?;
             just(next_card(Some("Removed the responses.")))
         }
         "3" => {
@@ -1303,7 +1361,7 @@ fn answer_next(
 }
 
 fn answer_respond(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     discord_user_id: &str,
     user_id: i64,
     text: &str,
@@ -1393,7 +1451,7 @@ fn fit_span(minutes: i64) -> Result<i64, String> {
 }
 
 fn where_to_post(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     source_channel: &Option<String>,
     source_discord: &Option<String>,
@@ -1424,7 +1482,7 @@ fn where_to_post(
 }
 
 fn other_channels(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     source_channel: Option<&str>,
 ) -> Result<Vec<store::Channel>, OpError> {
@@ -1462,7 +1520,7 @@ fn numbered_prompt(heading: &str, lines: &[String]) -> DmReply {
 }
 
 fn cmd_edit(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1507,7 +1565,7 @@ fn cmd_edit(
 }
 
 fn cmd_reminders(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     user_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
@@ -1535,7 +1593,7 @@ fn cmd_reminders(
 }
 
 fn cmd_response(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     actor_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
@@ -1572,7 +1630,7 @@ pub struct Choice {
 }
 
 pub fn response_events(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     partial: &str,
     now: DateTime<Utc>,
@@ -1615,7 +1673,7 @@ pub fn response_events(
 }
 
 pub fn response_options(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     event_token: &str,
     partial: &str,
@@ -1647,7 +1705,7 @@ pub fn response_options(
 }
 
 pub fn roster_action(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     actor_id: i64,
     event_token: &str,
     target_id: i64,
@@ -1662,7 +1720,7 @@ pub fn roster_action(
 }
 
 fn resolve_option(
-    conn: &rusqlite::Connection,
+    conn: &mut Connection,
     event_id: i64,
     token: &str,
 ) -> Result<store::SignupOption, OpError> {
@@ -1705,7 +1763,7 @@ fn option_menu_label(emoji: &str, name: &str) -> String {
 }
 
 fn cmd_settings(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1785,7 +1843,7 @@ fn cmd_settings(
 }
 
 fn cmd_signup_options(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1828,7 +1886,7 @@ fn cmd_signup_options(
 }
 
 fn cmd_presets(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1898,7 +1956,7 @@ fn cmd_presets(
 }
 
 fn cmd_channel(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1916,7 +1974,7 @@ fn cmd_channel(
 }
 
 fn cmd_google(
-    conn: &mut rusqlite::Connection,
+    conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
     pos: &[String],
@@ -1972,11 +2030,7 @@ fn cmd_google(
     }
 }
 
-fn input_from(
-    conn: &rusqlite::Connection,
-    event: &Event,
-    actor_id: i64,
-) -> Result<EventInput, OpError> {
+fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<EventInput, OpError> {
     let options = store::options_for(conn, event.id)?;
     let reminders = store::reminders_for(conn, event.id)?;
     Ok(EventInput {
@@ -2063,7 +2117,7 @@ fn yes_no_maybe() -> Vec<OptionInput> {
     ]
 }
 
-fn require_organizer(conn: &rusqlite::Connection, user_id: i64) -> Result<(), OpError> {
+fn require_organizer(conn: &mut Connection, user_id: i64) -> Result<(), OpError> {
     let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
     if user.organizer {
         Ok(())
@@ -2103,6 +2157,8 @@ fn fields(rest: &str) -> (Vec<String>, HashMap<String, String>) {
 
 #[cfg(test)]
 mod tests {
+    use diesel::connection::SimpleConnection as _;
+
     use super::*;
 
     fn only(result: Result<Option<Vec<DmReply>>, OpError>) -> DmReply {
@@ -2125,7 +2181,7 @@ mod tests {
     #[test]
     fn event_on_the_desk_asks_the_same_questions() {
         let mut conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
@@ -2134,7 +2190,7 @@ mod tests {
             ",
         )
         .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
         let rejected = execute(
             &mut conn,
             1,
@@ -2157,7 +2213,7 @@ mod tests {
     #[test]
     fn event_dm_asks_then_posts() {
         let mut conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, kind, position, discord_id)
@@ -2167,7 +2223,7 @@ mod tests {
             ",
         )
         .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
         let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99")).unwrap();
         assert_eq!(
             first.title.as_deref(),
@@ -2226,13 +2282,13 @@ mod tests {
             "{}",
             posted[0]
         );
-        let posts = channel_posts_waiting(&conn, "u1").unwrap();
+        let posts = channel_posts_waiting(&mut conn, "u1").unwrap();
         assert_eq!(posts.len(), 1, "{posts:?}");
-        let event = store::event(&conn, posts[0]).unwrap().unwrap();
+        let event = store::event(&mut conn, posts[0]).unwrap().unwrap();
         assert!(posted[0].body.contains(&event.public_id), "{}", posted[0]);
         assert_eq!(event.channel_id, 2, "the agreed channel");
         assert_eq!(event.status, "posted");
-        let view = logic::discord_view(&conn, event.id, "https://marian.example.com")
+        let view = logic::discord_view(&mut conn, event.id, "https://marian.example.com")
             .unwrap()
             .unwrap();
         assert_eq!(view.channel_id, "100");

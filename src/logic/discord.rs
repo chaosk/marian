@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
 
 use super::catalog::slug_channel;
 use super::db::{must_channel, must_event, must_guild, trim_chars};
 use super::model::*;
 use crate::clock;
 use crate::error::OpError;
-use crate::store::{self, Channel, User};
+use crate::schema;
+use crate::store::{self, Channel, Connection, User};
 
 pub enum Attendance {
     Idle,
@@ -33,7 +34,7 @@ pub struct AttendanceWork {
     pub role_remove: Vec<String>,
 }
 
-pub fn attendance(conn: &Connection, event_id: i64) -> Result<Attendance, OpError> {
+pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, OpError> {
     let event = must_event(conn, event_id)?;
     let guild = must_guild(conn, event.guild_id)?;
     let channel = must_channel(conn, event.channel_id)?;
@@ -49,7 +50,8 @@ pub fn attendance(conn: &Connection, event_id: i64) -> Result<Attendance, OpErro
     let settings = store::settings(conn, event.guild_id)?;
     let manage_thread = event.thread_enabled && settings.auto_join_threads;
     let desired_thread = if manage_thread {
-        store::discord_ids_for_users(conn, &store::thread_member_ids(conn, event_id)?)?
+        let members = store::thread_member_ids(conn, event_id)?;
+        store::discord_ids_for_users(conn, &members)?
     } else {
         Vec::new()
     };
@@ -101,7 +103,7 @@ fn role_color(color: &str) -> u32 {
 }
 
 pub fn discord_view(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     public_url: &str,
 ) -> Result<Option<DiscordView>, OpError> {
@@ -236,14 +238,13 @@ fn web_event_url(public_url: &str, server: Option<&str>, public_id: &str) -> Opt
 }
 
 pub fn remember_discord_message(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     message_id: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "UPDATE events SET discord_message_id = ? WHERE id = ?",
-        params![message_id, event_id],
-    )?;
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
+        .set(schema::events::discord_message_id.eq(message_id))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -254,25 +255,24 @@ pub fn ensure_discord_guild(
 ) -> Result<store::Guild, OpError> {
     if let Some(guild) = store::guild_by_discord(conn, discord_id)? {
         if guild.name != name && !name.is_empty() {
-            conn.execute(
-                "UPDATE guilds SET name = ? WHERE id = ?",
-                params![name, guild.id],
-            )?;
+            diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild.id)))
+                .set(schema::guilds::name.eq(name))
+                .execute(conn)?;
         }
         return store::guild(conn, guild.id)?.ok_or(OpError::NotFound);
     }
-    conn.execute(
-        "INSERT INTO guilds (name, timezone, discord_id) VALUES (?, 'UTC', ?)",
-        params![
-            if name.is_empty() {
+    let id = diesel::insert_into(schema::guilds::table)
+        .values((
+            schema::guilds::name.eq(if name.is_empty() {
                 "Discord server"
             } else {
                 name
-            },
-            discord_id
-        ],
-    )?;
-    let id = conn.last_insert_rowid();
+            }),
+            schema::guilds::timezone.eq("UTC"),
+            schema::guilds::discord_id.eq(discord_id),
+        ))
+        .returning(schema::guilds::id)
+        .get_result(conn)?;
     store::insert_default_settings(conn, id)?;
     store::guild(conn, id)?.ok_or(OpError::NotFound)
 }
@@ -285,10 +285,9 @@ pub fn ensure_discord_user(
 ) -> Result<User, OpError> {
     if let Some(user) = store::user_by_discord(conn, guild_id, discord_id)? {
         if user.name != name && !name.is_empty() {
-            conn.execute(
-                "UPDATE users SET name = ? WHERE id = ?",
-                params![name, user.id],
-            )?;
+            diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
+                .set(schema::users::name.eq(name))
+                .execute(conn)?;
         }
         return store::user(conn, user.id)?.ok_or(OpError::NotFound);
     }
@@ -306,12 +305,19 @@ pub fn ensure_discord_user(
     } else {
         name.trim()
     };
-    conn.execute(
-        "INSERT INTO users (guild_id, name, handle, color, reminders_enabled, organizer, discord_id)
-         VALUES (?, ?, ?, ?, 1, ?, ?)",
-        params![guild_id, display, handle, color, store::i(organizer), discord_id],
-    )?;
-    store::user(conn, conn.last_insert_rowid())?.ok_or(OpError::NotFound)
+    let id = diesel::insert_into(schema::users::table)
+        .values((
+            schema::users::guild_id.eq(guild_id),
+            schema::users::name.eq(display),
+            schema::users::handle.eq(&handle),
+            schema::users::color.eq(color),
+            schema::users::reminders_enabled.eq(true),
+            schema::users::organizer.eq(organizer),
+            schema::users::discord_id.eq(discord_id),
+        ))
+        .returning(schema::users::id)
+        .get_result(conn)?;
+    store::user(conn, id)?.ok_or(OpError::NotFound)
 }
 
 pub fn ensure_discord_channel(
@@ -342,20 +348,27 @@ pub fn ensure_discord_channel(
     } else {
         slug
     };
-    let position: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position), 0) + 1 FROM channels WHERE guild_id = ?",
-        [guild_id],
-        |row| row.get(0),
-    )?;
-    conn.execute(
-        "INSERT INTO channels (guild_id, name, kind, position, discord_id) VALUES (?, ?, 'text', ?, ?)",
-        params![guild_id, slug, position, discord_id],
-    )?;
-    store::channel(conn, conn.last_insert_rowid())?.ok_or(OpError::NotFound)
+    let position = schema::channels::table
+        .filter(schema::channels::guild_id.eq(guild_id))
+        .select(diesel::dsl::max(schema::channels::position))
+        .first::<Option<i64>>(conn)?
+        .unwrap_or(0)
+        + 1;
+    let id = diesel::insert_into(schema::channels::table)
+        .values((
+            schema::channels::guild_id.eq(guild_id),
+            schema::channels::name.eq(&slug),
+            schema::channels::kind.eq("text"),
+            schema::channels::position.eq(position),
+            schema::channels::discord_id.eq(discord_id),
+        ))
+        .returning(schema::channels::id)
+        .get_result(conn)?;
+    store::channel(conn, id)?.ok_or(OpError::NotFound)
 }
 
 fn unique_handle(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     name: &str,
     discord_id: &str,
@@ -378,12 +391,14 @@ fn unique_handle(
 
 #[cfg(test)]
 mod tests {
+    use diesel::connection::SimpleConnection;
+
     use super::*;
 
     #[test]
     fn the_channel_card_lists_names_in_columns() {
-        let conn = store::open_memory().unwrap();
-        conn.execute_batch(
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
@@ -407,8 +422,8 @@ mod tests {
             ",
         )
         .unwrap();
-        store::insert_default_settings(&conn, 1).unwrap();
-        let view = discord_view(&conn, 1, "https://marian.example.com")
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let view = discord_view(&mut conn, 1, "https://marian.example.com")
             .unwrap()
             .unwrap();
         assert!(

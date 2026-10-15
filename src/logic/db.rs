@@ -1,13 +1,14 @@
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
 
 use crate::error::OpError;
-use crate::store::{self, Channel, Event, User};
+use crate::schema;
+use crate::store::{self, Channel, Connection, Event, User};
 
 pub(super) fn trim_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-pub(super) fn role_names(conn: &Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
+pub(super) fn role_names(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
     let mut names = Vec::new();
     for id in ids {
         if let Some(role) = store::role(conn, *id)? {
@@ -18,42 +19,46 @@ pub(super) fn role_names(conn: &Connection, ids: &[i64]) -> Result<Vec<String>, 
 }
 
 pub(super) fn log(
-    conn: &Connection,
+    conn: &mut Connection,
     guild_id: i64,
     event_id: Option<i64>,
     body: &str,
 ) -> Result<(), OpError> {
-    conn.execute(
-        "INSERT INTO activity (guild_id, event_id, body, created_at) VALUES (?, ?, ?, ?)",
-        params![guild_id, event_id, body, store::now_stamp()],
-    )?;
+    diesel::insert_into(schema::activity::table)
+        .values((
+            schema::activity::guild_id.eq(guild_id),
+            schema::activity::event_id.eq(event_id),
+            schema::activity::body.eq(body),
+            schema::activity::created_at.eq(store::now_stamp()),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
-pub(super) fn must_event(conn: &Connection, id: i64) -> Result<Event, OpError> {
+pub(super) fn must_event(conn: &mut Connection, id: i64) -> Result<Event, OpError> {
     store::event(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_user(conn: &Connection, id: i64) -> Result<User, OpError> {
+pub(super) fn must_user(conn: &mut Connection, id: i64) -> Result<User, OpError> {
     store::user(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_channel(conn: &Connection, id: i64) -> Result<Channel, OpError> {
+pub(super) fn must_channel(conn: &mut Connection, id: i64) -> Result<Channel, OpError> {
     store::channel(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_role(conn: &Connection, id: i64) -> Result<store::Role, OpError> {
+pub(super) fn must_role(conn: &mut Connection, id: i64) -> Result<store::Role, OpError> {
     store::role(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_option(conn: &Connection, id: i64) -> Result<store::SignupOption, OpError> {
+pub(super) fn must_option(conn: &mut Connection, id: i64) -> Result<store::SignupOption, OpError> {
     store::option(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_series(conn: &Connection, id: i64) -> Result<store::Series, OpError> {
+pub(super) fn must_series(conn: &mut Connection, id: i64) -> Result<store::Series, OpError> {
     store::series(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_guild(conn: &Connection, id: i64) -> Result<store::Guild, OpError> {
+pub(super) fn must_guild(conn: &mut Connection, id: i64) -> Result<store::Guild, OpError> {
     store::guild(conn, id)?.ok_or(OpError::NotFound)
 }

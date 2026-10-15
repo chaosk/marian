@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
 
 use super::access::can_edit;
 use super::db::{log, must_event, must_option, must_role, must_user, role_names};
 use crate::clock;
 use crate::error::OpError;
-use crate::store::{self, Event};
+use crate::schema;
+use crate::store::{self, Connection, Event};
 
 pub fn signup(
     conn: &mut Connection,
@@ -19,7 +20,7 @@ pub fn signup(
 }
 
 fn signup_tx(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     option_id: i64,
     user_id: i64,
@@ -39,7 +40,8 @@ fn signup_tx(
     let now = Utc::now();
     if let Some(existing) = find_signup(conn, option_id, user_id)? {
         let state = existing.state.clone();
-        conn.execute("DELETE FROM signups WHERE id = ?", [existing.id])?;
+        diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
+            .execute(conn)?;
         fill_all(conn, event.id)?;
         sync_access(conn, event.id)?;
         let notice = if state == "waitlisted" {
@@ -80,7 +82,8 @@ fn signup_tx(
         let others = signups_for_user(conn, event.id, user.id)?;
         let moved = !others.is_empty();
         for other in others {
-            conn.execute("DELETE FROM signups WHERE id = ?", [other.id])?;
+            diesel::delete(schema::signups::table.filter(schema::signups::id.eq(other.id)))
+                .execute(conn)?;
         }
         moved
     } else {
@@ -99,10 +102,15 @@ fn signup_tx(
     } else {
         "confirmed"
     };
-    conn.execute(
-        "INSERT INTO signups (event_id, option_id, user_id, state, created_at) VALUES (?, ?, ?, ?, ?)",
-        params![event.id, option.id, user.id, state, clock::stamp(now)],
-    )?;
+    diesel::insert_into(schema::signups::table)
+        .values((
+            schema::signups::event_id.eq(event.id),
+            schema::signups::option_id.eq(option.id),
+            schema::signups::user_id.eq(user.id),
+            schema::signups::state.eq(state),
+            schema::signups::created_at.eq(clock::stamp(now)),
+        ))
+        .execute(conn)?;
     fill_all(conn, event.id)?;
     sync_access(conn, event.id)?;
     let notice = if moved && state == "confirmed" {
@@ -147,7 +155,8 @@ pub fn organizer_response(
                 let Some(existing) = find_signup(tx, option.id, target.id)? else {
                     return Ok(format!("{} wasn't on {}.", target.name, option.name));
                 };
-                tx.execute("DELETE FROM signups WHERE id = ?", [existing.id])?;
+                diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
+                    .execute(tx)?;
                 fill_all(tx, event.id)?;
                 sync_access(tx, event.id)?;
                 let notice = format!("Removed {} from {}.", target.name, option.name);
@@ -158,7 +167,10 @@ pub fn organizer_response(
                 if !event.multiple_signups || action == "move" {
                     for other in signups_for_user(tx, event.id, target.id)? {
                         if other.option_id != option.id {
-                            tx.execute("DELETE FROM signups WHERE id = ?", [other.id])?;
+                            diesel::delete(
+                                schema::signups::table.filter(schema::signups::id.eq(other.id)),
+                            )
+                            .execute(tx)?;
                         }
                     }
                 }
@@ -167,10 +179,15 @@ pub fn organizer_response(
                     sync_access(tx, event.id)?;
                     return Ok(format!("{} is already on {}.", target.name, option.name));
                 }
-                tx.execute(
-                    "INSERT INTO signups (event_id, option_id, user_id, state, created_at) VALUES (?, ?, ?, 'confirmed', ?)",
-                    params![event.id, option.id, target.id, store::now_stamp()],
-                )?;
+                diesel::insert_into(schema::signups::table)
+                    .values((
+                        schema::signups::event_id.eq(event.id),
+                        schema::signups::option_id.eq(option.id),
+                        schema::signups::user_id.eq(target_id),
+                        schema::signups::state.eq("confirmed"),
+                        schema::signups::created_at.eq(store::now_stamp()),
+                    ))
+                    .execute(tx)?;
                 fill_all(tx, event.id)?;
                 sync_access(tx, event.id)?;
                 let notice = format!("Added {} to {}.", target.name, option.name);
@@ -183,63 +200,46 @@ pub fn organizer_response(
 }
 
 fn find_signup(
-    conn: &Connection,
+    conn: &mut Connection,
     option_id: i64,
     user_id: i64,
 ) -> Result<Option<store::Signup>, OpError> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM signups WHERE option_id = ? AND user_id = ?",
-            params![option_id, user_id],
-            |row| {
-                Ok(store::Signup {
-                    id: row.get("id")?,
-                    event_id: row.get("event_id")?,
-                    option_id: row.get("option_id")?,
-                    user_id: row.get("user_id")?,
-                    state: row.get("state")?,
-                    created_at: row.get("created_at")?,
-                })
-            },
-        )
-        .ok())
+    Ok(schema::signups::table
+        .filter(schema::signups::option_id.eq(option_id))
+        .filter(schema::signups::user_id.eq(user_id))
+        .select(store::Signup::as_select())
+        .first(conn)
+        .optional()?)
 }
 
 fn signups_for_user(
-    conn: &Connection,
+    conn: &mut Connection,
     event_id: i64,
     user_id: i64,
 ) -> Result<Vec<store::Signup>, OpError> {
-    let mut stmt = conn.prepare("SELECT * FROM signups WHERE event_id = ? AND user_id = ?")?;
-    let rows = stmt.query_map(params![event_id, user_id], |row| {
-        Ok(store::Signup {
-            id: row.get("id")?,
-            event_id: row.get("event_id")?,
-            option_id: row.get("option_id")?,
-            user_id: row.get("user_id")?,
-            state: row.get("state")?,
-            created_at: row.get("created_at")?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(schema::signups::table
+        .filter(schema::signups::event_id.eq(event_id))
+        .filter(schema::signups::user_id.eq(user_id))
+        .select(store::Signup::as_select())
+        .load(conn)?)
 }
 
-fn count_state(conn: &Connection, option_id: i64, state: &str) -> Result<i64, OpError> {
-    Ok(conn.query_row(
-        "SELECT count(*) FROM signups WHERE option_id = ? AND state = ?",
-        params![option_id, state],
-        |row| row.get(0),
-    )?)
+fn count_state(conn: &mut Connection, option_id: i64, state: &str) -> Result<i64, OpError> {
+    Ok(schema::signups::table
+        .filter(schema::signups::option_id.eq(option_id))
+        .filter(schema::signups::state.eq(state))
+        .count()
+        .get_result(conn)?)
 }
 
-pub(super) fn fill_all(conn: &Connection, event_id: i64) -> Result<(), OpError> {
+pub(super) fn fill_all(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
     for opt in store::options_for(conn, event_id)? {
         fill_option(conn, opt.id)?;
     }
     Ok(())
 }
 
-fn fill_option(conn: &Connection, option_id: i64) -> Result<(), OpError> {
+fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
     let option = must_option(conn, option_id)?;
     let Some(cap) = option.capacity else {
         return Ok(());
@@ -249,20 +249,19 @@ fn fill_option(conn: &Connection, option_id: i64) -> Result<(), OpError> {
         if confirmed >= cap {
             break;
         }
-        let next = conn
-            .query_row(
-                "SELECT id, user_id FROM signups WHERE option_id = ? AND state = 'waitlisted' ORDER BY created_at, id LIMIT 1",
-                [option_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .ok();
+        let next: Option<(i64, i64)> = schema::signups::table
+            .filter(schema::signups::option_id.eq(option_id))
+            .filter(schema::signups::state.eq("waitlisted"))
+            .order((schema::signups::created_at.asc(), schema::signups::id.asc()))
+            .select((schema::signups::id, schema::signups::user_id))
+            .first(conn)
+            .optional()?;
         let Some((signup_id, user_id)) = next else {
             break;
         };
-        conn.execute(
-            "UPDATE signups SET state = 'confirmed' WHERE id = ?",
-            [signup_id],
-        )?;
+        diesel::update(schema::signups::table.filter(schema::signups::id.eq(signup_id)))
+            .set(schema::signups::state.eq("confirmed"))
+            .execute(conn)?;
         let user = must_user(conn, user_id)?;
         let event = must_event(conn, option.event_id)?;
         log(
@@ -278,7 +277,7 @@ fn fill_option(conn: &Connection, option_id: i64) -> Result<(), OpError> {
     Ok(())
 }
 
-pub(super) fn sync_access(conn: &Connection, event_id: i64) -> Result<(), OpError> {
+pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
     let event = must_event(conn, event_id)?;
     let settings = store::settings(conn, event.guild_id)?;
     let options = store::options_for(conn, event_id)?;
@@ -296,17 +295,23 @@ pub(super) fn sync_access(conn: &Connection, event_id: i64) -> Result<(), OpErro
         }
     }
     if event.thread_enabled && settings.auto_join_threads {
-        conn.execute(
-            "INSERT OR IGNORE INTO threads (event_id, name) VALUES (?, ?)",
-            params![event_id, event.title],
-        )?;
+        diesel::insert_into(schema::threads::table)
+            .values((
+                schema::threads::event_id.eq(event_id),
+                schema::threads::name.eq(&event.title),
+            ))
+            .on_conflict_do_nothing()
+            .execute(conn)?;
         let members = store::thread_member_ids(conn, event_id)?;
         for user_id in &reminding {
             if !members.contains(user_id) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO thread_members (event_id, user_id) VALUES (?, ?)",
-                    params![event_id, user_id],
-                )?;
+                diesel::insert_into(schema::thread_members::table)
+                    .values((
+                        schema::thread_members::event_id.eq(event_id),
+                        schema::thread_members::user_id.eq(user_id),
+                    ))
+                    .on_conflict_do_nothing()
+                    .execute(conn)?;
                 let user = must_user(conn, *user_id)?;
                 log(
                     conn,
@@ -318,10 +323,12 @@ pub(super) fn sync_access(conn: &Connection, event_id: i64) -> Result<(), OpErro
         }
         for user_id in members {
             if !reminding.contains(&user_id) {
-                conn.execute(
-                    "DELETE FROM thread_members WHERE event_id = ? AND user_id = ?",
-                    params![event_id, user_id],
-                )?;
+                diesel::delete(
+                    schema::thread_members::table
+                        .filter(schema::thread_members::event_id.eq(event_id))
+                        .filter(schema::thread_members::user_id.eq(user_id)),
+                )
+                .execute(conn)?;
                 let user = must_user(conn, user_id)?;
                 log(
                     conn,
@@ -339,25 +346,32 @@ pub(super) fn sync_access(conn: &Connection, event_id: i64) -> Result<(), OpErro
             .chars()
             .take(80)
             .collect();
-        conn.execute(
-            "INSERT INTO roles (guild_id, name, color) VALUES (?, ?, '#1e3a6e')",
-            params![event.guild_id, name],
-        )?;
-        role_id = Some(conn.last_insert_rowid());
-        conn.execute(
-            "UPDATE events SET attendee_role_id = ? WHERE id = ?",
-            params![role_id, event_id],
-        )?;
+        let new_id = diesel::insert_into(schema::roles::table)
+            .values((
+                schema::roles::guild_id.eq(event.guild_id),
+                schema::roles::name.eq(name),
+                schema::roles::color.eq("#1e3a6e"),
+            ))
+            .returning(schema::roles::id)
+            .get_result(conn)?;
+        role_id = Some(new_id);
+        diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
+            .set(schema::events::attendee_role_id.eq(role_id))
+            .execute(conn)?;
     }
     if let Some(role_id) = role_id {
         let role_name = must_role(conn, role_id)?.name;
         let grants = store::grant_user_ids(conn, event_id)?;
         for user_id in &reminding {
             if !grants.contains(user_id) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO role_grants (event_id, user_id, role_id) VALUES (?, ?, ?)",
-                    params![event_id, user_id, role_id],
-                )?;
+                diesel::insert_into(schema::role_grants::table)
+                    .values((
+                        schema::role_grants::event_id.eq(event_id),
+                        schema::role_grants::user_id.eq(user_id),
+                        schema::role_grants::role_id.eq(role_id),
+                    ))
+                    .on_conflict_do_nothing()
+                    .execute(conn)?;
                 let user = must_user(conn, *user_id)?;
                 log(
                     conn,
@@ -369,10 +383,12 @@ pub(super) fn sync_access(conn: &Connection, event_id: i64) -> Result<(), OpErro
         }
         for user_id in grants {
             if !reminding.contains(&user_id) {
-                conn.execute(
-                    "DELETE FROM role_grants WHERE event_id = ? AND user_id = ?",
-                    params![event_id, user_id],
-                )?;
+                diesel::delete(
+                    schema::role_grants::table
+                        .filter(schema::role_grants::event_id.eq(event_id))
+                        .filter(schema::role_grants::user_id.eq(user_id)),
+                )
+                .execute(conn)?;
                 let user = must_user(conn, user_id)?;
                 log(
                     conn,

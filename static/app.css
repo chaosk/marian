@@ -209,6 +209,9 @@ button:disabled, .primary:disabled { cursor: not-allowed; }
 .meta { color: var(--muted); font-size: 14px; }
 .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 3px 8px;

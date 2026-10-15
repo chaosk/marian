@@ -15,6 +15,7 @@ mod observe;
 pub mod parse;
 pub mod present;
 mod release_version;
+mod schema;
 pub mod serve;
 pub mod store;
 
