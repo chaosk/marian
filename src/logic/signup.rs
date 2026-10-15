@@ -298,7 +298,7 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
         diesel::insert_into(schema::threads::table)
             .values((
                 schema::threads::event_id.eq(event_id),
-                schema::threads::name.eq(&event.title),
+                schema::threads::name.eq(&super::discord::stored_thread_name(conn, &event)?),
             ))
             .on_conflict_do_nothing()
             .execute(conn)?;

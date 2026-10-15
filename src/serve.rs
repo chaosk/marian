@@ -34,6 +34,8 @@ struct AppState {
     client_id: String,
     client_secret: String,
     public_url: String,
+    google_client_id: String,
+    google_client_secret: String,
 }
 
 struct Session {
@@ -60,6 +62,8 @@ pub fn run() -> anyhow::Result<()> {
     let client_id = env::var("DISCORD_CLIENT_ID").unwrap_or_default();
     let client_secret = env::var("DISCORD_CLIENT_SECRET").unwrap_or_default();
     let public_url = env::var("MARIAN_PUBLIC_URL").unwrap_or_default();
+    let google_client_id = env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
+    let google_client_secret = env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default();
     let status = env::var("MARIAN_STATUS").unwrap_or_default();
     let invite_url = invite_url(&client_id);
     let http = reqwest::Client::builder()
@@ -80,6 +84,8 @@ pub fn run() -> anyhow::Result<()> {
         client_id,
         client_secret,
         public_url: public_url.clone(),
+        google_client_id,
+        google_client_secret,
     };
     let app = router(state.clone());
 
@@ -88,6 +94,10 @@ pub fn run() -> anyhow::Result<()> {
         crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status);
         let db = state.db.clone();
         let discord = state.discord.clone();
+        let http = state.http.clone();
+        let google_client_id = state.google_client_id.clone();
+        let google_client_secret = state.google_client_secret.clone();
+        let calendar_base = state.public_url.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -108,6 +118,14 @@ pub fn run() -> anyhow::Result<()> {
                     }
                     Err(err) => tracing::warn!("tick failed: {err}"),
                 }
+                sync_google(
+                    &db,
+                    &http,
+                    &google_client_id,
+                    &google_client_secret,
+                    &calendar_base,
+                )
+                .await;
             }
         });
 
@@ -127,11 +145,15 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/help", get(show_help))
         .route("/favicon.svg", get(asset))
         .route("/static/*file", get(asset))
         .route("/", get(schedule))
         .route("/auth/discord", get(auth_start))
         .route("/auth/discord/callback", get(auth_callback))
+        .route("/auth/google", get(google_start))
+        .route("/auth/google/callback", get(google_callback))
+        .route("/auth/google/disconnect", post(google_disconnect))
         .route("/logout", post(logout))
         .route("/servers/:guild_id", get(server_home))
         .route(
@@ -335,6 +357,13 @@ fn quiet_path(path: &str) -> bool {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn show_help() -> Response {
+    match present::help_page() {
+        Ok(body) => Html(body).into_response(),
+        Err(err) => plain_error(err),
+    }
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
@@ -560,6 +589,247 @@ async fn auth_callback(
     response
 }
 
+async fn sync_google(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    public_base: &str,
+) {
+    if !crate::google::configured(client_id, client_secret) {
+        return;
+    }
+    let jobs = {
+        let mut guard = db.lock().expect("database lock");
+        crate::google::plan(&mut guard, public_base)
+    };
+    let jobs = match jobs {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            tracing::warn!("google calendar: {err}");
+            return;
+        }
+    };
+    for job in jobs {
+        let outcome = crate::google::push(http, client_id, client_secret, job).await;
+        if let crate::google::Outcome::Failed {
+            event_id, message, ..
+        } = &outcome
+        {
+            tracing::warn!("google calendar event {event_id}: {message}");
+        }
+        let mut guard = db.lock().expect("database lock");
+        if let Err(err) = crate::google::record(&mut guard, outcome) {
+            tracing::warn!("google calendar: {err}");
+        }
+    }
+    let revokes = {
+        let mut guard = db.lock().expect("database lock");
+        match crate::google::ready_revokes(&mut guard) {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!("google calendar: {err}");
+                Vec::new()
+            }
+        }
+    };
+    for access in revokes {
+        let discord_user_id = access.discord_user_id.clone();
+        if crate::google::forget_remote(http, client_id, client_secret, access).await {
+            let mut guard = db.lock().expect("database lock");
+            if let Err(err) = crate::google::delete_account(&mut guard, &discord_user_id) {
+                tracing::warn!("google calendar: {err}");
+            }
+        } else {
+            tracing::warn!("google calendar disconnect for {discord_user_id} will retry");
+        }
+    }
+}
+
+async fn google_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<NextQuery>,
+) -> Response {
+    let next = query
+        .next
+        .as_deref()
+        .and_then(auth::safe_next)
+        .unwrap_or_else(|| "/".into());
+    if !crate::google::configured(&state.google_client_id, &state.google_client_secret) {
+        return redirect(&next, "Google Calendar is not configured yet.");
+    }
+    let Some(redirect_uri) = google_redirect(&state, &headers) else {
+        return redirect(&next, "Set MARIAN_PUBLIC_URL so Google can send you back.");
+    };
+    let session = {
+        let mut db = state.db.lock().expect("database lock");
+        read_session(&mut db, &headers)
+    };
+    let Some(session) = session else {
+        return redirect(&next, "Sign in with Discord.");
+    };
+    let state_token = {
+        let mut db = state.db.lock().expect("database lock");
+        match crate::google::begin_link(&mut db, &session.discord_user_id) {
+            Ok(token) => token,
+            Err(err) => return plain_error(err),
+        }
+    };
+    let secure = cookie_secure(&state, &headers);
+    let mut response = Redirect::to(&crate::google::authorize_url(
+        &state.google_client_id,
+        &redirect_uri,
+        &state_token,
+    ))
+    .into_response();
+    set_cookie(
+        &mut response,
+        "marian_google",
+        &auth::pack_oauth(&state_token, &next),
+        600,
+        secure,
+    );
+    response
+}
+
+async fn google_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GoogleCallback>,
+) -> Response {
+    let returned = query.state.clone().unwrap_or_default();
+    let packed = cookie(&headers, "marian_google").and_then(|raw| auth::unpack_oauth(&raw));
+    let dest = match &packed {
+        Some((expected, next)) if returned == *expected && !next.is_empty() => next.clone(),
+        _ => "/".to_string(),
+    };
+    if query.error.is_some() {
+        if !returned.is_empty() {
+            let mut db = state.db.lock().expect("database lock");
+            let _ = crate::google::finish_oauth(&mut db, &returned);
+        }
+        let mut response = redirect(
+            &dest,
+            "The Google Calendar connection stopped before it finished.",
+        );
+        clear_cookie(&mut response, "marian_google");
+        return response;
+    }
+    let Some(code) = query.code.as_deref().filter(|code| !code.is_empty()) else {
+        return redirect(&dest, "Google didn't send a connection code.");
+    };
+    let Some(redirect_uri) = google_redirect(&state, &headers) else {
+        return redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
+    };
+    let discord_user_id = {
+        let mut db = state.db.lock().expect("database lock");
+        match crate::google::claim_oauth(&mut db, &returned) {
+            Ok(Some(discord_user_id)) => {
+                let _ = crate::google::finish_oauth(&mut db, &returned);
+                discord_user_id
+            }
+            Ok(None) => {
+                return redirect(
+                    &dest,
+                    "That Google Calendar connection expired. Run /google authorize again.",
+                );
+            }
+            Err(err) => return plain_error(err),
+        }
+    };
+    let (refresh, access) = match crate::google::exchange_tokens(
+        &state.http,
+        &state.google_client_id,
+        &state.google_client_secret,
+        code,
+        &redirect_uri,
+    )
+    .await
+    {
+        Ok(tokens) => tokens,
+        Err(err) => return redirect(&dest, &err),
+    };
+    let email = crate::google::account_email(&state.http, &access).await;
+    {
+        let mut db = state.db.lock().expect("database lock");
+        if let Err(err) = crate::google::save_account(&mut db, &discord_user_id, &refresh, &email) {
+            return plain_error(err);
+        }
+    }
+    let mut response = redirect(
+        &dest,
+        "Google Calendar is connected. Marian will add events you created and events you accepted, and update them when they change.",
+    );
+    clear_cookie(&mut response, "marian_google");
+    response
+}
+
+async fn google_disconnect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<NextForm>,
+) -> Response {
+    let next = form
+        .next
+        .as_deref()
+        .and_then(auth::safe_next)
+        .unwrap_or_else(|| "/".into());
+    let session = {
+        let mut db = state.db.lock().expect("database lock");
+        read_session(&mut db, &headers)
+    };
+    let Some(session) = session else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    let access = {
+        let mut db = state.db.lock().expect("database lock");
+        match crate::google::remote_access(&mut db, &session.discord_user_id) {
+            Ok(access) => access,
+            Err(err) => return plain_error(err),
+        }
+    };
+    let clean = if let Some(access) = access {
+        if crate::google::configured(&state.google_client_id, &state.google_client_secret) {
+            crate::google::forget_remote(
+                &state.http,
+                &state.google_client_id,
+                &state.google_client_secret,
+                access,
+            )
+            .await
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+    {
+        let mut db = state.db.lock().expect("database lock");
+        if let Err(err) = crate::google::delete_account(&mut db, &session.discord_user_id) {
+            return plain_error(err);
+        }
+    }
+    let notice = if clean {
+        "Google Calendar is disconnected."
+    } else {
+        "Google Calendar is disconnected. Check it for any events that stayed behind."
+    };
+    redirect(&next, notice)
+}
+
+fn google_redirect(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    crate::google::redirect_uri(
+        &state.public_url,
+        headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok()),
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie(&headers, "marian_session") {
         let mut db = state.db.lock().expect("database lock");
@@ -700,6 +970,18 @@ struct DiscordCallback {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct GoogleCallback {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct NextForm {
+    next: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2420,6 +2702,8 @@ mod tests {
             client_id: "123".into(),
             client_secret: "test-secret".into(),
             public_url: "http://127.0.0.1:8080".into(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
         };
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2514,6 +2798,8 @@ mod tests {
         assert!(body.contains("Signed in as <strong>Nell</strong>"));
         assert!(body.contains("class=\"account\""));
         assert!(body.contains("Calendar feed"));
+        assert!(body.contains("Google Calendar"));
+        assert!(body.contains("Google client id"));
         assert!(body.contains("class=\"calendar\""));
         assert!(body.contains(".ics"));
         assert!(body.contains("Sign out"));

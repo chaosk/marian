@@ -81,9 +81,12 @@ async fn job_loop(
                 DiscordJob::Sync { event_id, .. } => {
                     push_sync(&db, &http, &public_url, *event_id).await
                 }
-                DiscordJob::Remind { event_id, text, .. } => {
-                    push_remind(&db, &http, *event_id, text).await
-                }
+                DiscordJob::Remind {
+                    event_id,
+                    text,
+                    message,
+                    ..
+                } => push_remind(&db, &http, &public_url, *event_id, text, message).await,
                 DiscordJob::Attend { event_id, .. } => push_attendance(&db, &http, *event_id).await,
                 DiscordJob::Routine { run_id, .. } => push_routine(&db, &http, *run_id).await,
             }
@@ -213,12 +216,22 @@ async fn on_event(
                 let posts = commands::channel_posts_waiting(&mut conn, &author)?;
                 (replies, posts)
             };
-            for event_id in posts {
-                if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await
+            for event_id in &posts {
+                if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, *event_id).await
                 {
                     tracing::warn!("could not post event {event_id} in the channel: {err}");
                 }
             }
+            let replies = replies.map(|mut replies| {
+                if let Some(event_id) = posts.first() {
+                    if let Ok(mut conn) = data.db.lock() {
+                        if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id) {
+                            commands::link_created_event(&mut replies, &url);
+                        }
+                    }
+                }
+                replies
+            });
             if let Some(replies) = replies {
                 for reply in replies {
                     new_message
@@ -955,15 +968,36 @@ async fn open_thread(
     event_id: i64,
     work: &logic::AttendanceWork,
 ) -> Result<u64, Error> {
-    if let Some(discord_id) = &work.thread_discord_id {
+    thread_on_message(
+        db,
+        http,
+        event_id,
+        &work.channel_discord_id,
+        &work.message_id,
+        &work.thread_name,
+        work.thread_discord_id.as_deref(),
+    )
+    .await
+}
+
+async fn thread_on_message(
+    db: &Arc<Mutex<Connection>>,
+    http: &serenity::Http,
+    event_id: i64,
+    channel_id: &str,
+    message_id: &str,
+    name: &str,
+    existing: Option<&str>,
+) -> Result<u64, Error> {
+    if let Some(discord_id) = existing.filter(|id| !id.is_empty()) {
         return Ok(discord_id.parse()?);
     }
-    let channel_id = serenity::ChannelId::new(work.channel_discord_id.parse()?);
-    let message_id = serenity::MessageId::new(work.message_id.parse()?);
-    let name = if work.thread_name.trim().is_empty() {
+    let channel_id = serenity::ChannelId::new(channel_id.parse()?);
+    let message_id = serenity::MessageId::new(message_id.parse()?);
+    let name = if name.trim().is_empty() {
         "Event".to_string()
     } else {
-        work.thread_name.clone()
+        name.to_string()
     };
     let created = channel_id
         .create_thread_from_message(
@@ -1051,33 +1085,108 @@ fn already_applied(err: &serenity::Error) -> bool {
 async fn push_remind(
     db: &Arc<Mutex<Connection>>,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    public_url: &str,
     event_id: i64,
     text: &str,
+    message: &str,
 ) -> Result<(), Error> {
-    let channel = {
+    let plan = {
         let mut conn = db.lock().map_err(|_| "database lock")?;
         let event =
             store::event(&mut conn, event_id)?.ok_or_else(|| "event missing".to_string())?;
         let channel = store::channel(&mut conn, event.channel_id)?
             .ok_or_else(|| "channel missing".to_string())?;
-        channel.discord_id
-    };
-    let Some(channel_id) = channel else {
-        return Ok(());
+        let Some(channel_id) = channel.discord_id.filter(|id| !id.is_empty()) else {
+            return Ok(());
+        };
+        let guild = store::guild(&mut conn, event.guild_id)?;
+        let settings = store::settings(&mut conn, event.guild_id)?;
+        let start = crate::clock::parse_stamp(&event.starts_at).map_err(|err| err.to_string())?;
+        let end = start + chrono::Duration::minutes(event.duration_minutes);
+        let message_id = event.discord_message_id.filter(|id| !id.is_empty());
+        let timezone = guild
+            .as_ref()
+            .map(|guild| guild.timezone.clone())
+            .unwrap_or_else(|| "UTC".into());
+        let guild_id = guild.and_then(|guild| guild.discord_id);
+        let link = message_id.as_ref().and_then(|message_id| {
+            let guild_id = guild_id.as_deref()?;
+            Some(logic::discord_message_link(
+                guild_id,
+                &channel_id,
+                message_id,
+            ))
+        });
+        let link = link.or_else(|| {
+            logic::web_event_url(public_url, guild_id.as_deref(), &event.public_id)
+        });
+        RemindPlan {
+            channel_id,
+            thread_id: store::thread_discord_id(&mut conn, event_id)?,
+            in_thread: event.thread_enabled && settings.thread_reminders,
+            message_id,
+            thread_name: logic::event_thread_name(&event.title, &event.starts_at, &timezone),
+            title: event.title,
+            start: start.timestamp(),
+            end: end.timestamp(),
+            link,
+        }
     };
     let http = http
         .lock()
         .map_err(|_| "http lock")?
         .clone()
         .ok_or("Discord is not connected")?;
-    serenity::ChannelId::new(channel_id.parse()?)
+    let target = if plan.in_thread {
+        if let Some(thread_id) = plan.thread_id.filter(|id| !id.is_empty()) {
+            thread_id.parse()?
+        } else if let Some(message_id) = &plan.message_id {
+            thread_on_message(
+                db,
+                &http,
+                event_id,
+                &plan.channel_id,
+                message_id,
+                &plan.thread_name,
+                None,
+            )
+            .await?
+        } else {
+            plan.channel_id.parse()?
+        }
+    } else {
+        plan.channel_id.parse()?
+    };
+    let card = logic::reminder_card(&plan.title, plan.start, plan.end, plan.link.as_deref(), message);
+    let embed = serenity::CreateEmbed::new()
+        .title(clip(&card.title, 256))
+        .description(clip(&card.description, 4000))
+        .color(serenity::Colour::new(0xF1C40F))
+        .footer(serenity::CreateEmbedFooter::new(card.footer));
+    serenity::ChannelId::new(target)
         .send_message(
             &http,
-            serenity::CreateMessage::new().content(clip(text, 1800)),
+            serenity::CreateMessage::new()
+                .content(clip(text, 2000))
+                .embed(embed)
+                .allowed_mentions(serenity::CreateAllowedMentions::new().all_users(true)),
         )
         .await?;
     Ok(())
 }
+
+struct RemindPlan {
+    channel_id: String,
+    thread_id: Option<String>,
+    in_thread: bool,
+    message_id: Option<String>,
+    thread_name: String,
+    title: String,
+    start: i64,
+    end: i64,
+    link: Option<String>,
+}
+
 
 struct Actor {
     guild_id: i64,
@@ -1187,6 +1296,18 @@ fn embed_parts(reply: &commands::DmReply) -> (Option<String>, String) {
     }
 }
 
+fn dm_blocked(lead: &str, public_url: &str, server: Option<u64>) -> String {
+    let base = public_url.trim().trim_end_matches('/');
+    let web = match (base.is_empty(), server) {
+        (false, Some(server)) => {
+            format!(" You can always create the event at {base}/servers/{server}/events/new.")
+        }
+        (false, None) => format!(" You can always create the event at {base}."),
+        _ => " You can always create the event on the web.".to_string(),
+    };
+    format!("{lead} Allow direct messages from server members, then run /event again.{web}")
+}
+
 fn clip(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
     if text.chars().count() > max {
@@ -1251,9 +1372,11 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
                     commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
                 }
                 tracing::warn!("could not send the event questions: {err}");
-                ctx.say(
-                    "I couldn't send the DM. Allow direct messages from server members, then run /event again.",
-                )
+                ctx.say(dm_blocked(
+                    "I couldn't send the DM.",
+                    &ctx.data().public_url,
+                    ctx.guild_id().map(|id| id.get()),
+                ))
                 .await?;
                 return Ok(());
             }
@@ -1266,25 +1389,111 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
                 commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
             }
             tracing::warn!("could not open a DM: {err}");
-            ctx.say(
-                "I couldn't open a DM. Allow direct messages from server members, then run /event again.",
-            )
+            ctx.say(dm_blocked(
+                "I couldn't open a DM.",
+                &ctx.data().public_url,
+                ctx.guild_id().map(|id| id.get()),
+            ))
             .await?;
         }
     }
     Ok(())
 }
 
+async fn complete_channel(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+    let Ok(mut conn) = ctx.data().db.lock() else {
+        return Vec::new();
+    };
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
+        return Vec::new();
+    };
+    commands::channel_choices(&mut conn, guild.id, partial)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
+        .collect()
+}
+
+async fn deliver(
+    ctx: Context<'_>,
+    actor: &Actor,
+    label: &str,
+    outcome: Result<String, crate::error::OpError>,
+) -> Result<(), Error> {
+    let data = ctx.data();
+    let text = match &outcome {
+        Ok(text) => text.clone(),
+        Err(err) => err.to_string(),
+    };
+    let refresh = {
+        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let _ = logic::record_command(&mut conn, actor.guild_id, actor.user_id, label, &text);
+        crate::serve::events_to_refresh(&mut conn, label, &text)
+    };
+    for event_id in refresh {
+        if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
+            tracing::warn!("could not refresh event {event_id}: {err}");
+        }
+        if let Err(err) = push_attendance(&data.db, &data.http, event_id).await {
+            tracing::warn!("could not update attendance for event {event_id}: {err}");
+        }
+    }
+    ctx.say(clip(&text, 1800)).await?;
+    Ok(())
+}
+
+#[derive(poise::ChoiceParameter, Copy, Clone)]
+enum ChannelKind {
+    #[name = "Text"]
+    Text,
+    #[name = "Event channel"]
+    Event,
+}
+
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Edit an event from one line")
+    description_localized("en-US", "Change an event")
 )]
 async fn edit(
     ctx: Context<'_>,
-    #[description = "EVENT title:\"New name\""] line: String,
+    #[description = "The event to change"]
+    #[autocomplete = "complete_event"]
+    event: String,
+    #[description = "New title"] title: Option<String>,
+    #[description = "New description"] description: Option<String>,
+    #[description = "New start, such as friday 7pm"] start: Option<String>,
+    #[description = "Length in minutes"] duration: Option<i64>,
+    #[description = "Channel to post in"]
+    #[autocomplete = "complete_channel"]
+    channel: Option<String>,
 ) -> Result<(), Error> {
-    desk(ctx, &format!("/edit {line}")).await
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let label = format!("/edit {event}");
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::edit_event(
+            &mut conn,
+            actor.guild_id,
+            actor.user_id,
+            commands::EditChange {
+                event,
+                title,
+                description,
+                start,
+                duration,
+                channel,
+            },
+        )
+    };
+    deliver(ctx, &actor, &label, outcome).await
 }
 
 #[poise::command(
@@ -1294,13 +1503,18 @@ async fn edit(
 )]
 async fn reminders(
     ctx: Context<'_>,
-    #[description = "on or off"] state: Option<String>,
+    #[description = "On or off. Leave empty to see the current choice"] enabled: Option<bool>,
 ) -> Result<(), Error> {
-    let line = match state {
-        Some(state) => format!("/reminders {state}"),
-        None => "/reminders".into(),
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
     };
-    desk(ctx, &line).await
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::set_reminders(&mut conn, actor.user_id, enabled)
+    };
+    deliver(ctx, &actor, "/reminders", outcome).await
 }
 
 #[poise::command(
@@ -1464,37 +1678,465 @@ async fn run_response(
     Ok(())
 }
 
+async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::apply_setting(&mut conn, actor.guild_id, actor.user_id, change)
+    };
+    deliver(ctx, &actor, label, outcome).await
+}
+
 #[poise::command(
     slash_command,
     guild_only,
+    subcommands(
+        "settings_reminder_interval",
+        "settings_hour_24",
+        "settings_auto_archive",
+        "settings_auto_archive_interval",
+        "settings_auto_join_threads",
+        "settings_event_threads",
+        "settings_localize_time",
+        "settings_purge",
+        "settings_thread_reminders",
+        "settings_show_attendees",
+        "settings_temp_roles",
+        "settings_park_clock",
+        "settings_digest",
+        "settings_post_lead",
+        "settings_role"
+    ),
     description_localized("en-US", "Change a server setting")
 )]
-async fn settings(
-    ctx: Context<'_>,
-    #[description = "show_attendees off"] line: String,
-) -> Result<(), Error> {
-    desk(ctx, &format!("/settings {line}")).await
+async fn settings(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
 }
 
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Add or remove a library option")
+    rename = "reminder_interval",
+    description_localized("en-US", "Default reminder, in minutes")
 )]
-async fn signup_options(
+async fn settings_reminder_interval(
     ctx: Context<'_>,
-    #[description = "add emoji:🛡️ name:Tank"] line: String,
+    #[description = "Minutes before the event"] minutes: i64,
 ) -> Result<(), Error> {
-    desk(ctx, &format!("/signup_options {line}")).await
+    setting(
+        ctx,
+        "/settings reminder_interval",
+        commands::Setting::ReminderInterval(minutes),
+    )
+    .await
 }
 
 #[poise::command(
     slash_command,
     guild_only,
+    rename = "hour_24",
+    description_localized("en-US", "Use a 24-hour clock")
+)]
+async fn settings_hour_24(
+    ctx: Context<'_>,
+    #[description = "On uses a 24-hour clock"] enabled: bool,
+) -> Result<(), Error> {
+    setting(ctx, "/settings hour_24", commands::Setting::Hour24(enabled)).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "auto_archive",
+    description_localized("en-US", "Archive posted events on a timer")
+)]
+async fn settings_auto_archive(
+    ctx: Context<'_>,
+    #[description = "Archive posted events after they end"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings auto_archive",
+        commands::Setting::AutoArchive(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "auto_archive_interval",
+    description_localized("en-US", "Hours after which a posted event archives")
+)]
+async fn settings_auto_archive_interval(
+    ctx: Context<'_>,
+    #[description = "Hours after the event ends"] hours: i64,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings auto_archive_interval",
+        commands::Setting::AutoArchiveHours(hours),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "auto_join_threads",
+    description_localized("en-US", "Join event threads for attendees")
+)]
+async fn settings_auto_join_threads(
+    ctx: Context<'_>,
+    #[description = "Add attendees to the event thread"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings auto_join_threads",
+        commands::Setting::AutoJoinThreads(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "event_threads",
+    description_localized("en-US", "Open a thread for each posted event")
+)]
+async fn settings_event_threads(
+    ctx: Context<'_>,
+    #[description = "Open a thread when an event is posted"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings event_threads",
+        commands::Setting::EventThreads(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "localize_time",
+    description_localized("en-US", "Show the start in each member's own zone")
+)]
+async fn settings_localize_time(
+    ctx: Context<'_>,
+    #[description = "Members see the start in their own zone"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings localize_time",
+        commands::Setting::LocalizeTime(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "purge",
+    description_localized("en-US", "Clear an event channel when the event archives")
+)]
+async fn settings_purge(
+    ctx: Context<'_>,
+    #[description = "Clear the event channel on archive"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings purge",
+        commands::Setting::PurgeChannels(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "thread_reminders",
+    description_localized("en-US", "Post reminders in the event thread")
+)]
+async fn settings_thread_reminders(
+    ctx: Context<'_>,
+    #[description = "Reminders post in the event thread"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings thread_reminders",
+        commands::Setting::ThreadReminders(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "show_attendees",
+    description_localized("en-US", "List names on the Discord post")
+)]
+async fn settings_show_attendees(
+    ctx: Context<'_>,
+    #[description = "The post lists who accepted each option"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings show_attendees",
+        commands::Setting::ShowAttendees(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "temp_roles",
+    description_localized("en-US", "Give attendees a temporary role")
+)]
+async fn settings_temp_roles(
+    ctx: Context<'_>,
+    #[description = "Create an attendee role for the event"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings temp_roles",
+        commands::Setting::TempRoles(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "park_clock",
+    description_localized("en-US", "Keep every event the same distance from now")
+)]
+async fn settings_park_clock(
+    ctx: Context<'_>,
+    #[description = "Park the clock on a test server"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings park_clock",
+        commands::Setting::ParkClock(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "digest",
+    description_localized("en-US", "How often Marian posts a digest")
+)]
+async fn settings_digest(
+    ctx: Context<'_>,
+    #[description = "Off, daily, or weekly"]
+    #[choices("off", "daily", "weekly")]
+    schedule: &'static str,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings digest",
+        commands::Setting::Digest(schedule.to_string()),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "post_lead",
+    description_localized("en-US", "How early a series date is posted")
+)]
+async fn settings_post_lead(
+    ctx: Context<'_>,
+    #[description = "Hours before the start"] hours: i64,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings post_lead",
+        commands::Setting::PostLeadHours(hours),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "role",
+    description_localized("en-US", "Choose which role may do something")
+)]
+async fn settings_role(
+    ctx: Context<'_>,
+    #[description = "What this role is allowed to do"]
+    #[choices("event", "edit", "delete", "channel", "signup")]
+    which: &'static str,
+    #[description = "Role name. Leave empty to clear it"] name: Option<String>,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings role",
+        commands::Setting::Role {
+            which: which.to_string(),
+            name: name.unwrap_or_default(),
+        },
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    subcommands("signup_options_list", "signup_options_add", "signup_options_remove"),
+    description_localized("en-US", "List, add, or remove a library option")
+)]
+async fn signup_options(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "list",
+    description_localized("en-US", "List the option library")
+)]
+async fn signup_options_list(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::library_text(&mut conn, actor.guild_id)
+    };
+    deliver(ctx, &actor, "/signup_options list", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "add",
+    description_localized("en-US", "Save an option in the library")
+)]
+async fn signup_options_add(
+    ctx: Context<'_>,
+    #[description = "Option name"] name: String,
+    #[description = "Emoji shown with the name"] emoji: Option<String>,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let emoji = emoji.unwrap_or_else(|| "•".into());
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::add_library_option(&mut conn, actor.guild_id, actor.user_id, &name, &emoji)
+    };
+    deliver(ctx, &actor, "/signup_options add", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "remove",
+    description_localized("en-US", "Remove an option from the library")
+)]
+async fn signup_options_remove(
+    ctx: Context<'_>,
+    #[description = "Option name"] name: String,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::remove_library_option(&mut conn, actor.guild_id, actor.user_id, &name)
+    };
+    deliver(ctx, &actor, "/signup_options remove", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    subcommands("signup_presets_list", "signup_presets_add", "signup_presets_remove"),
+    description_localized("en-US", "List, save, or remove a signup preset")
+)]
+async fn signup_presets(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "list",
     description_localized("en-US", "List signup presets")
 )]
-async fn signup_presets(ctx: Context<'_>) -> Result<(), Error> {
-    desk(ctx, "/signup_presets").await
+async fn signup_presets_list(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::preset_text(&mut conn, actor.guild_id)
+    };
+    deliver(ctx, &actor, "/signup_presets list", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "add",
+    description_localized("en-US", "Save a signup preset")
+)]
+async fn signup_presets_add(
+    ctx: Context<'_>,
+    #[description = "Preset name"] name: String,
+    #[description = "Option names, separated by commas"] options: String,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::add_preset(&mut conn, actor.guild_id, actor.user_id, &name, &options)
+    };
+    deliver(ctx, &actor, "/signup_presets add", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "remove",
+    description_localized("en-US", "Remove a signup preset")
+)]
+async fn signup_presets_remove(
+    ctx: Context<'_>,
+    #[description = "Preset name"] name: String,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::remove_preset(&mut conn, actor.guild_id, actor.user_id, &name)
+    };
+    deliver(ctx, &actor, "/signup_presets remove", outcome).await
 }
 
 #[poise::command(
@@ -1504,25 +2146,140 @@ async fn signup_presets(ctx: Context<'_>) -> Result<(), Error> {
 )]
 async fn channel(
     ctx: Context<'_>,
-    #[description = "name:briefing kind:event"] line: String,
+    #[description = "Channel name"] name: String,
+    #[description = "Text, or an event channel"] kind: Option<ChannelKind>,
 ) -> Result<(), Error> {
-    desk(ctx, &format!("/channel {line}")).await
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let kind = match kind {
+        Some(ChannelKind::Event) => "event",
+        _ => "text",
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::create_named_channel(&mut conn, actor.guild_id, actor.user_id, &name, kind)
+    };
+    deliver(ctx, &actor, "/channel", outcome).await
 }
 
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Calendar feed, without a Google login")
+    subcommands("google_authorize", "google_auto_sync", "google_sync", "google_revoke"),
+    description_localized("en-US", "Connect, update, or disconnect a Google Calendar")
 )]
-async fn google(
-    ctx: Context<'_>,
-    #[description = "authorize, auto_sync on, or sync EVENT"] line: Option<String>,
-) -> Result<(), Error> {
-    let line = match line {
-        Some(line) => format!("/google {line}"),
-        None => "/google authorize".into(),
+async fn google(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "authorize",
+    description_localized("en-US", "Sign in with Google")
+)]
+async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
     };
-    desk(ctx, &line).await
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::google_sign_in_url(&mut conn, actor.user_id)
+    };
+    let url = match outcome {
+        Ok(url) => url,
+        Err(err) => return deliver(ctx, &actor, "/google authorize", Err(err)).await,
+    };
+    {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let _ = logic::record_command(
+            &mut conn,
+            actor.guild_id,
+            actor.user_id,
+            "/google authorize",
+            "Sent a Google sign-in button.",
+        );
+    }
+    ctx.send(
+        poise::CreateReply::default()
+            .content("Click the button below to connect Google Calendar.")
+            .components(vec![serenity::CreateActionRow::Buttons(vec![
+                serenity::CreateButton::new_link(url).label("Sign in with Google"),
+            ])]),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "auto_sync",
+    description_localized("en-US", "Keep your Google Calendar updated")
+)]
+async fn google_auto_sync(
+    ctx: Context<'_>,
+    #[description = "Keep adding and updating events"] enabled: bool,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::google_auto_sync(&mut conn, actor.guild_id, actor.user_id, enabled)
+    };
+    deliver(ctx, &actor, "/google auto_sync", outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "sync",
+    description_localized("en-US", "Add one event to your Google Calendar")
+)]
+async fn google_sync(
+    ctx: Context<'_>,
+    #[description = "The event to add"]
+    #[autocomplete = "complete_event"]
+    event: String,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let label = format!("/google sync {event}");
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::google_sync(&mut conn, actor.guild_id, actor.user_id, &event)
+    };
+    deliver(ctx, &actor, &label, outcome).await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "revoke",
+    description_localized("en-US", "Disconnect Google Calendar")
+)]
+async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let outcome = {
+        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        commands::google_revoke(&mut conn, actor.guild_id, actor.user_id)
+    };
+    deliver(ctx, &actor, "/google revoke", outcome).await
 }
 
 #[poise::command(
@@ -1537,15 +2294,28 @@ async fn sort(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Show the command desk")
+    description_localized(
+        "en-US",
+        "How /event works, and where the other commands are explained"
+    )
 )]
 async fn help(ctx: Context<'_>) -> Result<(), Error> {
-    desk(ctx, "/help").await
+    let base = ctx.data().public_url.trim().trim_end_matches('/');
+    let more = if base.is_empty() {
+        "The other commands are explained on the Help page.".to_string()
+    } else {
+        format!("The other commands are explained at {base}/help.")
+    };
+    ctx.say(format!(
+        "/event starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats.\n\n{more}"
+    ))
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{embed_parts, presence_line};
+    use super::{dm_blocked, embed_parts, presence_line};
     use crate::commands::DmReply;
 
     #[test]
@@ -1572,5 +2342,19 @@ mod tests {
         });
         assert!(when.0.is_none());
         assert!(when.1.contains("**Shore**"));
+    }
+
+    #[test]
+    fn a_blocked_dm_offers_the_web_page() {
+        let noted = dm_blocked("I couldn't send the DM.", "https://marian.example.com/", Some(4242));
+        assert_eq!(
+            noted,
+            "I couldn't send the DM. Allow direct messages from server members, then run /event again. You can always create the event at https://marian.example.com/servers/4242/events/new."
+        );
+        let plain = dm_blocked("I couldn't open a DM.", "  ", None);
+        assert_eq!(
+            plain,
+            "I couldn't open a DM. Allow direct messages from server members, then run /event again. You can always create the event on the web."
+        );
     }
 }

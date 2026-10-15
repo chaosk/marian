@@ -320,6 +320,38 @@ diesel::table! {
 }
 
 diesel::table! {
+    google_accounts (discord_user_id) {
+        discord_user_id -> Text,
+        refresh_token -> Text,
+        email -> Text,
+        connected_at -> Text,
+        last_error -> Text,
+        auto_sync -> Bool,
+        revoking -> Bool,
+    }
+}
+
+diesel::table! {
+    google_events (discord_user_id, event_id) {
+        discord_user_id -> Text,
+        event_id -> BigInt,
+        google_event_id -> Nullable<Text>,
+        content_hash -> Text,
+        last_error -> Text,
+        retry_at -> Nullable<Text>,
+        forced -> Bool,
+    }
+}
+
+diesel::table! {
+    google_oauth (state) {
+        state -> Text,
+        discord_user_id -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
     routines (id) {
         id -> BigInt,
         public_id -> Text,
@@ -417,6 +449,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     event_roles,
     event_templates,
     events,
+    google_accounts,
+    google_events,
+    google_oauth,
     guilds,
     meta,
     option_library,

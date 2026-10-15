@@ -8,6 +8,7 @@ pub enum DiscordJob {
     Remind {
         event_id: i64,
         text: String,
+        message: String,
         tries: u8,
     },
     Attend {
@@ -25,10 +26,11 @@ impl DiscordJob {
         Self::Sync { event_id, tries: 0 }
     }
 
-    pub fn remind(event_id: i64, text: String) -> Self {
+    pub fn remind(event_id: i64, text: String, message: String) -> Self {
         Self::Remind {
             event_id,
             text,
+            message,
             tries: 0,
         }
     }
@@ -59,10 +61,12 @@ impl DiscordJob {
             Self::Remind {
                 event_id,
                 text,
+                message,
                 tries,
             } if tries < 8 => Some(Self::Remind {
                 event_id,
                 text,
+                message,
                 tries: tries + 1,
             }),
             Self::Attend { event_id, tries } if tries < 8 => Some(Self::Attend {

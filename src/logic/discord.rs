@@ -70,7 +70,7 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         channel_discord_id,
         message_id,
         thread_discord_id: store::thread_discord_id(conn, event_id)?,
-        thread_name: trim_chars(&event.title, 100),
+        thread_name: event_thread_name(&event.title, &event.starts_at, &guild.timezone),
         thread_add,
         thread_remove,
         role_id: role.as_ref().map(|role| role.id),
@@ -86,6 +86,38 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         role_add,
         role_remove,
     }))
+}
+
+/// Discord thread title: the event name, then its date in the guild's zone.
+/// Discord allows 100 characters, so a long name is shortened and the date stays.
+pub fn event_thread_name(title: &str, starts_at: &str, timezone: &str) -> String {
+    let date = clock::parse_stamp(starts_at).ok().and_then(|start| {
+        clock::zone(timezone)
+            .ok()
+            .map(|tz| clock::format_day(start.with_timezone(&tz).date_naive()))
+    });
+    let title = title.trim();
+    let title = if title.is_empty() { "Event" } else { title };
+    let Some(date) = date else {
+        return trim_chars(title, 100);
+    };
+    let suffix = format!(" -- {date}");
+    let room = 100usize.saturating_sub(suffix.chars().count()).max(1);
+    format!("{}{suffix}", trim_chars(title, room))
+}
+
+pub(super) fn stored_thread_name(
+    conn: &mut Connection,
+    event: &store::Event,
+) -> Result<String, OpError> {
+    let timezone = store::guild(conn, event.guild_id)?
+        .map(|guild| guild.timezone)
+        .unwrap_or_else(|| "UTC".into());
+    Ok(event_thread_name(
+        &event.title,
+        &event.starts_at,
+        &timezone,
+    ))
 }
 
 fn id_diff(desired: &[String], applied: &[String]) -> (Vec<String>, Vec<String>) {
@@ -228,7 +260,11 @@ pub fn discord_view(
     }))
 }
 
-fn web_event_url(public_url: &str, server: Option<&str>, public_id: &str) -> Option<String> {
+pub fn web_event_url(
+    public_url: &str,
+    server: Option<&str>,
+    public_id: &str,
+) -> Option<String> {
     let base = public_url.trim().trim_end_matches('/');
     let server = server.filter(|id| !id.is_empty())?;
     if base.is_empty() {

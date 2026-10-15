@@ -2,7 +2,7 @@ use std::path::Path;
 
 use diesel::connection::Connection as DbConnection;
 use diesel::connection::SimpleConnection;
-use diesel::migration::{MigrationConnection, MigrationSource};
+use diesel::migration::MigrationConnection;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
@@ -440,15 +440,10 @@ fn table_exists(conn: &mut Connection, table: &str) -> Result<bool, OpError> {
 
 fn record_applied_migrations(conn: &mut Connection) -> Result<(), OpError> {
     MigrationConnection::setup(conn)?;
-    let migrations =
-        <EmbeddedMigrations as MigrationSource<diesel::sqlite::Sqlite>>::migrations(&MIGRATIONS)
-            .map_err(|err| OpError::message(format!("Could not update the database: {err}")))?;
-    for migration in migrations {
-        let version = migration.name().version().to_string();
-        sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES (?)")
-            .bind::<diesel::sql_types::Text, _>(version)
-            .execute(conn)?;
-    }
+    // The legacy upgrade already matches the init migration. Later migrations still run.
+    sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES (?)")
+        .bind::<diesel::sql_types::Text, _>("20261015131400")
+        .execute(conn)?;
     Ok(())
 }
 
@@ -1630,13 +1625,17 @@ mod tests {
         let versions = sql_query("SELECT version FROM __diesel_schema_migrations")
             .load::<VersionRow>(&mut conn)
             .unwrap();
+        let mut versions: Vec<_> = versions.into_iter().map(|row| row.version).collect();
+        versions.sort();
         assert_eq!(
-            versions
-                .iter()
-                .map(|row| row.version.as_str())
-                .collect::<Vec<_>>(),
-            vec!["20261015131400"]
+            versions,
+            vec![
+                "20261015131400".to_string(),
+                "20261015164600".to_string(),
+                "20261015170700".to_string(),
+            ]
         );
+        assert!(table_exists(&mut conn, "google_accounts").unwrap());
         drop(conn);
         let mut conn = open(&url).unwrap();
         assert_eq!(list_guilds(&mut conn).unwrap().len(), 1);

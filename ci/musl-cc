@@ -1,0 +1,9 @@
+#!/bin/bash
+# ring passes -m64, which musl-gcc rejects. Drop that flag.
+args=()
+for arg in "$@"; do
+  if [ "$arg" != "-m64" ]; then
+    args+=("$arg")
+  fi
+done
+exec musl-gcc "${args[@]}"

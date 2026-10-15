@@ -19,7 +19,7 @@ spec:
       labels:
         {{- include "marian.labels" . | nindent 8 }}
       annotations:
-        checksum/values: {{ printf "%v-%s-%s-%s" .Values.discord.clientId (include "marian.publicUrl" .) .Values.status .Values.discord.clientSecretKey | sha256sum }}
+        checksum/values: {{ printf "%v-%s-%s-%s-%v" .Values.discord.clientId (include "marian.publicUrl" .) .Values.status .Values.discord.clientSecretKey .Values.google.clientId | sha256sum }}
         {{- if and (not .Values.discord.existingSecret) .Values.discord.token }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
@@ -76,6 +76,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "marian.secretName" . }}
                   key: {{ .Values.discord.secretKey }}
+            - name: GOOGLE_CLIENT_ID
+              value: {{ .Values.google.clientId | quote }}
+            {{- if and .Values.discord.existingSecret .Values.google.clientSecretKey }}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "marian.secretName" . }}
+                  key: {{ .Values.google.clientSecretKey }}
+            {{- else if .Values.google.clientSecret }}
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "marian.secretName" . }}
+                  key: googleClientSecret
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
