@@ -1,4 +1,5 @@
 /target
+/marian
 /data
 *.db
 *.db-*

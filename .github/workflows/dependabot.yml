@@ -1,0 +1,33 @@
+name: Dependabot
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    name: Merge
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          number="$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+            --jq '.[] | select(.user.login == "dependabot[bot]" and .state == "open") | .number')"
+          if [ -z "$number" ]; then
+            echo "No open Dependabot pull request for ${SHA}"
+            exit 1
+          fi
+          gh pr merge "$number" --repo "$REPO" --squash --delete-branch

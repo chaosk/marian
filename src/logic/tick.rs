@@ -109,7 +109,7 @@ fn tick_guild(
                 continue;
             }
             let cached = guild_people(conn, guild_id, &mut people)?;
-            let text = reminder_text(conn, event, rem, cached)?;
+            let text = reminder_text(conn, event, cached)?;
             match text {
                 Some(text) => {
                     let place = if event.thread_enabled && settings.thread_reminders {
@@ -117,10 +117,19 @@ fn tick_guild(
                     } else {
                         "channel"
                     };
+                    let mut body = format!(
+                        "{text}\nREMINDER: {} starts in {}.",
+                        event.title,
+                        clock::human_offset(rem.offset_minutes)
+                    );
+                    if !rem.message.trim().is_empty() {
+                        body.push('\n');
+                        body.push_str(rem.message.trim());
+                    }
                     diesel::insert_into(schema::thread_messages::table)
                         .values((
                             schema::thread_messages::event_id.eq(event.id),
-                            schema::thread_messages::body.eq(&text),
+                            schema::thread_messages::body.eq(&body),
                             schema::thread_messages::place.eq(place),
                             schema::thread_messages::created_at.eq(&stamp),
                         ))
@@ -131,7 +140,11 @@ fn tick_guild(
                         clock::human_offset(rem.offset_minutes)
                     );
                     log(conn, guild_id, Some(event.id), &note)?;
-                    report.jobs.push(DiscordJob::remind(event.id, text));
+                    report.jobs.push(DiscordJob::remind(
+                        event.id,
+                        text,
+                        rem.message.clone(),
+                    ));
                     report.notes.push(note);
                 }
                 None => {
@@ -280,7 +293,6 @@ fn grouped<T>(rows: Vec<T>, key: impl Fn(&T) -> i64) -> HashMap<i64, Vec<T>> {
 fn reminder_text(
     conn: &mut Connection,
     event: &Event,
-    rem: &store::Reminder,
     users: &HashMap<i64, store::User>,
 ) -> Result<Option<String>, OpError> {
     let options = store::options_for(conn, event.id)?;
@@ -318,17 +330,52 @@ fn reminder_text(
     if mentions.is_empty() {
         return Ok(None);
     }
-    let mut text = format!(
-        "{} — **{}** starts in {}.",
-        mentions.join(" "),
-        event.title,
-        clock::human_offset(rem.offset_minutes)
-    );
-    if !rem.message.trim().is_empty() {
-        text.push(' ');
-        text.push_str(rem.message.trim());
+    Ok(Some(mentions.join(" ")))
+}
+
+#[derive(Debug)]
+pub struct ReminderCard {
+    pub title: String,
+    pub description: String,
+    pub footer: &'static str,
+}
+
+/// The Discord embed for a reminder. The title's relative time updates after
+/// the message is sent. `link` is the event post, when one exists.
+pub fn reminder_card(
+    event_title: &str,
+    start_unix: i64,
+    end_unix: i64,
+    link: Option<&str>,
+    message: &str,
+) -> ReminderCard {
+    let label = event_title.replace(['[', ']'], "");
+    let label = if label.trim().is_empty() {
+        "Event".to_string()
+    } else {
+        label
+    };
+    let name = match link.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(link) => format!("[{label}]({link})"),
+        None => label,
+    };
+    let mut description = String::new();
+    if !message.trim().is_empty() {
+        description.push_str(message.trim());
+        description.push_str("\n\n");
     }
-    Ok(Some(text))
+    description.push_str(&name);
+    description.push('\n');
+    description.push_str(&format!("<t:{start_unix}:F> - <t:{end_unix}:t>"));
+    ReminderCard {
+        title: format!("REMINDER: Event starting <t:{start_unix}:R>!"),
+        description,
+        footer: "Opt out of reminders with /reminders off",
+    }
+}
+
+pub fn discord_message_link(guild_id: &str, channel_id: &str, message_id: &str) -> String {
+    format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}")
 }
 
 pub fn rebase(conn: &mut Connection, now: DateTime<Utc>) -> Result<(), OpError> {

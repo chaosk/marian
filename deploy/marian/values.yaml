@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   repository: marian
-  tag: "0.3.0"
+  tag: "0.4.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -26,6 +26,14 @@ discord:
   # With existingSecret, leave this empty and set clientSecretKey instead.
   clientSecret: ""
   # Key in the Discord secret that holds the OAuth client secret.
+  clientSecretKey: ""
+
+# Google Calendar OAuth. Both empty leaves the connection off.
+# In Google Cloud, the redirect URI is the public URL plus /auth/google/callback.
+google:
+  clientId: ""
+  clientSecret: ""
+  # Key in discord.existingSecret that holds the Google client secret.
   clientSecretKey: ""
 
 # Custom status under the bot's name. Empty leaves it unset.

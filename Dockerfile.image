@@ -1,0 +1,11 @@
+# Packages the static binary CI already built. Dependency crates stay in the
+# runner's Rust cache, so a version bump does not compile them again.
+FROM scratch
+ARG MARIAN_VERSION
+LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
+COPY marian /marian
+USER 65532:65532
+ENV PORT=8080 \
+    DATABASE_URL=sqlite:///data/marian.db
+EXPOSE 8080
+ENTRYPOINT ["/marian"]

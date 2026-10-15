@@ -20,7 +20,8 @@ pub use catalog::{
 };
 pub use discord::{
     attendance, discord_view, ensure_discord_channel, ensure_discord_guild, ensure_discord_user,
-    remember_discord_message, status_label, Attendance, AttendanceWork,
+    event_thread_name, remember_discord_message, status_label, web_event_url, Attendance,
+    AttendanceWork,
 };
 pub use event::save_event;
 pub use lifecycle::{
@@ -38,7 +39,7 @@ pub use routine::{
 };
 pub use signup::{organizer_response, signup};
 pub use template::series_template;
-pub use tick::{rebase, tick};
+pub use tick::{discord_message_link, rebase, reminder_card, tick, ReminderCard};
 
 #[cfg(test)]
 mod tests {
@@ -278,6 +279,50 @@ mod tests {
         let reminder = store::reminders_for(&mut conn, soon_id).unwrap();
         assert!(reminder[0].sent_at.is_some());
         assert!(report.notes.iter().any(|note| note.contains("Dock")));
+        assert!(report.jobs.iter().any(|job| matches!(
+            job,
+            crate::jobs::DiscordJob::Remind { text, message, .. }
+                if text == "June" && message == "Boots on."
+        )));
+    }
+
+    #[test]
+    fn a_reminder_links_the_event_and_says_how_to_opt_out() {
+        let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
+        let card = reminder_card(
+            "BotC #135",
+            start.timestamp(),
+            (start + Duration::minutes(105)).timestamp(),
+            Some("https://discord.com/channels/1/2/3"),
+            "",
+        );
+        assert!(card.title.starts_with("REMINDER: Event starting <t:"), "{card:?}");
+        assert!(card.title.ends_with(":R>!"), "{card:?}");
+        assert!(
+            card.description
+                .contains("[BotC #135](https://discord.com/channels/1/2/3)"),
+            "{card:?}"
+        );
+        assert!(card.description.contains(":F> - <t:"), "{card:?}");
+        assert_eq!(card.footer, "Opt out of reminders with /reminders off");
+    }
+
+    #[test]
+    fn a_thread_is_named_with_the_event_date() {
+        let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
+        let stamp = crate::clock::stamp(start);
+        assert_eq!(
+            event_thread_name("BotC #135", &stamp, "UTC"),
+            "BotC #135 -- Wed, Oct 14"
+        );
+        assert_eq!(
+            event_thread_name("  ", &stamp, "Europe/Paris"),
+            "Event -- Wed, Oct 14"
+        );
+        let long = "A".repeat(120);
+        let name = event_thread_name(&long, &stamp, "UTC");
+        assert!(name.ends_with(" -- Wed, Oct 14"), "{name}");
+        assert!(name.chars().count() <= 100, "{name}");
     }
 
     #[test]

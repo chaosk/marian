@@ -17,43 +17,9 @@ use crate::schema;
 use crate::store::{self, Connection, Event};
 
 pub const HELP: &str = "\
-/event
-/edit EVENT title:\"New name\" description:\"Bring dice.\" start:\"friday 7pm\" duration:90 channel:events
-/reminders off
-/response add event:EVENT user:june option:Accepted
-/response remove event:EVENT user:june option:Accepted
-/response move event:EVENT user:june option:Declined
-In Discord, /response add, /response remove, and /response move each ask for the event, the person, and the signup option, and list the choices. EVENT is the id in the event address.
-/settings reminder_interval 30
-/settings show_attendees off
-/settings 24_hour_time on
-/settings event_threads on
-/settings thread_reminders on
-/settings auto_archive on
-/settings auto_archive_interval 24
-/settings auto_join_threads on
-/settings localize_time on
-/settings purge off
-/settings temp_roles off
-/settings park_clock off
-/settings digest weekly
-/settings post_lead 48
-/settings role delete Officer
-/signup_options
-/signup_options add emoji:🛡️ name:Tank
-/signup_options remove Tank
-/signup_presets
-/channel name:briefing kind:event
-/google authorize
-/google auto_sync on
-/google sync EVENT
-/sort
-/help
+/event starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats.
 
-Signup options start as Accepted, Declined, and Tentative. Digest is off, daily, or weekly.
-A weekly poll is a routine on the website.
-Times can look like \"tomorrow at 7pm\", \"friday 9am\", \"oct 20 at 8:00pm\", or \"in 2 hours\".
-Presets, waitlists, and per-option roles are on the website.
+The other commands are explained at /help.
 ";
 
 pub fn execute(conn: &mut Connection, guild_id: i64, user_id: i64, line: &str) -> String {
@@ -95,6 +61,42 @@ fn find_event(conn: &mut Connection, guild_id: i64, token: &str) -> Result<Event
         }
     }
     Err(OpError::message("That event isn't in this server."))
+}
+
+/// Discord URL of the posted event message, once Discord has assigned an id.
+pub fn posted_message_url(conn: &mut Connection, event_id: i64) -> Result<Option<String>, OpError> {
+    let Some(event) = store::event(conn, event_id)? else {
+        return Ok(None);
+    };
+    let Some(message_id) = event.discord_message_id.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(channel_id) = store::channel(conn, event.channel_id)?
+        .and_then(|channel| channel.discord_id)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(guild_id) = store::guild(conn, event.guild_id)?
+        .and_then(|guild| guild.discord_id)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(logic::discord_message_link(
+        &guild_id,
+        &channel_id,
+        &message_id,
+    )))
+}
+
+pub fn link_created_event(replies: &mut [DmReply], message_url: &str) {
+    let body = format!("[Click here to view the event]({message_url})");
+    for reply in replies {
+        if reply.title.as_deref() == Some("Event has been created!") {
+            reply.body = body.clone();
+        }
+    }
 }
 
 pub fn channel_posts_waiting(
@@ -1519,38 +1521,51 @@ fn numbered_prompt(heading: &str, lines: &[String]) -> DmReply {
     )
 }
 
-fn cmd_edit(
+pub struct EditChange {
+    pub event: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub start: Option<String>,
+    pub duration: Option<i64>,
+    pub channel: Option<String>,
+}
+
+pub fn edit_event(
     conn: &mut Connection,
     guild_id: i64,
     user_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
+    change: EditChange,
 ) -> Result<String, OpError> {
-    let token = map
-        .get("id")
-        .or_else(|| pos.first())
-        .map(String::as_str)
-        .ok_or_else(|| OpError::message("Say which event, like /edit EVENT title:\"New name\"."))?;
-    let event = find_event(conn, guild_id, token)?;
+    if change.title.is_none()
+        && change.description.is_none()
+        && change.start.is_none()
+        && change.duration.is_none()
+        && change.channel.is_none()
+    {
+        return Err(OpError::message(
+            "Name a change: title, description, start, length, or channel.",
+        ));
+    }
+    let event = find_event(conn, guild_id, &change.event)?;
     let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let mut input = input_from(conn, &event, user_id)?;
-    if let Some(title) = map.get("title") {
-        input.title = title.clone();
+    if let Some(title) = change.title {
+        input.title = title;
     }
-    if let Some(description) = map.get("description") {
-        input.description = description.clone();
+    if let Some(description) = change.description {
+        input.description = description;
     }
-    if let Some(start) = map.get("start") {
-        input.starts_at = parse::parse_when(start, Utc::now(), tz).ok_or_else(|| {
+    if let Some(start) = change.start {
+        input.starts_at = parse::parse_when(&start, Utc::now(), tz).ok_or_else(|| {
             OpError::message(format!("Marian couldn't read the time \"{start}\"."))
         })?;
     }
-    if let Some(duration) = map.get("duration").and_then(|value| value.parse().ok()) {
+    if let Some(duration) = change.duration {
         input.duration_minutes = duration;
     }
-    if let Some(name) = map.get("channel") {
-        input.channel_id = store::channel_by_name(conn, event.guild_id, name)?
+    if let Some(name) = change.channel {
+        input.channel_id = store::channel_by_name(conn, event.guild_id, &name)?
             .ok_or_else(|| OpError::message(format!("No channel named {name}.")))?
             .id;
     }
@@ -1564,6 +1579,51 @@ fn cmd_edit(
     ))
 }
 
+fn cmd_edit(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    pos: &[String],
+    map: &HashMap<String, String>,
+) -> Result<String, OpError> {
+    let event = map
+        .get("id")
+        .or_else(|| pos.first())
+        .cloned()
+        .ok_or_else(|| OpError::message("Say which event to edit."))?;
+    edit_event(
+        conn,
+        guild_id,
+        user_id,
+        EditChange {
+            event,
+            title: map.get("title").cloned(),
+            description: map.get("description").cloned(),
+            start: map.get("start").cloned(),
+            duration: map.get("duration").and_then(|value| value.parse().ok()),
+            channel: map.get("channel").cloned(),
+        },
+    )
+}
+
+pub fn set_reminders(
+    conn: &mut Connection,
+    user_id: i64,
+    enabled: Option<bool>,
+) -> Result<String, OpError> {
+    match enabled {
+        Some(value) => logic::set_user_reminders(conn, user_id, value),
+        None => {
+            let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
+            Ok(if user.reminders_enabled {
+                format!("{} gets reminders.", user.name)
+            } else {
+                format!("{} is opted out of reminders.", user.name)
+            })
+        }
+    }
+}
+
 fn cmd_reminders(
     conn: &mut Connection,
     user_id: i64,
@@ -1575,21 +1635,12 @@ fn cmd_reminders(
         .cloned()
         .or_else(|| pos.first().cloned())
         .unwrap_or_else(|| "status".into());
-    match raw.to_lowercase().as_str() {
-        "off" | "no" | "false" => logic::set_user_reminders(conn, user_id, false),
-        "on" | "yes" | "true" => logic::set_user_reminders(conn, user_id, true),
-        _ => {
-            let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
-            Ok(if user.reminders_enabled {
-                format!("{} gets reminders. /reminders off to opt out.", user.name)
-            } else {
-                format!(
-                    "{} is opted out. /reminders on to hear them again.",
-                    user.name
-                )
-            })
-        }
-    }
+    let enabled = match raw.to_lowercase().as_str() {
+        "off" | "no" | "false" => Some(false),
+        "on" | "yes" | "true" => Some(true),
+        _ => None,
+    };
+    set_reminders(conn, user_id, enabled)
 }
 
 fn cmd_response(
@@ -1762,6 +1813,145 @@ fn option_menu_label(emoji: &str, name: &str) -> String {
     label.chars().take(100).collect()
 }
 
+pub fn channel_choices(
+    conn: &mut Connection,
+    guild_id: i64,
+    partial: &str,
+) -> Result<Vec<Choice>, OpError> {
+    let needle = partial.trim().to_lowercase();
+    let mut choices = Vec::new();
+    for channel in store::list_channels(conn, guild_id)? {
+        if !needle.is_empty() && !channel.name.to_lowercase().contains(&needle) {
+            continue;
+        }
+        let kind = if channel.kind == "event" {
+            "event"
+        } else {
+            "text"
+        };
+        let label = format!("#{} · {kind}", channel.name);
+        choices.push(Choice {
+            label: label.chars().take(100).collect(),
+            value: channel.name,
+        });
+        if choices.len() == 25 {
+            break;
+        }
+    }
+    Ok(choices)
+}
+
+pub enum Setting {
+    ReminderInterval(i64),
+    Hour24(bool),
+    AutoArchive(bool),
+    AutoArchiveHours(i64),
+    AutoJoinThreads(bool),
+    EventThreads(bool),
+    LocalizeTime(bool),
+    PurgeChannels(bool),
+    ThreadReminders(bool),
+    ShowAttendees(bool),
+    TempRoles(bool),
+    ParkClock(bool),
+    Digest(String),
+    PostLeadHours(i64),
+    Role { which: String, name: String },
+}
+
+pub fn apply_setting(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    setting: Setting,
+) -> Result<String, OpError> {
+    require_organizer(conn, user_id)?;
+    let mut settings = store::settings(conn, guild_id)?;
+    let key = match setting {
+        Setting::ReminderInterval(minutes) => {
+            settings.default_reminder_minutes = minutes;
+            "reminder_interval"
+        }
+        Setting::Hour24(enabled) => {
+            settings.hour_24 = enabled;
+            "24_hour_time"
+        }
+        Setting::AutoArchive(enabled) => {
+            settings.auto_archive = enabled;
+            "auto_archive"
+        }
+        Setting::AutoArchiveHours(hours) => {
+            settings.auto_archive_hours = hours;
+            "auto_archive_interval"
+        }
+        Setting::AutoJoinThreads(enabled) => {
+            settings.auto_join_threads = enabled;
+            "auto_join_threads"
+        }
+        Setting::EventThreads(enabled) => {
+            settings.event_threads = enabled;
+            "event_threads"
+        }
+        Setting::LocalizeTime(enabled) => {
+            settings.localize_time = enabled;
+            "localize_time"
+        }
+        Setting::PurgeChannels(enabled) => {
+            settings.purge_channels = enabled;
+            "purge"
+        }
+        Setting::ThreadReminders(enabled) => {
+            settings.thread_reminders = enabled;
+            "thread_reminders"
+        }
+        Setting::ShowAttendees(enabled) => {
+            settings.show_attendees = enabled;
+            "show_attendees"
+        }
+        Setting::TempRoles(enabled) => {
+            settings.temp_roles = enabled;
+            "temp_roles"
+        }
+        Setting::ParkClock(enabled) => {
+            settings.park_clock = enabled;
+            "park_clock"
+        }
+        Setting::Digest(value) => {
+            if !matches!(value.as_str(), "off" | "daily" | "weekly") {
+                return Err(OpError::message("Digest can be off, daily, or weekly."));
+            }
+            settings.digest = value;
+            "digest"
+        }
+        Setting::PostLeadHours(hours) => {
+            settings.post_lead_hours = hours;
+            "post_lead"
+        }
+        Setting::Role { which, name } => {
+            let role_id = if name.eq_ignore_ascii_case("clear") || name.is_empty() {
+                None
+            } else {
+                Some(
+                    store::role_by_name(conn, guild_id, &name)?
+                        .ok_or_else(|| OpError::message(format!("No role named {name}.")))?
+                        .id,
+                )
+            };
+            match which.as_str() {
+                "event" => settings.role_event = role_id,
+                "edit" => settings.role_edit = role_id,
+                "delete" => settings.role_delete = role_id,
+                "channel" => settings.role_channel = role_id,
+                "signup_options" | "signup" => settings.role_signup = role_id,
+                other => return Err(OpError::message(format!("Unknown role setting {other}."))),
+            }
+            "role"
+        }
+    };
+    store::update_settings(conn, &settings)?;
+    Ok(format!("Updated {key}."))
+}
+
 fn cmd_settings(
     conn: &mut Connection,
     guild_id: i64,
@@ -1775,71 +1965,85 @@ fn cmd_settings(
         .next()
         .cloned()
         .or_else(|| pos.first().cloned())
-        .ok_or_else(|| OpError::message("Name a setting. Try /settings reminder_interval 30."))?;
+        .ok_or_else(|| OpError::message("Name a setting."))?;
     let value = map
         .get(&key)
         .cloned()
         .or_else(|| pos.get(1).cloned())
         .unwrap_or_default();
     let extra = pos.get(2).cloned().unwrap_or_default();
-    let mut settings = store::settings(conn, guild_id)?;
-    match key.as_str() {
-        "reminder_interval" => {
-            settings.default_reminder_minutes = value
+    let setting = match key.as_str() {
+        "reminder_interval" => Setting::ReminderInterval(
+            value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of minutes."))?
-        }
-        "24_hour_time" => settings.hour_24 = on(&value)?,
-        "auto_archive" => settings.auto_archive = on(&value)?,
-        "auto_archive_interval" => {
-            settings.auto_archive_hours = value
+                .map_err(|_| OpError::message("Use a number of minutes."))?,
+        ),
+        "24_hour_time" => Setting::Hour24(on(&value)?),
+        "auto_archive" => Setting::AutoArchive(on(&value)?),
+        "auto_archive_interval" => Setting::AutoArchiveHours(
+            value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of hours."))?
-        }
-        "auto_join_threads" => settings.auto_join_threads = on(&value)?,
-        "event_threads" => settings.event_threads = on(&value)?,
-        "localize_time" => settings.localize_time = on(&value)?,
-        "purge" => settings.purge_channels = on(&value)?,
-        "thread_reminders" => settings.thread_reminders = on(&value)?,
-        "show_attendees" => settings.show_attendees = on(&value)?,
-        "temp_roles" => settings.temp_roles = on(&value)?,
-        "park_clock" => settings.park_clock = on(&value)?,
-        "digest" => {
-            if !matches!(value.as_str(), "off" | "daily" | "weekly") {
-                return Err(OpError::message("Digest can be off, daily, or weekly."));
-            }
-            settings.digest = value.clone();
-        }
-        "post_lead" => {
-            settings.post_lead_hours = value
+                .map_err(|_| OpError::message("Use a number of hours."))?,
+        ),
+        "auto_join_threads" => Setting::AutoJoinThreads(on(&value)?),
+        "event_threads" => Setting::EventThreads(on(&value)?),
+        "localize_time" => Setting::LocalizeTime(on(&value)?),
+        "purge" => Setting::PurgeChannels(on(&value)?),
+        "thread_reminders" => Setting::ThreadReminders(on(&value)?),
+        "show_attendees" => Setting::ShowAttendees(on(&value)?),
+        "temp_roles" => Setting::TempRoles(on(&value)?),
+        "park_clock" => Setting::ParkClock(on(&value)?),
+        "digest" => Setting::Digest(value),
+        "post_lead" => Setting::PostLeadHours(
+            value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of hours."))?
-        }
-        "role" => {
-            let which = value;
-            let role_name = extra;
-            let role_id = if role_name.eq_ignore_ascii_case("clear") || role_name.is_empty() {
-                None
-            } else {
-                Some(
-                    store::role_by_name(conn, guild_id, &role_name)?
-                        .ok_or_else(|| OpError::message(format!("No role named {role_name}.")))?
-                        .id,
-                )
-            };
-            match which.as_str() {
-                "event" => settings.role_event = role_id,
-                "edit" => settings.role_edit = role_id,
-                "delete" => settings.role_delete = role_id,
-                "channel" => settings.role_channel = role_id,
-                "signup_options" | "signup" => settings.role_signup = role_id,
-                other => return Err(OpError::message(format!("Unknown role setting {other}."))),
-            }
-        }
+                .map_err(|_| OpError::message("Use a number of hours."))?,
+        ),
+        "role" => Setting::Role {
+            which: value,
+            name: extra,
+        },
         other => return Err(OpError::message(format!("Unknown setting {other}."))),
+    };
+    apply_setting(conn, guild_id, user_id, setting)
+}
+
+pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
+    let lines: Vec<_> = store::list_library(conn, guild_id)?
+        .into_iter()
+        .map(|opt| format!("{} {}", opt.emoji, opt.name))
+        .collect();
+    if lines.is_empty() {
+        Ok("The option library is empty.".into())
+    } else {
+        Ok(lines.join("\n"))
     }
-    store::update_settings(conn, &settings)?;
-    Ok(format!("Updated {key}."))
+}
+
+pub fn add_library_option(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    name: &str,
+    emoji: &str,
+) -> Result<String, OpError> {
+    let emoji = if emoji.trim().is_empty() {
+        "•"
+    } else {
+        emoji
+    };
+    logic::library_add(conn, guild_id, user_id, name, emoji)?;
+    Ok(format!("Saved {emoji} {name} in the option library."))
+}
+
+pub fn remove_library_option(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    name: &str,
+) -> Result<String, OpError> {
+    logic::library_remove(conn, guild_id, user_id, name)?;
+    Ok(format!("Removed {name} from the library."))
 }
 
 fn cmd_signup_options(
@@ -1859,8 +2063,7 @@ fn cmd_signup_options(
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the option."))?;
             let emoji = map.get("emoji").cloned().unwrap_or_else(|| "•".into());
-            logic::library_add(conn, guild_id, user_id, &name, &emoji)?;
-            Ok(format!("Saved {emoji} {name} in the option library."))
+            add_library_option(conn, guild_id, user_id, &name, &emoji)
         }
         "remove" => {
             let name = map
@@ -1868,21 +2071,71 @@ fn cmd_signup_options(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            logic::library_remove(conn, guild_id, user_id, &name)?;
-            Ok(format!("Removed {name} from the library."))
+            remove_library_option(conn, guild_id, user_id, &name)
         }
-        _ => {
-            let lines: Vec<_> = store::list_library(conn, guild_id)?
-                .into_iter()
-                .map(|opt| format!("{} {}", opt.emoji, opt.name))
-                .collect();
-            if lines.is_empty() {
-                Ok("The option library is empty.".into())
-            } else {
-                Ok(lines.join("\n"))
-            }
-        }
+        _ => library_text(conn, guild_id),
     }
+}
+
+pub fn preset_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
+    let lines: Vec<_> = store::list_presets(conn, guild_id)?
+        .into_iter()
+        .map(|preset| preset.name)
+        .collect();
+    if lines.is_empty() {
+        Ok("No presets yet.".into())
+    } else {
+        Ok(lines.join("\n"))
+    }
+}
+
+pub fn add_preset(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    name: &str,
+    options: &str,
+) -> Result<String, OpError> {
+    let options = options
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| OptionInput {
+            id: None,
+            name: part.to_string(),
+            emoji: "•".into(),
+            capacity: None,
+            waitlist: false,
+            role_id: None,
+            reminders_enabled: true,
+        })
+        .collect();
+    logic::save_preset(
+        conn,
+        guild_id,
+        user_id,
+        name,
+        &PresetBody {
+            multiple_signups: false,
+            options,
+        },
+    )?;
+    Ok(format!("Saved the {name} preset."))
+}
+
+pub fn remove_preset(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    name: &str,
+) -> Result<String, OpError> {
+    if let Some(preset) = store::list_presets(conn, guild_id)?
+        .into_iter()
+        .find(|preset| preset.name.eq_ignore_ascii_case(name))
+    {
+        logic::delete_preset(conn, preset.id, user_id)?;
+    }
+    Ok(format!("Removed {name}."))
 }
 
 fn cmd_presets(
@@ -1901,31 +2154,7 @@ fn cmd_presets(
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the preset."))?;
             let raw = map.get("options").cloned().unwrap_or_default();
-            let options = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(|part| OptionInput {
-                    id: None,
-                    name: part.to_string(),
-                    emoji: "•".into(),
-                    capacity: None,
-                    waitlist: false,
-                    role_id: None,
-                    reminders_enabled: true,
-                })
-                .collect();
-            logic::save_preset(
-                conn,
-                guild_id,
-                user_id,
-                &name,
-                &PresetBody {
-                    multiple_signups: false,
-                    options,
-                },
-            )?;
-            Ok(format!("Saved the {name} preset."))
+            add_preset(conn, guild_id, user_id, &name, &raw)
         }
         "remove" => {
             let name = map
@@ -1933,26 +2162,22 @@ fn cmd_presets(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            if let Some(preset) = store::list_presets(conn, guild_id)?
-                .into_iter()
-                .find(|preset| preset.name.eq_ignore_ascii_case(&name))
-            {
-                logic::delete_preset(conn, preset.id, user_id)?;
-            }
-            Ok(format!("Removed {name}."))
+            remove_preset(conn, guild_id, user_id, &name)
         }
-        _ => {
-            let lines: Vec<_> = store::list_presets(conn, guild_id)?
-                .into_iter()
-                .map(|preset| preset.name)
-                .collect();
-            if lines.is_empty() {
-                Ok("No presets yet.".into())
-            } else {
-                Ok(lines.join("\n"))
-            }
-        }
+        _ => preset_text(conn, guild_id),
     }
+}
+
+pub fn create_named_channel(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    name: &str,
+    kind: &str,
+) -> Result<String, OpError> {
+    let id = logic::create_channel(conn, guild_id, user_id, name, kind)?;
+    let channel = store::channel(conn, id)?.ok_or(OpError::NotFound)?;
+    Ok(format!("Created #{}.", channel.name))
 }
 
 fn cmd_channel(
@@ -1968,9 +2193,102 @@ fn cmd_channel(
         .or_else(|| pos.first().cloned())
         .ok_or_else(|| OpError::message("Name the channel."))?;
     let kind = map.get("kind").cloned().unwrap_or_else(|| "text".into());
-    let id = logic::create_channel(conn, guild_id, user_id, &name, &kind)?;
-    let channel = store::channel(conn, id)?.ok_or(OpError::NotFound)?;
-    Ok(format!("Created #{}.", channel.name))
+    create_named_channel(conn, guild_id, user_id, &name, &kind)
+}
+
+fn public_base() -> String {
+    std::env::var("MARIAN_PUBLIC_URL")
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn person_discord_id(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+    let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
+    user.discord_id.ok_or_else(|| {
+        OpError::message("Marian needs your Discord account before it can connect Google Calendar.")
+    })
+}
+
+pub fn google_sign_in_url(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+    if !crate::google::configured_from_env() {
+        return Err(OpError::message("Google Calendar is not configured yet."));
+    }
+    let base = public_base();
+    if base.is_empty() {
+        return Err(OpError::message(
+            "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
+        ));
+    }
+    let client_id = std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
+    let discord_id = person_discord_id(conn, user_id)?;
+    let state = crate::google::begin_link(conn, &discord_id)?;
+    let url = crate::google::authorize_url(
+        client_id.trim(),
+        &format!("{base}/auth/google/callback"),
+        &state,
+    );
+    if url.len() > 512 {
+        return Err(OpError::message(
+            "The Google sign-in link is too long for Discord. Connect from Settings.",
+        ));
+    }
+    Ok(url)
+}
+
+pub fn google_authorize(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+    let url = google_sign_in_url(conn, user_id)?;
+    Ok(format!(
+        "Click the button below to connect Google Calendar.\n{url}"
+    ))
+}
+
+pub fn google_auto_sync(
+    conn: &mut Connection,
+    _guild_id: i64,
+    user_id: i64,
+    enabled: bool,
+) -> Result<String, OpError> {
+    let discord_id = person_discord_id(conn, user_id)?;
+    crate::google::set_auto_sync(conn, &discord_id, enabled)?;
+    Ok(if enabled {
+        "Marian will keep your Google Calendar updated.".into()
+    } else {
+        "Automatic Google Calendar updates are paused. /google sync still adds one event.".into()
+    })
+}
+
+pub fn google_revoke(
+    conn: &mut Connection,
+    _guild_id: i64,
+    user_id: i64,
+) -> Result<String, OpError> {
+    let discord_id = person_discord_id(conn, user_id)?;
+    if !crate::google::queue_revoke(conn, &discord_id)? {
+        return Ok("Google Calendar is already disconnected.".into());
+    }
+    Ok("Google Calendar will be disconnected, and Marian will remove the events it added.".into())
+}
+
+pub fn google_sync(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    event: &str,
+) -> Result<String, OpError> {
+    let event = find_event(conn, guild_id, event)?;
+    if !matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
+        return Err(OpError::message(
+            "Post or schedule the event before syncing it.",
+        ));
+    }
+    let discord_id = person_discord_id(conn, user_id)?;
+    crate::google::queue_event(conn, &discord_id, event.id)?;
+    Ok(format!(
+        "Marian will add {} to your Google Calendar.",
+        event.title
+    ))
 }
 
 fn cmd_google(
@@ -1982,49 +2300,23 @@ fn cmd_google(
 ) -> Result<String, OpError> {
     let action = pos.first().map(String::as_str).unwrap_or("authorize");
     match action {
-        "authorize" => {
-            let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
-            let discord_id = user.discord_id.as_deref().ok_or_else(|| {
-                OpError::message(
-                    "Marian needs your Discord account before it can make a calendar link.",
-                )
-            })?;
-            let token = store::ensure_calendar_token(conn, discord_id)?;
-            Ok(format!(
-                "Subscribe your calendar app to /calendar/{token}.ics. It lists events you accepted and events you created. The link is only yours. Marian does not ask Google for access. Add to Google Calendar on an event still opens one date."
-            ))
-        }
+        "authorize" => google_authorize(conn, user_id),
         "auto_sync" => {
-            require_organizer(conn, user_id)?;
-            let mut settings = store::settings(conn, guild_id)?;
             let value = map
                 .get("state")
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_else(|| "on".into());
-            settings.calendar_auto_sync = on(&value)?;
-            store::update_settings(conn, &settings)?;
-            Ok(if settings.calendar_auto_sync {
-                "New posts are marked on the calendar feed.".into()
-            } else {
-                "Automatic calendar marking is off. The feed still lists posted events.".into()
-            })
+            google_auto_sync(conn, guild_id, user_id, on(&value)?)
         }
-        "revoke" => {
-            require_organizer(conn, user_id)?;
-            let mut settings = store::settings(conn, guild_id)?;
-            settings.calendar_auto_sync = false;
-            store::update_settings(conn, &settings)?;
-            Ok("Turned automatic calendar marking off.".into())
-        }
+        "revoke" => google_revoke(conn, guild_id, user_id),
         "sync" => {
             let token = map
                 .get("event")
                 .map(String::as_str)
                 .or_else(|| pos.get(1).map(String::as_str))
                 .ok_or_else(|| OpError::message("Say which event to sync."))?;
-            let event = find_event(conn, guild_id, token)?;
-            logic::manual_calendar_sync(conn, event.id, user_id)
+            google_sync(conn, guild_id, user_id, token)
         }
         other => Err(OpError::message(format!("Unknown google command {other}."))),
     }
@@ -2168,14 +2460,12 @@ mod tests {
     }
 
     #[test]
-    fn help_uses_the_event_id_and_the_default_options() {
-        assert!(HELP.contains("option:Accepted"));
-        assert!(HELP.contains("option:Declined"));
-        assert!(HELP.contains("/settings digest weekly"));
-        assert!(HELP.contains("/google sync EVENT"));
-        assert!(HELP.contains("A weekly poll is a routine on the website."));
+    fn help_points_at_the_guide() {
+        assert!(HELP.contains("/event starts an event"));
+        assert!(HELP.contains("/help"));
         assert!(!HELP.contains("Healer"));
         assert!(!HELP.contains("event:12"));
+        assert!(!HELP.contains("title:"));
     }
 
     #[test]
@@ -2284,6 +2574,12 @@ mod tests {
         );
         let posts = channel_posts_waiting(&mut conn, "u1").unwrap();
         assert_eq!(posts.len(), 1, "{posts:?}");
+        diesel::update(schema::events::table.filter(schema::events::id.eq(posts[0])))
+            .set(schema::events::discord_message_id.eq("555"))
+            .execute(&mut conn)
+            .unwrap();
+        let url = posted_message_url(&mut conn, posts[0]).unwrap().unwrap();
+        assert_eq!(url, "https://discord.com/channels/4242/100/555");
         let event = store::event(&mut conn, posts[0]).unwrap().unwrap();
         assert!(posted[0].body.contains(&event.public_id), "{}", posted[0]);
         assert_eq!(event.channel_id, 2, "the agreed channel");
@@ -2328,5 +2624,12 @@ mod tests {
             posted[1].title.as_deref(),
             Some("What would you like to do?")
         );
+        let mut sent = posted;
+        link_created_event(&mut sent, &url);
+        assert_eq!(
+            sent[0].body,
+            "[Click here to view the event](https://discord.com/channels/4242/100/555)"
+        );
+        assert_eq!(sent[1].title.as_deref(), Some("What would you like to do?"));
     }
 }

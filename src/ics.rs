@@ -17,7 +17,10 @@ pub fn user_feed(conn: &mut Connection, discord_user_id: &str) -> Result<String,
     Ok(body)
 }
 
-fn events_for_person(conn: &mut Connection, discord_user_id: &str) -> Result<Vec<Event>, OpError> {
+pub(crate) fn events_for_person(
+    conn: &mut Connection,
+    discord_user_id: &str,
+) -> Result<Vec<Event>, OpError> {
     Ok(events::table
         .inner_join(users::table.on(users::guild_id.eq(events::guild_id)))
         .left_join(

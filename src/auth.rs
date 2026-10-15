@@ -146,10 +146,26 @@ fn decode(text: &str) -> String {
 pub fn is_public(path: &str) -> bool {
     matches!(
         path,
-        "/" | "/healthz" | "/readyz" | "/auth/discord" | "/auth/discord/callback" | "/logout"
+        "/" | "/healthz"
+            | "/readyz"
+            | "/help"
+            | "/auth/discord"
+            | "/auth/discord/callback"
+            | "/logout"
     ) || crate::assets::is_static(path)
         || personal_calendar(path)
         || server_calendar(path)
+        || google_connect(path)
+}
+
+fn google_connect(path: &str) -> bool {
+    if path == "/auth/google/callback" {
+        return true;
+    }
+    let Some(token) = path.strip_prefix("/auth/google/start/") else {
+        return false;
+    };
+    token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn personal_calendar(path: &str) -> bool {
@@ -235,10 +251,16 @@ mod tests {
     #[test]
     fn a_personal_calendar_is_public_and_the_site_is_not() {
         let token = "ab".repeat(32);
+        assert!(is_public("/help"));
         assert!(is_public(&format!("/calendar/{token}.ics")));
         assert!(!is_public("/calendar/short.ics"));
         assert!(!is_public("/servers/4/calendar.ics"));
         assert!(is_public("/servers/4/calendar/9.ics"));
+        assert!(is_public("/auth/google/callback"));
+        let state = "ab".repeat(32);
+        assert!(is_public(&format!("/auth/google/start/{state}")));
+        assert!(!is_public("/auth/google"));
+        assert!(!is_public("/auth/google/start/short"));
         assert!(is_public("/static/app.abc.css"));
         assert!(is_public("/favicon.svg"));
         assert!(!is_public("/static"));

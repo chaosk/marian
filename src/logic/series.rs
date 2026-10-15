@@ -398,7 +398,7 @@ pub(super) fn mark_posted(
         diesel::insert_into(schema::threads::table)
             .values((
                 schema::threads::event_id.eq(id),
-                schema::threads::name.eq(&event.title),
+                schema::threads::name.eq(&super::discord::stored_thread_name(conn, &event)?),
             ))
             .on_conflict_do_nothing()
             .execute(conn)?;

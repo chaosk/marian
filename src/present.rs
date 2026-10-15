@@ -6,7 +6,6 @@ use minijinja::{Environment, Value};
 use serde::Serialize;
 
 use crate::clock::{self, zone_label};
-use crate::commands::HELP;
 use crate::error::OpError;
 use crate::ics;
 use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction};
@@ -282,6 +281,12 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
             None
         }
     });
+    let google_synced = user
+        .discord_id
+        .as_deref()
+        .map(|discord_id| crate::google::on_calendar(page.conn, discord_id, event.id))
+        .transpose()?
+        .unwrap_or(false);
     let web_url = format!(
         "/servers/{}/events/{}",
         store::discord_server_id(page.conn, event.guild_id).unwrap_or_default(),
@@ -324,6 +329,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         "creator": creator,
         "image_url": image_url,
         "calendar_on": event.calendar_synced_at.is_some(),
+        "google_synced": google_synced,
         "duration": clock::human_duration(event.duration_minutes),
         "cutoff": event.cutoff_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
         "attendee_role": event.attendee_role_id.and_then(|id| role_rows.iter().find(|r| r.id == id).map(|r| r.name.clone())).unwrap_or_default(),
@@ -767,6 +773,12 @@ pub fn channels(page: &mut Page<'_>) -> Result<String, OpError> {
     render("channels.html", ctx)
 }
 
+pub fn help_page() -> Result<String, OpError> {
+    let mut ctx = Bag::new();
+    asset_context(&mut ctx);
+    render("help.html", ctx)
+}
+
 pub fn commands_page(page: &mut Page<'_>) -> Result<String, OpError> {
     let rows = store::list_commands(page.conn, page.guild_id, 30)?;
     let users = store::list_users(page.conn, page.guild_id)?;
@@ -779,20 +791,8 @@ pub fn commands_page(page: &mut Page<'_>) -> Result<String, OpError> {
             .unwrap_or_else(|| "Marian".into());
         log.push(serde_json::json!({"user": name, "line": row.line, "reply": row.reply}));
     }
-    let sample = store::list_events(page.conn, page.guild_id)?
-        .into_iter()
-        .find(|event| event.status == "posted");
-    let mut examples = vec!["/event".to_string(), "/reminders off".to_string()];
-    if let Some(event) = sample {
-        examples.push(format!(
-            "/response add event:{} user:samir option:Accepted",
-            event.public_id
-        ));
-    }
     let mut ctx = shell(page)?;
     ctx["log"] = Value::from_serialize(&log);
-    ctx["help"] = Value::from(HELP);
-    ctx["examples"] = Value::from_serialize(&examples);
     render("commands.html", ctx)
 }
 
@@ -887,6 +887,21 @@ pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     ctx["temp_roles"] = context_bool(settings.temp_roles);
     ctx["calendar_auto_sync"] = context_bool(settings.calendar_auto_sync);
     ctx["park_clock"] = context_bool(settings.park_clock);
+    let google = user
+        .as_ref()
+        .and_then(|person| person.discord_id.as_deref())
+        .map(|discord_id| crate::google::status(page.conn, discord_id))
+        .transpose()?
+        .flatten();
+    ctx["google_ready"] = context_bool(crate::google::configured_from_env());
+    ctx["google_connected"] = context_bool(google.as_ref().is_some_and(|status| status.connected));
+    ctx["google_reconnect"] = context_bool(google.as_ref().is_some_and(|status| status.reconnect));
+    ctx["google_email"] = Value::from(
+        google
+            .as_ref()
+            .map(|status| status.email.clone())
+            .unwrap_or_default(),
+    );
     ctx["zone_groups"] = Value::from_serialize(&clock::zone_groups(Utc::now(), &guild.timezone));
     ctx["digests"] = Value::from_serialize(
         &["off", "daily", "weekly"]
@@ -1896,6 +1911,10 @@ fn templates() -> &'static Environment<'static> {
             .expect("channels");
         env.add_template("commands.html", include_str!("../templates/commands.html"))
             .expect("commands");
+        env.add_template("guide.html", include_str!("../templates/guide.html"))
+            .expect("guide");
+        env.add_template("help.html", include_str!("../templates/help.html"))
+            .expect("help");
         env.add_template("routines.html", include_str!("../templates/routines.html"))
             .expect("routines");
         env.add_template("notfound.html", include_str!("../templates/notfound.html"))
@@ -2051,6 +2070,12 @@ mod tests {
         page.title = "Commands";
         let desk = commands_page(&mut page).unwrap();
         assert!(desk.contains("command-line"), "{desk}");
+        assert!(desk.contains("Starts an event"), "{desk}");
+        let help = help_page().unwrap();
+        assert!(help.contains("Starts an event"), "{help}");
+        assert!(help.contains("Accepted, Declined, and Tentative"), "{help}");
+        assert!(!help.contains("event:12"), "{help}");
+        assert!(!help.contains("Healer"), "{help}");
         page.nav = "drafts";
         page.title = "Drafts";
         let drafts = list_page(&mut page, "drafts", ListQuery::default()).unwrap();

@@ -19,19 +19,65 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
+  binary:
+    name: Release binary
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${GITHUB_SHA}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: musl linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools file
+          sudo cp ci/musl-cc /usr/local/bin/musl-cc
+          sudo chmod +x /usr/local/bin/musl-cc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: musl-release
+      - name: Build static binary
+        env:
+          MARIAN_VERSION: ${{ steps.version.outputs.version }}
+          CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/marian marian
+          file marian | grep -Eq "statically linked|static-pie linked"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marian
+          path: marian
+          if-no-files-found: error
+
   release:
     name: Image and chart
     if: github.event_name == 'push'
-    needs: test
+    needs: [test, binary]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: marian
+          path: .
       - name: Image name
         id: image
         run: |
+          chmod +x marian
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "name=${image}" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -60,11 +106,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.image
           platforms: linux/amd64
           provenance: false
           sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           # GHCR serves this manifest as OCI. Runtimes that only ask for Docker
           # media types get MANIFEST_UNKNOWN, which kubelet reports as not found.
           outputs: type=image,push=true,oci-mediatypes=false
@@ -86,7 +131,7 @@ jobs:
           path = Path("deploy/marian/values.yaml")
           text = path.read_text()
           text = text.replace("repository: marian", f"repository: {os.environ['IMAGE']}", 1)
-          text = text.replace('tag: "0.3.0"', f'tag: "{os.environ["IMAGE_TAG"]}"', 1)
+          text = text.replace('tag: "0.4.0"', f'tag: "{os.environ["IMAGE_TAG"]}"', 1)
           path.write_text(text)
           PY
           helm package deploy/marian --version "$version" --app-version "$version"

@@ -15,7 +15,7 @@
         <div class="reply md">{{ row.reply|md }}</div>
       </div>
       {% else %}
-      <p>No commands yet. Try one of the examples.</p>
+      <p>No commands yet.</p>
       {% endfor %}
     </div>
     <form method="post" action="{{ base }}/commands" style="margin-top:12px">
@@ -25,14 +25,9 @@
       <button class="primary" type="submit">Send</button>
     </form>
   </section>
-  <section>
-    <pre class="panel" style="white-space: pre-wrap">{{ help }}</pre>
-    {% for example in examples %}
-    <form method="post" action="{{ base }}/commands" style="margin-top:8px">
-      <input type="hidden" name="line" value="{{ example }}">
-      <button class="ghost" type="submit">{{ example }}</button>
-    </form>
-    {% endfor %}
+  <section class="panel guide">
+    <h3>Commands</h3>
+    {% include "guide.html" %}
   </section>
 </div>
 {% endblock %}

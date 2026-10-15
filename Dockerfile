@@ -3,17 +3,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools file \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl
-# ring passes -m64, which Debian's musl-gcc rejects. The wrapper drops that flag.
-COPY <<'EOF' /usr/local/bin/musl-cc
-#!/bin/bash
-args=()
-for arg in "$@"; do
-  if [ "$arg" != "-m64" ]; then
-    args+=("$arg")
-  fi
-done
-exec musl-gcc "${args[@]}"
-EOF
+# ring passes -m64, which musl-gcc rejects. The wrapper drops that flag.
+COPY ci/musl-cc /usr/local/bin/musl-cc
 RUN chmod +x /usr/local/bin/musl-cc
 WORKDIR /src
 ENV CC_x86_64_unknown_linux_musl=/usr/local/bin/musl-cc

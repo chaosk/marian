@@ -6,6 +6,7 @@ pub mod clock;
 pub mod commands;
 pub mod error;
 pub mod gateway;
+pub mod google;
 pub mod ics;
 mod ids;
 pub mod jobs;
