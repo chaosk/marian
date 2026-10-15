@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use minijinja::{Environment, Value};
 use rusqlite::Connection;
@@ -60,6 +60,7 @@ pub fn home(page: &Page<'_>) -> Result<String, OpError> {
     }
     let now = Utc::now();
     let (settings, tz) = zone_of(page)?;
+    let (week_start, week_end) = week_window(now, tz);
     let events = store::list_events(page.conn, page.guild_id)?;
     let mut days: Vec<DayBucket> = Vec::new();
     let mut wrapped = Vec::new();
@@ -67,6 +68,7 @@ pub fn home(page: &Page<'_>) -> Result<String, OpError> {
     let mut reminders = Vec::new();
     let mut hero: Option<serde_json::Value> = None;
     let mut hero_start: Option<DateTime<Utc>> = None;
+    let mut shown = 0usize;
     for event in &events {
         let start = clock::parse_stamp(&event.starts_at)?;
         let end = start + Duration::minutes(event.duration_minutes);
@@ -86,27 +88,32 @@ pub fn home(page: &Page<'_>) -> Result<String, OpError> {
             continue;
         }
         if matches!(event.status.as_str(), "posted" | "scheduled") {
-            if event.status == "posted"
-                && end >= now
-                && hero_start.map(|current| start < current).unwrap_or(true)
-            {
-                hero_start = Some(start);
-                hero = Some(card_value(page.conn, event, &settings, tz, now, true)?);
+            let local_day = start.with_timezone(&tz).date_naive();
+            let in_week = local_day >= week_start && local_day < week_end;
+            if in_week && shown < 5 {
+                shown += 1;
+                if event.status == "posted"
+                    && end >= now
+                    && hero_start.map(|current| start < current).unwrap_or(true)
+                {
+                    hero_start = Some(start);
+                    hero = Some(card_value(page.conn, event, &settings, tz, now, true)?);
+                }
+                let label = clock::format_day(start.with_timezone(&tz).date_naive());
+                let today =
+                    start.with_timezone(&tz).date_naive() == now.with_timezone(&tz).date_naive();
+                if days.last().map(|day| day.label != label).unwrap_or(true) {
+                    days.push(DayBucket {
+                        label,
+                        today,
+                        events: Vec::new(),
+                    });
+                }
+                days.last_mut()
+                    .unwrap()
+                    .events
+                    .push(card_value(page.conn, event, &settings, tz, now, false)?);
             }
-            let label = clock::format_day(start.with_timezone(&tz).date_naive());
-            let today =
-                start.with_timezone(&tz).date_naive() == now.with_timezone(&tz).date_naive();
-            if days.last().map(|day| day.label != label).unwrap_or(true) {
-                days.push(DayBucket {
-                    label,
-                    today,
-                    events: Vec::new(),
-                });
-            }
-            days.last_mut()
-                .unwrap()
-                .events
-                .push(card_value(page.conn, event, &settings, tz, now, false)?);
         }
         if event.status == "posted" {
             for rem in store::reminders_for(page.conn, event.id)? {
@@ -139,6 +146,12 @@ struct DayBucket {
     label: String,
     today: bool,
     events: Vec<serde_json::Value>,
+}
+
+fn week_window(now: DateTime<Utc>, tz: Tz) -> (NaiveDate, NaiveDate) {
+    let today = now.with_timezone(&tz).date_naive();
+    let start = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    (start, start + Duration::days(7))
 }
 
 pub fn event_page(page: &Page<'_>, event_id: i64) -> Result<String, OpError> {
@@ -401,67 +414,191 @@ fn button_state(
     (false, String::new(), false, base)
 }
 
-pub fn list_page(page: &Page<'_>, kind: &str) -> Result<String, OpError> {
+#[derive(Clone, Debug, Default)]
+pub struct ListQuery {
+    pub q: String,
+    pub page: u32,
+}
+
+impl ListQuery {
+    pub fn new(q: impl Into<String>, page: u32) -> Self {
+        Self {
+            q: q.into().trim().chars().take(200).collect(),
+            page,
+        }
+    }
+}
+
+const LIST_PAGE_SIZE: usize = 25;
+
+pub fn list_page(page: &Page<'_>, kind: &str, query: ListQuery) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let server = store::discord_server_id(page.conn, page.guild_id)?;
     let events = store::list_events(page.conn, page.guild_id)?;
-    let (heading, lede, empty_title, empty_body, rows) =
-        match kind {
-            "drafts" => (
-                "Drafts",
-                "Saved, not posted, and not on the Discord clock yet.",
-                "No drafts.",
-                "Start an event and choose Save draft.",
-                rows_for(&server, &events, &settings, tz, |e| e.status == "draft"),
-            ),
-            "scheduled" => (
-                "Scheduled posts",
-                "These are saved and will be posted when their time arrives.",
-                "Nothing is queued.",
-                "Choose Schedule post on an event to put it here.",
-                rows_for(&server, &events, &settings, tz, |e| {
-                    e.status == "scheduled" || e.status == "failed"
-                }),
-            ),
-            "archive" => (
-                "Archive",
-                "Past events stay searchable after the channel moves on.",
-                "The archive is empty.",
-                "Posted events land here when they are archived.",
-                rows_for(&server, &events, &settings, tz, |e| {
-                    matches!(e.status.as_str(), "archived" | "cancelled" | "skipped")
-                }),
-            ),
-            "activity" => {
-                let rows = activity_rows(page, 80)?;
-                let mapped = rows.iter().map(|row| serde_json::json!({
-                "href": row.get("href").cloned().unwrap_or(serde_json::json!("/activity")),
-                "badge": "Log",
-                "title": row.get("body").cloned().unwrap_or(serde_json::json!("")),
-                "meta": row.get("when").cloned().unwrap_or(serde_json::json!("")),
-            })).collect::<Vec<_>>();
-                (
-                    "Activity",
-                    "Everything Marian posted, moved, or reminded.",
-                    "The log is empty.",
-                    "Signups and posts will show up here.",
-                    mapped,
-                )
-            }
-            _ => ("Schedule", "", "", "", vec![]),
+    let (heading, empty_title, empty_body, rows, columns) = match kind {
+        "drafts" => (
+            "Drafts",
+            "No drafts.",
+            "Start an event and choose Save draft.",
+            rows_for(&server, &events, &settings, tz, |e| e.status == "draft"),
+            Some(("Title", "When", "Status")),
+        ),
+        "scheduled" => (
+            "Scheduled posts",
+            "Nothing is queued.",
+            "Choose Schedule post on an event to put it here.",
+            rows_for(&server, &events, &settings, tz, |e| {
+                e.status == "scheduled" || e.status == "failed"
+            }),
+            Some(("Title", "When", "Status")),
+        ),
+        "archive" => (
+            "Archive",
+            "The archive is empty.",
+            "Posted events land here when they are archived.",
+            rows_for(&server, &events, &settings, tz, |e| {
+                matches!(e.status.as_str(), "archived" | "cancelled" | "skipped")
+            }),
+            Some(("Title", "When", "Status")),
+        ),
+        "activity" => {
+            let rows = activity_rows(page, 80)?;
+            let mapped = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "href": row.get("href").cloned().unwrap_or(serde_json::json!("/activity")),
+                        "badge": "Log",
+                        "title": row.get("body").cloned().unwrap_or(serde_json::json!("")),
+                        "meta": row.get("when").cloned().unwrap_or(serde_json::json!("")),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                "Activity",
+                "The log is empty.",
+                "Signups and posts will show up here.",
+                mapped,
+                None,
+            )
+        }
+        _ => ("Schedule", "", "", vec![], None),
+    };
+    render_rows(page, heading, empty_title, empty_body, rows, columns, query)
+}
+
+fn render_rows(
+    page: &Page<'_>,
+    heading: &str,
+    empty_title: &str,
+    empty_body: &str,
+    rows: Vec<serde_json::Value>,
+    columns: Option<(&str, &str, &str)>,
+    query: ListQuery,
+) -> Result<String, OpError> {
+    let table = columns.is_some();
+    let searchable = table && (!rows.is_empty() || !query.q.is_empty());
+    let matched: Vec<serde_json::Value> = if table {
+        rows.into_iter()
+            .filter(|row| row_hits(&query.q, row))
+            .collect()
+    } else {
+        rows
+    };
+    let (shown, window, prev, next) = if table {
+        let (page_n, start, end) = page_window(matched.len(), query.page, LIST_PAGE_SIZE);
+        let prev = if page_n > 1 {
+            list_link(&query.q, page_n - 1)
+        } else {
+            String::new()
         };
+        let next = if end < matched.len() {
+            list_link(&query.q, page_n + 1)
+        } else {
+            String::new()
+        };
+        let window = if matched.is_empty() {
+            String::new()
+        } else {
+            format!("{}–{} of {}", start + 1, end, matched.len())
+        };
+        (matched[start..end].to_vec(), window, prev, next)
+    } else {
+        (matched, String::new(), String::new(), String::new())
+    };
+    let (col_title, col_when, col_status) = columns.unwrap_or(("", "", ""));
     let mut ctx = shell(page)?;
     ctx["heading"] = Value::from(heading);
-    ctx["lede"] = Value::from(lede);
     ctx["empty_title"] = Value::from(empty_title);
     ctx["empty_body"] = Value::from(empty_body);
-    ctx["rows"] = Value::from_serialize(&rows);
+    ctx["rows"] = Value::from_serialize(&shown);
     ctx["extra"] = Value::from("");
-    ctx["dense"] = context_bool(kind == "activity");
+    ctx["dense"] = context_bool(!table);
+    ctx["searchable"] = context_bool(searchable);
+    ctx["q"] = Value::from(query.q);
+    ctx["window"] = Value::from(window);
+    ctx["prev"] = Value::from(prev);
+    ctx["next"] = Value::from(next);
+    ctx["col_title"] = Value::from(col_title);
+    ctx["col_when"] = Value::from(col_when);
+    ctx["col_status"] = Value::from(col_status);
     render("list.html", ctx)
 }
 
-pub fn recurring(page: &Page<'_>) -> Result<String, OpError> {
+fn row_hits(q: &str, row: &serde_json::Value) -> bool {
+    let q = q.trim();
+    if q.is_empty() {
+        return true;
+    }
+    let q = q.to_lowercase();
+    ["title", "meta", "badge"].iter().any(|key| {
+        row.get(*key)
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| text.to_lowercase().contains(&q))
+    })
+}
+
+fn page_window(len: usize, page: u32, size: usize) -> (u32, usize, usize) {
+    if len == 0 || size == 0 {
+        return (1, 0, 0);
+    }
+    let pages = len.div_ceil(size);
+    let page = (page.max(1) as usize).min(pages);
+    let start = (page - 1) * size;
+    let end = (start + size).min(len);
+    (page as u32, start, end)
+}
+
+fn list_link(q: &str, page: u32) -> String {
+    let mut parts = Vec::new();
+    if !q.is_empty() {
+        parts.push(format!("q={}", query_escape(q)));
+    }
+    if page > 1 {
+        parts.push(format!("page={page}"));
+    }
+    if parts.is_empty() {
+        "?".into()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+pub fn recurring(page: &Page<'_>, query: ListQuery) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let mut rows = Vec::new();
     for series in store::list_series(page.conn, page.guild_id)? {
@@ -495,19 +632,18 @@ pub fn recurring(page: &Page<'_>) -> Result<String, OpError> {
             ),
         }));
     }
-    let mut ctx = shell(page)?;
-    ctx["heading"] = Value::from("Recurring");
-    ctx["lede"] =
-        Value::from("A series keeps its own dates. Shifting one Tuesday does not move the rest.");
-    ctx["empty_title"] = Value::from("No series yet.");
-    ctx["empty_body"] = Value::from("Set a repeat when you create an event.");
-    ctx["rows"] = Value::from_serialize(&rows);
-    ctx["extra"] = Value::from("");
-    ctx["dense"] = context_bool(false);
-    render("list.html", ctx)
+    render_rows(
+        page,
+        "Recurring",
+        "No series yet.",
+        "Set a repeat when you create an event.",
+        rows,
+        Some(("Series", "Next", "Repeat")),
+        query,
+    )
 }
 
-pub fn series_page(page: &Page<'_>, public_id: &str) -> Result<String, OpError> {
+pub fn series_page(page: &Page<'_>, public_id: &str, query: ListQuery) -> Result<String, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Err(OpError::NotFound);
     };
@@ -529,25 +665,28 @@ pub fn series_page(page: &Page<'_>, public_id: &str) -> Result<String, OpError> 
             "meta": format!("{} · posts {}", clock::format_when(start, tz, settings.hour_24), if post.is_empty() { "with the event".into() } else { post }),
         }))
     }).collect::<Vec<_>>();
-    let next_post = events
-        .iter()
-        .filter(|e| e.status == "scheduled")
-        .filter_map(|e| {
-            e.post_at
-                .as_deref()
-                .and_then(|v| clock::parse_stamp(v).ok())
-        })
-        .min();
-    let mut lede = match next_post {
-        Some(dt) => format!(
-            "Next post {}.",
-            clock::format_when(dt, tz, settings.hour_24)
-        ),
-        None => "Nothing else is waiting to post.".into(),
+    let had_dates = !rows.is_empty();
+    let matched: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|row| row_hits(&query.q, row))
+        .collect();
+    let (page_n, start, end) = page_window(matched.len(), query.page, LIST_PAGE_SIZE);
+    let prev = if page_n > 1 {
+        list_link(&query.q, page_n - 1)
+    } else {
+        String::new()
     };
-    if series.active && series.max_occurrences.is_none() && series.end_on.is_none() {
-        lede.push_str(" This series keeps going.");
-    }
+    let next = if end < matched.len() {
+        list_link(&query.q, page_n + 1)
+    } else {
+        String::new()
+    };
+    let window = if matched.is_empty() {
+        String::new()
+    } else {
+        format!("{}–{} of {}", start + 1, end, matched.len())
+    };
+    let shown = matched[start..end].to_vec();
     let repeat_until = series
         .end_on
         .as_deref()
@@ -558,7 +697,6 @@ pub fn series_page(page: &Page<'_>, public_id: &str) -> Result<String, OpError> 
     ctx["heading"] = Value::from(title);
     ctx["cadence"] = Value::from(clock::cadence_label(&series.cadence));
     ctx["active"] = context_bool(series.active);
-    ctx["lede"] = Value::from(lede);
     ctx["series_id"] = Value::from(series.public_id.clone());
     ctx["repeat"] = Value::from(series.cadence);
     ctx["repeat_count"] = Value::from(
@@ -568,7 +706,12 @@ pub fn series_page(page: &Page<'_>, public_id: &str) -> Result<String, OpError> 
             .unwrap_or_default(),
     );
     ctx["repeat_until"] = Value::from(repeat_until);
-    ctx["rows"] = Value::from_serialize(&rows);
+    ctx["rows"] = Value::from_serialize(&shown);
+    ctx["searchable"] = context_bool(had_dates || !query.q.is_empty());
+    ctx["q"] = Value::from(query.q);
+    ctx["window"] = Value::from(window);
+    ctx["prev"] = Value::from(prev);
+    ctx["next"] = Value::from(next);
     render("series.html", ctx)
 }
 
@@ -902,8 +1045,8 @@ pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft 
             body.options
         })
         .unwrap_or_else(default_options);
-    draft.options = pad_options(options.into_iter().map(slot_from_option).collect());
-    draft.reminders = pad_reminders(draft.reminders.clone());
+    draft.options = finish_options(options.into_iter().map(slot_from_option).collect());
+    draft.reminders = finish_reminders(draft.reminders);
     draft
 }
 
@@ -934,7 +1077,7 @@ pub fn form_from_event(conn: &Connection, event_id: i64, tz: Tz) -> Result<FormD
         .and_then(|v| clock::parse_stamp(v).ok())
         .map(|dt| clock::datetime_local(dt, tz))
         .unwrap_or_default();
-    draft.options = pad_options(
+    draft.options = finish_options(
         options
             .into_iter()
             .map(|opt| Slot {
@@ -949,7 +1092,7 @@ pub fn form_from_event(conn: &Connection, event_id: i64, tz: Tz) -> Result<FormD
             })
             .collect(),
     );
-    draft.reminders = pad_reminders(
+    draft.reminders = finish_reminders(
         reminders
             .into_iter()
             .map(|rem| RemSlot {
@@ -1025,8 +1168,9 @@ pub fn form_from_map(
             }
         }
     }
-    draft.options = pad_options(
-        (0..8)
+    draft.options = finish_options(
+        option_indexes(map)
+            .into_iter()
             .map(|n| Slot {
                 n,
                 id: map.get(&format!("opt{n}_id")).cloned().unwrap_or_default(),
@@ -1051,8 +1195,9 @@ pub fn form_from_map(
             })
             .collect(),
     );
-    draft.reminders = pad_reminders(
-        (0..5)
+    draft.reminders = finish_reminders(
+        reminder_indexes(map)
+            .into_iter()
             .map(|n| RemSlot {
                 n,
                 offset: map
@@ -1222,35 +1367,58 @@ fn apply_flags(draft: &mut FormDraft, status: &str, series: bool) {
     }
 }
 
-fn pad_options(mut slots: Vec<Slot>) -> Vec<Slot> {
-    slots.truncate(8);
-    while slots.len() < 8 {
-        slots.push(Slot {
-            n: slots.len(),
-            id: String::new(),
-            name: String::new(),
-            emoji: String::new(),
-            capacity: String::new(),
-            waitlist: false,
-            role_id: String::new(),
-            reminders: true,
-        });
+fn option_indexes(map: &HashMap<String, String>) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    for key in map.keys() {
+        let Some(rest) = key.strip_prefix("opt") else {
+            continue;
+        };
+        let Some((n, field)) = rest.split_once('_') else {
+            continue;
+        };
+        if field == "name" {
+            if let Ok(n) = n.parse() {
+                indexes.push(n);
+            }
+        }
     }
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes.truncate(8);
+    indexes
+}
+
+fn finish_options(mut slots: Vec<Slot>) -> Vec<Slot> {
+    slots.truncate(8);
     for (n, slot) in slots.iter_mut().enumerate() {
         slot.n = n;
     }
     slots
 }
 
-fn pad_reminders(mut slots: Vec<RemSlot>) -> Vec<RemSlot> {
-    slots.truncate(5);
-    while slots.len() < 5 {
-        slots.push(RemSlot {
-            n: slots.len(),
-            offset: String::new(),
-            message: String::new(),
-        });
+fn reminder_indexes(map: &HashMap<String, String>) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    for key in map.keys() {
+        let Some(rest) = key.strip_prefix("rem") else {
+            continue;
+        };
+        let Some((n, field)) = rest.split_once('_') else {
+            continue;
+        };
+        if field == "offset" {
+            if let Ok(n) = n.parse() {
+                indexes.push(n);
+            }
+        }
     }
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes.truncate(5);
+    indexes
+}
+
+fn finish_reminders(mut slots: Vec<RemSlot>) -> Vec<RemSlot> {
+    slots.truncate(5);
     for (n, slot) in slots.iter_mut().enumerate() {
         slot.n = n;
     }
@@ -1699,6 +1867,16 @@ fn templates() -> &'static Environment<'static> {
             .expect("event");
         env.add_template("form.html", include_str!("../templates/form.html"))
             .expect("form");
+        env.add_template(
+            "option_row.html",
+            include_str!("../templates/option_row.html"),
+        )
+        .expect("option row");
+        env.add_template(
+            "reminder_row.html",
+            include_str!("../templates/reminder_row.html"),
+        )
+        .expect("reminder row");
         env.add_template("list.html", include_str!("../templates/list.html"))
             .expect("list");
         env.add_template("series.html", include_str!("../templates/series.html"))
@@ -1805,7 +1983,11 @@ mod tests {
             title: "This week",
             allowed_guilds: &[1],
         };
-        home(&page).unwrap();
+        let home = home(&page).unwrap();
+        assert!(
+            home.contains("<title>This week · Guild · Marian</title>"),
+            "{home}"
+        );
         let event = store::list_events(&conn, 1)
             .unwrap()
             .into_iter()
@@ -1829,19 +2011,46 @@ mod tests {
         let form = form_page(&page, &blank_form("99", None)).unwrap();
         assert!(form.contains("Does not repeat"), "{form}");
         assert!(form.contains("Post now"), "{form}");
-        settings_page(&Page {
+        assert!(form.contains("Add option"), "{form}");
+        assert!(form.contains("Add reminder"), "{form}");
+        assert_eq!(form.matches("placeholder=\"minutes\"").count(), 2, "{form}");
+        assert!(
+            form.contains("This event opens a Discord thread."),
+            "{form}"
+        );
+        assert!(
+            form.contains("Only people with a checked role can sign up."),
+            "{form}"
+        );
+        assert!(form.contains("value=\"Accepted\""), "{form}");
+        assert!(form.contains("value=\"Declined\""), "{form}");
+        assert!(form.contains("value=\"Tentative\""), "{form}");
+        assert_eq!(
+            form.matches("aria-label=\"Option name\"").count(),
+            4,
+            "{form}"
+        );
+        let settings = settings_page(&Page {
             nav: "settings",
             title: "Settings",
             ..page
         })
         .unwrap();
+        assert!(
+            settings.contains("Reminders post in the event thread."),
+            "{settings}"
+        );
+        assert!(
+            settings.contains("Every event stays the same distance from now."),
+            "{settings}"
+        );
         let desk = commands_page(&Page {
             nav: "commands",
             title: "Commands",
             ..page
         })
         .unwrap();
-        assert!(desk.contains("the account you signed in with"), "{desk}");
+        assert!(desk.contains("command-line"), "{desk}");
         let drafts = list_page(
             &Page {
                 nav: "drafts",
@@ -1849,9 +2058,11 @@ mod tests {
                 ..page
             },
             "drafts",
+            ListQuery::default(),
         )
         .unwrap();
         assert!(!drafts.contains("log-list"), "{drafts}");
+        assert!(drafts.contains("No drafts."), "{drafts}");
         let activity = list_page(
             &Page {
                 nav: "activity",
@@ -1859,12 +2070,205 @@ mod tests {
                 ..page
             },
             "activity",
+            ListQuery::default(),
         )
         .unwrap();
         assert!(activity.contains("log-list"), "{activity}");
         assert!(activity.contains("Posted Raid."), "{activity}");
         assert!(!activity.contains(">Log<"), "{activity}");
-        recurring(&page).unwrap();
+        recurring(&page, ListQuery::default()).unwrap();
+        assert!(!activity.contains("<table"), "{activity}");
+    }
+
+    #[test]
+    fn home_keeps_this_week_to_five_events() {
+        let mut conn = sample();
+        let now = Utc::now();
+        let (_, week_end) = week_window(now, chrono_tz::UTC);
+        let deadline = week_end.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let room = (deadline - now).num_seconds().max(8);
+        let step = (room / 8).max(1);
+        let names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
+        for (i, name) in names.iter().enumerate() {
+            publish(
+                &mut conn,
+                name,
+                now + Duration::seconds(1 + step * i as i64),
+                60,
+            );
+        }
+        publish(&mut conn, "Next month", deadline + Duration::days(14), 60);
+        let page = Page {
+            conn: &conn,
+            guild_id: 1,
+            user_id: 1,
+            notice: None,
+            invite_url: "",
+            nav: "schedule",
+            title: "This week",
+            allowed_guilds: &[1],
+        };
+        let home = home(&page).unwrap();
+        for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
+            assert!(
+                home.contains(&format!("<h3>{name}</h3>")),
+                "{name} missing from this week\n{home}"
+            );
+        }
+        assert!(!home.contains("<h3>Foxtrot</h3>"), "{home}");
+        assert!(!home.contains("<h3>Next month</h3>"), "{home}");
+        assert!(home.contains(">Alpha</a></h2>"), "{home}");
+        assert!(!home.contains(">Foxtrot</a></h2>"), "{home}");
+        assert!(!home.contains(">Next month</a></h2>"), "{home}");
+    }
+
+    fn publish(conn: &mut Connection, title: &str, start: DateTime<Utc>, duration: i64) {
+        logic::save_event(
+            conn,
+            EventInput {
+                id: None,
+                guild_id: 1,
+                actor_id: 1,
+                channel_id: 1,
+                title: title.into(),
+                description: String::new(),
+                starts_at: start,
+                duration_minutes: duration,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                cutoff_at: None,
+                attendee_role_id: None,
+                thread_enabled: false,
+                multiple_signups: false,
+                mention_everyone: false,
+                mention_role_ids: vec![],
+                restrict_role_ids: vec![],
+                options: vec![OptionInput {
+                    id: None,
+                    name: "Yes".into(),
+                    emoji: "✅".into(),
+                    capacity: None,
+                    waitlist: false,
+                    role_id: None,
+                    reminders_enabled: true,
+                }],
+                reminders: vec![ReminderInput {
+                    offset_minutes: 15,
+                    message: String::new(),
+                }],
+                repeat: None,
+                action: SaveAction::Publish,
+                post_at: None,
+                apply_series: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_scheduled_list_searches_and_pages() {
+        assert_eq!(super::list_link("raid night", 2), "?q=raid+night&page=2");
+        assert_eq!(super::page_window(26, 9, 25), (2, 25, 26));
+
+        let mut conn = sample();
+        for n in 1..=26 {
+            logic::save_event(
+                &mut conn,
+                EventInput {
+                    id: None,
+                    guild_id: 1,
+                    actor_id: 1,
+                    channel_id: 1,
+                    title: format!("Slot {n:02}"),
+                    description: String::new(),
+                    starts_at: Utc::now() + Duration::hours(10 + n),
+                    duration_minutes: 60,
+                    color: "#1e3a6e".into(),
+                    image_url: None,
+                    cutoff_at: None,
+                    attendee_role_id: None,
+                    thread_enabled: false,
+                    multiple_signups: false,
+                    mention_everyone: false,
+                    mention_role_ids: vec![],
+                    restrict_role_ids: vec![],
+                    options: vec![OptionInput {
+                        id: None,
+                        name: "Yes".into(),
+                        emoji: "✅".into(),
+                        capacity: None,
+                        waitlist: false,
+                        role_id: None,
+                        reminders_enabled: true,
+                    }],
+                    reminders: vec![],
+                    repeat: None,
+                    action: SaveAction::Schedule,
+                    post_at: Some(Utc::now() + Duration::hours(1)),
+                    apply_series: false,
+                },
+            )
+            .unwrap();
+        }
+        let page = Page {
+            conn: &conn,
+            guild_id: 1,
+            user_id: 1,
+            notice: None,
+            invite_url: "",
+            nav: "scheduled",
+            title: "Scheduled posts",
+            allowed_guilds: &[1],
+        };
+        let first = list_page(&page, "scheduled", ListQuery::default()).unwrap();
+        assert!(first.contains("<table"), "{first}");
+        assert!(first.contains("Slot 01"), "{first}");
+        assert!(first.contains("Slot 25"), "{first}");
+        assert!(!first.contains("Slot 26"), "{first}");
+        assert!(first.contains("1–25 of 26"), "{first}");
+        assert!(first.contains("href=\"?page=2\""), "{first}");
+        assert!(!first.contains("Previous"), "{first}");
+
+        let second = list_page(&page, "scheduled", ListQuery::new("", 2)).unwrap();
+        assert!(second.contains("Slot 26"), "{second}");
+        assert!(!second.contains("Slot 01"), "{second}");
+        assert!(second.contains("26–26 of 26"), "{second}");
+        assert!(second.contains("Previous"), "{second}");
+
+        let found = list_page(&page, "scheduled", ListQuery::new("slot 26", 1)).unwrap();
+        assert!(found.contains("Slot 26"), "{found}");
+        assert!(!found.contains("Slot 01"), "{found}");
+        assert!(found.contains("1–1 of 1"), "{found}");
+
+        let none = list_page(&page, "scheduled", ListQuery::new("no such", 1)).unwrap();
+        assert!(none.contains("No matches."), "{none}");
+        assert!(none.contains("value=\"no such\""), "{none}");
+    }
+
+    #[test]
+    fn a_form_keeps_only_the_options_that_were_sent() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("opt0_name".into(), "Accepted".into());
+        map.insert("opt0_emoji".into(), "✅".into());
+        map.insert("opt2_name".into(), "Late".into());
+        map.insert("opt2_emoji".into(), "⏰".into());
+        map.insert("opt2_reminders".into(), "1".into());
+        map.insert("rem0_offset".into(), "15".into());
+        map.insert("rem3_offset".into(), "60".into());
+        map.insert("rem3_message".into(), "flasks".into());
+        let draft = form_from_map(&map, "99", None, String::new(), chrono_tz::UTC);
+        assert_eq!(draft.options.len(), 2);
+        assert_eq!(draft.options[0].name, "Accepted");
+        assert_eq!(draft.options[0].n, 0);
+        assert_eq!(draft.options[1].name, "Late");
+        assert_eq!(draft.options[1].n, 1);
+        assert!(draft.options[1].reminders);
+        assert_eq!(draft.reminders.len(), 2);
+        assert_eq!(draft.reminders[0].offset, "15");
+        assert_eq!(draft.reminders[0].n, 0);
+        assert_eq!(draft.reminders[1].offset, "60");
+        assert_eq!(draft.reminders[1].message, "flasks");
+        assert_eq!(draft.reminders[1].n, 1);
     }
 
     #[test]
@@ -1948,13 +2352,18 @@ mod tests {
             title: "Series",
             allowed_guilds: &[1],
         };
-        assert!(series_page(&page, "1").is_err());
-        let html = series_page(&page, &series.public_id).unwrap();
+        assert!(series_page(&page, "1", ListQuery::default()).is_err());
+        let html = series_page(&page, &series.public_id, ListQuery::default()).unwrap();
         assert!(
             html.contains(&format!("/recurring/{}", series.public_id)),
             "{html}"
         );
         assert!(html.contains("Save repeat"), "{html}");
+        assert!(html.contains("<table"), "{html}");
+        assert!(html.contains("Vault"), "{html}");
+        assert!(html.contains("aria-label=\"Search\""), "{html}");
+        let missed = series_page(&page, &series.public_id, ListQuery::new("no such", 1)).unwrap();
+        assert!(missed.contains("No matches."), "{missed}");
         assert!(html.contains("value=\"weekly\" selected"), "{html}");
         assert!(html.contains("value=\"3\""), "{html}");
         let shown = event_page(&page, event.id).unwrap();

@@ -679,6 +679,21 @@ struct NextQuery {
 }
 
 #[derive(serde::Deserialize)]
+struct ListForm {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    page: String,
+}
+
+impl ListForm {
+    fn into_list(self) -> present::ListQuery {
+        let page = self.page.trim().parse().unwrap_or(1);
+        present::ListQuery::new(self.q, page)
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct DiscordCallback {
     code: Option<String>,
     state: Option<String>,
@@ -706,9 +721,11 @@ async fn drafts(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(server): Path<String>,
+    Query(query): Query<ListForm>,
 ) -> Response {
-    html(&state, &headers, &server, "drafts", "Drafts", |page| {
-        present::list_page(page, "drafts")
+    let query = query.into_list();
+    html(&state, &headers, &server, "drafts", "Drafts", move |page| {
+        present::list_page(page, "drafts", query)
     })
 }
 
@@ -716,14 +733,16 @@ async fn scheduled(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(server): Path<String>,
+    Query(query): Query<ListForm>,
 ) -> Response {
+    let query = query.into_list();
     html(
         &state,
         &headers,
         &server,
         "scheduled",
         "Scheduled posts",
-        |page| present::list_page(page, "scheduled"),
+        move |page| present::list_page(page, "scheduled", query),
     )
 }
 
@@ -731,10 +750,17 @@ async fn archive_list(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(server): Path<String>,
+    Query(query): Query<ListForm>,
 ) -> Response {
-    html(&state, &headers, &server, "archive", "Archive", |page| {
-        present::list_page(page, "archive")
-    })
+    let query = query.into_list();
+    html(
+        &state,
+        &headers,
+        &server,
+        "archive",
+        "Archive",
+        move |page| present::list_page(page, "archive", query),
+    )
 }
 
 async fn activity(
@@ -743,7 +769,7 @@ async fn activity(
     Path(server): Path<String>,
 ) -> Response {
     html(&state, &headers, &server, "activity", "Activity", |page| {
-        present::list_page(page, "activity")
+        present::list_page(page, "activity", present::ListQuery::default())
     })
 }
 
@@ -751,14 +777,16 @@ async fn recurring(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(server): Path<String>,
+    Query(query): Query<ListForm>,
 ) -> Response {
+    let query = query.into_list();
     html(
         &state,
         &headers,
         &server,
         "recurring",
         "Recurring",
-        present::recurring,
+        move |page| present::recurring(page, query),
     )
 }
 
@@ -1067,14 +1095,16 @@ async fn series(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((server, public_id)): Path<(String, String)>,
+    Query(query): Query<ListForm>,
 ) -> Response {
+    let query = query.into_list();
     html(
         &state,
         &headers,
         &server,
         "recurring",
         "Series",
-        move |page| present::series_page(page, &public_id),
+        move |page| present::series_page(page, &public_id, query),
     )
 }
 

@@ -3,7 +3,6 @@
 <div class="page-head">
   <div>
     <h1>This week</h1>
-    <p class="lede">Posted events, the ones still waiting to go out, and the roster Marian is already keeping.</p>
   </div>
   <a class="primary" href="{{ base }}/events/new">New event</a>
 </div>
@@ -23,7 +22,7 @@
     {% if hero.description %}<div class="md">{{ hero.description|md }}</div>{% endif %}
   </div>
   <div>
-    <p class="kicker">Roster</p>
+    <p class="kicker">Responses</p>
     <p>{{ hero.spots }}</p>
   </div>
 </section>
@@ -34,8 +33,10 @@
   <div class="stack">
     {% for event in day.events %}
     <a class="card" href="{{ base }}/events/{{ event.id }}">
-      <span class="badge">{{ event.status_label }}</span>
-      <h3>{{ event.title }}</h3>
+      <div class="card-top">
+        <h3>{{ event.title }}</h3>
+        <span class="badge">{{ event.status_label }}</span>
+      </div>
       <p class="meta">{{ event.when }}–{{ event.end }} · #{{ event.channel }} · {{ event.rel }}</p>
       <div class="pills">
         {% for spot in event.spots %}
@@ -49,7 +50,6 @@
 {% else %}
 <section class="empty">
   <h2>Nothing scheduled.</h2>
-  <p>Drafts and scheduled posts live in their own lists. A posted event shows up here.</p>
 </section>
 {% endfor %}
 {% if wrapped %}
@@ -80,13 +80,12 @@
     {% endfor %}
   </section>
   <section class="panel">
-    <h3>What Marian did</h3>
+    <h3>Activity</h3>
     {% for item in activity %}
     <p>{{ item.body }}<br><span class="muted">{{ item.when }}</span></p>
     {% else %}
     <p class="muted">The log is quiet.</p>
     {% endfor %}
-    <p><a href="{{ base }}/activity">The whole log</a></p>
   </section>
 </div>
 {% endif %}

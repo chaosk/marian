@@ -4,7 +4,6 @@
   <div>
     <p class="kicker">{{ cadence }}{% if active %} · active{% else %} · ended{% endif %}</p>
     <h1>{{ heading }}</h1>
-    <p class="lede">{{ lede }}</p>
   </div>
   {% if active %}
   <form method="post" action="{{ base }}/recurring/{{ series_id }}/end" data-confirm="Skip every date that has not been posted?">
@@ -37,13 +36,42 @@
   </div>
 </form>
 {% endif %}
-<div class="stack">
-  {% for row in rows %}
-  <div class="card">
-    <span class="badge">{{ row.badge }}</span>
-    <h3><a href="{{ base }}/events/{{ row.id }}">{{ row.title }}</a></h3>
-    <p class="meta">{{ row.meta }}</p>
-  </div>
-  {% endfor %}
+{% if searchable %}
+<form class="finder" method="get">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search">
+</form>
+{% endif %}
+{% if rows %}
+<div class="sheet">
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th class="fit">When</th>
+      <th class="fit">Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{{ base }}/events/{{ row.id }}">{{ row.title }}</a></td>
+      <td class="fit">{{ row.meta }}</td>
+      <td class="fit"><span class="badge">{{ row.badge }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 </div>
+<div class="pager">
+  <p class="muted">{{ window }}</p>
+  <div>
+    {% if prev %}<a class="ghost" href="{{ prev }}">Previous</a>{% endif %}
+    {% if next %}<a class="ghost" href="{{ next }}">Next</a>{% endif %}
+  </div>
+</div>
+{% elif q %}
+<section class="empty"><h2>No matches.</h2></section>
+{% else %}
+<section class="empty"><h2>No dates yet.</h2></section>
+{% endif %}
 {% endblock %}

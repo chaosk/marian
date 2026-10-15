@@ -54,7 +54,10 @@ pub(super) fn archive_tx(
             &format!("Cleared #{} after {}.", channel.name, event.title),
         )?;
     }
-    let notice = format!("Archived {}. The roster stays in the archive.", event.title);
+    let notice = format!(
+        "Archived {}. The responses stay in the archive.",
+        event.title
+    );
     log(conn, event.guild_id, Some(event.id), &notice)?;
     Ok(notice)
 }

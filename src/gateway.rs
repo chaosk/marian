@@ -1288,7 +1288,7 @@ async fn reminders(
     slash_command,
     guild_only,
     subcommands("response_add", "response_remove", "response_move"),
-    description_localized("en-US", "Add, remove, or move someone on a roster")
+    description_localized("en-US", "Add, remove, or move a response")
 )]
 async fn response(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())

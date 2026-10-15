@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>{{ title }} · Marian</title>
+  <title>{{ title }}{% if guild_name %} · {{ guild_name }}{% endif %} · Marian</title>
   <link rel="icon" href="{{ asset_icon }}" type="image/svg+xml">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap">
   <link rel="stylesheet" href="{{ asset_css }}">
@@ -67,7 +67,6 @@
     <main class="main" id="content">
       {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
       {% block content %}{% endblock %}
-      <p class="foot">Marian checks for updates every few seconds.</p>
     </main>
   </div>
   <script src="{{ asset_js }}"></script>

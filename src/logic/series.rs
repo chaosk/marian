@@ -271,19 +271,29 @@ pub(super) fn ensure_series(
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
     let series = must_series(conn, series_id)?;
+    let existing = store::events_in_series(conn, series_id)?;
+    let guild = must_guild(conn, series.guild_id)?;
+    let tz = clock::zone(&guild.timezone)?;
+    fill_series(conn, &series, &existing, tz, now)
+}
+
+/// `existing` is that series' dates, oldest occurrence first.
+pub(super) fn fill_series(
+    conn: &Connection,
+    series: &store::Series,
+    existing: &[Event],
+    tz: Tz,
+    now: DateTime<Utc>,
+) -> Result<(), OpError> {
     if !series.active {
         return Ok(());
     }
-    let template = template::series_template(conn, &series)?;
-    let existing = store::events_in_series(conn, series_id)?;
     if !existing
         .iter()
         .any(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "archived"))
     {
         return Ok(());
     }
-    let guild = must_guild(conn, series.guild_id)?;
-    let tz = clock::zone(&guild.timezone)?;
     let anchor = clock::parse_stamp(&series.anchor_start)?;
     let have: HashSet<i64> = existing
         .iter()
@@ -296,6 +306,7 @@ pub(super) fn ensure_series(
         .count();
     let mut index = 1_i64;
     let mut last_start = None;
+    let mut template = None;
     loop {
         if let Some(max) = series.max_occurrences {
             if index > max {
@@ -319,7 +330,18 @@ pub(super) fn ensure_series(
             if series.max_occurrences.is_none() && scheduled >= 8 {
                 break;
             }
-            insert_occurrence(conn, &series, &template, creator, index, start, tz)?;
+            if template.is_none() {
+                template = Some(template::series_template(conn, series)?);
+            }
+            insert_occurrence(
+                conn,
+                series,
+                template.as_ref().expect("template loaded above"),
+                creator,
+                index,
+                start,
+                tz,
+            )?;
             scheduled += 1;
         }
         index += 1;
@@ -375,12 +397,6 @@ pub(super) fn mark_posted(conn: &Connection, id: i64, now: DateTime<Utc>) -> Res
         conn.execute(
             "UPDATE events SET calendar_synced_at = ? WHERE id = ?",
             params![stamp, id],
-        )?;
-        log(
-            conn,
-            event.guild_id,
-            Some(id),
-            &format!("Synced {} to the calendar feed.", event.title),
         )?;
     }
     let channel = must_channel(conn, event.channel_id)?;

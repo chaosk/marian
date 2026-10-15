@@ -3,7 +3,6 @@
 <div class="page-head">
   <div>
     <h1>Settings</h1>
-    <p class="lede">The same switches as the Discord settings commands, kept in one place for the people who run the server.</p>
   </div>
 </div>
 {% if empty_server %}
@@ -62,25 +61,55 @@
   <label class="field">Who may edit signup options
     <select name="role_signup">{% for role in role_signup %}{% include "role_option.html" %}{% endfor %}</select>
   </label>
-  <div class="checks span-2">
-    <label><input type="checkbox" name="thread_reminders" value="1" {% if thread_reminders %}checked{% endif %}> Reminders in the thread</label>
-    <label><input type="checkbox" name="auto_archive" value="1" {% if auto_archive %}checked{% endif %}> Auto archive</label>
-    <label><input type="checkbox" name="event_threads" value="1" {% if event_threads %}checked{% endif %}> Threads on new events</label>
-    <label><input type="checkbox" name="auto_join_threads" value="1" {% if auto_join_threads %}checked{% endif %}> Pull attendees into the thread</label>
-    <label><input type="checkbox" name="show_attendees" value="1" {% if show_attendees %}checked{% endif %}> Show names on the Discord post</label>
-    <label><input type="checkbox" name="hour_24" value="1" {% if hour_24 %}checked{% endif %}> 24-hour time</label>
-    <label><input type="checkbox" name="localize_time" value="1" {% if localize_time %}checked{% endif %}> Members see their own zone</label>
-    <label><input type="checkbox" name="purge_channels" value="1" {% if purge_channels %}checked{% endif %}> Clear event channels when an event archives</label>
-    <label><input type="checkbox" name="temp_roles" value="1" {% if temp_roles %}checked{% endif %}> Make a temporary attendee role</label>
-    <label><input type="checkbox" name="calendar_auto_sync" value="1" {% if calendar_auto_sync %}checked{% endif %}> Mark new posts on the calendar feed</label>
-    <label><input type="checkbox" name="park_clock" value="1" {% if park_clock %}checked{% endif %}> Park the clock</label>
+  <div class="settings span-2">
+    <label class="setting">
+      <input type="checkbox" name="thread_reminders" value="1" {% if thread_reminders %}checked{% endif %}>
+      <span><strong>Reminders in the thread</strong><span class="muted">Reminders post in the event thread.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="auto_archive" value="1" {% if auto_archive %}checked{% endif %}>
+      <span><strong>Auto archive</strong><span class="muted">Marian archives a posted event after it ends, once the hours above have passed.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="event_threads" value="1" {% if event_threads %}checked{% endif %}>
+      <span><strong>Threads on new events</strong><span class="muted">A new event opens a Discord thread.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="auto_join_threads" value="1" {% if auto_join_threads %}checked{% endif %}>
+      <span><strong>Pull attendees into the thread</strong><span class="muted">People who accept on a reminding option join the thread. Marian removes them when they leave that option.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="show_attendees" value="1" {% if show_attendees %}checked{% endif %}>
+      <span><strong>Show names on the Discord post</strong><span class="muted">The post lists who accepted each option.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="hour_24" value="1" {% if hour_24 %}checked{% endif %}>
+      <span><strong>24-hour time</strong><span class="muted">This site and the digest use a 24-hour clock.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="localize_time" value="1" {% if localize_time %}checked{% endif %}>
+      <span><strong>Members see their own zone</strong><span class="muted">Discord shows the start time in each member's own zone.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="purge_channels" value="1" {% if purge_channels %}checked{% endif %}>
+      <span><strong>Clear event channels when an event archives</strong><span class="muted">Archiving an event clears its event channel.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="temp_roles" value="1" {% if temp_roles %}checked{% endif %}>
+      <span><strong>Make a temporary attendee role</strong><span class="muted">Marian creates an attendee role for the event and gives it to people on a reminding option.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="calendar_auto_sync" value="1" {% if calendar_auto_sync %}checked{% endif %}>
+      <span><strong>Mark new posts on the calendar feed</strong><span class="muted">Each new post is marked on the personal calendar feed.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="park_clock" value="1" {% if park_clock %}checked{% endif %}>
+      <span><strong>Park the clock</strong><span class="muted">Every event stays the same distance from now. Use this on a test server.</span></span>
+    </label>
   </div>
   <div class="actions span-2">
     <button class="primary" type="submit" {% if not organizer %}disabled{% endif %}>Save settings</button>
   </div>
 </form>
-{% if calendar_url %}
-<p class="muted">Subscribe your calendar app to <a href="{{ calendar_url }}">your feed</a>. It lists events you accepted and events you created. The link is only yours.</p>
-{% endif %}
 {% endif %}
 {% endblock %}

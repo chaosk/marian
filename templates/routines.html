@@ -4,7 +4,6 @@
 <div class="page-head">
   <div>
     <h1>New routine</h1>
-    <p class="lede">A poll opens on one weekday. On a later weekday Marian locks the winning day and posts the event.</p>
   </div>
 </div>
 <form method="post" action="{{ base }}/routines" class="grid">
@@ -40,7 +39,7 @@
     <legend>Days people can vote for</legend>
     <div class="checks">
       {% for day in weekdays %}
-      <label><input type="checkbox" name="day_{{ day.n }}" value="1" checked> {{ day.name }}</label>
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" checked> <span>{{ day.name }}</span></label>
       {% endfor %}
     </div>
   </fieldset>
@@ -51,7 +50,6 @@
   <div>
     <p class="kicker">#{{ routine.channel }}{% if routine.active %} · active{% else %} · stopped{% endif %}</p>
     <h1>{{ routine.title }}</h1>
-    <p class="lede">{{ routine.prompt }} The poll opens {{ routine.poll_when }} and locks {{ routine.lock_when }}. The event starts at {{ routine.event_when }} and lasts {{ routine.duration_minutes }} minutes.</p>
   </div>
   {% if routine.active %}
   <form method="post" action="{{ base }}/routines/{{ routine.id }}/stop" data-confirm="Stop this routine?">
@@ -66,7 +64,7 @@
     <input type="hidden" name="scope" value="run">
     <div class="checks">
       {% for day in routine.run.days %}
-      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}{% if routine.run.open %} · {{ day.votes }}{% endif %}</label>
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> <span>{{ day.name }}{% if routine.run.open %} · {{ day.votes }}{% endif %}</span></label>
       {% endfor %}
     </div>
     <div class="actions"><button class="primary" type="submit">Save these days</button></div>
@@ -115,7 +113,7 @@
     <legend>{% if routine.run %}Days later weeks start from{% else %}Days people can vote for{% endif %}</legend>
     <div class="checks">
       {% for day in routine.usual %}
-      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> {{ day.name }}</label>
+      <label><input type="checkbox" name="day_{{ day.n }}" value="1" {% if day.on %}checked{% endif %}> <span>{{ day.name }}</span></label>
       {% endfor %}
     </div>
   </fieldset>
@@ -132,7 +130,6 @@
 <div class="page-head">
   <div>
     <h1>Routines</h1>
-    <p class="lede">A routine opens a poll on one weekday and posts the event on the day that wins.</p>
   </div>
   <a class="primary" href="{{ base }}/routines/new">New routine</a>
 </div>

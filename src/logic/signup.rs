@@ -130,11 +130,11 @@ pub fn organizer_response(
         let settings = store::settings(tx, event.guild_id)?;
         let roles = store::user_role_ids(tx, actor.id)?;
         if !can_edit(&actor, &event, &settings, &roles) {
-            return Err(OpError::message("You can't change this roster."));
+            return Err(OpError::message("You can't change these responses."));
         }
         if event.status != "posted" {
             return Err(OpError::message(
-                "Post the event before editing its roster.",
+                "Post the event before editing its responses.",
             ));
         }
         let target = must_user(tx, target_id)?;

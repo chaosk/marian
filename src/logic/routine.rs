@@ -404,14 +404,23 @@ pub fn maintain(
     guild_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    let mut jobs = Vec::new();
-    let ids: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT id FROM routines WHERE guild_id = ?")?;
-        let rows = stmt.query_map([guild_id], |row| row.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
+    let routines = routines_for_guild(conn, guild_id)?;
+    if routines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_routine: HashMap<i64, Vec<Run>> = HashMap::new();
+    for run in runs_for_guild(conn, guild_id)? {
+        by_routine.entry(run.routine_id).or_default().push(run);
+    }
+    let tz = if routines.iter().any(|routine| routine.active) {
+        Some(clock::zone(&must_guild(conn, guild_id)?.timezone)?)
+    } else {
+        None
     };
-    for id in ids {
-        jobs.extend(progress_one(conn, id, now)?);
+    let mut jobs = Vec::new();
+    for routine in &routines {
+        let runs = by_routine.remove(&routine.id).unwrap_or_default();
+        jobs.extend(advance(conn, routine, runs, tz, now)?);
     }
     Ok(jobs)
 }
@@ -723,19 +732,37 @@ fn progress_one(
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
     let routine = must_routine(conn, routine_id)?;
-    let mut jobs = Vec::new();
     let runs = runs_for(conn, routine.id)?;
-    for run in &runs {
+    let tz = if routine.active {
+        Some(clock::zone(&must_guild(conn, routine.guild_id)?.timezone)?)
+    } else {
+        None
+    };
+    advance(conn, &routine, runs, tz, now)
+}
+
+fn advance(
+    conn: &Connection,
+    routine: &Routine,
+    mut runs: Vec<Run>,
+    tz: Option<Tz>,
+    now: DateTime<Utc>,
+) -> Result<Vec<DiscordJob>, OpError> {
+    let mut jobs = Vec::new();
+    for run in &mut runs {
         if run.status == "open" && clock::parse_stamp(&run.locks_at)? <= now {
-            jobs.extend(lock_run(conn, &routine, run, now)?);
+            jobs.extend(lock_run(conn, routine, run, now)?);
+            run.status = "locked".to_string();
         } else if run.status == "scheduled" && clock::parse_stamp(&run.opens_at)? <= now {
             if clock::parse_stamp(&run.locks_at)? <= now {
-                jobs.extend(lock_run(conn, &routine, run, now)?);
+                jobs.extend(lock_run(conn, routine, run, now)?);
+                run.status = "locked".to_string();
             } else {
                 conn.execute(
                     "UPDATE routine_runs SET status = 'open' WHERE id = ?",
                     [run.id],
                 )?;
+                run.status = "open".to_string();
                 log(
                     conn,
                     routine.guild_id,
@@ -747,8 +774,7 @@ fn progress_one(
         }
     }
     if routine.active {
-        let guild = must_guild(conn, routine.guild_id)?;
-        let tz = clock::zone(&guild.timezone)?;
+        let tz = tz.ok_or(OpError::NotFound)?;
         let (opens, locks) = window(
             now,
             tz,
@@ -758,8 +784,8 @@ fn progress_one(
             routine.lock_minutes,
         );
         let opens_stamp = clock::stamp(opens);
-        let already = runs_for(conn, routine.id)?
-            .into_iter()
+        let already = runs
+            .iter()
             .any(|run| run.opens_at == opens_stamp && run.status != "locked");
         if !already && locks > now {
             let days_json = serde_json::to_string(&routine.days).unwrap_or_else(|_| "[]".into());
@@ -1110,6 +1136,26 @@ fn runs_for(conn: &Connection, routine_id: i64) -> Result<Vec<Run>, OpError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
 }
 
+fn runs_for_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Run>, OpError> {
+    let mut stmt = conn.prepare(
+        "SELECT routine_runs.id, routine_runs.routine_id, routine_runs.opens_at, routine_runs.locks_at,
+                routine_runs.status, routine_runs.days_json, routine_runs.winner_weekday,
+                routine_runs.event_id, routine_runs.discord_message_id
+         FROM routine_runs
+         JOIN routines ON routines.id = routine_runs.routine_id
+         WHERE routines.guild_id = ?
+         ORDER BY routine_runs.routine_id, routine_runs.opens_at",
+    )?;
+    let rows = stmt.query_map([guild_id], read_run)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
+}
+
+fn routines_for_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Routine>, OpError> {
+    let mut stmt = conn.prepare(&format!("{ROUTINE_SQL} WHERE r.guild_id = ? ORDER BY r.id"))?;
+    let rows = stmt.query_map([guild_id], map_routine)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(OpError::from)
+}
+
 fn must_run(conn: &Connection, id: i64) -> Result<Run, OpError> {
     conn.query_row(
         "SELECT id, routine_id, opens_at, locks_at, status, days_json, winner_weekday, event_id, discord_message_id
@@ -1140,40 +1186,40 @@ fn must_routine(conn: &Connection, id: i64) -> Result<Routine, OpError> {
     load_routine(conn, id)?.ok_or(OpError::NotFound)
 }
 
+const ROUTINE_SQL: &str =
+    "SELECT r.id, r.public_id, r.guild_id, r.template_id, t.channel_id, t.title, r.prompt,
+        t.description, t.duration_minutes, r.start_minutes, r.poll_weekday, r.poll_minutes,
+        r.lock_weekday, r.lock_minutes, r.days_json, r.active, r.created_by
+ FROM routines r
+ JOIN event_templates t ON t.id = r.template_id";
+
+fn map_routine(row: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
+    let raw: String = row.get(14)?;
+    Ok(Routine {
+        id: row.get(0)?,
+        public_id: row.get(1)?,
+        guild_id: row.get(2)?,
+        template_id: row.get(3)?,
+        channel_id: row.get(4)?,
+        title: row.get(5)?,
+        prompt: row.get(6)?,
+        description: row.get(7)?,
+        duration_minutes: row.get(8)?,
+        start_minutes: row.get(9)?,
+        poll_weekday: row.get(10)?,
+        poll_minutes: row.get(11)?,
+        lock_weekday: row.get(12)?,
+        lock_minutes: row.get(13)?,
+        days: serde_json::from_str(&raw).unwrap_or_default(),
+        active: row.get::<_, i64>(15)? != 0,
+        created_by: row.get(16)?,
+    })
+}
+
 fn load_routine(conn: &Connection, id: i64) -> Result<Option<Routine>, OpError> {
-    conn.query_row(
-        "SELECT r.id, r.public_id, r.guild_id, r.template_id, t.channel_id, t.title, r.prompt,
-                t.description, t.duration_minutes, r.start_minutes, r.poll_weekday, r.poll_minutes,
-                r.lock_weekday, r.lock_minutes, r.days_json, r.active, r.created_by
-         FROM routines r
-         JOIN event_templates t ON t.id = r.template_id
-         WHERE r.id = ?",
-        [id],
-        |row| {
-            let raw: String = row.get(14)?;
-            Ok(Routine {
-                id: row.get(0)?,
-                public_id: row.get(1)?,
-                guild_id: row.get(2)?,
-                template_id: row.get(3)?,
-                channel_id: row.get(4)?,
-                title: row.get(5)?,
-                prompt: row.get(6)?,
-                description: row.get(7)?,
-                duration_minutes: row.get(8)?,
-                start_minutes: row.get(9)?,
-                poll_weekday: row.get(10)?,
-                poll_minutes: row.get(11)?,
-                lock_weekday: row.get(12)?,
-                lock_minutes: row.get(13)?,
-                days: serde_json::from_str(&raw).unwrap_or_default(),
-                active: row.get::<_, i64>(15)? != 0,
-                created_by: row.get(16)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(OpError::from)
+    conn.query_row(&format!("{ROUTINE_SQL} WHERE r.id = ?"), [id], map_routine)
+        .optional()
+        .map_err(OpError::from)
 }
 
 #[cfg(test)]

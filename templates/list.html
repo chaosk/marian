@@ -3,8 +3,12 @@
 <div class="page-head">
   <div>
     <h1>{{ heading }}</h1>
-    <p class="lede">{{ lede }}</p>
   </div>
+  {% if searchable %}
+  <form class="finder" method="get">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search">
+  </form>
+  {% endif %}
 </div>
 {% if rows and dense %}
 <ul class="log-list">
@@ -13,15 +17,35 @@
   {% endfor %}
 </ul>
 {% elif rows %}
-<div class="stack">
-  {% for row in rows %}
-  <a class="card" href="{{ row.href }}">
-    <span class="badge">{{ row.badge }}</span>
-    <h3>{{ row.title }}</h3>
-    <p class="meta">{{ row.meta }}</p>
-  </a>
-  {% endfor %}
+<div class="sheet">
+<table>
+  <thead>
+    <tr>
+      <th>{{ col_title }}</th>
+      <th class="fit">{{ col_when }}</th>
+      <th class="fit">{{ col_status }}</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{{ row.href }}">{{ row.title }}</a></td>
+      <td class="fit">{{ row.meta }}</td>
+      <td class="fit"><span class="badge">{{ row.badge }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 </div>
+<div class="pager">
+  <p class="muted">{{ window }}</p>
+  <div>
+    {% if prev %}<a class="ghost" href="{{ prev }}">Previous</a>{% endif %}
+    {% if next %}<a class="ghost" href="{{ next }}">Next</a>{% endif %}
+  </div>
+</div>
+{% elif q %}
+<section class="empty"><h2>No matches.</h2></section>
 {% else %}
 <section class="empty"><h2>{{ empty_title }}</h2><p>{{ empty_body }}</p></section>
 {% endif %}

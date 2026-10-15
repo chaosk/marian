@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use super::db::{log, must_event, must_guild, must_user};
 use super::lifecycle::archive_tx;
 use super::model::*;
-use super::series::{ensure_series, mark_posted};
+use super::series::{fill_series, mark_posted};
 use super::signup::cutoff_passed;
 use crate::clock;
 use crate::error::OpError;
@@ -74,13 +74,17 @@ fn tick_guild(conn: &Connection, guild_id: i64, now: DateTime<Utc>) -> Result<Ti
         .jobs
         .extend(super::routine::maintain(conn, guild_id, now)?);
 
+    let reminders = grouped(store::reminders_in_guild(conn, guild_id)?, |rem| {
+        rem.event_id
+    });
+    let mut people = None;
     let events = store::list_events(conn, guild_id)?;
     for event in &events {
         if event.status != "posted" {
             continue;
         }
         let start = clock::parse_stamp(&event.starts_at)?;
-        let reminders = store::reminders_for(conn, event.id)?;
+        let reminders = reminders.get(&event.id).map(Vec::as_slice).unwrap_or(&[]);
         for rem in reminders {
             if rem.sent_at.is_some() {
                 continue;
@@ -100,7 +104,7 @@ fn tick_guild(conn: &Connection, guild_id: i64, now: DateTime<Utc>) -> Result<Ti
                 report.notes.push(note);
                 continue;
             }
-            let text = reminder_text(conn, event, &rem)?;
+            let text = reminder_text(conn, event, rem, guild_people(conn, guild_id, &mut people)?)?;
             match text {
                 Some(text) => {
                     let place = if event.thread_enabled && settings.thread_reminders {
@@ -157,9 +161,13 @@ fn tick_guild(conn: &Connection, guild_id: i64, now: DateTime<Utc>) -> Result<Ti
         }
     }
 
+    let dates = grouped(store::events_in_active_series(conn, guild_id)?, |event| {
+        event.series_id.unwrap_or(0)
+    });
     for series in store::list_series(conn, guild_id)? {
         if series.active {
-            ensure_series(conn, series.id, now)?;
+            let existing = dates.get(&series.id).map(Vec::as_slice).unwrap_or(&[]);
+            fill_series(conn, &series, existing, tz, now)?;
         }
     }
 
@@ -230,10 +238,34 @@ fn fail_post(conn: &Connection, event: &Event) -> Result<(), OpError> {
     Ok(())
 }
 
+fn guild_people<'a>(
+    conn: &Connection,
+    guild_id: i64,
+    cache: &'a mut Option<HashMap<i64, store::User>>,
+) -> Result<&'a HashMap<i64, store::User>, OpError> {
+    if cache.is_none() {
+        let loaded = store::list_users(conn, guild_id)?
+            .into_iter()
+            .map(|user| (user.id, user))
+            .collect();
+        *cache = Some(loaded);
+    }
+    Ok(cache.as_ref().expect("people loaded above"))
+}
+
+fn grouped<T>(rows: Vec<T>, key: impl Fn(&T) -> i64) -> HashMap<i64, Vec<T>> {
+    let mut grouped: HashMap<i64, Vec<T>> = HashMap::new();
+    for row in rows {
+        grouped.entry(key(&row)).or_default().push(row);
+    }
+    grouped
+}
+
 fn reminder_text(
     conn: &Connection,
     event: &Event,
     rem: &store::Reminder,
+    users: &HashMap<i64, store::User>,
 ) -> Result<Option<String>, OpError> {
     let options = store::options_for(conn, event.id)?;
     let reminding: HashSet<i64> = options
@@ -251,14 +283,20 @@ fn reminder_text(
         {
             continue;
         }
-        let user = must_user(conn, signup.user_id)?;
+        let owned;
+        let user = if let Some(user) = users.get(&signup.user_id) {
+            user
+        } else {
+            owned = must_user(conn, signup.user_id)?;
+            &owned
+        };
         if !user.reminders_enabled {
             continue;
         }
         if let Some(discord_id) = &user.discord_id {
             mentions.push(format!("<@{discord_id}>"));
         } else {
-            mentions.push(user.name);
+            mentions.push(user.name.clone());
         }
     }
     if mentions.is_empty() {

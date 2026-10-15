@@ -3,7 +3,6 @@
 <div class="page-head">
   <div>
     <h1>{{ heading }}</h1>
-    <p class="lede">Post it to Discord, queue it, or leave it as a draft. Signup buttons, caps, and reminders live on the same form.</p>
   </div>
 </div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -45,37 +44,46 @@
     </label>
   </div>
   <h2>Signup options</h2>
-  <p class="muted">Leave a name blank to skip the row. Capacity blank means unlimited. A waitlist needs a capacity.</p>
-  {% for opt in options %}
-  <div class="option-row">
-    <input type="hidden" name="opt{{ opt.n }}_id" value="{{ opt.id }}">
-    <input name="opt{{ opt.n }}_emoji" value="{{ opt.emoji }}" aria-label="Emoji {{ opt.n }}">
-    <input name="opt{{ opt.n }}_name" value="{{ opt.name }}" aria-label="Option name {{ opt.n }}" {% if lock_options and opt.id == '' %}disabled{% endif %}>
-    <input name="opt{{ opt.n }}_capacity" value="{{ opt.capacity }}" aria-label="Capacity {{ opt.n }}" placeholder="cap">
-    <select name="opt{{ opt.n }}_role" aria-label="Role limit {{ opt.n }}">
-      <option value="">Any role</option>
-      {% for role in roles %}
-      <option value="{{ role.id }}" {% if opt.role_id == role.id_s %}selected{% endif %}>{{ role.name }}</option>
-      {% endfor %}
-    </select>
+  <p class="muted">Capacity blank means unlimited. A waitlist needs a capacity.</p>
+  <div id="options">
+    {% for opt in options %}
+    {% include "option_row.html" %}
+    {% endfor %}
   </div>
-  <div class="checks">
-    <label><input type="checkbox" name="opt{{ opt.n }}_waitlist" value="1" {% if opt.waitlist %}checked{% endif %}> Waitlist</label>
-    <label><input type="checkbox" name="opt{{ opt.n }}_reminders" value="1" {% if opt.reminders %}checked{% endif %}> Reminders and attendee role</label>
-  </div>
-  {% endfor %}
+  {% if not lock_options %}
+  <button class="ghost option-add" type="button" id="add-option" {% if options|length >= 8 %}hidden{% endif %}>Add option</button>
+  <template id="option-blank">
+    {% with opt = {"n": "@@n@@", "id": "", "name": "", "emoji": "", "capacity": "", "waitlist": false, "role_id": "", "reminders": true} %}
+    {% include "option_row.html" %}
+    {% endwith %}
+  </template>
+  {% endif %}
   <h2>Reminders</h2>
-  {% for rem in reminders %}
-  <div class="rem-row">
-    <input name="rem{{ rem.n }}_offset" value="{{ rem.offset }}" placeholder="minutes">
-    <input class="span-2" name="rem{{ rem.n }}_message" value="{{ rem.message }}" placeholder="Optional note, such as flasks and food">
+  <div id="reminders">
+    {% for rem in reminders %}
+    {% include "reminder_row.html" %}
+    {% endfor %}
   </div>
-  {% endfor %}
+  <button class="ghost option-add" type="button" id="add-reminder" {% if reminders|length >= 5 %}hidden{% endif %}>Add reminder</button>
+  <template id="reminder-blank">
+    {% with rem = {"n": "@@n@@", "offset": "", "message": ""} %}
+    {% include "reminder_row.html" %}
+    {% endwith %}
+  </template>
   <h2>Access</h2>
-  <div class="checks">
-    <label><input type="checkbox" name="thread_enabled" value="1" {% if thread_enabled %}checked{% endif %}> Event thread</label>
-    <label><input type="checkbox" name="multiple_signups" value="1" {% if multiple_signups %}checked{% endif %}> Allow several options</label>
-    <label><input type="checkbox" name="mention_everyone" value="1" {% if mention_everyone %}checked{% endif %}> Mention everyone</label>
+  <div class="settings">
+    <label class="setting">
+      <input type="checkbox" name="thread_enabled" value="1" {% if thread_enabled %}checked{% endif %}>
+      <span><strong>Event thread</strong><span class="muted">This event opens a Discord thread.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="multiple_signups" value="1" {% if multiple_signups %}checked{% endif %}>
+      <span><strong>Allow several options</strong><span class="muted">A person can choose more than one option at once.</span></span>
+    </label>
+    <label class="setting">
+      <input type="checkbox" name="mention_everyone" value="1" {% if mention_everyone %}checked{% endif %}>
+      <span><strong>Mention everyone</strong><span class="muted">The Discord post mentions @everyone.</span></span>
+    </label>
   </div>
   <label class="field">Attendee role
     <select name="attendee_role_id">
@@ -84,17 +92,18 @@
       <option value="{{ role.id }}" {% if attendee_role_id == role.id_s %}selected{% endif %}>{{ role.name }}</option>
       {% endfor %}
     </select>
+    <span class="muted">People who accept on a reminding option receive this role.</span>
   </label>
-  <p>Mention</p>
+  <p>Mention<br><span class="muted">The Discord post mentions the roles you check.</span></p>
   <div class="checks">
     {% for role in roles %}
-    <label><input type="checkbox" name="mention_{{ role.id }}" value="1" {% if role.mentioned %}checked{% endif %}> {{ role.name }}</label>
+    <label><input type="checkbox" name="mention_{{ role.id }}" value="1" {% if role.mentioned %}checked{% endif %}> <span>{{ role.name }}</span></label>
     {% endfor %}
   </div>
-  <p>Limit the whole event to</p>
+  <p>Limit the whole event to<br><span class="muted">Only people with a checked role can sign up.</span></p>
   <div class="checks">
     {% for role in roles %}
-    <label><input type="checkbox" name="restrict_{{ role.id }}" value="1" {% if role.restricted %}checked{% endif %}> {{ role.name }}</label>
+    <label><input type="checkbox" name="restrict_{{ role.id }}" value="1" {% if role.restricted %}checked{% endif %}> <span>{{ role.name }}</span></label>
     {% endfor %}
   </div>
   {% if not series_locked %}
@@ -119,7 +128,7 @@
   <p>Leave both empty and the series keeps going.</p>
   {% endif %}
   {% if show_apply %}
-  <label class="checks"><input type="checkbox" name="apply_series" value="1" {% if apply_series %}checked{% endif %}> Also update upcoming dates in this series. This date's start time stays its own.</label>
+  <label class="checks"><input type="checkbox" name="apply_series" value="1" {% if apply_series %}checked{% endif %}> <span>Also update upcoming dates in this series. This date's start time stays its own.</span></label>
   {% endif %}
   <div class="actions">
     {% if show_draft %}<button class="ghost" name="action" value="draft" type="submit">Save draft</button>{% endif %}

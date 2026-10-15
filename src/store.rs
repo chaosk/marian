@@ -1138,6 +1138,28 @@ pub fn reminders_for(conn: &Connection, event_id: i64) -> Result<Vec<Reminder>, 
     )
 }
 
+pub fn reminders_in_guild(conn: &Connection, guild_id: i64) -> Result<Vec<Reminder>, OpError> {
+    let mut stmt = conn.prepare(
+        "SELECT reminders.* FROM reminders
+         JOIN events ON events.id = reminders.event_id
+         WHERE events.guild_id = ?
+         ORDER BY reminders.event_id, reminders.offset_minutes DESC, reminders.id",
+    )?;
+    let rows = stmt.query_map([guild_id], map_reminder)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn events_in_active_series(conn: &Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
+    let mut stmt = conn.prepare(
+        "SELECT events.* FROM events
+         JOIN series ON series.id = events.series_id
+         WHERE events.guild_id = ? AND series.active = 1
+         ORDER BY events.series_id, events.occurrence_index, events.id",
+    )?;
+    let rows = stmt.query_map([guild_id], map_event)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 fn map_reminder(row: &Row<'_>) -> rusqlite::Result<Reminder> {
     Ok(Reminder {
         id: row.get("id")?,
