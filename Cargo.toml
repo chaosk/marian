@@ -8,16 +8,16 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-axum = "0.7.9"
+axum = "0.8.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 diesel = { version = "2.3.14", default-features = false, features = ["sqlite", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 diesel_migrations = { version = "2.3.2", default-features = false, features = ["sqlite"] }
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 minijinja = "2"
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls-webpki-roots"] }
-opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+opentelemetry = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.33", features = ["trace"] }
 poise = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -26,5 +26,5 @@ thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }

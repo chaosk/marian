@@ -147,7 +147,7 @@ fn router(state: AppState) -> Router {
         .route("/readyz", get(ready))
         .route("/help", get(show_help))
         .route("/favicon.svg", get(asset))
-        .route("/static/*file", get(asset))
+        .route("/static/{*file}", get(asset))
         .route("/", get(schedule))
         .route("/auth/discord", get(auth_start))
         .route("/auth/discord/callback", get(auth_callback))
@@ -155,67 +155,67 @@ fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(google_callback))
         .route("/auth/google/disconnect", post(google_disconnect))
         .route("/logout", post(logout))
-        .route("/servers/:guild_id", get(server_home))
+        .route("/servers/{guild_id}", get(server_home))
         .route(
-            "/servers/:guild_id/events/new",
+            "/servers/{guild_id}/events/new",
             get(new_event).post(create_event),
         )
-        .route("/servers/:guild_id/events/:id", get(show_event))
+        .route("/servers/{guild_id}/events/{id}", get(show_event))
         .route(
-            "/servers/:guild_id/events/:id/edit",
+            "/servers/{guild_id}/events/{id}/edit",
             get(edit_event).post(save_event),
         )
-        .route("/servers/:guild_id/events/:id/signup", post(signup))
-        .route("/servers/:guild_id/events/:id/response", post(response))
-        .route("/servers/:guild_id/events/:id/archive", post(archive))
-        .route("/servers/:guild_id/events/:id/delete", post(delete_event))
-        .route("/servers/:guild_id/events/:id/duplicate", post(duplicate))
-        .route("/servers/:guild_id/events/:id/skip", post(skip))
-        .route("/servers/:guild_id/drafts", get(drafts))
-        .route("/servers/:guild_id/scheduled", get(scheduled))
-        .route("/servers/:guild_id/recurring", get(recurring))
+        .route("/servers/{guild_id}/events/{id}/signup", post(signup))
+        .route("/servers/{guild_id}/events/{id}/response", post(response))
+        .route("/servers/{guild_id}/events/{id}/archive", post(archive))
+        .route("/servers/{guild_id}/events/{id}/delete", post(delete_event))
+        .route("/servers/{guild_id}/events/{id}/duplicate", post(duplicate))
+        .route("/servers/{guild_id}/events/{id}/skip", post(skip))
+        .route("/servers/{guild_id}/drafts", get(drafts))
+        .route("/servers/{guild_id}/scheduled", get(scheduled))
+        .route("/servers/{guild_id}/recurring", get(recurring))
         .route(
-            "/servers/:guild_id/recurring/:id",
+            "/servers/{guild_id}/recurring/{id}",
             get(series).post(save_series),
         )
-        .route("/servers/:guild_id/recurring/:id/end", post(end_series))
+        .route("/servers/{guild_id}/recurring/{id}/end", post(end_series))
         .route(
-            "/servers/:guild_id/routines",
+            "/servers/{guild_id}/routines",
             get(routines_page).post(create_routine),
         )
-        .route("/servers/:guild_id/routines/new", get(new_routine))
+        .route("/servers/{guild_id}/routines/new", get(new_routine))
         .route(
-            "/servers/:guild_id/routines/:id",
+            "/servers/{guild_id}/routines/{id}",
             get(show_routine).post(update_routine),
         )
         .route(
-            "/servers/:guild_id/routines/:id/days",
+            "/servers/{guild_id}/routines/{id}/days",
             post(save_routine_days),
         )
-        .route("/servers/:guild_id/routines/:id/vote", post(vote_routine))
-        .route("/servers/:guild_id/routines/:id/stop", post(stop_routine))
-        .route("/servers/:guild_id/archive", get(archive_list))
+        .route("/servers/{guild_id}/routines/{id}/vote", post(vote_routine))
+        .route("/servers/{guild_id}/routines/{id}/stop", post(stop_routine))
+        .route("/servers/{guild_id}/archive", get(archive_list))
         .route(
-            "/servers/:guild_id/presets",
+            "/servers/{guild_id}/presets",
             get(presets_page).post(save_preset),
         )
-        .route("/servers/:guild_id/presets/library", post(save_library))
-        .route("/servers/:guild_id/presets/:id/delete", post(delete_preset))
+        .route("/servers/{guild_id}/presets/library", post(save_library))
+        .route("/servers/{guild_id}/presets/{id}/delete", post(delete_preset))
         .route(
-            "/servers/:guild_id/channels",
+            "/servers/{guild_id}/channels",
             get(channels_page).post(create_channel),
         )
         .route(
-            "/servers/:guild_id/commands",
+            "/servers/{guild_id}/commands",
             get(commands_page).post(run_command),
         )
-        .route("/servers/:guild_id/activity", get(activity))
+        .route("/servers/{guild_id}/activity", get(activity))
         .route(
-            "/servers/:guild_id/settings",
+            "/servers/{guild_id}/settings",
             get(settings_page).post(save_settings),
         )
-        .route("/servers/:guild_id/me/reminders", post(toggle_reminders))
-        .route("/servers/:guild_id/calendar/:file", get(event_calendar))
+        .route("/servers/{guild_id}/me/reminders", post(toggle_reminders))
+        .route("/servers/{guild_id}/calendar/{file}", get(event_calendar))
         .route("/drafts", get(legacy_drafts))
         .route("/scheduled", get(legacy_scheduled))
         .route("/recurring", get(legacy_recurring))
@@ -226,9 +226,9 @@ fn router(state: AppState) -> Router {
         .route("/commands", get(legacy_commands))
         .route("/activity", get(legacy_activity))
         .route("/settings", get(legacy_settings))
-        .route("/events/:id", get(legacy_event))
-        .route("/events/:id/edit", get(legacy_edit))
-        .route("/calendar/:file", get(legacy_event_calendar))
+        .route("/events/{id}", get(legacy_event))
+        .route("/events/{id}/edit", get(legacy_edit))
+        .route("/calendar/{file}", get(legacy_event_calendar))
         .layer(middleware::from_fn_with_state(state.clone(), require_login))
         .layer(http_trace())
         .with_state(state)
