@@ -21,6 +21,7 @@ pub struct Status {
     pub email: String,
     pub connected: bool,
     pub reconnect: bool,
+    pub auto_sync: bool,
 }
 
 pub enum Job {
@@ -149,6 +150,7 @@ pub fn status(conn: &mut Connection, discord_user_id: &str) -> Result<Option<Sta
         connected: account.last_error.is_empty(),
         reconnect: !account.last_error.is_empty(),
         email: account.email,
+        auto_sync: account.auto_sync,
     }))
 }
 

@@ -45,7 +45,7 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_ID&permissions=326686174
 
 Marian asks for the `GUILDS` and `DIRECT_MESSAGES` intents. It does not use privileged intents. A bad token is logged and retried; the dashboard stays up.
 
-`/event` in Discord opens a direct message. It asks where to post, then the title, the description, when it starts, when it ends, and how often it repeats. The last step is finish, or change signup options and the other details first. Signup options start as Accepted, Declined, and Tentative. A weekly poll is a routine on the dashboard. `/response` asks for the event, the person, and the signup option, and lists the choices for the event and the option. `/edit`, `/reminders`, `/settings`, `/signup_options`, `/signup_presets`, `/channel`, and `/google` each ask for their own fields. `/help` explains `/event` and links to `/help` on this site, where the rest are described. `/google authorize` sends a private Sign in with Google button. It opens Google, and Google sends the person back here. Settings has the same connection. Marian then adds events they created and events they accepted to that calendar, and updates those events when the time, title, or description changes. `/google auto_sync` pauses or resumes those updates. `/google sync` adds one event. `/google revoke` disconnects the calendar and removes the events Marian added. The Google client uses the calendar events scope and the email scope. Each person also keeps a private feed at `/calendar/<token>.ics`. The token is a long random secret, shown on Settings. The feed lists the same events. The rest of the dashboard asks you to sign in with Discord first.
+`/event` in Discord opens a direct message. It asks where to post, then the title, the description, when it starts, when it ends, and how often it repeats. The last step is finish, or change signup options and the other details first. Signup options start as Accepted, Declined, and Tentative. A weekly poll is a routine on the dashboard. `/response` asks for the event, the person, and the signup option, and lists the choices for the event and the option. `/edit`, `/reminders`, `/settings`, `/signup_options`, `/signup_presets`, `/channel`, and `/google` each ask for their own fields. `/help` explains `/event` and links to `/help` on this site, where the rest are described. `/google authorize` sends a private Sign in with Google button. It opens Google, and Google sends the person back here. The Google Calendar page has the same connection, including the automatic-update switch. Marian then adds events they created and events they accepted to that calendar, and updates those events when the time, title, or description changes. `/google auto_sync` pauses or resumes those updates. `/google sync` adds one event. `/google revoke` disconnects the calendar and removes the events Marian added. The Google client uses the calendar events scope and the email scope. Each person also keeps a private feed at `/calendar/<token>.ics`. The token is a long random secret, shown on Settings. The feed lists the same events. The rest of the dashboard asks you to sign in with Discord first.
 
 ## Dashboard sign-in
 
@@ -70,12 +70,12 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.4.0 -t ghcr.io/you/marian:0.4.0 .
-docker push ghcr.io/you/marian:0.4.0
+docker build --build-arg MARIAN_VERSION=0.4.1 -t ghcr.io/you/marian:0.4.1 .
+docker push ghcr.io/you/marian:0.4.1
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.4.0 \
+  --set image.tag=0.4.1 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

@@ -887,21 +887,6 @@ pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     ctx["temp_roles"] = context_bool(settings.temp_roles);
     ctx["calendar_auto_sync"] = context_bool(settings.calendar_auto_sync);
     ctx["park_clock"] = context_bool(settings.park_clock);
-    let google = user
-        .as_ref()
-        .and_then(|person| person.discord_id.as_deref())
-        .map(|discord_id| crate::google::status(page.conn, discord_id))
-        .transpose()?
-        .flatten();
-    ctx["google_ready"] = context_bool(crate::google::configured_from_env());
-    ctx["google_connected"] = context_bool(google.as_ref().is_some_and(|status| status.connected));
-    ctx["google_reconnect"] = context_bool(google.as_ref().is_some_and(|status| status.reconnect));
-    ctx["google_email"] = Value::from(
-        google
-            .as_ref()
-            .map(|status| status.email.clone())
-            .unwrap_or_default(),
-    );
     ctx["zone_groups"] = Value::from_serialize(&clock::zone_groups(Utc::now(), &guild.timezone));
     ctx["digests"] = Value::from_serialize(
         &["off", "daily", "weekly"]
@@ -921,6 +906,34 @@ pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     ctx["role_channel"] = role_choices(&roles, settings.role_channel);
     ctx["role_signup"] = role_choices(&roles, settings.role_signup);
     render("settings.html", ctx)
+}
+
+pub fn google_page(page: &mut Page<'_>) -> Result<String, OpError> {
+    if page.guild_id == 0 {
+        let mut ctx = shell(page)?;
+        ctx.insert("empty_server", context_bool(true));
+        return render("google.html", ctx);
+    }
+    let user = store::user(page.conn, page.user_id)?;
+    let google = user
+        .as_ref()
+        .and_then(|person| person.discord_id.as_deref())
+        .map(|discord_id| crate::google::status(page.conn, discord_id))
+        .transpose()?
+        .flatten();
+    let mut ctx = shell(page)?;
+    ctx["empty_server"] = context_bool(false);
+    ctx["google_ready"] = context_bool(crate::google::configured_from_env());
+    ctx["google_connected"] = context_bool(google.as_ref().is_some_and(|status| status.connected));
+    ctx["google_reconnect"] = context_bool(google.as_ref().is_some_and(|status| status.reconnect));
+    ctx["google_auto_sync"] = context_bool(google.as_ref().is_some_and(|status| status.auto_sync));
+    ctx["google_email"] = Value::from(
+        google
+            .as_ref()
+            .map(|status| status.email.clone())
+            .unwrap_or_default(),
+    );
+    render("google.html", ctx)
 }
 
 pub fn form_page(page: &mut Page<'_>, draft: &FormDraft) -> Result<String, OpError> {
@@ -1900,6 +1913,8 @@ fn templates() -> &'static Environment<'static> {
             .expect("series");
         env.add_template("settings.html", include_str!("../templates/settings.html"))
             .expect("settings");
+        env.add_template("google.html", include_str!("../templates/google.html"))
+            .expect("google");
         env.add_template(
             "role_option.html",
             include_str!("../templates/role_option.html"),
@@ -2425,5 +2440,39 @@ mod tests {
         assert!(body.contains("Europe&#x2f;Warsaw"));
         assert!(body.contains(">Warsaw</option>"));
         assert!(body.contains("value=\"UTC\" selected"));
+    }
+
+    #[test]
+    fn google_page_offers_automatic_updates() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
+            INSERT INTO users (id, guild_id, name, handle, color, discord_id) VALUES
+              (1, 1, 'Nell', 'nell', '#112233', 'u1');
+            INSERT INTO google_accounts (discord_user_id, refresh_token, email, connected_at, auto_sync)
+              VALUES ('u1', 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z', 0);
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let mut page = Page {
+            conn: &mut conn,
+            guild_id: 1,
+            user_id: 1,
+            notice: None,
+            invite_url: "",
+            nav: "google",
+            title: "Google Calendar",
+            allowed_guilds: &[1],
+        };
+        let body = google_page(&mut page).unwrap();
+        assert!(body.contains("nell@example.com"), "{body}");
+        assert!(body.contains("name=\"auto_sync\""), "{body}");
+        assert!(
+            !body.contains("name=\"auto_sync\" value=\"1\" checked"),
+            "{body}"
+        );
+        assert!(body.contains("Keep your Google Calendar updated"), "{body}");
     }
 }

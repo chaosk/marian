@@ -214,6 +214,10 @@ fn router(state: AppState) -> Router {
             "/servers/{guild_id}/settings",
             get(settings_page).post(save_settings),
         )
+        .route(
+            "/servers/{guild_id}/google",
+            get(google_page).post(save_google),
+        )
         .route("/servers/{guild_id}/me/reminders", post(toggle_reminders))
         .route("/servers/{guild_id}/calendar/{file}", get(event_calendar))
         .route("/drafts", get(legacy_drafts))
@@ -226,6 +230,7 @@ fn router(state: AppState) -> Router {
         .route("/commands", get(legacy_commands))
         .route("/activity", get(legacy_activity))
         .route("/settings", get(legacy_settings))
+        .route("/google", get(legacy_google))
         .route("/events/{id}", get(legacy_event))
         .route("/events/{id}/edit", get(legacy_edit))
         .route("/calendar/{file}", get(legacy_event_calendar))
@@ -1452,6 +1457,48 @@ async fn settings_page(
     )
 }
 
+async fn google_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(server): Path<String>,
+) -> Response {
+    html(
+        &state,
+        &headers,
+        &server,
+        "google",
+        "Google Calendar",
+        present::google_page,
+    )
+}
+
+async fn save_google(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(server): Path<String>,
+    Form(map): Form<HashMap<String, String>>,
+) -> Response {
+    let back = here(&server, "/google");
+    let mut db = state.db.lock().expect("database lock");
+    let Some(mut session) = read_session(&mut db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let notice = match commands::google_auto_sync(
+        &mut db,
+        session.guild_id,
+        session.user_id,
+        map.contains_key("auto_sync"),
+    ) {
+        Ok(notice) => notice,
+        Err(err) => return redirect(&back, &err.to_string()),
+    };
+    drop(db);
+    redirect(&back, &notice)
+}
+
 async fn show_event(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2273,6 +2320,10 @@ async fn legacy_settings(State(state): State<AppState>, headers: HeaderMap) -> R
     legacy_redirect(&state, &headers, "/settings")
 }
 
+async fn legacy_google(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    legacy_redirect(&state, &headers, "/google")
+}
+
 async fn legacy_event(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2799,7 +2850,7 @@ mod tests {
         assert!(body.contains("class=\"account\""));
         assert!(body.contains("Calendar feed"));
         assert!(body.contains("Google Calendar"));
-        assert!(body.contains("Google client id"));
+        assert!(!body.contains("Google client id"), "{body}");
         assert!(body.contains("class=\"calendar\""));
         assert!(body.contains(".ics"));
         assert!(body.contains("Sign out"));
@@ -2819,6 +2870,29 @@ mod tests {
         assert_eq!(
             legacy.headers().get(header::LOCATION).unwrap(),
             "/servers/99/settings"
+        );
+
+        let google = client
+            .get(format!("http://{addr}/servers/99/google"))
+            .header(header::COOKIE, "marian_session=session-token-value")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(google.status(), StatusCode::OK);
+        let google_body = google.text().await.unwrap();
+        assert!(google_body.contains("Google client id"), "{google_body}");
+        assert!(google_body.contains("servers&#x2f;99/google"), "{google_body}");
+
+        let legacy_google = client
+            .get(format!("http://{addr}/google"))
+            .header(header::COOKIE, "marian_session=session-token-value")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(legacy_google.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            legacy_google.headers().get(header::LOCATION).unwrap(),
+            "/servers/99/google"
         );
 
         let week = client

@@ -12,24 +12,6 @@
   {% if invite_url %}<p><a class="primary" href="{{ invite_url }}">Invite Marian</a></p>{% endif %}
 </section>
 {% else %}
-<section class="panel google-cal">
-  <h3>Google Calendar</h3>
-  {% if google_connected %}
-  <p>Connected{% if google_email %} as {{ google_email }}{% endif %}. Marian adds events you created and events you accepted, and updates them when they change.</p>
-  <form method="post" action="/auth/google/disconnect">
-    <input type="hidden" name="next" value="{{ base }}/settings">
-    <button class="ghost" type="submit">Disconnect</button>
-  </form>
-  {% elif google_reconnect %}
-  <p>Google Calendar needs a new connection.{% if google_email %} The last account was {{ google_email }}.{% endif %}</p>
-  <p><a class="primary" href="/auth/google?next={{ base }}/settings">Connect Google Calendar</a></p>
-  {% elif google_ready %}
-  <p>Connect Google so Marian can add events you created and events you accepted to your calendar, and update them when they change.</p>
-  <p><a class="primary" href="/auth/google?next={{ base }}/settings">Connect Google Calendar</a></p>
-  {% else %}
-  <p>Google Calendar connects once this server has a Google client id and secret.</p>
-  {% endif %}
-</section>
 {% if empty_people %}
 <p class="error">Nobody from this server has used Marian yet. Run any Marian command in Discord. A person who can manage the server becomes an organizer.</p>
 {% elif not organizer %}

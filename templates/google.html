@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Google Calendar</h1>
+  </div>
+</div>
+{% if empty_server %}
+<section class="empty">
+  <h2>No server yet.</h2>
+  <p>Invite Marian to a Discord server. Your Google Calendar connection shows up here once the bot has joined.</p>
+  {% if invite_url %}<p><a class="primary" href="{{ invite_url }}">Invite Marian</a></p>{% endif %}
+</section>
+{% else %}
+<section class="panel google-cal">
+  {% if google_connected %}
+  <p>Connected{% if google_email %} as {{ google_email }}{% endif %}.</p>
+  <form method="post" action="/auth/google/disconnect">
+    <input type="hidden" name="next" value="{{ base }}/google">
+    <button class="ghost" type="submit">Disconnect</button>
+  </form>
+  {% elif google_reconnect %}
+  <p>Google Calendar needs a new connection.{% if google_email %} The last account was {{ google_email }}.{% endif %}</p>
+  <p><a class="primary" href="/auth/google?next={{ base }}/google">Connect Google Calendar</a></p>
+  {% elif google_ready %}
+  <p>Connect Google so Marian can add events you created and events you accepted to your calendar, and update them when they change.</p>
+  <p><a class="primary" href="/auth/google?next={{ base }}/google">Connect Google Calendar</a></p>
+  {% else %}
+  <p>Google Calendar connects once this server has a Google client id and secret.</p>
+  {% endif %}
+</section>
+{% if google_connected or google_reconnect %}
+<form method="post" action="{{ base }}/google" class="grid">
+  <div class="settings span-2">
+    <label class="setting">
+      <input type="checkbox" name="auto_sync" value="1" {% if google_auto_sync %}checked{% endif %}>
+      <span><strong>Keep your Google Calendar updated</strong><span class="muted">Marian adds events you created and events you accepted, and updates them when they change. /google sync still adds one event when this is off.</span></span>
+    </label>
+  </div>
+  <div class="actions span-2">
+    <button class="primary" type="submit">Save</button>
+  </div>
+</form>
+{% endif %}
+{% endif %}
+{% endblock %}
