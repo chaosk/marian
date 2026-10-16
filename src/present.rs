@@ -2062,6 +2062,16 @@ mod tests {
             form.contains("Only people with a checked role can sign up."),
             "{form}"
         );
+        let mention = form
+            .find("The Discord post mentions the roles you check.")
+            .expect("mention heading");
+        let everyone = form.find("name=\"mention_everyone\"").expect("everyone");
+        let restrict = form
+            .find("Only people with a checked role can sign up.")
+            .expect("restrict");
+        assert!(mention < everyone && everyone < restrict, "{form}");
+        assert!(form.contains(">@everyone<"), "{form}");
+        assert!(!form.contains("Mention everyone"), "{form}");
         assert!(form.contains("value=\"Accepted\""), "{form}");
         assert!(form.contains("value=\"Declined\""), "{form}");
         assert!(form.contains("value=\"Tentative\""), "{form}");

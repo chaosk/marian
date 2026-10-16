@@ -80,10 +80,6 @@
       <input type="checkbox" name="multiple_signups" value="1" {% if multiple_signups %}checked{% endif %}>
       <span><strong>Allow several options</strong><span class="muted">A person can choose more than one option at once.</span></span>
     </label>
-    <label class="setting">
-      <input type="checkbox" name="mention_everyone" value="1" {% if mention_everyone %}checked{% endif %}>
-      <span><strong>Mention everyone</strong><span class="muted">The Discord post mentions @everyone.</span></span>
-    </label>
   </div>
   <label class="field">Attendee role
     <select name="attendee_role_id">
@@ -96,6 +92,7 @@
   </label>
   <p>Mention<br><span class="muted">The Discord post mentions the roles you check.</span></p>
   <div class="checks">
+    <label><input type="checkbox" name="mention_everyone" value="1" {% if mention_everyone %}checked{% endif %}> <span>@everyone</span></label>
     {% for role in roles %}
     <label><input type="checkbox" name="mention_{{ role.id }}" value="1" {% if role.mentioned %}checked{% endif %}> <span>{{ role.name }}</span></label>
     {% endfor %}

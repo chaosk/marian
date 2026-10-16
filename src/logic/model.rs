@@ -129,6 +129,9 @@ pub struct DiscordView {
     pub footer: String,
     pub image_url: Option<String>,
     pub buttons: Vec<DiscordButton>,
+    pub mention_everyone: bool,
+    /// Discord role ids to mention above the embed.
+    pub mention_roles: Vec<String>,
 }
 
 pub struct TickReport {

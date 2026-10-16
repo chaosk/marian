@@ -134,6 +134,53 @@ fn role_color(color: &str) -> u32 {
     u32::from_str_radix(color.trim_start_matches('#'), 16).unwrap_or(0x1e3a6e)
 }
 
+/// Text that sits above the embed. Discord only notifies `@everyone` and roles from this
+/// line, and only the first time each mention appears.
+pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
+    let mut parts = Vec::new();
+    if everyone {
+        parts.push("@everyone".to_string());
+    }
+    for id in role_discord_ids {
+        parts.push(format!("<@&{id}>"));
+    }
+    let mut line = String::new();
+    for part in parts {
+        let gap = if line.is_empty() { 0 } else { 1 };
+        if line.chars().count() + gap + part.chars().count() > 2000 {
+            break;
+        }
+        if gap == 1 {
+            line.push(' ');
+        }
+        line.push_str(&part);
+    }
+    line
+}
+
+fn mention_discord_roles(conn: &mut Connection, event_id: i64) -> Result<Vec<String>, OpError> {
+    let mut roles = Vec::new();
+    for role_id in store::event_role_ids(conn, event_id, "mention")? {
+        let Some(role) = store::role(conn, role_id)? else {
+            continue;
+        };
+        if role.name.eq_ignore_ascii_case("@everyone") || role.name.eq_ignore_ascii_case("@here") {
+            continue;
+        }
+        let Some(discord_id) = role.discord_id else {
+            continue;
+        };
+        let discord_id = discord_id.trim();
+        if discord_id.is_empty() || !discord_id.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        roles.push(discord_id.to_string());
+    }
+    roles.sort();
+    roles.dedup();
+    Ok(roles)
+}
+
 pub fn discord_view(
     conn: &mut Connection,
     event_id: i64,
@@ -235,6 +282,7 @@ pub fn discord_view(
         tone: ButtonTone::Danger,
         disabled: false,
     });
+    let mention_roles = mention_discord_roles(conn, event.id)?;
     let creator = store::user(conn, event.created_by)?
         .map(|user| user.name)
         .filter(|name| !name.trim().is_empty())
@@ -257,6 +305,8 @@ pub fn discord_view(
         footer: format!("Created by {creator}"),
         image_url,
         buttons,
+        mention_everyone: event.mention_everyone,
+        mention_roles,
     }))
 }
 
@@ -483,6 +533,57 @@ mod tests {
         assert_eq!(view.fields[1].name, "❌ **Declined** (0)");
         assert_eq!(view.fields[1].value, "1 waiting");
         assert_eq!(view.buttons.len(), 4);
+        assert!(!view.mention_everyone);
+        assert!(view.mention_roles.is_empty());
+    }
+
+    #[test]
+    fn the_post_mentions_everyone_and_the_checked_roles() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
+            INSERT INTO users (id, guild_id, name, handle, color) VALUES
+              (1, 1, 'Nell', 'nell', '#112233');
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES
+              (1, 1, 'Raiders', '#112233', '111'),
+              (2, 1, 'Local only', '#112233', NULL),
+              (3, 1, 'Officers', '#112233', '333'),
+              (4, 1, '@everyone', '#112233', '4242');
+            INSERT INTO events (
+              public_id, guild_id, channel_id, title, starts_at, status, mention_everyone,
+              created_by, created_at, updated_at
+            ) VALUES (
+              '01900000-0000-7000-8000-000000000010', 1, 1, 'Shore cleanup',
+              '2026-10-14T18:00:00Z', 'posted', 1, 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'
+            );
+            INSERT INTO event_roles (event_id, role_id, kind) VALUES
+              (1, 3, 'mention'),
+              (1, 1, 'mention'),
+              (1, 2, 'mention'),
+              (1, 4, 'mention'),
+              (1, 3, 'restrict');
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let view = discord_view(&mut conn, 1, "https://marian.example.com")
+            .unwrap()
+            .unwrap();
+        assert!(view.mention_everyone);
+        assert_eq!(view.mention_roles, vec!["111".to_string(), "333".to_string()]);
+        assert_eq!(
+            mention_line(view.mention_everyone, &view.mention_roles),
+            "@everyone <@&111> <@&333>"
+        );
+    }
+
+    #[test]
+    fn mention_line_stops_before_a_mention_would_pass_the_limit() {
+        let huge = "1".repeat(1990);
+        assert_eq!(mention_line(true, &[huge]), "@everyone");
+        assert_eq!(mention_line(false, &["42".into()]), "<@&42>");
     }
 }
 

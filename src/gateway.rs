@@ -743,6 +743,11 @@ async fn push_sync(
     if !buttons.is_empty() {
         rows.push(serenity::CreateActionRow::Buttons(buttons));
     }
+    // Discord notifies @everyone and roles only from the message text, not the embed.
+    // An edit notifies a mention only when that mention is new, so signup refreshes
+    // of an unchanged line do not ping again.
+    let content = logic::mention_line(view.mention_everyone, &view.mention_roles);
+    let mentions = event_mentions(view.mention_everyone, &view.mention_roles);
     let sent = if let Some(message_id) = view
         .message_id
         .as_deref()
@@ -753,8 +758,10 @@ async fn push_sync(
                 &http,
                 serenity::MessageId::new(message_id),
                 serenity::EditMessage::new()
+                    .content(&content)
                     .embed(embed.clone())
-                    .components(rows.clone()),
+                    .components(rows.clone())
+                    .allowed_mentions(mentions.clone()),
             )
             .await;
         match edit {
@@ -765,7 +772,11 @@ async fn push_sync(
                     channel_id
                         .send_message(
                             &http,
-                            serenity::CreateMessage::new().embed(embed).components(rows),
+                            serenity::CreateMessage::new()
+                                .content(content)
+                                .embed(embed)
+                                .components(rows)
+                                .allowed_mentions(mentions),
                         )
                         .await?,
                 )
@@ -776,7 +787,11 @@ async fn push_sync(
             channel_id
                 .send_message(
                     &http,
-                    serenity::CreateMessage::new().embed(embed).components(rows),
+                    serenity::CreateMessage::new()
+                        .content(content)
+                        .embed(embed)
+                        .components(rows)
+                        .allowed_mentions(mentions),
                 )
                 .await?,
         )
@@ -1306,6 +1321,18 @@ fn dm_blocked(lead: &str, public_url: &str, server: Option<u64>) -> String {
         _ => " You can always create the event on the web.".to_string(),
     };
     format!("{lead} Allow direct messages from server members, then run /event again.{web}")
+}
+
+fn event_mentions(everyone: bool, roles: &[String]) -> serenity::CreateAllowedMentions {
+    let mut allowed = serenity::CreateAllowedMentions::new();
+    if everyone {
+        allowed = allowed.everyone(true);
+    }
+    let roles: Vec<u64> = roles.iter().filter_map(|id| id.parse().ok()).collect();
+    if !roles.is_empty() {
+        allowed = allowed.roles(roles);
+    }
+    allowed
 }
 
 fn clip(text: &str, max: usize) -> String {
