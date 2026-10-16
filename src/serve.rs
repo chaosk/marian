@@ -37,6 +37,7 @@ struct AppState {
     google_client_id: String,
     google_client_secret: String,
     bot_token: String,
+    member_roles: Arc<Mutex<MemberRoles>>,
 }
 
 struct Session {
@@ -88,6 +89,7 @@ pub fn run() -> anyhow::Result<()> {
         google_client_id,
         google_client_secret,
         bot_token: token.clone(),
+        member_roles: member_roles_cache(),
     };
     let app = router(state.clone());
 
@@ -469,6 +471,40 @@ struct RoleTarget {
     user_discord: String,
 }
 
+const MEMBER_ROLES_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+struct MemberRoles {
+    fetched: HashMap<(String, String), std::time::Instant>,
+}
+
+fn member_roles_cache() -> Arc<Mutex<MemberRoles>> {
+    Arc::new(Mutex::new(MemberRoles::default()))
+}
+
+impl MemberRoles {
+    fn fresh(&self, guild: &str, user: &str, now: std::time::Instant) -> bool {
+        self.fetched
+            .get(&member_key(guild, user))
+            .is_some_and(|at| now.saturating_duration_since(*at) < MEMBER_ROLES_TTL)
+    }
+
+    fn remember(&mut self, guild: &str, user: &str, now: std::time::Instant) {
+        let ttl = MEMBER_ROLES_TTL;
+        self.fetched
+            .retain(|_, at| now.saturating_duration_since(*at) < ttl);
+        self.fetched.insert(member_key(guild, user), now);
+    }
+
+    fn forget_user(&mut self, user: &str) {
+        self.fetched.retain(|(_, id), _| id != user);
+    }
+}
+
+fn member_key(guild: &str, user: &str) -> (String, String) {
+    (guild.to_string(), user.to_string())
+}
+
 enum FreshRoles {
     Known(Vec<String>),
     Unavailable,
@@ -481,6 +517,14 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
     let Some(target) = load_role_target(state, path, headers) else {
         return;
     };
+    if state
+        .member_roles
+        .lock()
+        .expect("member roles")
+        .fresh(&target.guild_discord, &target.user_discord, std::time::Instant::now())
+    {
+        return;
+    }
     let Some((status, body)) =
         discord_member(&state.http, &state.bot_token, &target.guild_discord, &target.user_discord)
             .await
@@ -493,6 +537,15 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
         return;
     };
     store_member_roles(state, &target, &roles);
+    state
+        .member_roles
+        .lock()
+        .expect("member roles")
+        .remember(
+            &target.guild_discord,
+            &target.user_discord,
+            std::time::Instant::now(),
+        );
 }
 
 fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
@@ -708,6 +761,11 @@ async fn auth_callback(
         return plain_error(err);
     }
     drop(db);
+    state
+        .member_roles
+        .lock()
+        .expect("member roles")
+        .forget_user(&me.id);
     let dest = if next.is_empty() {
         "/".to_string()
     } else {
@@ -2746,6 +2804,23 @@ mod tests {
     }
 
     #[test]
+    fn a_member_lookup_is_reused_for_thirty_seconds() {
+        let now = std::time::Instant::now();
+        let mut roles = MemberRoles::default();
+        assert!(!roles.fresh("99", "42", now));
+        roles.remember("99", "42", now);
+        assert!(roles.fresh("99", "42", now + std::time::Duration::from_secs(29)));
+        assert!(!roles.fresh("99", "42", now + MEMBER_ROLES_TTL));
+        roles.remember("7", "42", now);
+        roles.forget_user("42");
+        assert!(!roles.fresh("99", "42", now));
+        assert!(!roles.fresh("7", "42", now));
+        roles.remember("99", "42", now - MEMBER_ROLES_TTL);
+        roles.remember("99", "8", now);
+        assert_eq!(roles.fetched.len(), 1);
+    }
+
+    #[test]
     fn notice_round_trip_and_event_ids() {
         let encoded = percent_encode("Posted Shore supper.");
         assert_eq!(percent_decode(&encoded), "Posted Shore supper.");
@@ -2847,6 +2922,7 @@ mod tests {
             google_client_id: String::new(),
             google_client_secret: String::new(),
             bot_token: String::new(),
+            member_roles: member_roles_cache(),
         };
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3007,6 +3083,7 @@ mod tests {
             google_client_id: "google-client".into(),
             google_client_secret: "google-secret".into(),
             bot_token: String::new(),
+            member_roles: member_roles_cache(),
         };
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
