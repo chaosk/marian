@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
@@ -34,7 +34,9 @@ jobs:
             version="${GITHUB_SHA}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      # The @ref is the toolchain this action installs. It has to match
+      # rust-toolchain.toml, or the musl target lands on a compiler cargo does not use.
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: x86_64-unknown-linux-musl
       - name: musl linker
