@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-axum = "0.7.9"
+axum = "0.8.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 diesel = { version = "2.3.14", default-features = false, features = ["sqlite", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
