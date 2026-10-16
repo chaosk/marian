@@ -85,12 +85,12 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.4.3 -t ghcr.io/you/marian:0.4.3 .
-docker push ghcr.io/you/marian:0.4.3
+docker build --build-arg MARIAN_VERSION=0.5.0 -t ghcr.io/you/marian:0.5.0 .
+docker push ghcr.io/you/marian:0.5.0
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.4.3 \
+  --set image.tag=0.5.0 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \
