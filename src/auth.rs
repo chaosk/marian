@@ -167,7 +167,6 @@ pub fn is_public(path: &str) -> bool {
             | "/logout"
     ) || crate::assets::is_static(path)
         || personal_calendar(path)
-        || server_calendar(path)
         || google_connect(path)
 }
 
@@ -192,23 +191,6 @@ fn personal_calendar(path: &str) -> bool {
         return false;
     };
     token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit())
-}
-
-fn server_calendar(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/servers/") else {
-        return false;
-    };
-    let mut parts = rest.split('/');
-    let id = parts.next().unwrap_or("");
-    if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_digit()) {
-        return false;
-    }
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some("calendar"), Some(file), None) => {
-            file.ends_with(".ics") && !file[..file.len() - 4].is_empty()
-        }
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -273,8 +255,7 @@ mod tests {
         assert!(is_public("/help"));
         assert!(is_public(&format!("/calendar/{token}.ics")));
         assert!(!is_public("/calendar/short.ics"));
-        assert!(!is_public("/servers/4/calendar.ics"));
-        assert!(is_public("/servers/4/calendar/9.ics"));
+        assert!(!is_public("/servers/4/calendar/9.ics"));
         assert!(is_public("/auth/google/callback"));
         let state = "ab".repeat(32);
         assert!(is_public(&format!("/auth/google/start/{state}")));

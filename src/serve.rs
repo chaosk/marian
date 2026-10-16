@@ -222,21 +222,7 @@ fn router(state: AppState) -> Router {
             get(google_page).post(save_google),
         )
         .route("/servers/{guild_id}/me/reminders", post(toggle_reminders))
-        .route("/servers/{guild_id}/calendar/{file}", get(event_calendar))
-        .route("/drafts", get(legacy_drafts))
-        .route("/scheduled", get(legacy_scheduled))
-        .route("/recurring", get(legacy_recurring))
-        .route("/routines", get(legacy_routines))
-        .route("/archive", get(legacy_archive))
-        .route("/presets", get(legacy_presets))
-        .route("/channels", get(legacy_channels))
-        .route("/commands", get(legacy_commands))
-        .route("/activity", get(legacy_activity))
-        .route("/settings", get(legacy_settings))
-        .route("/google", get(legacy_google))
-        .route("/events/{id}", get(legacy_event))
-        .route("/events/{id}/edit", get(legacy_edit))
-        .route("/calendar/{file}", get(legacy_event_calendar))
+        .route("/calendar/{file}", get(personal_calendar))
         .layer(middleware::from_fn_with_state(state.clone(), require_login))
         .layer(http_trace())
         .with_state(state)
@@ -2354,47 +2340,16 @@ async fn toggle_reminders(
     )
 }
 
-async fn event_calendar(
-    State(state): State<AppState>,
-    Path((server, file)): Path<(String, String)>,
-) -> Response {
+async fn personal_calendar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+    let Some(token) = personal_token(&file) else {
+        return (StatusCode::NOT_FOUND, "No calendar").into_response();
+    };
     let mut db = state.db.lock().expect("database lock");
-    let Some(guild) = store::guild_by_discord(&mut db, &server).ok().flatten() else {
-        return (StatusCode::NOT_FOUND, "No server").into_response();
+    let Some(discord_id) = store::calendar_discord_id(&mut db, token).ok().flatten() else {
+        return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
-    let Some(event) = calendar_event(&mut db, &file).ok().flatten() else {
-        return (StatusCode::NOT_FOUND, "No event").into_response();
-    };
-    if event.guild_id != guild.id {
-        return (StatusCode::NOT_FOUND, "No event").into_response();
-    }
-    match ics::one_event(&mut db, event.id) {
+    match ics::user_feed(&mut db, &discord_id) {
         Ok(body) => calendar_response(body),
-        Err(OpError::NotFound) => (StatusCode::NOT_FOUND, "No event").into_response(),
-        Err(err) => plain_error(err),
-    }
-}
-
-async fn legacy_event_calendar(
-    State(state): State<AppState>,
-    Path(file): Path<String>,
-) -> Response {
-    let mut db = state.db.lock().expect("database lock");
-    if let Some(token) = personal_token(&file) {
-        let Some(discord_id) = store::calendar_discord_id(&mut db, token).ok().flatten() else {
-            return (StatusCode::NOT_FOUND, "No calendar").into_response();
-        };
-        return match ics::user_feed(&mut db, &discord_id) {
-            Ok(body) => calendar_response(body),
-            Err(err) => plain_error(err),
-        };
-    }
-    let Some(event) = calendar_event(&mut db, &file).ok().flatten() else {
-        return (StatusCode::NOT_FOUND, "No event").into_response();
-    };
-    match ics::one_event(&mut db, event.id) {
-        Ok(body) => calendar_response(body),
-        Err(OpError::NotFound) => (StatusCode::NOT_FOUND, "No event").into_response(),
         Err(err) => plain_error(err),
     }
 }
@@ -2443,16 +2398,6 @@ fn event_for_guild(
     Ok(event)
 }
 
-fn calendar_event(conn: &mut Connection, file: &str) -> Result<Option<store::Event>, OpError> {
-    let token = file.trim_end_matches(".ics");
-    if let Some(public_id) = crate::ids::parse_event_id(token) {
-        if let Some(event) = store::event_by_public(conn, public_id)? {
-            return Ok(Some(event));
-        }
-    }
-    Ok(None)
-}
-
 fn here(server: &str, rest: &str) -> String {
     format!("/servers/{server}{rest}")
 }
@@ -2485,102 +2430,6 @@ fn guild_error(err: OpError) -> Response {
         OpError::NotFound => (StatusCode::NOT_FOUND, "That server isn't here.").into_response(),
         other => redirect("/", &other.to_string()),
     }
-}
-
-fn legacy_redirect(state: &AppState, headers: &HeaderMap, rest: &str) -> Response {
-    let mut db = state.db.lock().expect("database lock");
-    let Some(session) = read_session(&mut db, headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    let server = match store::discord_server_id(&mut db, session.guild_id) {
-        Ok(server) => server,
-        Err(err) => return plain_error(err),
-    };
-    Redirect::to(&here(&server, rest)).into_response()
-}
-
-async fn legacy_drafts(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/drafts")
-}
-
-async fn legacy_scheduled(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/scheduled")
-}
-
-async fn legacy_recurring(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/recurring")
-}
-
-async fn legacy_routines(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/routines")
-}
-
-async fn legacy_archive(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/archive")
-}
-
-async fn legacy_presets(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/presets")
-}
-
-async fn legacy_channels(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/channels")
-}
-
-async fn legacy_commands(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/commands")
-}
-
-async fn legacy_activity(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/activity")
-}
-
-async fn legacy_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/settings")
-}
-
-async fn legacy_google(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    legacy_redirect(&state, &headers, "/google")
-}
-
-async fn legacy_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    legacy_event_path(&state, &headers, &id, "")
-}
-
-async fn legacy_edit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    legacy_event_path(&state, &headers, &id, "/edit")
-}
-
-fn legacy_event_path(state: &AppState, headers: &HeaderMap, id: &str, suffix: &str) -> Response {
-    let mut db = state.db.lock().expect("database lock");
-    let Some(session) = read_session(&mut db, headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    let event = match calendar_event(&mut db, id) {
-        Ok(Some(event)) => event,
-        Ok(None) => return (StatusCode::NOT_FOUND, "No event").into_response(),
-        Err(err) => return plain_error(err),
-    };
-    if !session.allowed.contains(&event.guild_id) {
-        return (StatusCode::NOT_FOUND, "No event").into_response();
-    }
-    let server = match store::discord_server_id(&mut db, event.guild_id) {
-        Ok(server) => server,
-        Err(err) => return plain_error(err),
-    };
-    Redirect::to(&here(
-        &server,
-        &format!("/events/{}{suffix}", event.public_id),
-    ))
-    .into_response()
 }
 
 fn mutate(
@@ -3071,14 +2920,14 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         let blocked = client
-            .get(format!("http://{addr}/settings"))
+            .get(format!("http://{addr}/servers/99/settings"))
             .send()
             .await
             .unwrap();
         assert_eq!(blocked.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             blocked.headers().get(header::LOCATION).unwrap(),
-            "/?next=%2Fsettings"
+            "/?next=%2Fservers%2F99%2Fsettings"
         );
 
         let open = client
@@ -3103,18 +2952,6 @@ mod tests {
         assert!(body.contains("servers&#x2f;99/settings"));
         assert!(!body.contains("Acting as"));
 
-        let legacy = client
-            .get(format!("http://{addr}/settings"))
-            .header(header::COOKIE, "marian_session=session-token-value")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(legacy.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            legacy.headers().get(header::LOCATION).unwrap(),
-            "/servers/99/settings"
-        );
-
         let google = client
             .get(format!("http://{addr}/servers/99/google"))
             .header(header::COOKIE, "marian_session=session-token-value")
@@ -3125,18 +2962,6 @@ mod tests {
         let google_body = google.text().await.unwrap();
         assert!(google_body.contains("Google client id"), "{google_body}");
         assert!(google_body.contains("servers&#x2f;99/google"), "{google_body}");
-
-        let legacy_google = client
-            .get(format!("http://{addr}/google"))
-            .header(header::COOKIE, "marian_session=session-token-value")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(legacy_google.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            legacy_google.headers().get(header::LOCATION).unwrap(),
-            "/servers/99/google"
-        );
 
         let week = client
             .get(format!("http://{addr}/"))

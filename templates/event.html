@@ -68,7 +68,6 @@
     </div>
     <p class="meta" style="margin-top:10px">
       {% if event.google_synced %}On your Google Calendar{% else %}<a href="{{ event.google_url }}">Add to Google Calendar</a>{% endif %}
-      · <a href="{{ base }}/calendar/{{ event.id }}.ics">Download .ics</a>
       {% if event.calendar_on %} · on the calendar feed{% endif %}
     </p>
   </section>

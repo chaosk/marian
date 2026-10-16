@@ -47,16 +47,6 @@ pub(crate) fn events_for_person(
         .load(conn)?)
 }
 
-pub fn one_event(conn: &mut Connection, event_id: i64) -> Result<String, OpError> {
-    let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
-    let mut body = String::from(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Marian//Discord Scheduler//EN\r\nCALSCALE:GREGORIAN\r\n",
-    );
-    body.push_str(&event_body(conn, &event)?);
-    body.push_str("END:VCALENDAR\r\n");
-    Ok(body)
-}
-
 fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
     let start = clock::parse_stamp(&event.starts_at)?;
     let end = start + Duration::minutes(event.duration_minutes);
