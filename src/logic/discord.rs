@@ -134,6 +134,32 @@ fn role_color(color: &str) -> u32 {
     u32::from_str_radix(color.trim_start_matches('#'), 16).unwrap_or(0x1e3a6e)
 }
 
+/// Body of the ephemeral card shown before a Discord delete. The title of that card is
+/// "Delete event". A posted event is cancelled and its post is removed. Anything else
+/// that can still be deleted is removed outright.
+pub fn delete_confirm_body(title: &str, starts_at: &str, url: Option<&str>, posted: bool) -> String {
+    let name = title.trim();
+    let name = if name.is_empty() { "Event" } else { name };
+    let label = trim_chars(&name.replace(['\n', '\r'], " "), 200);
+    let label = label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let head = match url.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => format!("[{label}]({url})"),
+        None => label,
+    };
+    let when = clock::parse_stamp(starts_at)
+        .ok()
+        .map(|start| format!(" · <t:{}:R>", start.timestamp()));
+    let consequence = if posted {
+        "This removes the Discord post. The event is marked cancelled."
+    } else {
+        "This deletes the event."
+    };
+    match when {
+        Some(when) => format!("{head}{when}\n\n{consequence}"),
+        None => format!("{head}\n\n{consequence}"),
+    }
+}
+
 /// Text that sits above the embed. Discord only notifies `@everyone` and roles from this
 /// line, and only the first time each mention appears.
 pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
@@ -377,8 +403,6 @@ pub fn ensure_discord_user(
         }
         return store::user(conn, user.id)?.ok_or(OpError::NotFound);
     }
-    let existing = store::list_users(conn, guild_id)?;
-    let organizer = existing.iter().all(|user| !user.organizer);
     let handle = unique_handle(conn, guild_id, name, discord_id)?;
     let color = [
         "#1e3a6e", "#2f6b4f", "#8a6232", "#6b3a6b", "#8d3a32", "#243038",
@@ -398,12 +422,19 @@ pub fn ensure_discord_user(
             schema::users::handle.eq(&handle),
             schema::users::color.eq(color),
             schema::users::reminders_enabled.eq(true),
-            schema::users::organizer.eq(organizer),
+            schema::users::organizer.eq(false),
             schema::users::discord_id.eq(discord_id),
         ))
         .returning(schema::users::id)
         .get_result(conn)?;
     store::user(conn, id)?.ok_or(OpError::NotFound)
+}
+
+pub fn set_organizer(conn: &mut Connection, user_id: i64, organizer: bool) -> Result<(), OpError> {
+    diesel::update(schema::users::table.filter(schema::users::id.eq(user_id)))
+        .set(schema::users::organizer.eq(organizer))
+        .execute(conn)?;
+    Ok(())
 }
 
 pub fn ensure_discord_channel(
@@ -577,6 +608,42 @@ mod tests {
             mention_line(view.mention_everyone, &view.mention_roles),
             "@everyone <@&111> <@&333>"
         );
+    }
+
+    #[test]
+    fn delete_confirm_names_the_event_and_says_what_delete_does() {
+        let posted = delete_confirm_body(
+            "Test",
+            "2026-10-16T14:00:00Z",
+            Some("https://marian.example.com/servers/1/events/abc"),
+            true,
+        );
+        assert!(
+            posted.starts_with(
+                "[Test](https://marian.example.com/servers/1/events/abc) · <t:"
+            ),
+            "{posted}"
+        );
+        assert!(posted.contains(":R>\n\nThis removes the Discord post. The event is marked cancelled."));
+        let draft = delete_confirm_body("Shore", "not-a-date", None, false);
+        assert_eq!(draft, "Shore\n\nThis deletes the event.");
+    }
+
+    #[test]
+    fn signing_in_does_not_make_the_first_member_an_organizer() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
+        )
+        .unwrap();
+        let first = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert!(!first.organizer);
+        let second = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
+        assert!(!second.organizer);
+        set_organizer(&mut conn, first.id, true).unwrap();
+        assert!(store::user(&mut conn, first.id).unwrap().unwrap().organizer);
+        set_organizer(&mut conn, first.id, false).unwrap();
+        assert!(!store::user(&mut conn, first.id).unwrap().unwrap().organizer);
     }
 
     #[test]

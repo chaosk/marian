@@ -26,6 +26,19 @@ pub fn discord_display_name(global_name: Option<&str>, username: &str) -> String
     picked.chars().take(80).collect()
 }
 
+/// Owner, Administrator, or Manage Server on the guild list Discord returns at sign-in.
+pub fn manages_guild(owner: bool, permissions: &str) -> bool {
+    if owner {
+        return true;
+    }
+    let Ok(bits) = permissions.parse::<u64>() else {
+        return false;
+    };
+    const ADMINISTRATOR: u64 = 1 << 3;
+    const MANAGE_GUILD: u64 = 1 << 5;
+    bits & (ADMINISTRATOR | MANAGE_GUILD) != 0
+}
+
 /// Guild ids whose Discord id is in the signed-in member's guild list.
 pub fn guilds_in_common(guilds: &[(i64, String)], member_of: &[String]) -> Vec<i64> {
     let member: HashSet<&str> = member_of.iter().map(String::as_str).collect();
@@ -236,6 +249,12 @@ mod tests {
         assert_eq!(guilds_in_common(&guilds, &member), vec![1, 3]);
         assert_eq!(discord_display_name(Some("Nell"), "nell"), "Nell");
         assert_eq!(discord_display_name(None, "nell"), "nell");
+        assert!(manages_guild(true, "0"));
+        assert!(manages_guild(false, "8"));
+        assert!(manages_guild(false, "32"));
+        assert!(!manages_guild(false, "0"));
+        assert!(!manages_guild(false, ""));
+        assert!(!manages_guild(false, "nope"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "marian"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "Marian, the Discord scheduler"
 license = "MIT"
@@ -28,3 +28,4 @@ tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+uuid = { version = "1.28.0", features = ["v7"] }

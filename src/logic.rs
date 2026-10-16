@@ -19,10 +19,9 @@ pub use catalog::{
     record_command, save_preset, set_user_reminders, slug_channel,
 };
 pub use discord::{
-    attendance, discord_view, ensure_discord_channel, ensure_discord_guild, ensure_discord_user,
-    event_thread_name, mention_line, remember_discord_message, status_label, web_event_url,
-    Attendance,
-    AttendanceWork,
+    attendance, delete_confirm_body, discord_view, ensure_discord_channel, ensure_discord_guild,
+    ensure_discord_user, event_thread_name, mention_line, remember_discord_message, set_organizer,
+    status_label, web_event_url, Attendance, AttendanceWork,
 };
 pub use event::save_event;
 pub use lifecycle::{

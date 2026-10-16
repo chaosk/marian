@@ -36,6 +36,7 @@ struct AppState {
     public_url: String,
     google_client_id: String,
     google_client_secret: String,
+    bot_token: String,
 }
 
 struct Session {
@@ -86,6 +87,7 @@ pub fn run() -> anyhow::Result<()> {
         public_url: public_url.clone(),
         google_client_id,
         google_client_secret,
+        bot_token: token.clone(),
     };
     let app = router(state.clone());
 
@@ -152,6 +154,7 @@ fn router(state: AppState) -> Router {
         .route("/auth/discord", get(auth_start))
         .route("/auth/discord/callback", get(auth_callback))
         .route("/auth/google", get(google_start))
+        .route("/auth/google/start/{state}", get(google_open))
         .route("/auth/google/callback", get(google_callback))
         .route("/auth/google/disconnect", post(google_disconnect))
         .route("/logout", post(logout))
@@ -453,11 +456,13 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     if auth::is_public(&path) {
         return next.run(request).await;
     }
+    let headers = request.headers().clone();
     let signed_in = {
         let mut db = state.db.lock().expect("database lock");
-        read_session(&mut db, request.headers()).is_some()
+        read_session(&mut db, &headers).is_some()
     };
     if signed_in {
+        refresh_member_roles(&state, &path, &headers).await;
         return next.run(request).await;
     }
     if request.method() == Method::GET || request.method() == Method::HEAD {
@@ -469,6 +474,128 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         return Redirect::to(&auth::login_location(target)).into_response();
     }
     redirect("/", "Sign in with Discord.")
+}
+
+struct RoleTarget {
+    guild_id: i64,
+    user_id: i64,
+    guild_discord: String,
+    user_discord: String,
+}
+
+enum FreshRoles {
+    Known(Vec<String>),
+    Unavailable,
+}
+
+async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap) {
+    if state.bot_token.trim().is_empty() {
+        return;
+    }
+    let Some(target) = load_role_target(state, path, headers) else {
+        return;
+    };
+    let Some((status, body)) =
+        discord_member(&state.http, &state.bot_token, &target.guild_discord, &target.user_discord)
+            .await
+    else {
+        tracing::warn!("could not read Discord roles for this member");
+        return;
+    };
+    let FreshRoles::Known(roles) = fresh_roles(status, &body) else {
+        tracing::warn!("Discord role lookup returned {status}");
+        return;
+    };
+    store_member_roles(state, &target, &roles);
+}
+
+fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
+    let server = server_in_path(path)?;
+    let mut db = state.db.lock().expect("database lock");
+    role_target(&mut db, headers, server)
+}
+
+fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
+    let mut db = state.db.lock().expect("database lock");
+    if let Err(err) = store::replace_discord_roles(&mut db, target.guild_id, target.user_id, roles)
+    {
+        tracing::warn!("could not store Discord roles: {err}");
+    }
+}
+
+fn server_in_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/servers/")?;
+    let id = rest.split('/').next()?;
+    if snowflake(id) { Some(id) } else { None }
+}
+
+fn snowflake(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn role_target(conn: &mut Connection, headers: &HeaderMap, server: &str) -> Option<RoleTarget> {
+    let session = read_session(conn, headers)?;
+    let guild = store::guild_by_discord(conn, server).ok()??;
+    if !session.allowed.contains(&guild.id) {
+        return None;
+    }
+    let user = logic::ensure_discord_user(
+        conn,
+        guild.id,
+        &session.discord_user_id,
+        &session.display_name,
+    )
+    .ok()?;
+    Some(RoleTarget {
+        guild_id: guild.id,
+        user_id: user.id,
+        guild_discord: server.to_string(),
+        user_discord: session.discord_user_id,
+    })
+}
+
+fn fresh_roles(status: StatusCode, body: &str) -> FreshRoles {
+    if status == StatusCode::NOT_FOUND {
+        return FreshRoles::Known(Vec::new());
+    }
+    if !status.is_success() {
+        return FreshRoles::Unavailable;
+    }
+    #[derive(serde::Deserialize)]
+    struct Member {
+        roles: Vec<String>,
+    }
+    match serde_json::from_str::<Member>(body) {
+        Ok(member) => {
+            FreshRoles::Known(member.roles.into_iter().filter(|id| snowflake(id)).collect())
+        }
+        Err(_) => FreshRoles::Unavailable,
+    }
+}
+
+async fn discord_member(
+    http: &reqwest::Client,
+    bot_token: &str,
+    guild_discord: &str,
+    user_discord: &str,
+) -> Option<(StatusCode, String)> {
+    if !snowflake(guild_discord) || !snowflake(user_discord) {
+        return None;
+    }
+    let response = http
+        .get(format!(
+            "https://discord.com/api/guilds/{guild_discord}/members/{user_discord}"
+        ))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bot {}", bot_token.trim()),
+        )
+        .send()
+        .await
+        .ok()?;
+    let status = response.status();
+    let body = response.text().await.ok()?;
+    Some((status, body))
 }
 
 async fn auth_start(
@@ -554,22 +681,43 @@ async fn auth_callback(
         .iter()
         .filter_map(|guild| Some((guild.id, guild.discord_id.clone()?)))
         .collect();
-    let allowed = auth::guilds_in_common(&pairs, &member_of);
+    let discord_ids: Vec<String> = member_of.iter().map(|guild| guild.id.clone()).collect();
+    let allowed = auth::guilds_in_common(&pairs, &discord_ids);
     if allowed.is_empty() {
         return redirect("/", "Marian isn't in a server you belong to yet.");
     }
-    let guild_id = allowed[0];
     let name = auth::discord_display_name(me.global_name.as_deref(), &me.username);
-    let user = match logic::ensure_discord_user(&mut db, guild_id, &me.id, &name) {
-        Ok(user) => user,
-        Err(err) => return plain_error(err),
+    let mut signed_in = None;
+    for &guild_id in &allowed {
+        let discord_id = pairs
+            .iter()
+            .find(|(id, _)| *id == guild_id)
+            .map(|(_, discord_id)| discord_id.as_str())
+            .unwrap_or("");
+        let user = match logic::ensure_discord_user(&mut db, guild_id, &me.id, &name) {
+            Ok(user) => user,
+            Err(err) => return plain_error(err),
+        };
+        let manages = member_of
+            .iter()
+            .find(|guild| guild.id == discord_id)
+            .is_some_and(|guild| guild.manages);
+        if let Err(err) = logic::set_organizer(&mut db, user.id, manages) {
+            return plain_error(err);
+        }
+        if signed_in.is_none() {
+            signed_in = Some((guild_id, user.id));
+        }
+    }
+    let Some((guild_id, user_id)) = signed_in else {
+        return redirect("/", "Marian isn't in a server you belong to yet.");
     };
     let token = match auth::random_token() {
         Ok(token) => token,
         Err(err) => return plain_error(err),
     };
     if let Err(err) =
-        store::insert_web_session(&mut db, &token, &me.id, &name, guild_id, user.id, &allowed)
+        store::insert_web_session(&mut db, &token, &me.id, &name, guild_id, user_id, &allowed)
     {
         return plain_error(err);
     }
@@ -698,22 +846,83 @@ async fn google_start(
     response
 }
 
+async fn google_open(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Response {
+    if token.len() != 64 || !token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return redirect(
+            "/",
+            "That Google Calendar connection expired. Run /google authorize again.",
+        );
+    }
+    if !crate::google::configured(&state.google_client_id, &state.google_client_secret) {
+        return redirect("/", "Google Calendar is not configured yet.");
+    }
+    let Some(redirect_uri) = google_redirect(&state, &headers) else {
+        return redirect("/", "Set MARIAN_PUBLIC_URL so Google can send you back.");
+    };
+    let pending = {
+        let mut db = state.db.lock().expect("database lock");
+        match crate::google::claim_oauth(&mut db, &token) {
+            Ok(row) => row.is_some(),
+            Err(err) => return plain_error(err),
+        }
+    };
+    if !pending {
+        return redirect(
+            "/",
+            "That Google Calendar connection expired. Run /google authorize again.",
+        );
+    }
+    let secure = cookie_secure(&state, &headers);
+    let mut response = Redirect::to(&crate::google::authorize_url(
+        &state.google_client_id,
+        &redirect_uri,
+        &token,
+    ))
+    .into_response();
+    set_cookie(
+        &mut response,
+        "marian_google",
+        &auth::pack_oauth(&token, "/"),
+        600,
+        secure,
+    );
+    response
+}
+
+fn matched_google_next(headers: &HeaderMap, returned: &str) -> Option<String> {
+    let (expected, next) =
+        cookie(headers, "marian_google").and_then(|raw| auth::unpack_oauth(&raw))?;
+    if expected != returned {
+        None
+    } else {
+        Some(next)
+    }
+}
+
 async fn google_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<GoogleCallback>,
 ) -> Response {
     let returned = query.state.clone().unwrap_or_default();
-    let packed = cookie(&headers, "marian_google").and_then(|raw| auth::unpack_oauth(&raw));
-    let dest = match &packed {
-        Some((expected, next)) if returned == *expected && !next.is_empty() => next.clone(),
-        _ => "/".to_string(),
+    let Some(next) = matched_google_next(&headers, &returned) else {
+        return redirect(
+            "/",
+            "That Google Calendar connection expired. Run /google authorize again.",
+        );
+    };
+    let dest = if next.is_empty() {
+        "/".to_string()
+    } else {
+        next
     };
     if query.error.is_some() {
-        if !returned.is_empty() {
-            let mut db = state.db.lock().expect("database lock");
-            let _ = crate::google::finish_oauth(&mut db, &returned);
-        }
+        let mut db = state.db.lock().expect("database lock");
+        let _ = crate::google::finish_oauth(&mut db, &returned);
         let mut response = redirect(
             &dest,
             "The Google Calendar connection stopped before it finished.",
@@ -914,8 +1123,8 @@ async fn discord_me(state: &AppState, access: &str) -> Result<DiscordMe, String>
         .map_err(|_| "Discord sent an unexpected account.".into())
 }
 
-async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<String>, String> {
-    let mut ids = Vec::new();
+async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuild>, String> {
+    let mut found = Vec::new();
     let mut after = String::new();
     for _ in 0..5 {
         let mut endpoint = "https://discord.com/api/users/@me/guilds?limit=200".to_string();
@@ -942,12 +1151,15 @@ async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<String>, S
         if let Some(last) = guilds.last() {
             after = last.id.clone();
         }
-        ids.extend(guilds.into_iter().map(|guild| guild.id));
+        found.extend(guilds.into_iter().map(|guild| MemberGuild {
+            manages: auth::manages_guild(guild.owner, &guild.permissions),
+            id: guild.id,
+        }));
         if page < 200 {
             break;
         }
     }
-    Ok(ids)
+    Ok(found)
 }
 
 #[derive(serde::Deserialize)]
@@ -1004,6 +1216,15 @@ struct DiscordMe {
 #[derive(serde::Deserialize)]
 struct DiscordGuild {
     id: String,
+    #[serde(default)]
+    owner: bool,
+    #[serde(default)]
+    permissions: String,
+}
+
+struct MemberGuild {
+    id: String,
+    manages: bool,
 }
 
 async fn drafts(
@@ -2655,6 +2876,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_member_payload_is_the_current_role_list() {
+        assert_eq!(server_in_path("/servers/99/settings"), Some("99"));
+        assert_eq!(server_in_path("/servers/99"), Some("99"));
+        assert_eq!(server_in_path("/settings"), None);
+        match fresh_roles(StatusCode::OK, r#"{"roles":["222","nope",""]}"#) {
+            FreshRoles::Known(roles) => assert_eq!(roles, vec!["222".to_string()]),
+            FreshRoles::Unavailable => panic!("expected the role ids"),
+        }
+        match fresh_roles(StatusCode::NOT_FOUND, "") {
+            FreshRoles::Known(roles) => assert!(roles.is_empty()),
+            FreshRoles::Unavailable => panic!("a missing member has no roles"),
+        }
+        assert!(matches!(
+            fresh_roles(StatusCode::TOO_MANY_REQUESTS, ""),
+            FreshRoles::Unavailable
+        ));
+        assert!(matches!(
+            fresh_roles(StatusCode::OK, "not-json"),
+            FreshRoles::Unavailable
+        ));
+    }
+
+    #[test]
     fn notice_round_trip_and_event_ids() {
         let encoded = percent_encode("Posted Shore supper.");
         assert_eq!(percent_decode(&encoded), "Posted Shore supper.");
@@ -2755,6 +2999,7 @@ mod tests {
             public_url: "http://127.0.0.1:8080".into(),
             google_client_id: String::new(),
             google_client_secret: String::new(),
+            bot_token: String::new(),
         };
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2920,5 +3165,75 @@ mod tests {
         assert!(location.contains("scope=identify%20guilds"));
         assert!(location.contains("client_id=123"));
         assert!(!location.contains("test-secret"));
+    }
+
+    #[tokio::test]
+    async fn google_callback_keeps_a_link_the_browser_did_not_start() {
+        let mut conn = store::open_memory().unwrap();
+        let token = crate::google::begin_link(&mut conn, "42").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let db = Arc::new(Mutex::new(conn));
+        let state = AppState {
+            db: db.clone(),
+            discord: tx,
+            invite_url: String::new(),
+            http: reqwest::Client::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            public_url: "https://marian.example".into(),
+            google_client_id: "google-client".into(),
+            google_client_secret: "google-secret".into(),
+            bot_token: String::new(),
+        };
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let missed = client
+            .get(format!(
+                "http://{addr}/auth/google/callback?state={token}&error=access_denied"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missed.status(), StatusCode::SEE_OTHER);
+        let still = {
+            let mut guard = db.lock().unwrap();
+            crate::google::claim_oauth(&mut guard, &token).unwrap()
+        };
+        assert_eq!(still.as_deref(), Some("42"));
+
+        let open = client
+            .get(format!("http://{addr}/auth/google/start/{token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(open.status(), StatusCode::SEE_OTHER);
+        let location = open
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(location.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(location.contains(&token));
+        let set = open
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set.starts_with(&format!("marian_google={token}.")));
     }
 }

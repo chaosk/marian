@@ -2221,15 +2221,15 @@ pub fn google_sign_in_url(conn: &mut Connection, user_id: i64) -> Result<String,
             "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
         ));
     }
-    let client_id = std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
     let discord_id = person_discord_id(conn, user_id)?;
     let state = crate::google::begin_link(conn, &discord_id)?;
-    let url = crate::google::authorize_url(
-        client_id.trim(),
-        &format!("{base}/auth/google/callback"),
-        &state,
-    );
+    let Some(url) = crate::google::connect_url(&base, &state) else {
+        return Err(OpError::message(
+            "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
+        ));
+    };
     if url.len() > 512 {
+        let _ = crate::google::finish_oauth(conn, &state);
         return Err(OpError::message(
             "The Google sign-in link is too long for Discord. Connect from Settings.",
         ));

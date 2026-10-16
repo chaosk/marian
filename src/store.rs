@@ -1058,6 +1058,35 @@ pub fn user_has_role(conn: &mut Connection, user_id: i64, role_id: i64) -> Resul
     Ok(n > 0)
 }
 
+pub fn replace_discord_roles(
+    conn: &mut Connection,
+    guild_id: i64,
+    user_id: i64,
+    discord_role_ids: &[String],
+) -> Result<(), OpError> {
+    let known = list_roles(conn, guild_id)?;
+    let role_ids: Vec<i64> = known
+        .into_iter()
+        .filter(|role| {
+            role.discord_id
+                .as_deref()
+                .is_some_and(|id| discord_role_ids.iter().any(|wanted| wanted == id))
+        })
+        .map(|role| role.id)
+        .collect();
+    diesel::delete(schema::user_roles::table.filter(schema::user_roles::user_id.eq(user_id)))
+        .execute(conn)?;
+    for role_id in role_ids {
+        diesel::insert_into(schema::user_roles::table)
+            .values((
+                schema::user_roles::user_id.eq(user_id),
+                schema::user_roles::role_id.eq(role_id),
+            ))
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
 pub fn event(conn: &mut Connection, id: i64) -> Result<Option<Event>, OpError> {
     Ok(schema::events::table
         .filter(schema::events::id.eq(id))
@@ -1641,5 +1670,28 @@ mod tests {
         assert_eq!(list_guilds(&mut conn).unwrap().len(), 1);
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_discord_role_list_replaces_the_stored_roles() {
+        let mut conn = open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
+            INSERT INTO users (id, guild_id, name, handle, color) VALUES
+              (1, 1, 'Nell', 'nell', '#112233');
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES
+              (1, 1, 'Raiders', '#112233', '111'),
+              (2, 1, 'Officers', '#112233', '222'),
+              (3, 1, 'Local', '#112233', NULL);
+            INSERT INTO user_roles (user_id, role_id) VALUES (1, 1), (1, 3);
+            ",
+        )
+        .unwrap();
+        replace_discord_roles(&mut conn, 1, 1, &["222".into()]).unwrap();
+        let roles = user_role_ids(&mut conn, 1).unwrap();
+        assert_eq!(roles, vec![2]);
+        replace_discord_roles(&mut conn, 1, 1, &[]).unwrap();
+        assert!(user_role_ids(&mut conn, 1).unwrap().is_empty());
     }
 }

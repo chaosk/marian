@@ -356,7 +356,8 @@ async fn handle_button(
         .await?;
     match action {
         ButtonAction::Edit { event_id } => edit_from_button(ctx, component, data, event_id).await,
-        ButtonAction::Delete { event_id } => {
+        ButtonAction::Delete { event_id } => ask_delete(ctx, component, data, event_id).await,
+        ButtonAction::ConfirmDelete { event_id } => {
             delete_from_button(ctx, component, data, event_id).await
         }
         ButtonAction::Signup {
@@ -453,6 +454,70 @@ async fn edit_from_button(
     followup(ctx, component, &text).await
 }
 
+async fn ask_delete(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    event_id: i64,
+) -> Result<(), Error> {
+    let Some(click) = click_context(ctx, component) else {
+        followup(ctx, component, "Use that button inside a server.").await?;
+        return Ok(());
+    };
+    let card = {
+        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let user_id = bind_clicker(&mut conn, &click)?;
+        match store::event(&mut conn, event_id)? {
+            None => Err("That event isn't here.".to_string()),
+            Some(event) if event.created_by != user_id => Ok(None),
+            Some(event)
+                if !matches!(
+                    event.status.as_str(),
+                    "draft" | "scheduled" | "failed" | "posted"
+                ) =>
+            {
+                Err("That event is already closed.".to_string())
+            }
+            Some(event) => {
+                let server = store::discord_server_id(&mut conn, event.guild_id).unwrap_or_default();
+                let url = logic::web_event_url(
+                    &data.public_url,
+                    Some(server.as_str()).filter(|id| !id.is_empty()),
+                    &event.public_id,
+                );
+                Ok(Some(logic::delete_confirm_body(
+                    &event.title,
+                    &event.starts_at,
+                    url.as_deref(),
+                    event.status == "posted",
+                )))
+            }
+        }
+    };
+    let body = match card {
+        Ok(Some(body)) => body,
+        Ok(None) => return Ok(()),
+        Err(text) => return followup(ctx, component, &text).await,
+    };
+    let embed = serenity::CreateEmbed::new()
+        .title("Delete event")
+        .description(clip(&body, 4000))
+        .color(serenity::Colour::new(0xF1C40F));
+    let delete = serenity::CreateButton::new(format!("marian:{event_id}:confirm-delete"))
+        .style(serenity::ButtonStyle::Danger)
+        .label("Delete");
+    component
+        .create_followup(
+            &ctx.http,
+            serenity::CreateInteractionResponseFollowup::new()
+                .embed(embed)
+                .components(vec![serenity::CreateActionRow::Buttons(vec![delete])])
+                .ephemeral(true),
+        )
+        .await?;
+    Ok(())
+}
+
 async fn delete_from_button(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -474,40 +539,48 @@ async fn delete_from_button(
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
                 match logic::delete_event(&mut conn, event_id, user_id) {
-                    Ok(_) => Ok(Some((channel_discord, message_id))),
+                    Ok(notice) => Ok(Some((channel_discord, message_id, notice))),
                     Err(err) => Err(err.to_string()),
                 }
             }
         }
     };
-    let (channel_discord, message_id) = match removed {
+    let (channel_discord, message_id, notice) = match removed {
         Ok(Some(removed)) => removed,
         Ok(None) => return Ok(()),
         Err(text) => return followup(ctx, component, &text).await,
     };
-    let Some(channel_discord) = channel_discord else {
-        return Ok(());
-    };
-    let Some(message_id) = message_id else {
-        return Ok(());
-    };
-    let http = data
-        .http
-        .lock()
-        .map_err(|_| "http lock")?
-        .clone()
-        .ok_or("Discord is not connected")?;
-    let deleted = serenity::ChannelId::new(channel_discord.parse()?)
-        .delete_message(&http, serenity::MessageId::new(message_id.parse()?))
-        .await;
-    if let Err(err) = deleted {
-        tracing::warn!("could not remove the Discord post: {err}");
-        return Ok(());
+    if let (Some(channel_discord), Some(message_id)) = (channel_discord, message_id) {
+        let http = data
+            .http
+            .lock()
+            .map_err(|_| "http lock")?
+            .clone()
+            .ok_or("Discord is not connected")?;
+        let deleted = serenity::ChannelId::new(channel_discord.parse()?)
+            .delete_message(&http, serenity::MessageId::new(message_id.parse()?))
+            .await;
+        if let Err(err) = deleted {
+            tracing::warn!("could not remove the Discord post: {err}");
+        } else if let Ok(mut conn) = data.db.lock() {
+            diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
+                .set(schema::events::discord_message_id.eq(None::<String>))
+                .execute(&mut *conn)?;
+        }
     }
-    let mut conn = data.db.lock().map_err(|_| "database lock")?;
-    diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
-        .set(schema::events::discord_message_id.eq(None::<String>))
-        .execute(&mut *conn)?;
+    if let Err(err) = component
+        .edit_response(
+            &ctx.http,
+            serenity::EditInteractionResponse::new()
+                .content(clip(&notice, 1800))
+                .embeds(Vec::new())
+                .components(Vec::new()),
+        )
+        .await
+    {
+        tracing::warn!("could not update the delete confirmation: {err}");
+        followup(ctx, component, &notice).await?;
+    }
     Ok(())
 }
 
@@ -516,7 +589,7 @@ struct Click {
     guild_name: String,
     user_discord: String,
     display: String,
-    manage: bool,
+    manage: Option<bool>,
     roles: Option<Vec<(String, String, String)>>,
 }
 
@@ -535,12 +608,11 @@ fn click_context(
         .global_name
         .clone()
         .unwrap_or_else(|| component.user.name.clone());
-    let manage = component
-        .member
-        .as_ref()
-        .and_then(|member| member.permissions)
-        .map(|permissions| permissions.manage_guild())
-        .unwrap_or(false);
+    let manage = component.member.as_ref().and_then(|member| {
+        member
+            .permissions
+            .map(|permissions| permissions.manage_guild() || permissions.administrator())
+    });
     let roles = component.member.as_ref().map(|member| {
         member
             .roles
@@ -571,10 +643,8 @@ fn click_context(
 fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
     let user = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
-    if click.manage {
-        diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
-            .set(schema::users::organizer.eq(true))
-            .execute(conn)?;
+    if let Some(manage) = click.manage {
+        logic::set_organizer(conn, user.id, manage)?;
     }
     if let Some(roles) = &click.roles {
         sync_roles(conn, guild.id, user.id, roles)?;
@@ -645,6 +715,7 @@ enum ButtonAction {
     Signup { event_id: i64, option_id: i64 },
     Edit { event_id: i64 },
     Delete { event_id: i64 },
+    ConfirmDelete { event_id: i64 },
     Routine { run_id: i64, day: u8 },
 }
 
@@ -689,6 +760,7 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
     match parts.next()? {
         "edit" => Some(ButtonAction::Edit { event_id }),
         "delete" => Some(ButtonAction::Delete { event_id }),
+        "confirm-delete" => Some(ButtonAction::ConfirmDelete { event_id }),
         option => Some(ButtonAction::Signup {
             event_id,
             option_id: option.parse().ok()?,
@@ -1223,19 +1295,37 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
         .guild_id()
         .and_then(|id| ctx.cache().guild(id).map(|guild| guild.name.clone()))
         .unwrap_or_default();
-    let manage = ctx
-        .author_member()
-        .await
-        .and_then(|member| member.permissions)
-        .map(|permissions| permissions.manage_guild())
-        .unwrap_or(false);
+    let member = ctx.author_member().await;
+    let manage = member.as_ref().and_then(|member| {
+        member
+            .permissions
+            .map(|permissions| permissions.manage_guild() || permissions.administrator())
+    });
+    let roles = member.as_ref().and_then(|member| {
+        ctx.cache().guild(guild_id).map(|guild| {
+            member
+                .roles
+                .iter()
+                .filter_map(|role_id| {
+                    guild.roles.get(role_id).map(|role| {
+                        (
+                            role.name.clone(),
+                            role.colour.hex(),
+                            role.id.get().to_string(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+    });
     let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
     let user = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
-    if manage {
-        diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
-            .set(schema::users::organizer.eq(true))
-            .execute(&mut *conn)?;
+    if let Some(manage) = manage {
+        logic::set_organizer(&mut conn, user.id, manage)?;
+    }
+    if let Some(roles) = &roles {
+        sync_roles(&mut conn, guild.id, user.id, roles)?;
     }
     Ok(Some(Actor {
         guild_id: guild.id,
