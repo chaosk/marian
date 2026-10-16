@@ -1956,7 +1956,7 @@ mod tests {
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
             INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', 1, 1);
+              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
             ",
         )
         .unwrap();
@@ -2461,7 +2461,7 @@ mod tests {
             INSERT INTO users (id, guild_id, name, handle, color, discord_id) VALUES
               (1, 1, 'Nell', 'nell', '#112233', 'u1');
             INSERT INTO google_accounts (discord_user_id, refresh_token, email, connected_at, auto_sync)
-              VALUES ('u1', 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z', 0);
+              VALUES ('u1', 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z', false);
             ",
         )
         .unwrap();

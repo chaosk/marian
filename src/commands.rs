@@ -2476,7 +2476,7 @@ mod tests {
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
             INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', 1, 1);
+              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
             ",
         )
         .unwrap();
@@ -2509,7 +2509,7 @@ mod tests {
             INSERT INTO channels (id, guild_id, name, kind, position, discord_id)
               VALUES (1, 1, 'social', 'text', 0, '99'), (2, 1, 'briefing', 'text', 1, '100');
             INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', 1, 1);
+              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
             ",
         )
         .unwrap();

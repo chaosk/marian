@@ -8,7 +8,7 @@ CREATE TABLE google_accounts (
 
 CREATE TABLE google_events (
     discord_user_id TEXT NOT NULL,
-    event_id INTEGER NOT NULL,
+    event_id BIGINT NOT NULL,
     google_event_id TEXT,
     content_hash TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',

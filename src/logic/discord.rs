@@ -587,7 +587,7 @@ mod tests {
               created_by, created_at, updated_at
             ) VALUES (
               '01900000-0000-7000-8000-000000000010', 1, 1, 'Shore cleanup',
-              '2026-10-14T18:00:00Z', 'posted', 1, 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'
+              '2026-10-14T18:00:00Z', 'posted', true, 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'
             );
             INSERT INTO event_roles (event_id, role_id, kind) VALUES
               (1, 3, 'mention'),

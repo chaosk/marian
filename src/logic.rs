@@ -62,9 +62,9 @@ mod tests {
               (2, 1, 'Tank', '#336699');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
             INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer) VALUES
-              (1, 1, 'Nell', 'nell', '#112233', 1, 1),
-              (2, 1, 'June', 'june', '#223344', 1, 0),
-              (3, 1, 'Samir', 'samir', '#334455', 1, 0);
+              (1, 1, 'Nell', 'nell', '#112233', true, true),
+              (2, 1, 'June', 'june', '#223344', true, false),
+              (3, 1, 'Samir', 'samir', '#334455', true, false);
             INSERT INTO user_roles (user_id, role_id) VALUES (2, 2);
             ",
         )

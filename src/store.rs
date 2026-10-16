@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Once;
 
 use diesel::connection::Connection as DbConnection;
 use diesel::connection::SimpleConnection;
@@ -11,13 +13,18 @@ use crate::clock;
 use crate::error::OpError;
 use crate::schema;
 
-pub use diesel::sqlite::SqliteConnection as Connection;
+pub use diesel::pg::PgConnection as Connection;
+
+const DEFAULT_URL: &str = "postgres://marian:marian@127.0.0.1:5433/marian";
+
+static TEST_SCHEMAS: AtomicU64 = AtomicU64::new(0);
+static TEST_CLEANUP: Once = Once::new();
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::guilds)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Guild {
     pub id: i64,
     pub name: String,
@@ -27,7 +34,7 @@ pub struct Guild {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::settings)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Settings {
     pub guild_id: i64,
     pub default_reminder_minutes: i64,
@@ -54,7 +61,7 @@ pub struct Settings {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::users)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
     pub id: i64,
     pub guild_id: i64,
@@ -68,7 +75,7 @@ pub struct User {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::roles)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Role {
     pub id: i64,
     pub guild_id: i64,
@@ -79,7 +86,7 @@ pub struct Role {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::channels)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Channel {
     pub id: i64,
     pub guild_id: i64,
@@ -92,7 +99,7 @@ pub struct Channel {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::events)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Event {
     pub id: i64,
     pub public_id: String,
@@ -126,7 +133,7 @@ pub struct Event {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::series)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Series {
     pub id: i64,
     pub public_id: String,
@@ -143,7 +150,7 @@ pub struct Series {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::signup_options)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SignupOption {
     pub id: i64,
     pub event_id: i64,
@@ -158,7 +165,7 @@ pub struct SignupOption {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::signups)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Signup {
     pub id: i64,
     pub event_id: i64,
@@ -170,7 +177,7 @@ pub struct Signup {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::reminders)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Reminder {
     pub id: i64,
     pub event_id: i64,
@@ -181,7 +188,7 @@ pub struct Reminder {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::activity)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Activity {
     pub id: i64,
     pub guild_id: i64,
@@ -192,7 +199,7 @@ pub struct Activity {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::presets)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Preset {
     pub id: i64,
     pub public_id: String,
@@ -203,7 +210,7 @@ pub struct Preset {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::option_library)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct LibraryOption {
     pub id: i64,
     pub guild_id: i64,
@@ -213,7 +220,7 @@ pub struct LibraryOption {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::thread_messages)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ThreadMessage {
     pub id: i64,
     pub event_id: i64,
@@ -224,7 +231,7 @@ pub struct ThreadMessage {
 
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::command_log)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct CommandRow {
     pub id: i64,
     pub guild_id: i64,
@@ -235,65 +242,109 @@ pub struct CommandRow {
 }
 
 pub fn open(database_url: &str) -> Result<Connection, OpError> {
-    let target = parse_database_url(database_url)?;
-    if let Some(directory) = &target.directory {
-        std::fs::create_dir_all(directory)
-            .map_err(|err| OpError::message(format!("Could not create the data folder: {err}")))?;
-    }
-    let mut conn = Connection::establish(&target.establish)
-        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))?;
-    tune(&mut conn, target.file, target.system)?;
+    let url = parse_database_url(database_url)?;
+    let mut conn = connect(&url)?;
+    crate::observe::install_query_trace(&mut conn, "postgresql");
     migrate(&mut conn)?;
     Ok(conn)
 }
 
-pub fn open_memory() -> Result<Connection, OpError> {
-    open("sqlite::memory:")
+struct SchemaGuard {
+    schema: String,
+    admin_url: String,
 }
 
-fn tune(conn: &mut Connection, file: bool, system: &'static str) -> Result<(), OpError> {
-    conn.batch_execute("PRAGMA foreign_keys = ON")?;
-    conn.batch_execute("PRAGMA busy_timeout = 5000")?;
-    if file {
-        let _ = conn.batch_execute("PRAGMA journal_mode = WAL");
+impl Drop for SchemaGuard {
+    fn drop(&mut self) {
+        drop_schema(&self.admin_url, &self.schema);
     }
-    crate::observe::install_query_trace(conn, system);
-    Ok(())
 }
 
-#[derive(Debug)]
-struct DatabaseUrl {
-    establish: String,
-    directory: Option<std::path::PathBuf>,
-    file: bool,
-    system: &'static str,
+thread_local! {
+    static TEST_GUARDS: RefCell<Vec<SchemaGuard>> = const { RefCell::new(Vec::new()) };
 }
 
-fn parse_database_url(database_url: &str) -> Result<DatabaseUrl, OpError> {
+pub fn open_memory() -> Result<Connection, OpError> {
+    let admin_url = database_url();
+    let schema = format!(
+        "marian_t{}_{}",
+        std::process::id(),
+        TEST_SCHEMAS.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut admin = connect(&admin_url)?;
+    let pid = std::process::id();
+    TEST_CLEANUP.call_once(|| {
+        let _ = admin.batch_execute(&format!(
+            "DO $$ DECLARE name text; BEGIN
+               FOR name IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'marian_t{pid}_%'
+               LOOP EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', name); END LOOP;
+             END $$"
+        ));
+    });
+    admin
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))?;
+    drop(admin);
+    let mut conn = match connect(&admin_url) {
+        Ok(conn) => conn,
+        Err(err) => {
+            drop_schema(&admin_url, &schema);
+            return Err(err);
+        }
+    };
+    if let Err(err) = conn.batch_execute(&format!("SET search_path TO {schema}")) {
+        drop(conn);
+        drop_schema(&admin_url, &schema);
+        return Err(OpError::message(format!("Could not open the database: {err}")));
+    }
+    crate::observe::install_query_trace(&mut conn, "postgresql");
+    if let Err(err) = migrate(&mut conn) {
+        drop(conn);
+        drop_schema(&admin_url, &schema);
+        return Err(err);
+    }
+    let guard = SchemaGuard {
+        schema,
+        admin_url,
+    };
+    TEST_GUARDS.with(|guards| guards.borrow_mut().push(guard));
+    Ok(conn)
+}
+
+fn connect(url: &str) -> Result<Connection, OpError> {
+    Connection::establish(url)
+        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))
+}
+
+fn drop_schema(admin_url: &str, schema: &str) {
+    if admin_url.is_empty() || schema.is_empty() {
+        return;
+    }
+    let Ok(mut admin) = Connection::establish(admin_url) else {
+        return;
+    };
+    let _ = admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"));
+}
+
+fn parse_database_url(database_url: &str) -> Result<String, OpError> {
     let database_url = database_url.trim();
     if database_url.is_empty() {
         return Err(OpError::message(
-            "Set DATABASE_URL to a database connection string, such as sqlite://data/marian.db.",
+            "Set DATABASE_URL to a Postgres connection string, such as postgres://marian:marian@127.0.0.1:5433/marian.",
         ));
     }
     let database_url = normalize_scheme(database_url);
-    if database_url == ":memory:" || database_url == "sqlite::memory:" {
-        return Ok(memory_url());
+    let Some((scheme, _)) = database_url.split_once("://") else {
+        return Err(OpError::message(
+            "Set DATABASE_URL to a Postgres connection string, such as postgres://marian:marian@127.0.0.1:5433/marian.",
+        ));
+    };
+    if scheme != "postgres" && scheme != "postgresql" {
+        return Err(OpError::message(format!(
+            "Set DATABASE_URL to a Postgres connection string, such as postgres://marian:marian@127.0.0.1:5433/marian. The scheme is {scheme}."
+        )));
     }
-    if let Some(spec) = database_url.strip_prefix("sqlite:") {
-        return sqlite_url(spec);
-    }
-    if let Some(spec) = database_url.strip_prefix("file:") {
-        return file_url(&database_url, spec);
-    }
-    if let Some((scheme, _)) = database_url.split_once("://") {
-        if !scheme.is_empty() {
-            return Err(OpError::message(format!(
-                "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db. The scheme is {scheme}."
-            )));
-        }
-    }
-    file_on_disk(database_url.clone(), &database_url)
+    Ok(database_url)
 }
 
 fn normalize_scheme(database_url: &str) -> String {
@@ -306,97 +357,6 @@ fn normalize_scheme(database_url: &str) -> String {
     format!("{}:{rest}", scheme.to_ascii_lowercase())
 }
 
-fn memory_url() -> DatabaseUrl {
-    DatabaseUrl {
-        establish: ":memory:".into(),
-        directory: None,
-        file: false,
-        system: "sqlite",
-    }
-}
-
-fn sqlite_url(spec: &str) -> Result<DatabaseUrl, OpError> {
-    let (body, query) = split_query(spec);
-    if body == ":memory:"
-        || body == "//:memory:"
-        || body == "///:memory:"
-        || query_requests_memory(query)
-    {
-        return Ok(memory_url());
-    }
-    let (establish, path) = if let Some(rest) = body.strip_prefix("//") {
-        (format!("sqlite://{rest}{query}"), rest.to_string())
-    } else if let Some(path) = body.strip_prefix('/') {
-        (format!("sqlite:///{path}{query}"), format!("/{path}"))
-    } else if body.is_empty() {
-        return Err(OpError::message(
-            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
-        ));
-    } else {
-        (format!("sqlite://{body}{query}"), body.to_string())
-    };
-    file_on_disk(establish, &path)
-}
-
-fn file_url(original: &str, spec: &str) -> Result<DatabaseUrl, OpError> {
-    let (body, query) = split_query(spec);
-    if body == ":memory:" || query_requests_memory(query) {
-        return Ok(memory_url());
-    }
-    let path = if let Some(rest) = body.strip_prefix("//") {
-        match rest.split_once('/') {
-            Some((host, path)) if host.is_empty() || host.eq_ignore_ascii_case("localhost") => {
-                format!("/{path}")
-            }
-            Some(_) => body.to_string(),
-            None => rest.to_string(),
-        }
-    } else {
-        body.to_string()
-    };
-    if path.is_empty() {
-        return Err(OpError::message(
-            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
-        ));
-    }
-    file_on_disk(original.to_string(), &path)
-}
-
-fn file_on_disk(establish: impl Into<String>, path: &str) -> Result<DatabaseUrl, OpError> {
-    if path.is_empty() {
-        return Err(OpError::message(
-            "Set DATABASE_URL to a sqlite connection string, such as sqlite://data/marian.db.",
-        ));
-    }
-    let directory = Path::new(path).parent().and_then(|parent| {
-        if parent.as_os_str().is_empty() {
-            None
-        } else {
-            Some(parent.to_path_buf())
-        }
-    });
-    Ok(DatabaseUrl {
-        establish: establish.into(),
-        directory,
-        file: true,
-        system: "sqlite",
-    })
-}
-
-fn split_query(spec: &str) -> (&str, &str) {
-    match spec.split_once('?') {
-        Some((body, _)) => (body, &spec[body.len()..]),
-        None => (spec, ""),
-    }
-}
-
-fn query_requests_memory(query: &str) -> bool {
-    query.trim_start_matches('?').split('&').any(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        key == "mode" && value == "memory"
-    })
-}
-
 pub fn database_url() -> String {
     choose_database_url(env_value("DATABASE_URL"), env_value("MARIAN_DB"))
 }
@@ -404,7 +364,7 @@ pub fn database_url() -> String {
 fn choose_database_url(database_url: Option<String>, legacy: Option<String>) -> String {
     database_url
         .or(legacy)
-        .unwrap_or_else(|| "sqlite://data/marian.db".into())
+        .unwrap_or_else(|| DEFAULT_URL.into())
 }
 
 fn env_value(key: &str) -> Option<String> {
@@ -430,18 +390,20 @@ fn table_exists(conn: &mut Connection, table: &str) -> Result<bool, OpError> {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         count: i64,
     }
-    let count: i64 =
-        sql_query("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
-            .bind::<diesel::sql_types::Text, _>(table)
-            .get_result::<CountRow>(conn)?
-            .count;
+    let count: i64 = sql_query(
+        "SELECT count(*) AS count FROM information_schema.tables
+         WHERE table_schema = current_schema() AND table_name = $1",
+    )
+    .bind::<diesel::sql_types::Text, _>(table)
+    .get_result::<CountRow>(conn)?
+    .count;
     Ok(count > 0)
 }
 
 fn record_applied_migrations(conn: &mut Connection) -> Result<(), OpError> {
     MigrationConnection::setup(conn)?;
     // The legacy upgrade already matches the init migration. Later migrations still run.
-    sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES (?)")
+    sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES ($1)")
         .bind::<diesel::sql_types::Text, _>("20261015131400")
         .execute(conn)?;
     Ok(())
@@ -688,12 +650,6 @@ struct IdRow {
     id: i64,
 }
 
-#[derive(QueryableByName)]
-struct ColName {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    name: String,
-}
-
 fn insert_template_value(
     conn: &mut Connection,
     guild_id: i64,
@@ -790,7 +746,7 @@ fn fill_public_ids(conn: &mut Connection, table: &str) -> Result<(), OpError> {
         } else {
             crate::ids::event_id()
         };
-        sql_query(format!("UPDATE {table} SET public_id = ? WHERE id = ?"))
+        sql_query(format!("UPDATE {table} SET public_id = $1 WHERE id = $2"))
             .bind::<diesel::sql_types::Text, _>(public_id)
             .bind::<diesel::sql_types::BigInt, _>(row.id)
             .execute(conn)?;
@@ -803,8 +759,20 @@ fn backfill_public_ids(conn: &mut Connection) -> Result<(), OpError> {
 }
 
 fn has_column(conn: &mut Connection, table: &str, column: &str) -> Result<bool, OpError> {
-    let rows = sql_query(format!("PRAGMA table_info({table})")).load::<ColName>(conn)?;
-    Ok(rows.iter().any(|row| row.name == column))
+    #[derive(QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let count: i64 = sql_query(
+        "SELECT count(*) AS count FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2",
+    )
+    .bind::<diesel::sql_types::Text, _>(table)
+    .bind::<diesel::sql_types::Text, _>(column)
+    .get_result::<CountRow>(conn)?
+    .count;
+    Ok(count > 0)
 }
 
 pub fn with_tx<T>(
@@ -1068,9 +1036,9 @@ pub fn replace_discord_roles(
     let role_ids: Vec<i64> = known
         .into_iter()
         .filter(|role| {
-            role.discord_id
-                .as_deref()
-                .is_some_and(|id| discord_role_ids.iter().any(|wanted| wanted == id))
+            role.discord_id.as_deref().is_some_and(|id| {
+                discord_role_ids.iter().any(|wanted| wanted == id)
+            })
         })
         .map(|role| role.id)
         .collect();
@@ -1572,77 +1540,51 @@ mod tests {
 
     #[test]
     fn a_connection_string_names_the_database() {
-        let url = parse_database_url("sqlite://data/marian.db").unwrap();
-        assert_eq!(url.establish, "sqlite://data/marian.db");
-        assert_eq!(url.directory.as_deref(), Some(Path::new("data")));
-        assert!(url.file);
-        assert_eq!(url.system, "sqlite");
+        let url = parse_database_url("postgres://marian:marian@127.0.0.1/marian").unwrap();
+        assert_eq!(url, "postgres://marian:marian@127.0.0.1/marian");
 
-        let url = parse_database_url("sqlite:///data/marian.db?mode=rwc").unwrap();
-        assert_eq!(url.establish, "sqlite:///data/marian.db?mode=rwc");
-        assert_eq!(url.directory.as_deref(), Some(Path::new("/data")));
+        let url = parse_database_url("  PostgreSQL://marian@localhost/marian ").unwrap();
+        assert_eq!(url, "postgresql://marian@localhost/marian");
 
-        let url = parse_database_url("  SQLITE::memory: ").unwrap();
-        assert_eq!(url.establish, ":memory:");
-        assert!(!url.file);
-
-        let url = parse_database_url("file:///tmp/marian.db").unwrap();
-        assert_eq!(url.establish, "file:///tmp/marian.db");
-        assert_eq!(url.directory.as_deref(), Some(Path::new("/tmp")));
-
-        let url = parse_database_url("/data/marian.db").unwrap();
-        assert_eq!(url.establish, "/data/marian.db");
-
-        let err = parse_database_url("postgres://user:secret@localhost/marian").unwrap_err();
+        let err = parse_database_url("sqlite://data/marian.db").unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("postgres"));
+        assert!(text.contains("sqlite"));
+        assert!(!text.contains("marian.db"));
+
+        let err = parse_database_url("mysql://user:secret@localhost/marian").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("mysql"));
         assert!(!text.contains("secret"));
 
+        assert!(parse_database_url("").is_err());
+        assert!(parse_database_url("/data/marian.db").is_err());
+
         assert_eq!(
-            choose_database_url(Some("sqlite://chosen.db".into()), Some("legacy.db".into())),
-            "sqlite://chosen.db"
+            choose_database_url(
+                Some("postgres://chosen/marian".into()),
+                Some("postgres://legacy/marian".into())
+            ),
+            "postgres://chosen/marian"
         );
         assert_eq!(
-            choose_database_url(None, Some("legacy.db".into())),
-            "legacy.db"
+            choose_database_url(None, Some("postgres://legacy/marian".into())),
+            "postgres://legacy/marian"
         );
-        assert_eq!(choose_database_url(None, None), "sqlite://data/marian.db");
+        assert_eq!(choose_database_url(None, None), DEFAULT_URL);
     }
 
     #[test]
-    fn a_sqlite_url_opens_that_file() {
-        let dir = std::env::temp_dir().join(format!("marian-url-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("marian.db");
-        let url = format!("sqlite://{}", path.display());
-        let mut conn = open(&url).unwrap();
-        assert!(path.is_file());
-        assert!(list_guilds(&mut conn).unwrap().is_empty());
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_existing_database_keeps_its_rows() {
-        let dir = std::env::temp_dir().join(format!("marian-migrate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("marian.db");
-        let url = format!("sqlite://{}", path.display());
-        {
-            let mut conn = Connection::establish(&url).unwrap();
-            conn.batch_execute(include_str!("../migrations/20261015131400_init/up.sql"))
-                .unwrap();
-            diesel::insert_into(schema::guilds::table)
-                .values((
-                    schema::guilds::id.eq(1),
-                    schema::guilds::name.eq("Guild"),
-                    schema::guilds::timezone.eq("UTC"),
-                ))
-                .execute(&mut conn)
-                .unwrap();
-        }
-        let mut conn = open(&url).unwrap();
+    fn open_applies_the_migrations() {
+        let mut conn = open_memory().unwrap();
+        diesel::insert_into(schema::guilds::table)
+            .values((
+                schema::guilds::id.eq(1),
+                schema::guilds::name.eq("Guild"),
+                schema::guilds::timezone.eq("UTC"),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        migrate(&mut conn).unwrap();
         let guilds = list_guilds(&mut conn).unwrap();
         assert_eq!(guilds.len(), 1);
         assert_eq!(guilds[0].name, "Guild");
@@ -1665,11 +1607,6 @@ mod tests {
             ]
         );
         assert!(table_exists(&mut conn, "google_accounts").unwrap());
-        drop(conn);
-        let mut conn = open(&url).unwrap();
-        assert_eq!(list_guilds(&mut conn).unwrap().len(), 1);
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

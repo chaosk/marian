@@ -616,9 +616,7 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
         .inner_join(schema::event_templates::table)
         .filter(schema::routines::guild_id.eq(guild_id))
         .order(schema::routines::active.desc())
-        .then_order_by(diesel::dsl::sql::<diesel::sql_types::Text>(
-            "event_templates.title COLLATE NOCASE",
-        ))
+        .then_order_by(schema::lower(schema::event_templates::title))
         .select(schema::routines::id)
         .load(conn)?;
     let mut rows = Vec::new();
@@ -1378,8 +1376,8 @@ mod tests {
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'play', 'text', 0);
             INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', 1, 1),
-                     (2, 1, 'June', 'june', '#112233', 1, 0);
+              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true),
+                     (2, 1, 'June', 'june', '#112233', true, false);
             ",
         )
         .unwrap();

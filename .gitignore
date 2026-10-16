@@ -5,3 +5,4 @@
 *.db-*
 .env
 .DS_Store
+/scripts/sqlite-to-postgres.py

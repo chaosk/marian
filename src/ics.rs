@@ -136,8 +136,8 @@ mod tests {
               ('01900000-0000-7000-8000-000000000002', 1, 1, 'June hosts accepted', '2026-10-15T18:00:00Z', 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000003', 1, 1, 'June hosts declined', '2026-10-16T18:00:00Z', 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
             INSERT INTO signup_options (id, event_id, name, emoji, reminders_enabled, position) VALUES
-              (1, 2, 'Accepted', '✅', 1, 0),
-              (2, 3, 'Declined', '❌', 0, 0);
+              (1, 2, 'Accepted', '✅', true, 0),
+              (2, 3, 'Declined', '❌', false, 0);
             INSERT INTO signups (event_id, option_id, user_id, state, created_at) VALUES
               (2, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (3, 2, 1, 'confirmed', '2026-10-13T00:00:00Z');

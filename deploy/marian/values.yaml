@@ -1,4 +1,4 @@
-# One process owns the database. Keep this at 1.
+# The reminder clock runs in this process. Keep this at 1.
 replicaCount: 1
 
 image:
@@ -36,6 +36,12 @@ google:
   # Key in discord.existingSecret that holds the Google client secret.
   clientSecretKey: ""
 
+database:
+  # Postgres connection string. Required unless discord.existingSecret already
+  # holds it under secretKey.
+  url: ""
+  secretKey: databaseUrl
+
 # Custom status under the bot's name. Empty leaves it unset.
 status: ""
 
@@ -57,6 +63,8 @@ ingress:
   tls: false
   annotations: {}
 
+# Unused by the pod. Leave this on through the first upgrade so Helm does not
+# delete the old sqlite volume. Copy that file out, then set enabled to false.
 persistence:
   enabled: true
   size: 1Gi

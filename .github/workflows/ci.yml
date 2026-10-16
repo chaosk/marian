@@ -13,9 +13,27 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: marian
+          POSTGRES_PASSWORD: marian
+          POSTGRES_DB: marian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U marian -d marian"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://marian:marian@127.0.0.1:5432/marian
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1
+      - name: libpq
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
@@ -42,7 +60,7 @@ jobs:
       - name: musl linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools file
+          sudo apt-get install -y --no-install-recommends musl-tools cmake perl make pkg-config file
           sudo cp ci/musl-cc /usr/local/bin/musl-cc
           sudo chmod +x /usr/local/bin/musl-cc
       - uses: Swatinem/rust-cache@v2
@@ -53,7 +71,7 @@ jobs:
           MARIAN_VERSION: ${{ steps.version.outputs.version }}
           CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
         run: |
-          cargo build --release --locked --target x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl --features static-libpq
           cp target/x86_64-unknown-linux-musl/release/marian marian
           file marian | grep -Eq "statically linked|static-pie linked"
       - uses: actions/upload-artifact@v7
