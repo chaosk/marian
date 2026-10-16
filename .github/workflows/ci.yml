@@ -56,7 +56,7 @@ jobs:
           cargo build --release --locked --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/release/marian marian
           file marian | grep -Eq "statically linked|static-pie linked"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: marian
           path: marian
