@@ -4,13 +4,14 @@
 use std::cell::RefCell;
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use diesel::connection::{Connection, Instrumentation, InstrumentationEvent};
 use opentelemetry::trace::{Span, SpanKind, Tracer, TracerProvider};
 use opentelemetry::{global, Context, KeyValue};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
+use tracing::Instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -177,9 +178,6 @@ fn finish_query() {
         return;
     };
     let duration = pending.start.elapsed().unwrap_or_default();
-    if duration < Duration::from_millis(1) {
-        return;
-    }
     let millis = duration.as_secs_f64() * 1000.0;
     tracing::debug!(
         "db.system" = pending.system,
@@ -192,8 +190,13 @@ fn finish_query() {
         return;
     }
     let tracer = global::tracer("marian");
+    let name = if pending.statement.is_empty() {
+        pending.system.to_string()
+    } else {
+        pending.statement.clone()
+    };
     let mut span = tracer
-        .span_builder(pending.system)
+        .span_builder(name)
         .with_kind(SpanKind::Client)
         .with_start_time(pending.start)
         .with_attributes([
@@ -248,6 +251,33 @@ fn statement_shape(sql: &str) -> String {
         }
     }
     out
+}
+
+/// One outbound HTTP call, named by method and path. The query string stays off
+/// the span: Google and Discord put tokens there.
+pub(crate) async fn send_traced(
+    builder: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let (client, built) = builder.build_split();
+    let request = built?;
+    let method = request.method().to_string();
+    let host = request.url().host_str().unwrap_or("").to_string();
+    let path = request.url().path().to_string();
+    let span = tracing::info_span!(
+        "http",
+        otel.kind = "client",
+        "http.request.method" = method.as_str(),
+        "server.address" = host.as_str(),
+        "url.path" = path.as_str(),
+        "http.response.status_code" = tracing::field::Empty,
+    );
+    async move {
+        let response = client.execute(request).await?;
+        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
+        Ok(response)
+    }
+    .instrument(span)
+    .await
 }
 
 fn push_limited(out: &mut String, c: char) {

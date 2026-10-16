@@ -643,16 +643,12 @@ pub fn record(conn: &mut Connection, outcome: Outcome) -> Result<(), OpError> {
 }
 
 pub async fn account_email(http: &reqwest::Client, access_token: &str) -> String {
-    let Ok(response) = http
-        .get("https://www.googleapis.com/oauth2/v2/userinfo")
-        .timeout(StdDuration::from_secs(10))
-        .bearer_auth(access_token)
-        .send()
-        .await
+    let Ok((_status, body)) = send(
+        http.get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .bearer_auth(access_token),
+    )
+    .await
     else {
-        return String::new();
-    };
-    let Ok(body) = response.text().await else {
         return String::new();
     };
     serde_json::from_str::<serde_json::Value>(&body)
@@ -1072,9 +1068,7 @@ async fn post_form(
 }
 
 async fn send(builder: reqwest::RequestBuilder) -> Result<(reqwest::StatusCode, String), String> {
-    let response = builder
-        .timeout(StdDuration::from_secs(10))
-        .send()
+    let response = crate::observe::send_traced(builder.timeout(StdDuration::from_secs(10)))
         .await
         .map_err(|_| "Google Calendar didn't respond.".to_string())?;
     let status = response.status();

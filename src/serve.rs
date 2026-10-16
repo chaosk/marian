@@ -582,17 +582,17 @@ async fn discord_member(
     if !snowflake(guild_discord) || !snowflake(user_discord) {
         return None;
     }
-    let response = http
-        .get(format!(
+    let response = crate::observe::send_traced(
+        http.get(format!(
             "https://discord.com/api/guilds/{guild_discord}/members/{user_discord}"
         ))
         .header(
             header::AUTHORIZATION,
             format!("Bot {}", bot_token.trim()),
-        )
-        .send()
-        .await
-        .ok()?;
+        ),
+    )
+    .await
+    .ok()?;
     let status = response.status();
     let body = response.text().await.ok()?;
     Some((status, body))
@@ -1078,19 +1078,20 @@ fn cookie_secure(state: &AppState, headers: &HeaderMap) -> bool {
 }
 
 async fn discord_token(state: &AppState, code: &str, redirect_uri: &str) -> Result<String, String> {
-    let response = state
-        .http
-        .post("https://discord.com/api/oauth2/token")
-        .form(&[
-            ("client_id", state.client_id.as_str()),
-            ("client_secret", state.client_secret.as_str()),
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-        ])
-        .send()
-        .await
-        .map_err(|_| "Discord didn't answer the sign-in.".to_string())?;
+    let response = crate::observe::send_traced(
+        state
+            .http
+            .post("https://discord.com/api/oauth2/token")
+            .form(&[
+                ("client_id", state.client_id.as_str()),
+                ("client_secret", state.client_secret.as_str()),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+            ]),
+    )
+    .await
+    .map_err(|_| "Discord didn't answer the sign-in.".to_string())?;
     if !response.status().is_success() {
         tracing::warn!("discord token exchange returned {}", response.status());
         return Err("Discord didn't accept the sign-in. Try again.".into());
@@ -1106,13 +1107,14 @@ async fn discord_token(state: &AppState, code: &str, redirect_uri: &str) -> Resu
 }
 
 async fn discord_me(state: &AppState, access: &str) -> Result<DiscordMe, String> {
-    let response = state
-        .http
-        .get("https://discord.com/api/users/@me")
-        .bearer_auth(access)
-        .send()
-        .await
-        .map_err(|_| "Discord didn't answer with your account.".to_string())?;
+    let response = crate::observe::send_traced(
+        state
+            .http
+            .get("https://discord.com/api/users/@me")
+            .bearer_auth(access),
+    )
+    .await
+    .map_err(|_| "Discord didn't answer with your account.".to_string())?;
     if !response.status().is_success() {
         tracing::warn!("discord identity returned {}", response.status());
         return Err("Discord didn't share your account. Try again.".into());
@@ -1132,11 +1134,7 @@ async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuil
             endpoint.push_str("&after=");
             endpoint.push_str(&auth::encode(&after));
         }
-        let response = state
-            .http
-            .get(endpoint)
-            .bearer_auth(access)
-            .send()
+        let response = crate::observe::send_traced(state.http.get(endpoint).bearer_auth(access))
             .await
             .map_err(|_| "Discord didn't answer with your servers.".to_string())?;
         if !response.status().is_success() {
