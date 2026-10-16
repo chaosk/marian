@@ -1,6 +1,9 @@
 {{- if not (or .Values.discord.token .Values.discord.existingSecret) }}
 {{- fail "Set discord.token or discord.existingSecret. Marian does not start without a bot token." }}
 {{- end }}
+{{- if and (not .Values.discord.existingSecret) (not .Values.database.url) }}
+{{- fail "Set database.url to a Postgres connection string, or store it in discord.existingSecret under database.secretKey." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,7 +50,10 @@ spec:
             - name: PORT
               value: "8080"
             - name: DATABASE_URL
-              value: sqlite:///data/marian.db
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "marian.secretName" . }}
+                  key: {{ .Values.database.secretKey }}
             - name: MARIAN_PUBLIC_URL
               value: {{ include "marian.publicUrl" . | quote }}
             - name: MARIAN_STATUS
@@ -112,18 +118,9 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            - name: data
-              mountPath: /data
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: data
-          {{- if .Values.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ .Values.persistence.existingClaim | default (include "marian.fullname" .) }}
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
         - name: tmp
           emptyDir: {}
       {{- with .Values.nodeSelector }}

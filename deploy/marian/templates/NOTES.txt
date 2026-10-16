@@ -1,4 +1,4 @@
-Marian is installed as one pod. Events live in SQLite, so the chart keeps a single replica and recreates the pod instead of rolling two writers.
+Marian is installed as one pod. Events live in Postgres. The chart keeps a single replica and recreates the pod instead of rolling two clocks.
 
 The dashboard:
 

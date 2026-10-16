@@ -45,7 +45,7 @@ pub struct Spawn<'a> {
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::event_templates)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 struct StoredTemplate {
     #[allow(dead_code)]
     id: i64,

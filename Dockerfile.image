@@ -1,11 +1,17 @@
-# Packages the static binary CI already built. Dependency crates stay in the
-# runner's Rust cache, so a version bump does not compile them again.
+# Packages the static binary CI already built. Postgres TLS reads Debian's CA
+# bundle; Discord uses rustls and does not.
+FROM debian:bookworm-slim AS certs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM scratch
 ARG MARIAN_VERSION
 LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY marian /marian
 USER 65532:65532
 ENV PORT=8080 \
-    DATABASE_URL=sqlite:///data/marian.db
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

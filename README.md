@@ -7,15 +7,30 @@ Marian keeps a Discord community's events, signups, reminders, and recurring dat
 Rust 1.99.1 (see `rust-toolchain.toml`).
 
 ```sh
+docker compose up -d
 DISCORD_TOKEN=... cargo run
 ```
 
-Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
+`docker compose` starts Postgres 17 and publishes it on `127.0.0.1:5433` (user `marian`, password `marian`, database `marian`). That is the default `DATABASE_URL`. Port 5433 leaves a Postgres already listening on 5432 alone. Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
+
+If `cargo` cannot find `libpq`, point pkg-config at it. Homebrew keeps it off the default path:
+
+```sh
+export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+```
+
+To copy an existing sqlite file, start Marian once so it migrates the empty database, then:
+
+```sh
+python3 scripts/sqlite-to-postgres.py data/marian.db
+```
+
+That script is gitignored. It runs `psql` inside the compose service. Set `PSQL` or `DATABASE_URL` to use another `psql`.
 
 | Variable | Default | Role |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
-| `DATABASE_URL` | `sqlite://data/marian.db` | Database connection string. `MARIAN_DB` is read when this is empty. A path with no scheme is a sqlite file |
+| `DATABASE_URL` | `postgres://marian:marian@127.0.0.1:5433/marian` | Postgres connection string. `MARIAN_DB` is read when this is empty |
 | `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
 | `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
@@ -67,7 +82,7 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 
 ## Install on Kubernetes
 
-The chart runs one container, stores the database on a volume, and mounts the bot token from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
+The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
 docker build --build-arg MARIAN_VERSION=0.4.3 -t ghcr.io/you/marian:0.4.3 .
@@ -79,13 +94,14 @@ helm upgrade --install marian ./deploy/marian \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \
+  --set database.url="postgres://marian:marian@postgres:5432/marian" \
   --set ingress.enabled=true \
   --set ingress.host=marian.example.com
 ```
 
 `discord.token` or `discord.existingSecret` is required. Use `existingSecret` and `discord.secretKey` when the token already lives in the cluster. `discord.clientSecret` is the OAuth secret when the chart creates the Secret. With `existingSecret`, set `discord.clientSecretKey` to the key that already holds it. `imagePullSecrets` is a list of `{name: ...}` objects.
 
-The Deployment is a single replica with `strategy: Recreate`. The database URL is `sqlite:///data/marian.db` on a PersistentVolumeClaim (1Gi unless you change `persistence.size`). A sqlite file has one writer, so keep the replica count at 1. The root filesystem is read-only. Set `persistence.existingClaim` to bring your own volume.
+The image is a static binary. Postgres TLS reads Debian's CA bundle from `SSL_CERT_FILE`. The Deployment is a single replica with `strategy: Recreate`. The reminder clock runs in this process, so keep the replica count at 1. `database.url` is the Postgres connection string when the chart creates the Secret. With `discord.existingSecret`, put that string in the same secret under `database.secretKey` (`databaseUrl`). The root filesystem is read-only. `persistence` still creates the old sqlite volume and the pod does not mount it. Copy the file out, then set `persistence.enabled` to false.
 
 Probes call `/healthz` and `/readyz`. The pod runs as uid 65532.
 
