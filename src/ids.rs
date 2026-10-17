@@ -5,39 +5,27 @@
 
 use uuid::Uuid;
 
-pub fn routine_id() -> String {
+pub fn routine_id() -> Uuid {
     event_id()
 }
 
-pub fn series_id() -> String {
+pub fn series_id() -> Uuid {
     event_id()
 }
 
-pub fn preset_id() -> String {
+pub fn preset_id() -> Uuid {
     event_id()
 }
 
-pub fn event_id() -> String {
-    Uuid::now_v7().to_string()
+pub fn event_id() -> Uuid {
+    Uuid::now_v7()
 }
 
-pub fn parse_event_id(token: &str) -> Option<&str> {
+pub fn parse_event_id(token: &str) -> Option<Uuid> {
     let end = token
         .find(|ch: char| !ch.is_ascii_hexdigit() && ch != '-')
         .unwrap_or(token.len());
-    let id = &token[..end];
-    let mut parts = id.split('-');
-    let widths = [8, 4, 4, 4, 12];
-    for width in widths {
-        let part = parts.next()?;
-        if part.len() != width || !part.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return None;
-        }
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(id)
+    Uuid::parse_str(&token[..end]).ok()
 }
 
 #[cfg(test)]
@@ -47,9 +35,8 @@ mod tests {
     #[test]
     fn an_event_id_is_a_version_7_uuid() {
         let id = event_id();
-        let parsed = Uuid::parse_str(&id).unwrap();
-        assert_eq!(parsed.get_version(), Some(uuid::Version::SortRand));
-        assert_eq!(parse_event_id(&id), Some(id.as_str()));
+        assert_eq!(id.get_version(), Some(uuid::Version::SortRand));
+        assert_eq!(parse_event_id(&id.to_string()), Some(id));
         assert_ne!(event_id(), id);
     }
 }

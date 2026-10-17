@@ -36,7 +36,6 @@ diesel::table! {
         role_signup -> Nullable<BigInt>,
         post_lead_hours -> BigInt,
         digest -> Text,
-        park_clock -> Bool,
     }
 }
 
@@ -57,7 +56,7 @@ diesel::table! {
         name -> Text,
         kind -> Text,
         position -> BigInt,
-        purged_at -> Nullable<Text>,
+        purged_at -> Nullable<Timestamptz>,
         discord_id -> Nullable<Text>,
     }
 }
@@ -65,19 +64,26 @@ diesel::table! {
 diesel::table! {
     users (id) {
         id -> BigInt,
+        discord_id -> Text,
+    }
+}
+
+diesel::table! {
+    memberships (id) {
+        id -> BigInt,
+        user_id -> BigInt,
         guild_id -> BigInt,
         name -> Text,
         handle -> Text,
         color -> Text,
         reminders_enabled -> Bool,
         organizer -> Bool,
-        discord_id -> Nullable<Text>,
     }
 }
 
 diesel::table! {
-    user_roles (user_id, role_id) {
-        user_id -> BigInt,
+    membership_roles (membership_id, role_id) {
+        membership_id -> BigInt,
         role_id -> BigInt,
     }
 }
@@ -97,57 +103,57 @@ diesel::table! {
         mention_everyone -> Bool,
         attendee_role_id -> Nullable<BigInt>,
         cutoff_offset_minutes -> Nullable<BigInt>,
-        options_json -> Text,
-        reminders_json -> Text,
-        mention_role_ids -> Text,
-        restrict_role_ids -> Text,
-        created_at -> Text,
+        options_json -> Jsonb,
+        reminders_json -> Jsonb,
+        mention_role_ids -> Array<BigInt>,
+        restrict_role_ids -> Array<BigInt>,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::table! {
     series (id) {
         id -> BigInt,
-        public_id -> Text,
+        public_id -> Uuid,
         guild_id -> BigInt,
         cadence -> Text,
-        end_on -> Nullable<Text>,
+        end_on -> Nullable<Timestamptz>,
         max_occurrences -> Nullable<BigInt>,
         active -> Bool,
         template_id -> BigInt,
-        anchor_start -> Text,
+        anchor_start -> Timestamptz,
         post_lead_hours -> BigInt,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::table! {
     events (id) {
         id -> BigInt,
-        public_id -> Text,
+        public_id -> Uuid,
         guild_id -> BigInt,
         channel_id -> BigInt,
         series_id -> Nullable<BigInt>,
         occurrence_index -> Nullable<BigInt>,
         title -> Text,
         description -> Text,
-        starts_at -> Text,
+        starts_at -> Timestamptz,
         duration_minutes -> BigInt,
         status -> Text,
-        post_at -> Nullable<Text>,
-        posted_at -> Nullable<Text>,
-        archived_at -> Nullable<Text>,
+        post_at -> Nullable<Timestamptz>,
+        posted_at -> Nullable<Timestamptz>,
+        archived_at -> Nullable<Timestamptz>,
         color -> Text,
         image_url -> Nullable<Text>,
-        cutoff_at -> Nullable<Text>,
+        cutoff_at -> Nullable<Timestamptz>,
         mention_everyone -> Bool,
         attendee_role_id -> Nullable<BigInt>,
         thread_enabled -> Bool,
         multiple_signups -> Bool,
-        created_by -> BigInt,
-        created_at -> Text,
-        updated_at -> Text,
-        calendar_synced_at -> Nullable<Text>,
+        created_by -> Nullable<BigInt>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        calendar_synced_at -> Nullable<Timestamptz>,
         signups_closed -> Bool,
         post_attempts -> BigInt,
         discord_message_id -> Nullable<Text>,
@@ -181,9 +187,9 @@ diesel::table! {
         id -> BigInt,
         event_id -> BigInt,
         option_id -> BigInt,
-        user_id -> BigInt,
+        membership_id -> BigInt,
         state -> Text,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
@@ -193,7 +199,7 @@ diesel::table! {
         event_id -> BigInt,
         offset_minutes -> BigInt,
         message -> Text,
-        sent_at -> Nullable<Text>,
+        sent_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -214,9 +220,9 @@ diesel::table! {
 }
 
 diesel::table! {
-    thread_members (event_id, user_id) {
+    thread_members (event_id, membership_id) {
         event_id -> BigInt,
-        user_id -> BigInt,
+        membership_id -> BigInt,
     }
 }
 
@@ -226,14 +232,14 @@ diesel::table! {
         event_id -> BigInt,
         body -> Text,
         place -> Text,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::table! {
-    role_grants (event_id, user_id) {
+    role_grants (event_id, membership_id) {
         event_id -> BigInt,
-        user_id -> BigInt,
+        membership_id -> BigInt,
         role_id -> BigInt,
     }
 }
@@ -241,10 +247,10 @@ diesel::table! {
 diesel::table! {
     presets (id) {
         id -> BigInt,
-        public_id -> Text,
+        public_id -> Uuid,
         guild_id -> BigInt,
         name -> Text,
-        body -> Text,
+        body -> Jsonb,
     }
 }
 
@@ -263,7 +269,7 @@ diesel::table! {
         guild_id -> BigInt,
         event_id -> Nullable<BigInt>,
         body -> Text,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
@@ -271,10 +277,10 @@ diesel::table! {
     command_log (id) {
         id -> BigInt,
         guild_id -> BigInt,
-        user_id -> BigInt,
+        membership_id -> Nullable<BigInt>,
         line -> Text,
         reply -> Text,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
@@ -282,14 +288,14 @@ diesel::table! {
     event_prompts (discord_user_id) {
         discord_user_id -> Text,
         guild_id -> BigInt,
-        user_id -> BigInt,
+        membership_id -> BigInt,
         step -> Text,
         title -> Nullable<Text>,
         start_raw -> Nullable<Text>,
         channel_name -> Nullable<Text>,
         source_channel -> Nullable<Text>,
         source_discord -> Nullable<Text>,
-        draft -> Nullable<Text>,
+        draft -> Nullable<Jsonb>,
     }
 }
 
@@ -299,8 +305,8 @@ diesel::table! {
         discord_user_id -> Text,
         display_name -> Text,
         guild_id -> BigInt,
-        user_id -> BigInt,
-        created_at -> Text,
+        membership_id -> BigInt,
+        created_at -> Timestamptz,
     }
 }
 
@@ -314,17 +320,17 @@ diesel::table! {
 diesel::table! {
     calendar_feeds (token) {
         token -> Text,
-        discord_user_id -> Text,
-        created_at -> Text,
+        user_id -> BigInt,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::table! {
-    google_accounts (discord_user_id) {
-        discord_user_id -> Text,
+    google_accounts (user_id) {
+        user_id -> BigInt,
         refresh_token -> Text,
         email -> Text,
-        connected_at -> Text,
+        connected_at -> Timestamptz,
         last_error -> Text,
         auto_sync -> Bool,
         revoking -> Bool,
@@ -332,13 +338,13 @@ diesel::table! {
 }
 
 diesel::table! {
-    google_events (discord_user_id, event_id) {
-        discord_user_id -> Text,
+    google_events (user_id, event_id) {
+        user_id -> BigInt,
         event_id -> BigInt,
         google_event_id -> Nullable<Text>,
         content_hash -> Text,
         last_error -> Text,
-        retry_at -> Nullable<Text>,
+        retry_at -> Nullable<Timestamptz>,
         forced -> Bool,
     }
 }
@@ -346,15 +352,15 @@ diesel::table! {
 diesel::table! {
     google_oauth (state) {
         state -> Text,
-        discord_user_id -> Text,
-        created_at -> Text,
+        user_id -> BigInt,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::table! {
     routines (id) {
         id -> BigInt,
-        public_id -> Text,
+        public_id -> Uuid,
         guild_id -> BigInt,
         template_id -> BigInt,
         prompt -> Text,
@@ -363,10 +369,10 @@ diesel::table! {
         poll_minutes -> BigInt,
         lock_weekday -> BigInt,
         lock_minutes -> BigInt,
-        days_json -> Text,
+        days_json -> Array<SmallInt>,
         active -> Bool,
-        created_by -> BigInt,
-        created_at -> Text,
+        created_by -> Nullable<BigInt>,
+        created_at -> Timestamptz,
         description -> Text,
     }
 }
@@ -375,14 +381,14 @@ diesel::table! {
     routine_runs (id) {
         id -> BigInt,
         routine_id -> BigInt,
-        opens_at -> Text,
-        locks_at -> Text,
+        opens_at -> Timestamptz,
+        locks_at -> Timestamptz,
         status -> Text,
-        days_json -> Text,
+        days_json -> Array<SmallInt>,
         winner_weekday -> Nullable<BigInt>,
         event_id -> Nullable<BigInt>,
         discord_message_id -> Nullable<Text>,
-        created_at -> Text,
+        created_at -> Timestamptz,
     }
 }
 
@@ -391,17 +397,22 @@ diesel::table! {
         id -> BigInt,
         run_id -> BigInt,
         choice -> Text,
-        user_id -> BigInt,
-        created_at -> Text,
+        membership_id -> BigInt,
+        created_at -> Timestamptz,
     }
 }
 
 diesel::joinable!(settings -> guilds (guild_id));
 diesel::joinable!(roles -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
-diesel::joinable!(users -> guilds (guild_id));
-diesel::joinable!(user_roles -> users (user_id));
-diesel::joinable!(user_roles -> roles (role_id));
+diesel::joinable!(memberships -> users (user_id));
+diesel::joinable!(calendar_feeds -> users (user_id));
+diesel::joinable!(google_accounts -> users (user_id));
+diesel::joinable!(google_events -> users (user_id));
+diesel::joinable!(google_oauth -> users (user_id));
+diesel::joinable!(memberships -> guilds (guild_id));
+diesel::joinable!(membership_roles -> memberships (membership_id));
+diesel::joinable!(membership_roles -> roles (role_id));
 diesel::joinable!(event_templates -> guilds (guild_id));
 diesel::joinable!(event_templates -> channels (channel_id));
 diesel::joinable!(series -> guilds (guild_id));
@@ -409,21 +420,21 @@ diesel::joinable!(series -> event_templates (template_id));
 diesel::joinable!(events -> guilds (guild_id));
 diesel::joinable!(events -> channels (channel_id));
 diesel::joinable!(events -> series (series_id));
-diesel::joinable!(events -> users (created_by));
+diesel::joinable!(events -> memberships (created_by));
 diesel::joinable!(event_roles -> events (event_id));
 diesel::joinable!(event_roles -> roles (role_id));
 diesel::joinable!(signup_options -> events (event_id));
 diesel::joinable!(signups -> events (event_id));
 diesel::joinable!(signups -> signup_options (option_id));
-diesel::joinable!(signups -> users (user_id));
+diesel::joinable!(signups -> memberships (membership_id));
 diesel::joinable!(reminders -> events (event_id));
 diesel::joinable!(threads -> events (event_id));
 diesel::joinable!(applied_access -> events (event_id));
 diesel::joinable!(thread_members -> events (event_id));
-diesel::joinable!(thread_members -> users (user_id));
+diesel::joinable!(thread_members -> memberships (membership_id));
 diesel::joinable!(thread_messages -> events (event_id));
 diesel::joinable!(role_grants -> events (event_id));
-diesel::joinable!(role_grants -> users (user_id));
+diesel::joinable!(role_grants -> memberships (membership_id));
 diesel::joinable!(role_grants -> roles (role_id));
 diesel::joinable!(presets -> guilds (guild_id));
 diesel::joinable!(option_library -> guilds (guild_id));
@@ -433,13 +444,14 @@ diesel::joinable!(command_log -> guilds (guild_id));
 diesel::joinable!(web_session_guilds -> web_sessions (token));
 diesel::joinable!(routines -> guilds (guild_id));
 diesel::joinable!(routines -> event_templates (template_id));
-diesel::joinable!(routines -> users (created_by));
+diesel::joinable!(routines -> memberships (created_by));
 diesel::joinable!(routine_runs -> routines (routine_id));
 diesel::joinable!(routine_runs -> events (event_id));
 diesel::joinable!(routine_votes -> routine_runs (run_id));
-diesel::joinable!(routine_votes -> users (user_id));
+diesel::joinable!(routine_votes -> memberships (membership_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    users,
     activity,
     applied_access,
     calendar_feeds,
@@ -469,8 +481,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     thread_members,
     thread_messages,
     threads,
-    user_roles,
-    users,
+    membership_roles,
+    memberships,
     web_session_guilds,
     web_sessions,
 );

@@ -22,30 +22,30 @@ pub const HELP: &str = "\
 The other commands are explained at /help.
 ";
 
-pub fn execute(conn: &mut Connection, guild_id: i64, user_id: i64, line: &str) -> String {
+pub fn execute(conn: &mut Connection, guild_id: i64, membership_id: i64, line: &str) -> String {
     let line = line.trim();
     let reply = if line.is_empty() {
         "Type /help to see the command desk.".to_string()
     } else if !line.starts_with('/') {
-        match desk_answer(conn, user_id, line) {
+        match desk_answer(conn, membership_id, line) {
             Ok(Some(text)) => text,
-            Ok(None) => match dispatch(conn, guild_id, user_id, line) {
+            Ok(None) => match dispatch(conn, guild_id, membership_id, line) {
                 Ok(text) => text,
                 Err(err) => err.to_string(),
             },
             Err(err) => err.to_string(),
         }
     } else {
-        match dispatch(conn, guild_id, user_id, line) {
+        match dispatch(conn, guild_id, membership_id, line) {
             Ok(text) => text,
             Err(err) => err.to_string(),
         }
     };
-    let _ = logic::record_command(conn, guild_id, user_id, line, &reply);
+    let _ = logic::record_command(conn, guild_id, membership_id, line, &reply);
     reply
 }
 
-fn event_path(guild: &store::Guild, public_id: &str) -> String {
+fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String {
     match guild.discord_id.as_deref().filter(|id| !id.is_empty()) {
         Some(server) => format!("/servers/{server}/events/{public_id}"),
         None => format!("/events/{public_id}"),
@@ -53,8 +53,8 @@ fn event_path(guild: &store::Guild, public_id: &str) -> String {
 }
 
 fn find_event(conn: &mut Connection, guild_id: i64, token: &str) -> Result<Event, OpError> {
-    if let Some(public_id) = crate::ids::parse_event_id(token) {
-        if let Some(event) = store::event_by_public(conn, public_id)? {
+    if crate::ids::parse_event_id(token).is_some() {
+        if let Some(event) = store::event_by_public(conn, token)? {
             if event.guild_id == guild_id {
                 return Ok(event);
             }
@@ -103,7 +103,7 @@ pub fn channel_posts_waiting(
     conn: &mut Connection,
     discord_user_id: &str,
 ) -> Result<Vec<i64>, OpError> {
-    let raw: Option<String> = schema::event_prompts::table
+    let raw: Option<serde_json::Value> = schema::event_prompts::table
         .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
         .filter(schema::event_prompts::step.eq("next"))
         .select(schema::event_prompts::draft.assume_not_null())
@@ -112,7 +112,7 @@ pub fn channel_posts_waiting(
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
-    let draft = serde_json::from_str::<EventDraft>(&raw).unwrap_or_default();
+    let draft = serde_json::from_value::<EventDraft>(raw).unwrap_or_default();
     let Some(id) = draft.event_id else {
         return Ok(Vec::new());
     };
@@ -129,31 +129,47 @@ pub fn channel_posts_waiting(
 fn dispatch(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     line: &str,
 ) -> Result<String, OpError> {
     let (cmd, rest) = split_cmd(line);
     let (pos, map) = fields(rest);
     match cmd {
         "help" | "" => Ok(HELP.to_string()),
-        "event" => cmd_event(conn, guild_id, user_id, rest),
-        "edit" => cmd_edit(conn, guild_id, user_id, &pos, &map),
-        "reminders" => cmd_reminders(conn, user_id, &pos, &map),
-        "response" => cmd_response(conn, user_id, &pos, &map),
-        "settings" => cmd_settings(conn, guild_id, user_id, &pos, &map),
-        "signup_options" => cmd_signup_options(conn, guild_id, user_id, &pos, &map),
-        "signup_presets" => cmd_presets(conn, guild_id, user_id, &pos, &map),
-        "channel" => cmd_channel(conn, guild_id, user_id, &pos, &map),
-        "google" => cmd_google(conn, guild_id, user_id, &pos, &map),
+        "event" => cmd_event(conn, guild_id, membership_id, rest),
+        "edit" => cmd_edit(conn, guild_id, membership_id, &pos, &map),
+        "reminders" => cmd_reminders(conn, membership_id, &pos, &map),
+        "response" => cmd_response(conn, membership_id, &pos, &map),
+        "settings" => cmd_settings(conn, guild_id, membership_id, &pos, &map),
+        "signup_options" => cmd_signup_options(conn, guild_id, membership_id, &pos, &map),
+        "signup_presets" => cmd_presets(conn, guild_id, membership_id, &pos, &map),
+        "channel" => cmd_channel(conn, guild_id, membership_id, &pos, &map),
+        "google" => cmd_google(conn, guild_id, membership_id, &pos, &map),
         "sort" => Ok("Events are already in chronological order. Discord posts are refreshed in that same order when Marian syncs them.".into()),
         other => Err(OpError::message(format!("Unknown command /{other}. Try /help."))),
     }
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::event_prompts)]
+#[diesel(treat_none_as_default_value = false)]
+struct NewEventPrompt<'a> {
+    discord_user_id: &'a str,
+    guild_id: i64,
+    membership_id: i64,
+    step: &'a str,
+    title: Option<&'a str>,
+    start_raw: Option<&'a str>,
+    channel_name: Option<&'a str>,
+    source_channel: Option<&'a str>,
+    source_discord: Option<&'a str>,
+    draft: Option<serde_json::Value>,
+}
+
 fn cmd_event(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     rest: &str,
 ) -> Result<String, OpError> {
     if !rest.trim().is_empty() {
@@ -166,47 +182,43 @@ fn cmd_event(
             "Create a channel before posting an event.",
         ));
     }
-    let discord_user_id = prompt_key(conn, user_id)?;
+    let discord_user_id = prompt_key(conn, membership_id)?;
     diesel::insert_into(schema::event_prompts::table)
-        .values((
-            schema::event_prompts::discord_user_id.eq(&discord_user_id),
-            schema::event_prompts::guild_id.eq(guild_id),
-            schema::event_prompts::user_id.eq(user_id),
-            schema::event_prompts::step.eq("channel"),
-            schema::event_prompts::title.eq(None::<&str>),
-            schema::event_prompts::start_raw.eq(None::<&str>),
-            schema::event_prompts::channel_name.eq(None::<&str>),
-            schema::event_prompts::source_channel.eq(None::<&str>),
-            schema::event_prompts::source_discord.eq(None::<&str>),
-            schema::event_prompts::draft.eq(None::<&str>),
-        ))
+        .values(&NewEventPrompt {
+            discord_user_id: &discord_user_id,
+            guild_id,
+            membership_id,
+            step: "channel",
+            title: None,
+            start_raw: None,
+            channel_name: None,
+            source_channel: None,
+            source_discord: None,
+            draft: None,
+        })
         .on_conflict(schema::event_prompts::discord_user_id)
         .do_update()
         .set((
             schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
-            schema::event_prompts::user_id.eq(excluded(schema::event_prompts::user_id)),
+            schema::event_prompts::membership_id.eq(excluded(schema::event_prompts::membership_id)),
             schema::event_prompts::step.eq("channel"),
             schema::event_prompts::title.eq(None::<&str>),
             schema::event_prompts::start_raw.eq(None::<&str>),
             schema::event_prompts::channel_name.eq(None::<&str>),
             schema::event_prompts::source_channel.eq(None::<&str>),
             schema::event_prompts::source_discord.eq(None::<&str>),
-            schema::event_prompts::draft.eq(None::<&str>),
+            schema::event_prompts::draft.eq(None::<serde_json::Value>),
         ))
         .execute(conn)?;
     Ok(where_to_post(conn, guild_id, &None, &None)?.to_string())
 }
 
-fn prompt_key(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
-    let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
-    Ok(user
-        .discord_id
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| format!("user:{user_id}")))
+fn prompt_key(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
+    store::discord_id_for_membership(conn, membership_id)
 }
 
-fn desk_answer(conn: &mut Connection, user_id: i64, line: &str) -> Result<Option<String>, OpError> {
-    let key = prompt_key(conn, user_id)?;
+fn desk_answer(conn: &mut Connection, membership_id: i64, line: &str) -> Result<Option<String>, OpError> {
+    let key = prompt_key(conn, membership_id)?;
     let Some(replies) = answer_event_dm(conn, &key, line, "")? else {
         return Ok(None);
     };
@@ -253,7 +265,7 @@ impl std::fmt::Display for DmReply {
 pub fn start_event_dm(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     discord_user_id: &str,
     source_channel: &str,
     source_discord: Option<&str>,
@@ -270,23 +282,23 @@ pub fn start_event_dm(
         ));
     }
     diesel::insert_into(schema::event_prompts::table)
-        .values((
-            schema::event_prompts::discord_user_id.eq(discord_user_id),
-            schema::event_prompts::guild_id.eq(guild_id),
-            schema::event_prompts::user_id.eq(user_id),
-            schema::event_prompts::step.eq("channel"),
-            schema::event_prompts::title.eq(None::<&str>),
-            schema::event_prompts::start_raw.eq(None::<&str>),
-            schema::event_prompts::channel_name.eq(None::<&str>),
-            schema::event_prompts::source_channel.eq(source_channel),
-            schema::event_prompts::source_discord.eq(source_discord),
-            schema::event_prompts::draft.eq(None::<&str>),
-        ))
+        .values(&NewEventPrompt {
+            discord_user_id,
+            guild_id,
+            membership_id,
+            step: "channel",
+            title: None,
+            start_raw: None,
+            channel_name: None,
+            source_channel: Some(source_channel),
+            source_discord,
+            draft: None,
+        })
         .on_conflict(schema::event_prompts::discord_user_id)
         .do_update()
         .set((
             schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
-            schema::event_prompts::user_id.eq(excluded(schema::event_prompts::user_id)),
+            schema::event_prompts::membership_id.eq(excluded(schema::event_prompts::membership_id)),
             schema::event_prompts::step.eq("channel"),
             schema::event_prompts::title.eq(None::<&str>),
             schema::event_prompts::start_raw.eq(None::<&str>),
@@ -295,7 +307,7 @@ pub fn start_event_dm(
                 .eq(excluded(schema::event_prompts::source_channel)),
             schema::event_prompts::source_discord
                 .eq(excluded(schema::event_prompts::source_discord)),
-            schema::event_prompts::draft.eq(None::<&str>),
+            schema::event_prompts::draft.eq(None::<serde_json::Value>),
         ))
         .execute(conn)?;
     let source = Some(source_channel.to_string());
@@ -322,7 +334,7 @@ pub fn answer_event_dm(
         .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
         .select((
             schema::event_prompts::guild_id,
-            schema::event_prompts::user_id,
+            schema::event_prompts::membership_id,
             schema::event_prompts::step,
             schema::event_prompts::title,
             schema::event_prompts::start_raw,
@@ -336,7 +348,7 @@ pub fn answer_event_dm(
         .map(
             |(
                 guild_id,
-                user_id,
+                membership_id,
                 step,
                 title,
                 start_raw,
@@ -346,7 +358,7 @@ pub fn answer_event_dm(
                 draft,
             )| EventPrompt {
                 guild_id,
-                user_id,
+                membership_id,
                 step,
                 title,
                 start_raw,
@@ -361,7 +373,7 @@ pub fn answer_event_dm(
     };
     let EventPrompt {
         guild_id,
-        user_id,
+        membership_id,
         step,
         title,
         start_raw,
@@ -371,8 +383,7 @@ pub fn answer_event_dm(
         draft,
     } = prompt;
     let mut draft = draft
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<EventDraft>(raw).ok())
+        .and_then(|raw| serde_json::from_value::<EventDraft>(raw).ok())
         .unwrap_or_default();
     let text = text.trim();
     if text.eq_ignore_ascii_case("cancel") {
@@ -504,7 +515,7 @@ pub fn answer_event_dm(
             conn,
             discord_user_id,
             guild_id,
-            user_id,
+            membership_id,
             text,
             title.as_deref(),
             start_raw.as_deref(),
@@ -551,7 +562,7 @@ pub fn answer_event_dm(
             let Some(preset) = choice.and_then(|n| presets.get(n - 1)) else {
                 return just(preset_card(&presets));
             };
-            if let Ok(body) = serde_json::from_str::<PresetBody>(&preset.body) {
+            if let Ok(body) = serde_json::from_value::<PresetBody>(preset.body.clone()) {
                 draft.multiple = body.multiple_signups;
                 draft.options = body.options;
             }
@@ -622,8 +633,8 @@ pub fn answer_event_dm(
             save_draft(conn, discord_user_id, "finish", &draft)?;
             just(finish_card(&draft))
         }
-        "next" => answer_next(conn, discord_user_id, user_id, text, &draft, public_url),
-        "respond" => answer_respond(conn, discord_user_id, user_id, text, &draft),
+        "next" => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url),
+        "respond" => answer_respond(conn, discord_user_id, membership_id, text, &draft),
         _ => {
             cancel_event_dm(conn, discord_user_id)?;
             Ok(None)
@@ -633,14 +644,14 @@ pub fn answer_event_dm(
 
 struct EventPrompt {
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     step: String,
     title: Option<String>,
     start_raw: Option<String>,
     channel_name: Option<String>,
     source_channel: Option<String>,
     source_discord: Option<String>,
-    draft: Option<String>,
+    draft: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -873,7 +884,7 @@ fn save_draft(
     step: &str,
     draft: &EventDraft,
 ) -> Result<(), OpError> {
-    let json = serde_json::to_string(draft)
+    let json = serde_json::to_value(draft)
         .map_err(|err| OpError::message(format!("Could not keep the draft: {err}")))?;
     diesel::update(
         schema::event_prompts::table
@@ -955,7 +966,7 @@ fn answer_finish(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     text: &str,
     title: Option<&str>,
     start_raw: Option<&str>,
@@ -969,7 +980,7 @@ fn answer_finish(
                 conn,
                 discord_user_id,
                 guild_id,
-                user_id,
+                membership_id,
                 title,
                 start_raw,
                 channel_name,
@@ -1221,7 +1232,7 @@ fn finish_event(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     title: Option<&str>,
     start_raw: Option<&str>,
     channel_name: Option<&str>,
@@ -1268,7 +1279,7 @@ fn finish_event(
         EventInput {
             id: None,
             guild_id,
-            actor_id: user_id,
+            actor_id: membership_id,
             channel_id: channel.id,
             title: title.unwrap_or("Event").to_string(),
             description: draft.description.clone(),
@@ -1314,7 +1325,7 @@ fn finish_event(
 fn answer_next(
     conn: &mut Connection,
     discord_user_id: &str,
-    user_id: i64,
+    membership_id: i64,
     text: &str,
     draft: &EventDraft,
     public_url: &str,
@@ -1345,7 +1356,8 @@ fn answer_next(
         }
         "3" => {
             save_draft(conn, discord_user_id, "respond", draft)?;
-            let options = store::options_for(conn, event_id)?;
+            let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
+            let options = store::options_for(conn, &event)?;
             let lines = options
                 .iter()
                 .map(|opt| format!("{} {}", opt.emoji, opt.name))
@@ -1353,7 +1365,7 @@ fn answer_next(
             just(numbered_prompt("Add a response", &lines))
         }
         "4" => {
-            let id = logic::duplicate_event(conn, event_id, user_id)?;
+            let id = logic::duplicate_event(conn, event_id, membership_id)?;
             just(next_card(Some(&format!(
                 "Duplicated it. The copy is event {id}, one week later."
             ))))
@@ -1365,7 +1377,7 @@ fn answer_next(
 fn answer_respond(
     conn: &mut Connection,
     discord_user_id: &str,
-    user_id: i64,
+    membership_id: i64,
     text: &str,
     draft: &EventDraft,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
@@ -1373,7 +1385,8 @@ fn answer_respond(
         cancel_event_dm(conn, discord_user_id)?;
         return Ok(None);
     };
-    let options = store::options_for(conn, event_id)?;
+    let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
+    let options = store::options_for(conn, &event)?;
     let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
     let Some(option) = choice.and_then(|n| options.get(n - 1)) else {
         let lines = options
@@ -1382,7 +1395,7 @@ fn answer_respond(
             .collect::<Vec<_>>();
         return just(numbered_prompt("Add a response", &lines));
     };
-    let reply = logic::signup(conn, event_id, option.id, user_id)?;
+    let reply = logic::signup(conn, event_id, option.id, membership_id)?;
     save_draft(conn, discord_user_id, "next", draft)?;
     just(next_card(Some(&reply)))
 }
@@ -1533,7 +1546,7 @@ pub struct EditChange {
 pub fn edit_event(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     change: EditChange,
 ) -> Result<String, OpError> {
     if change.title.is_none()
@@ -1549,7 +1562,7 @@ pub fn edit_event(
     let event = find_event(conn, guild_id, &change.event)?;
     let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
-    let mut input = input_from(conn, &event, user_id)?;
+    let mut input = input_from(conn, &event, membership_id)?;
     if let Some(title) = change.title {
         input.title = title;
     }
@@ -1582,7 +1595,7 @@ pub fn edit_event(
 fn cmd_edit(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
@@ -1594,7 +1607,7 @@ fn cmd_edit(
     edit_event(
         conn,
         guild_id,
-        user_id,
+        membership_id,
         EditChange {
             event,
             title: map.get("title").cloned(),
@@ -1608,13 +1621,13 @@ fn cmd_edit(
 
 pub fn set_reminders(
     conn: &mut Connection,
-    user_id: i64,
+    membership_id: i64,
     enabled: Option<bool>,
 ) -> Result<String, OpError> {
     match enabled {
-        Some(value) => logic::set_user_reminders(conn, user_id, value),
+        Some(value) => logic::set_user_reminders(conn, membership_id, value),
         None => {
-            let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
+            let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
             Ok(if user.reminders_enabled {
                 format!("{} gets reminders.", user.name)
             } else {
@@ -1626,7 +1639,7 @@ pub fn set_reminders(
 
 fn cmd_reminders(
     conn: &mut Connection,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
@@ -1640,7 +1653,7 @@ fn cmd_reminders(
         "on" | "yes" | "true" => Some(true),
         _ => None,
     };
-    set_reminders(conn, user_id, enabled)
+    set_reminders(conn, membership_id, enabled)
 }
 
 fn cmd_response(
@@ -1659,13 +1672,13 @@ fn cmd_response(
         .or_else(|| pos.get(1))
         .map(String::as_str)
         .ok_or_else(|| OpError::message("Name the event id."))?;
-    let actor = store::user(conn, actor_id)?.ok_or(OpError::NotFound)?;
+    let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let handle = map
         .get("user")
         .cloned()
         .or_else(|| pos.get(2).cloned())
         .ok_or_else(|| OpError::message("Name the person by handle."))?;
-    let user = store::user_by_handle(conn, actor.guild_id, &handle)?
+    let user = store::membership_by_handle(conn, actor.guild_id, &handle)?
         .ok_or_else(|| OpError::message(format!("Nobody here goes by {handle}.")))?;
     let option_name = map
         .get("option")
@@ -1694,9 +1707,7 @@ pub fn response_events(
         if event.status != "posted" {
             continue;
         }
-        let Ok(start) = clock::parse_stamp(&event.starts_at) else {
-            continue;
-        };
+        let start = event.starts_at;
         let end = start + Duration::minutes(event.duration_minutes);
         if end < now {
             continue;
@@ -1708,13 +1719,13 @@ pub fn response_events(
         if !needle.is_empty()
             && !event.title.to_lowercase().contains(&needle)
             && !label.to_lowercase().contains(&needle)
-            && event.public_id != typed
+            && event.public_id.to_string() != typed
         {
             continue;
         }
         choices.push(Choice {
             label,
-            value: event.public_id,
+            value: event.public_id.to_string(),
         });
         if choices.len() == 25 {
             break;
@@ -1735,7 +1746,7 @@ pub fn response_options(
     };
     let needle = partial.trim().to_lowercase();
     let mut choices = Vec::new();
-    for opt in store::options_for(conn, event.id)? {
+    for opt in store::options_for(conn, &event)? {
         let label = option_menu_label(&opt.emoji, &opt.name);
         if !needle.is_empty()
             && !opt.name.to_lowercase().contains(&needle)
@@ -1763,19 +1774,19 @@ pub fn roster_action(
     option_token: &str,
     action: &str,
 ) -> Result<(String, i64), OpError> {
-    let actor = store::user(conn, actor_id)?.ok_or(OpError::NotFound)?;
+    let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let event = find_event(conn, actor.guild_id, event_token)?;
-    let option = resolve_option(conn, event.id, option_token)?;
+    let option = resolve_option(conn, &event, option_token)?;
     let notice = logic::organizer_response(conn, event.id, actor_id, target_id, option.id, action)?;
     Ok((notice, event.id))
 }
 
 fn resolve_option(
     conn: &mut Connection,
-    event_id: i64,
+    event: &Event,
     token: &str,
 ) -> Result<store::SignupOption, OpError> {
-    let options = store::options_for(conn, event_id)?;
+    let options = store::options_for(conn, event)?;
     if let Some(opt) = options
         .iter()
         .find(|opt| opt.name.eq_ignore_ascii_case(token))
@@ -1853,7 +1864,6 @@ pub enum Setting {
     ThreadReminders(bool),
     ShowAttendees(bool),
     TempRoles(bool),
-    ParkClock(bool),
     Digest(String),
     PostLeadHours(i64),
     Role { which: String, name: String },
@@ -1862,10 +1872,10 @@ pub enum Setting {
 pub fn apply_setting(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     setting: Setting,
 ) -> Result<String, OpError> {
-    require_organizer(conn, user_id)?;
+    require_organizer(conn, membership_id)?;
     let mut settings = store::settings(conn, guild_id)?;
     let key = match setting {
         Setting::ReminderInterval(minutes) => {
@@ -1912,10 +1922,6 @@ pub fn apply_setting(
             settings.temp_roles = enabled;
             "temp_roles"
         }
-        Setting::ParkClock(enabled) => {
-            settings.park_clock = enabled;
-            "park_clock"
-        }
         Setting::Digest(value) => {
             if !matches!(value.as_str(), "off" | "daily" | "weekly") {
                 return Err(OpError::message("Digest can be off, daily, or weekly."));
@@ -1955,11 +1961,11 @@ pub fn apply_setting(
 fn cmd_settings(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
-    require_organizer(conn, user_id)?;
+    require_organizer(conn, membership_id)?;
     let key = map
         .keys()
         .next()
@@ -1992,7 +1998,6 @@ fn cmd_settings(
         "thread_reminders" => Setting::ThreadReminders(on(&value)?),
         "show_attendees" => Setting::ShowAttendees(on(&value)?),
         "temp_roles" => Setting::TempRoles(on(&value)?),
-        "park_clock" => Setting::ParkClock(on(&value)?),
         "digest" => Setting::Digest(value),
         "post_lead" => Setting::PostLeadHours(
             value
@@ -2005,7 +2010,7 @@ fn cmd_settings(
         },
         other => return Err(OpError::message(format!("Unknown setting {other}."))),
     };
-    apply_setting(conn, guild_id, user_id, setting)
+    apply_setting(conn, guild_id, membership_id, setting)
 }
 
 pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
@@ -2023,7 +2028,7 @@ pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpEr
 pub fn add_library_option(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     name: &str,
     emoji: &str,
 ) -> Result<String, OpError> {
@@ -2032,24 +2037,24 @@ pub fn add_library_option(
     } else {
         emoji
     };
-    logic::library_add(conn, guild_id, user_id, name, emoji)?;
+    logic::library_add(conn, guild_id, membership_id, name, emoji)?;
     Ok(format!("Saved {emoji} {name} in the option library."))
 }
 
 pub fn remove_library_option(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     name: &str,
 ) -> Result<String, OpError> {
-    logic::library_remove(conn, guild_id, user_id, name)?;
+    logic::library_remove(conn, guild_id, membership_id, name)?;
     Ok(format!("Removed {name} from the library."))
 }
 
 fn cmd_signup_options(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
@@ -2063,7 +2068,7 @@ fn cmd_signup_options(
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the option."))?;
             let emoji = map.get("emoji").cloned().unwrap_or_else(|| "•".into());
-            add_library_option(conn, guild_id, user_id, &name, &emoji)
+            add_library_option(conn, guild_id, membership_id, &name, &emoji)
         }
         "remove" => {
             let name = map
@@ -2071,7 +2076,7 @@ fn cmd_signup_options(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            remove_library_option(conn, guild_id, user_id, &name)
+            remove_library_option(conn, guild_id, membership_id, &name)
         }
         _ => library_text(conn, guild_id),
     }
@@ -2092,7 +2097,7 @@ pub fn preset_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpErr
 pub fn add_preset(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     name: &str,
     options: &str,
 ) -> Result<String, OpError> {
@@ -2113,7 +2118,7 @@ pub fn add_preset(
     logic::save_preset(
         conn,
         guild_id,
-        user_id,
+        membership_id,
         name,
         &PresetBody {
             multiple_signups: false,
@@ -2126,14 +2131,14 @@ pub fn add_preset(
 pub fn remove_preset(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     name: &str,
 ) -> Result<String, OpError> {
     if let Some(preset) = store::list_presets(conn, guild_id)?
         .into_iter()
         .find(|preset| preset.name.eq_ignore_ascii_case(name))
     {
-        logic::delete_preset(conn, preset.id, user_id)?;
+        logic::delete_preset(conn, preset.id, membership_id)?;
     }
     Ok(format!("Removed {name}."))
 }
@@ -2141,7 +2146,7 @@ pub fn remove_preset(
 fn cmd_presets(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
@@ -2154,7 +2159,7 @@ fn cmd_presets(
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the preset."))?;
             let raw = map.get("options").cloned().unwrap_or_default();
-            add_preset(conn, guild_id, user_id, &name, &raw)
+            add_preset(conn, guild_id, membership_id, &name, &raw)
         }
         "remove" => {
             let name = map
@@ -2162,7 +2167,7 @@ fn cmd_presets(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            remove_preset(conn, guild_id, user_id, &name)
+            remove_preset(conn, guild_id, membership_id, &name)
         }
         _ => preset_text(conn, guild_id),
     }
@@ -2171,11 +2176,11 @@ fn cmd_presets(
 pub fn create_named_channel(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     name: &str,
     kind: &str,
 ) -> Result<String, OpError> {
-    let id = logic::create_channel(conn, guild_id, user_id, name, kind)?;
+    let id = logic::create_channel(conn, guild_id, membership_id, name, kind)?;
     let channel = store::channel(conn, id)?.ok_or(OpError::NotFound)?;
     Ok(format!("Created #{}.", channel.name))
 }
@@ -2183,7 +2188,7 @@ pub fn create_named_channel(
 fn cmd_channel(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
@@ -2193,7 +2198,7 @@ fn cmd_channel(
         .or_else(|| pos.first().cloned())
         .ok_or_else(|| OpError::message("Name the channel."))?;
     let kind = map.get("kind").cloned().unwrap_or_else(|| "text".into());
-    create_named_channel(conn, guild_id, user_id, &name, &kind)
+    create_named_channel(conn, guild_id, membership_id, &name, &kind)
 }
 
 fn public_base() -> String {
@@ -2204,14 +2209,17 @@ fn public_base() -> String {
         .to_string()
 }
 
-fn person_discord_id(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
-    let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
-    user.discord_id.ok_or_else(|| {
-        OpError::message("Marian needs your Discord account before it can connect Google Calendar.")
-    })
+fn person_user_id(conn: &mut Connection, membership_id: i64) -> Result<i64, OpError> {
+    store::membership(conn, membership_id)?
+        .map(|membership| membership.user_id)
+        .ok_or_else(|| {
+            OpError::message(
+                "Marian needs your Discord account before it can connect Google Calendar.",
+            )
+        })
 }
 
-pub fn google_sign_in_url(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
     if !crate::google::configured_from_env() {
         return Err(OpError::message("Google Calendar is not configured yet."));
     }
@@ -2221,8 +2229,8 @@ pub fn google_sign_in_url(conn: &mut Connection, user_id: i64) -> Result<String,
             "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
         ));
     }
-    let discord_id = person_discord_id(conn, user_id)?;
-    let state = crate::google::begin_link(conn, &discord_id)?;
+    let user_id = person_user_id(conn, membership_id)?;
+    let state = crate::google::begin_link(conn, user_id)?;
     let Some(url) = crate::google::connect_url(&base, &state) else {
         return Err(OpError::message(
             "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
@@ -2237,8 +2245,8 @@ pub fn google_sign_in_url(conn: &mut Connection, user_id: i64) -> Result<String,
     Ok(url)
 }
 
-pub fn google_authorize(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
-    let url = google_sign_in_url(conn, user_id)?;
+pub fn google_authorize(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
+    let url = google_sign_in_url(conn, membership_id)?;
     Ok(format!(
         "Click the button below to connect Google Calendar.\n{url}"
     ))
@@ -2247,11 +2255,11 @@ pub fn google_authorize(conn: &mut Connection, user_id: i64) -> Result<String, O
 pub fn google_auto_sync(
     conn: &mut Connection,
     _guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     enabled: bool,
 ) -> Result<String, OpError> {
-    let discord_id = person_discord_id(conn, user_id)?;
-    crate::google::set_auto_sync(conn, &discord_id, enabled)?;
+    let user_id = person_user_id(conn, membership_id)?;
+    crate::google::set_auto_sync(conn, user_id, enabled)?;
     Ok(if enabled {
         "Marian will keep your Google Calendar updated.".into()
     } else {
@@ -2262,10 +2270,10 @@ pub fn google_auto_sync(
 pub fn google_revoke(
     conn: &mut Connection,
     _guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
 ) -> Result<String, OpError> {
-    let discord_id = person_discord_id(conn, user_id)?;
-    if !crate::google::queue_revoke(conn, &discord_id)? {
+    let user_id = person_user_id(conn, membership_id)?;
+    if !crate::google::queue_revoke(conn, user_id)? {
         return Ok("Google Calendar is already disconnected.".into());
     }
     Ok("Google Calendar will be disconnected, and Marian will remove the events it added.".into())
@@ -2274,7 +2282,7 @@ pub fn google_revoke(
 pub fn google_sync(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     event: &str,
 ) -> Result<String, OpError> {
     let event = find_event(conn, guild_id, event)?;
@@ -2283,8 +2291,8 @@ pub fn google_sync(
             "Post or schedule the event before syncing it.",
         ));
     }
-    let discord_id = person_discord_id(conn, user_id)?;
-    crate::google::queue_event(conn, &discord_id, event.id)?;
+    let user_id = person_user_id(conn, membership_id)?;
+    crate::google::queue_event(conn, user_id, event.id)?;
     Ok(format!(
         "Marian will add {} to your Google Calendar.",
         event.title
@@ -2294,37 +2302,37 @@ pub fn google_sync(
 fn cmd_google(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
     let action = pos.first().map(String::as_str).unwrap_or("authorize");
     match action {
-        "authorize" => google_authorize(conn, user_id),
+        "authorize" => google_authorize(conn, membership_id),
         "auto_sync" => {
             let value = map
                 .get("state")
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_else(|| "on".into());
-            google_auto_sync(conn, guild_id, user_id, on(&value)?)
+            google_auto_sync(conn, guild_id, membership_id, on(&value)?)
         }
-        "revoke" => google_revoke(conn, guild_id, user_id),
+        "revoke" => google_revoke(conn, guild_id, membership_id),
         "sync" => {
             let token = map
                 .get("event")
                 .map(String::as_str)
                 .or_else(|| pos.get(1).map(String::as_str))
                 .ok_or_else(|| OpError::message("Say which event to sync."))?;
-            google_sync(conn, guild_id, user_id, token)
+            google_sync(conn, guild_id, membership_id, token)
         }
         other => Err(OpError::message(format!("Unknown google command {other}."))),
     }
 }
 
 fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<EventInput, OpError> {
-    let options = store::options_for(conn, event.id)?;
-    let reminders = store::reminders_for(conn, event.id)?;
+    let options = store::options_for(conn, event)?;
+    let reminders = store::reminders_for(conn, event)?;
     Ok(EventInput {
         id: Some(event.id),
         guild_id: event.guild_id,
@@ -2332,21 +2340,17 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
         channel_id: event.channel_id,
         title: event.title.clone(),
         description: event.description.clone(),
-        starts_at: clock::parse_stamp(&event.starts_at)?,
+        starts_at: event.starts_at,
         duration_minutes: event.duration_minutes,
         color: event.color.clone(),
         image_url: event.image_url.clone(),
-        cutoff_at: event
-            .cutoff_at
-            .as_deref()
-            .map(clock::parse_stamp)
-            .transpose()?,
+        cutoff_at: event.cutoff_at,
         attendee_role_id: event.attendee_role_id,
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,
-        mention_role_ids: store::event_role_ids(conn, event.id, "mention")?,
-        restrict_role_ids: store::event_role_ids(conn, event.id, "restrict")?,
+        mention_role_ids: store::event_role_ids(conn, event, "mention")?,
+        restrict_role_ids: store::event_role_ids(conn, event, "restrict")?,
         options: options
             .into_iter()
             .map(|opt| OptionInput {
@@ -2368,11 +2372,7 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
             .collect(),
         repeat: None,
         action: SaveAction::Save,
-        post_at: event
-            .post_at
-            .as_deref()
-            .map(clock::parse_stamp)
-            .transpose()?,
+        post_at: event.post_at,
         apply_series: false,
     })
 }
@@ -2409,8 +2409,8 @@ fn yes_no_maybe() -> Vec<OptionInput> {
     ]
 }
 
-fn require_organizer(conn: &mut Connection, user_id: i64) -> Result<(), OpError> {
-    let user = store::user(conn, user_id)?.ok_or(OpError::NotFound)?;
+fn require_organizer(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
+    let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
     if user.organizer {
         Ok(())
     } else {
@@ -2475,8 +2475,9 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
-            INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
         .unwrap();
@@ -2508,8 +2509,9 @@ mod tests {
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, kind, position, discord_id)
               VALUES (1, 1, 'social', 'text', 0, '99'), (2, 1, 'briefing', 'text', 1, '100');
-            INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
         .unwrap();
@@ -2581,7 +2583,11 @@ mod tests {
         let url = posted_message_url(&mut conn, posts[0]).unwrap().unwrap();
         assert_eq!(url, "https://discord.com/channels/4242/100/555");
         let event = store::event(&mut conn, posts[0]).unwrap().unwrap();
-        assert!(posted[0].body.contains(&event.public_id), "{}", posted[0]);
+        assert!(
+            posted[0].body.contains(&event.public_id.to_string()),
+            "{}",
+            posted[0]
+        );
         assert_eq!(event.channel_id, 2, "the agreed channel");
         assert_eq!(event.status, "posted");
         let view = logic::discord_view(&mut conn, event.id, "https://marian.example.com")

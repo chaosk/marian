@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::access::{can_create, can_edit};
-use super::db::{log, must_channel, must_event, must_role, must_user};
+use super::db::{log, must_channel, must_event, must_role, must_membership};
 use super::model::*;
 use super::series::{apply_series_template, ensure_series, link_new_series, mark_posted};
 use super::signup::{fill_all, sync_access};
@@ -22,7 +22,7 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
             update_event_row(tx, existing.id, &input, &clean, now)?;
             if existing.status == "posted" {
                 update_options_in_place(tx, existing.id, &clean.options)?;
-                replace_reminders(tx, existing.id, &clean.reminders)?;
+                replace_reminders(tx, existing, &clean.reminders)?;
             } else {
                 replace_children(tx, existing.id, &clean.options, &clean.reminders)?;
             }
@@ -57,7 +57,7 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
             }
         }
         if event.status == "posted" {
-            fill_all(tx, id)?;
+            fill_all(tx, &event)?;
             sync_access(tx, id)?;
         }
         Ok(id)
@@ -66,11 +66,11 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
 
 fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, OpError> {
     let settings = store::settings(conn, input.guild_id)?;
-    let actor = must_user(conn, input.actor_id)?;
+    let actor = must_membership(conn, input.actor_id)?;
     if actor.guild_id != input.guild_id {
         return Err(OpError::message("That person isn't in this server."));
     }
-    let roles = store::user_role_ids(conn, actor.id)?;
+    let roles = store::membership_role_ids(conn, &actor)?;
     let existing = if let Some(id) = input.id {
         let event = must_event(conn, id)?;
         if event.guild_id != input.guild_id {
@@ -223,7 +223,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     }
     if let Some(existing) = &existing {
         if existing.status == "posted" {
-            let current = store::options_for(conn, existing.id)?;
+            let current = store::options_for(conn, existing)?;
             let ids: HashSet<i64> = current.iter().map(|opt| opt.id).collect();
             let same = options.len() == current.len()
                 && options
@@ -320,40 +320,83 @@ fn valid_color(color: &str) -> bool {
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::events)]
+#[diesel(treat_none_as_default_value = false)]
+struct NewEvent<'a> {
+    public_id: uuid::Uuid,
+    guild_id: i64,
+    channel_id: i64,
+    title: String,
+    description: String,
+    starts_at: DateTime<Utc>,
+    duration_minutes: i64,
+    status: &'a str,
+    color: &'a str,
+    image_url: Option<&'a str>,
+    cutoff_at: Option<DateTime<Utc>>,
+    mention_everyone: bool,
+    attendee_role_id: Option<i64>,
+    thread_enabled: bool,
+    multiple_signups: bool,
+    created_by: Option<i64>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 fn insert_event_row(
     conn: &mut Connection,
     input: &EventInput,
     clean: &CleanInput,
     now: DateTime<Utc>,
 ) -> Result<i64, OpError> {
-    let stamp = clock::stamp(now);
     let title = template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?;
     let description =
         template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?;
+    let row = NewEvent {
+        public_id: crate::ids::event_id(),
+        guild_id: input.guild_id,
+        channel_id: input.channel_id,
+        title,
+        description,
+        starts_at: input.starts_at,
+        duration_minutes: input.duration_minutes,
+        status: "draft",
+        color: &input.color,
+        image_url: clean.image_url.as_deref(),
+        cutoff_at: input.cutoff_at,
+        mention_everyone: input.mention_everyone,
+        attendee_role_id: input.attendee_role_id,
+        thread_enabled: input.thread_enabled,
+        multiple_signups: input.multiple_signups,
+        created_by: Some(input.actor_id),
+        created_at: now,
+        updated_at: now,
+    };
     let id = diesel::insert_into(schema::events::table)
-        .values((
-            schema::events::public_id.eq(crate::ids::event_id()),
-            schema::events::guild_id.eq(input.guild_id),
-            schema::events::channel_id.eq(input.channel_id),
-            schema::events::title.eq(title),
-            schema::events::description.eq(description),
-            schema::events::starts_at.eq(clock::stamp(input.starts_at)),
-            schema::events::duration_minutes.eq(input.duration_minutes),
-            schema::events::status.eq("draft"),
-            schema::events::color.eq(&input.color),
-            schema::events::image_url.eq(clean.image_url.as_deref()),
-            schema::events::cutoff_at.eq(input.cutoff_at.map(|dt| clock::stamp(dt))),
-            schema::events::mention_everyone.eq(input.mention_everyone),
-            schema::events::attendee_role_id.eq(input.attendee_role_id),
-            schema::events::thread_enabled.eq(input.thread_enabled),
-            schema::events::multiple_signups.eq(input.multiple_signups),
-            schema::events::created_by.eq(input.actor_id),
-            schema::events::created_at.eq(&stamp),
-            schema::events::updated_at.eq(&stamp),
-        ))
+        .values(&row)
         .returning(schema::events::id)
         .get_result(conn)?;
     Ok(id)
+}
+
+#[derive(AsChangeset)]
+#[diesel(table_name = schema::events)]
+#[diesel(treat_none_as_null = true)]
+struct EventEdits<'a> {
+    channel_id: i64,
+    title: String,
+    description: String,
+    starts_at: DateTime<Utc>,
+    duration_minutes: i64,
+    color: &'a str,
+    image_url: Option<&'a str>,
+    cutoff_at: Option<DateTime<Utc>>,
+    mention_everyone: bool,
+    attendee_role_id: Option<i64>,
+    thread_enabled: bool,
+    multiple_signups: bool,
+    updated_at: DateTime<Utc>,
 }
 
 fn update_event_row(
@@ -366,22 +409,23 @@ fn update_event_row(
     let title = template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?;
     let description =
         template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?;
+    let edits = EventEdits {
+        channel_id: input.channel_id,
+        title,
+        description,
+        starts_at: input.starts_at,
+        duration_minutes: input.duration_minutes,
+        color: &input.color,
+        image_url: clean.image_url.as_deref(),
+        cutoff_at: input.cutoff_at,
+        mention_everyone: input.mention_everyone,
+        attendee_role_id: input.attendee_role_id,
+        thread_enabled: input.thread_enabled,
+        multiple_signups: input.multiple_signups,
+        updated_at: now,
+    };
     diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
-        .set((
-            schema::events::channel_id.eq(input.channel_id),
-            schema::events::title.eq(title),
-            schema::events::description.eq(description),
-            schema::events::starts_at.eq(clock::stamp(input.starts_at)),
-            schema::events::duration_minutes.eq(input.duration_minutes),
-            schema::events::color.eq(&input.color),
-            schema::events::image_url.eq(clean.image_url.as_deref()),
-            schema::events::cutoff_at.eq(input.cutoff_at.map(|dt| clock::stamp(dt))),
-            schema::events::mention_everyone.eq(input.mention_everyone),
-            schema::events::attendee_role_id.eq(input.attendee_role_id),
-            schema::events::thread_enabled.eq(input.thread_enabled),
-            schema::events::multiple_signups.eq(input.multiple_signups),
-            schema::events::updated_at.eq(clock::stamp(now)),
-        ))
+        .set(&edits)
         .execute(conn)?;
     Ok(())
 }
@@ -435,14 +479,28 @@ fn update_options_in_place(
 
 fn replace_reminders(
     conn: &mut Connection,
-    event_id: i64,
+    event: &store::Event,
     reminders: &[ReminderInput],
 ) -> Result<(), OpError> {
-    let old = store::reminders_for(conn, event_id)?;
-    diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(event_id)))
+    let old = store::reminders_for(conn, event)?;
+    diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(event.id)))
         .execute(conn)?;
-    insert_reminders(conn, event_id, reminders, &old)?;
+    insert_reminders(conn, event.id, reminders, &old)?;
     Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::signup_options)]
+#[diesel(treat_none_as_default_value = false)]
+struct NewSignupOption<'a> {
+    event_id: i64,
+    name: &'a str,
+    emoji: &'a str,
+    capacity: Option<i64>,
+    waitlist: bool,
+    role_id: Option<i64>,
+    reminders_enabled: bool,
+    position: i64,
 }
 
 fn insert_options(
@@ -450,21 +508,37 @@ fn insert_options(
     event_id: i64,
     options: &[OptionInput],
 ) -> Result<(), OpError> {
-    for (index, opt) in options.iter().enumerate() {
-        diesel::insert_into(schema::signup_options::table)
-            .values((
-                schema::signup_options::event_id.eq(event_id),
-                schema::signup_options::name.eq(&opt.name),
-                schema::signup_options::emoji.eq(&opt.emoji),
-                schema::signup_options::capacity.eq(opt.capacity),
-                schema::signup_options::waitlist.eq(opt.waitlist),
-                schema::signup_options::role_id.eq(opt.role_id),
-                schema::signup_options::reminders_enabled.eq(opt.reminders_enabled),
-                schema::signup_options::position.eq(index as i64),
-            ))
-            .execute(conn)?;
+    let rows: Vec<_> = options
+        .iter()
+        .enumerate()
+        .map(|(index, opt)| NewSignupOption {
+            event_id,
+            name: &opt.name,
+            emoji: &opt.emoji,
+            capacity: opt.capacity,
+            waitlist: opt.waitlist,
+            role_id: opt.role_id,
+            reminders_enabled: opt.reminders_enabled,
+            position: index as i64,
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
     }
+    diesel::insert_into(schema::signup_options::table)
+        .values(&rows)
+        .execute(conn)?;
     Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::reminders)]
+#[diesel(treat_none_as_default_value = false)]
+struct NewReminder<'a> {
+    event_id: i64,
+    offset_minutes: i64,
+    message: &'a str,
+    sent_at: Option<DateTime<Utc>>,
 }
 
 fn insert_reminders(
@@ -473,46 +547,82 @@ fn insert_reminders(
     reminders: &[ReminderInput],
     old: &[store::Reminder],
 ) -> Result<(), OpError> {
-    for rem in reminders {
-        let sent = old
-            .iter()
-            .find(|item| item.offset_minutes == rem.offset_minutes && item.message == rem.message)
-            .and_then(|item| item.sent_at.clone());
-        diesel::insert_into(schema::reminders::table)
-            .values((
-                schema::reminders::event_id.eq(event_id),
-                schema::reminders::offset_minutes.eq(rem.offset_minutes),
-                schema::reminders::message.eq(&rem.message),
-                schema::reminders::sent_at.eq(sent),
-            ))
-            .execute(conn)?;
+    let rows: Vec<_> = reminders
+        .iter()
+        .map(|rem| {
+            let sent_at = old
+                .iter()
+                .find(|item| item.offset_minutes == rem.offset_minutes && item.message == rem.message)
+                .and_then(|item| item.sent_at);
+            NewReminder {
+                event_id,
+                offset_minutes: rem.offset_minutes,
+                message: &rem.message,
+                sent_at,
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
     }
+    diesel::insert_into(schema::reminders::table)
+        .values(&rows)
+        .execute(conn)?;
+    Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::event_roles)]
+struct NewEventRole<'a> {
+    event_id: i64,
+    role_id: i64,
+    kind: &'a str,
+}
+
+pub(super) fn insert_event_roles(
+    conn: &mut Connection,
+    event_id: i64,
+    mention_role_ids: &[i64],
+    restrict_role_ids: &[i64],
+) -> Result<(), OpError> {
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    for role_id in mention_role_ids {
+        if seen.insert((*role_id, "mention")) {
+            rows.push(NewEventRole {
+                event_id,
+                role_id: *role_id,
+                kind: "mention",
+            });
+        }
+    }
+    for role_id in restrict_role_ids {
+        if seen.insert((*role_id, "restrict")) {
+            rows.push(NewEventRole {
+                event_id,
+                role_id: *role_id,
+                kind: "restrict",
+            });
+        }
+    }
+    if rows.is_empty() {
+        return Ok(());
+    }
+    diesel::insert_into(schema::event_roles::table)
+        .values(&rows)
+        .execute(conn)?;
     Ok(())
 }
 
 fn replace_roles(conn: &mut Connection, event_id: i64, input: &EventInput) -> Result<(), OpError> {
     diesel::delete(schema::event_roles::table.filter(schema::event_roles::event_id.eq(event_id)))
         .execute(conn)?;
-    for role_id in &input.mention_role_ids {
-        diesel::insert_into(schema::event_roles::table)
-            .values((
-                schema::event_roles::event_id.eq(event_id),
-                schema::event_roles::role_id.eq(role_id),
-                schema::event_roles::kind.eq("mention"),
-            ))
-            .execute(conn)?;
-    }
-    for role_id in &input.restrict_role_ids {
-        diesel::insert_into(schema::event_roles::table)
-            .values((
-                schema::event_roles::event_id.eq(event_id),
-                schema::event_roles::role_id.eq(role_id),
-                schema::event_roles::kind.eq("restrict"),
-            ))
-            .on_conflict_do_nothing()
-            .execute(conn)?;
-    }
-    Ok(())
+    insert_event_roles(
+        conn,
+        event_id,
+        &input.mention_role_ids,
+        &input.restrict_role_ids,
+    )
 }
 
 fn transition(
@@ -522,7 +632,6 @@ fn transition(
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
     let event = must_event(conn, id)?;
-    let stamp = clock::stamp(now);
     match (event.status.as_str(), input.action) {
         ("posted", _) => {
             log(
@@ -546,8 +655,8 @@ fn transition(
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
                     schema::events::status.eq("scheduled"),
-                    schema::events::post_at.eq(clock::stamp(post_at)),
-                    schema::events::updated_at.eq(&stamp),
+                    schema::events::post_at.eq(post_at),
+                    schema::events::updated_at.eq(now),
                 ))
                 .execute(conn)?;
             log(
@@ -561,8 +670,8 @@ fn transition(
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
                     schema::events::status.eq("draft"),
-                    schema::events::post_at.eq(None::<String>),
-                    schema::events::updated_at.eq(&stamp),
+                    schema::events::post_at.eq(None::<DateTime<Utc>>),
+                    schema::events::updated_at.eq(now),
                 ))
                 .execute(conn)?;
         }

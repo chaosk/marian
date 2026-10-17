@@ -102,10 +102,6 @@
       <input type="checkbox" name="calendar_auto_sync" value="1" {% if calendar_auto_sync %}checked{% endif %}>
       <span><strong>Mark new posts on the calendar feed</strong><span class="muted">Each new post is marked on the personal calendar feed.</span></span>
     </label>
-    <label class="setting">
-      <input type="checkbox" name="park_clock" value="1" {% if park_clock %}checked{% endif %}>
-      <span><strong>Park the clock</strong><span class="muted">Every event stays the same distance from now. Use this on a test server.</span></span>
-    </label>
   </div>
   <div class="actions span-2">
     <button class="primary" type="submit" {% if not organizer %}disabled{% endif %}>Save settings</button>

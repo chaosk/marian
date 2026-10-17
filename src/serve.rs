@@ -42,9 +42,10 @@ struct AppState {
 
 struct Session {
     discord_user_id: String,
+    user_id: i64,
     display_name: String,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     allowed: Vec<i64>,
     notice: Option<String>,
 }
@@ -52,7 +53,7 @@ struct Session {
 pub fn run() -> anyhow::Result<()> {
     let _telemetry = crate::observe::init();
 
-    let database_url = store::database_url();
+    let database_url = store::database_url()?;
     let port: u16 = env::var("PORT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -73,8 +74,7 @@ pub fn run() -> anyhow::Result<()> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let mut conn = store::open(&database_url)?;
-    logic::rebase(&mut conn, Utc::now())?;
+    let conn = store::open(&database_url)?;
     let db = Arc::new(Mutex::new(conn));
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -466,7 +466,7 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
 
 struct RoleTarget {
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     guild_discord: String,
     user_discord: String,
 }
@@ -556,7 +556,7 @@ fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option
 
 fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
     let mut db = state.db.lock().expect("database lock");
-    if let Err(err) = store::replace_discord_roles(&mut db, target.guild_id, target.user_id, roles)
+    if let Err(err) = store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles)
     {
         tracing::warn!("could not store Discord roles: {err}");
     }
@@ -587,7 +587,7 @@ fn role_target(conn: &mut Connection, headers: &HeaderMap, server: &str) -> Opti
     .ok()?;
     Some(RoleTarget {
         guild_id: guild.id,
-        user_id: user.id,
+        membership_id: user.id,
         guild_discord: server.to_string(),
         user_discord: session.discord_user_id,
     })
@@ -748,7 +748,7 @@ async fn auth_callback(
             signed_in = Some((guild_id, user.id));
         }
     }
-    let Some((guild_id, user_id)) = signed_in else {
+    let Some((guild_id, membership_id)) = signed_in else {
         return redirect("/", "Marian isn't in a server you belong to yet.");
     };
     let token = match auth::random_token() {
@@ -756,7 +756,7 @@ async fn auth_callback(
         Err(err) => return plain_error(err),
     };
     if let Err(err) =
-        store::insert_web_session(&mut db, &token, &me.id, &name, guild_id, user_id, &allowed)
+        store::insert_web_session(&mut db, &token, &me.id, &name, guild_id, membership_id, &allowed)
     {
         return plain_error(err);
     }
@@ -831,14 +831,14 @@ async fn sync_google(
         }
     };
     for access in revokes {
-        let discord_user_id = access.discord_user_id.clone();
+        let user_id = access.user_id;
         if crate::google::forget_remote(http, client_id, client_secret, access).await {
             let mut guard = db.lock().expect("database lock");
-            if let Err(err) = crate::google::delete_account(&mut guard, &discord_user_id) {
+            if let Err(err) = crate::google::delete_account(&mut guard, user_id) {
                 tracing::warn!("google calendar: {err}");
             }
         } else {
-            tracing::warn!("google calendar disconnect for {discord_user_id} will retry");
+            tracing::warn!("google calendar disconnect for {user_id} will retry");
         }
     }
 }
@@ -868,7 +868,7 @@ async fn google_start(
     };
     let state_token = {
         let mut db = state.db.lock().expect("database lock");
-        match crate::google::begin_link(&mut db, &session.discord_user_id) {
+        match crate::google::begin_link(&mut db, session.user_id) {
             Ok(token) => token,
             Err(err) => return plain_error(err),
         }
@@ -980,12 +980,12 @@ async fn google_callback(
     let Some(redirect_uri) = google_redirect(&state, &headers) else {
         return redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
-    let discord_user_id = {
+    let user_id = {
         let mut db = state.db.lock().expect("database lock");
         match crate::google::claim_oauth(&mut db, &returned) {
-            Ok(Some(discord_user_id)) => {
+            Ok(Some(user_id)) => {
                 let _ = crate::google::finish_oauth(&mut db, &returned);
-                discord_user_id
+                user_id
             }
             Ok(None) => {
                 return redirect(
@@ -1011,7 +1011,7 @@ async fn google_callback(
     let email = crate::google::account_email(&state.http, &access).await;
     {
         let mut db = state.db.lock().expect("database lock");
-        if let Err(err) = crate::google::save_account(&mut db, &discord_user_id, &refresh, &email) {
+        if let Err(err) = crate::google::save_account(&mut db, user_id, &refresh, &email) {
             return plain_error(err);
         }
     }
@@ -1042,7 +1042,7 @@ async fn google_disconnect(
     };
     let access = {
         let mut db = state.db.lock().expect("database lock");
-        match crate::google::remote_access(&mut db, &session.discord_user_id) {
+        match crate::google::remote_access(&mut db, session.user_id) {
             Ok(access) => access,
             Err(err) => return plain_error(err),
         }
@@ -1064,7 +1064,7 @@ async fn google_disconnect(
     };
     {
         let mut db = state.db.lock().expect("database lock");
-        if let Err(err) = crate::google::delete_account(&mut db, &session.discord_user_id) {
+        if let Err(err) = crate::google::delete_account(&mut db, session.user_id) {
             return plain_error(err);
         }
     }
@@ -1406,7 +1406,7 @@ async fn create_routine(
         Ok(input) => logic::create_routine(
             &mut db,
             session.guild_id,
-            session.user_id,
+            session.membership_id,
             input.channel_id,
             &input.title,
             &input.prompt,
@@ -1457,7 +1457,7 @@ async fn update_routine(
         logic::save_routine(
             &mut db,
             id,
-            session.user_id,
+            session.membership_id,
             input.channel_id,
             &input.title,
             &input.prompt,
@@ -1502,10 +1502,10 @@ async fn save_routine_days(
     let result = (|| {
         let id = logic::routine_in_guild(&mut db, session.guild_id, &public_id)?;
         if map.get("scope").map(String::as_str) == Some("usual") {
-            logic::save_usual_days(&mut db, id, session.user_id, &days)
+            logic::save_usual_days(&mut db, id, session.membership_id, &days)
                 .map(|notice| (notice, Vec::new()))
         } else {
-            logic::save_run_days(&mut db, id, session.user_id, &days)
+            logic::save_run_days(&mut db, id, session.membership_id, &days)
                 .map(|effect| (effect.notice, effect.jobs))
         }
     })();
@@ -1548,7 +1548,7 @@ async fn vote_routine(
     let Some(run_id) = run_id else {
         return redirect(&back, "That poll is closed.");
     };
-    match logic::cast_run(&mut db, run_id, session.user_id, day) {
+    match logic::cast_run(&mut db, run_id, session.membership_id, day) {
         Ok(effect) => {
             drop(db);
             for job in effect.jobs {
@@ -1572,7 +1572,7 @@ async fn stop_routine(
         &here(&server, &format!("/routines/{public_id}")),
         move |db, session| {
             let id = logic::routine_in_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::stop_routine(db, id, session.user_id)?;
+            let notice = logic::stop_routine(db, id, session.membership_id)?;
             Ok((notice, None))
         },
     )
@@ -1752,7 +1752,7 @@ async fn save_google(
     let notice = match commands::google_auto_sync(
         &mut db,
         session.guild_id,
-        session.user_id,
+        session.membership_id,
         map.contains_key("auto_sync"),
     ) {
         Ok(notice) => notice,
@@ -1781,12 +1781,11 @@ async fn new_event(
 ) -> Response {
     html(&state, &headers, &server, "event", "New event", |page| {
         let preset = query.get("preset").and_then(|raw| {
-            let public_id = crate::ids::parse_event_id(raw)?;
-            store::preset_by_public(page.conn, public_id)
+            store::preset_by_public(page.conn, raw)
                 .ok()
                 .flatten()
                 .filter(|preset| preset.guild_id == page.guild_id)
-                .and_then(|preset| serde_json::from_str::<PresetBody>(&preset.body).ok())
+                .and_then(|preset| serde_json::from_value::<PresetBody>(preset.body).ok())
         });
         present::form_page(page, &present::blank_form(&server, preset))
     })
@@ -1865,7 +1864,7 @@ fn save_form(
     let input = match present::input_from_form(
         &map,
         session.guild_id,
-        session.user_id,
+        session.membership_id,
         tz,
         existing.as_ref(),
     ) {
@@ -1941,7 +1940,7 @@ async fn signup(
         &here(&server, &format!("/events/{public_id}")),
         move |db, session| {
             let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::signup(db, event.id, option_id, session.user_id)?;
+            let notice = logic::signup(db, event.id, option_id, session.membership_id)?;
             Ok((notice, Some(event.id)))
         },
     )
@@ -1957,8 +1956,8 @@ async fn response(
         .get("option_id")
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let user_id = map
-        .get("user_id")
+    let membership_id = map
+        .get("membership_id")
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let action = map.get("action").cloned().unwrap_or_else(|| "add".into());
@@ -1972,8 +1971,8 @@ async fn response(
             let notice = logic::organizer_response(
                 db,
                 event.id,
-                session.user_id,
-                user_id,
+                session.membership_id,
+                membership_id,
                 option_id,
                 &action,
             )?;
@@ -1994,7 +1993,7 @@ async fn archive(
         &here(&server, &format!("/events/{public_id}")),
         move |db, session| {
             let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::archive_event(db, event.id, session.user_id)?;
+            let notice = logic::archive_event(db, event.id, session.membership_id)?;
             Ok((notice, Some(event.id)))
         },
     )
@@ -2019,7 +2018,7 @@ async fn delete_event(
     };
     mutate(&state, &headers, &server, &back, move |db, session| {
         let event = event_for_guild(db, session.guild_id, &public_id)?;
-        let notice = logic::delete_event(db, event.id, session.user_id)?;
+        let notice = logic::delete_event(db, event.id, session.membership_id)?;
         Ok((notice, Some(event.id)))
     })
 }
@@ -2041,7 +2040,7 @@ async fn duplicate(
         Err(OpError::NotFound) => return render_missing(&state, &mut db, &session),
         Err(err) => return plain_error(err),
     };
-    match logic::duplicate_event(&mut db, id, session.user_id) {
+    match logic::duplicate_event(&mut db, id, session.membership_id) {
         Ok(new_id) => {
             let copy = store::event(&mut db, new_id)
                 .ok()
@@ -2073,7 +2072,7 @@ async fn skip(
         &here(&server, &format!("/events/{public_id}")),
         move |db, session| {
             let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::skip_event(db, event.id, session.user_id)?;
+            let notice = logic::skip_event(db, event.id, session.membership_id)?;
             Ok((notice, None))
         },
     )
@@ -2116,7 +2115,7 @@ async fn save_series(
         let notice = logic::save_series_repeat(
             db,
             id,
-            session.user_id,
+            session.membership_id,
             logic::RepeatSpec {
                 cadence: cadence.to_string(),
                 end_on,
@@ -2139,7 +2138,7 @@ async fn end_series(
         &here(&server, &format!("/recurring/{public_id}")),
         move |db, session| {
             let id = series_for_guild(db, session.guild_id, &public_id)?.id;
-            let notice = logic::end_series(db, id, session.user_id)?;
+            let notice = logic::end_series(db, id, session.membership_id)?;
             Ok((notice, None))
         },
     )
@@ -2172,7 +2171,7 @@ async fn save_preset(
                 multiple_signups: map.contains_key("multiple"),
                 options,
             };
-            logic::save_preset(db, session.guild_id, session.user_id, &name, &body)?;
+            logic::save_preset(db, session.guild_id, session.membership_id, &name, &body)?;
             Ok((format!("Saved the {name} preset."), None))
         },
     )
@@ -2189,14 +2188,11 @@ async fn delete_preset(
         &server,
         &here(&server, "/presets"),
         move |db, session| {
-            let Some(public_id) = crate::ids::parse_event_id(&public_id) else {
-                return Err(OpError::NotFound);
-            };
-            let preset = store::preset_by_public(db, public_id)?.ok_or(OpError::NotFound)?;
+            let preset = store::preset_by_public(db, &public_id)?.ok_or(OpError::NotFound)?;
             if preset.guild_id != session.guild_id {
                 return Err(OpError::NotFound);
             }
-            logic::delete_preset(db, preset.id, session.user_id)?;
+            logic::delete_preset(db, preset.id, session.membership_id)?;
             Ok(("Removed the preset.".into(), None))
         },
     )
@@ -2216,7 +2212,7 @@ async fn save_library(
         |db, session| {
             let name = map.get("name").cloned().unwrap_or_default();
             let emoji = map.get("emoji").cloned().unwrap_or_default();
-            logic::library_add(db, session.guild_id, session.user_id, &name, &emoji)?;
+            logic::library_add(db, session.guild_id, session.membership_id, &name, &emoji)?;
             Ok((format!("Added {name} to the option library."), None))
         },
     )
@@ -2252,7 +2248,7 @@ async fn create_channel(
         |db, session| {
             let name = map.get("name").cloned().unwrap_or_default();
             let kind = map.get("kind").cloned().unwrap_or_else(|| "text".into());
-            logic::create_channel(db, session.guild_id, session.user_id, &name, &kind)?;
+            logic::create_channel(db, session.guild_id, session.membership_id, &name, &kind)?;
             Ok((format!("Created #{}.", logic::slug_channel(&name)), None))
         },
     )
@@ -2272,7 +2268,7 @@ async fn run_command(
         return guild_error(err);
     }
     let line = map.get("line").cloned().unwrap_or_default();
-    let reply = commands::execute(&mut db, session.guild_id, session.user_id, &line);
+    let reply = commands::execute(&mut db, session.guild_id, session.membership_id, &line);
     let ids = events_to_refresh(&mut db, &line, &reply);
     drop(db);
     for id in ids {
@@ -2296,7 +2292,7 @@ async fn save_settings(
     if let Err(err) = bind_server(&mut db, &mut session, &server) {
         return guild_error(err);
     }
-    let user = match store::user(&mut db, session.user_id) {
+    let user = match store::membership(&mut db, session.membership_id) {
         Ok(Some(user)) => user,
         _ => return redirect(&back, "Sign in again before changing settings."),
     };
@@ -2356,7 +2352,6 @@ fn apply_settings(settings: &mut Settings, map: &HashMap<String, String>) -> Res
     settings.purge_channels = map.contains_key("purge_channels");
     settings.temp_roles = map.contains_key("temp_roles");
     settings.calendar_auto_sync = map.contains_key("calendar_auto_sync");
-    settings.park_clock = map.contains_key("park_clock");
     Ok(())
 }
 
@@ -2392,7 +2387,7 @@ async fn toggle_reminders(
         &server,
         &here(&server, ""),
         |db, session| {
-            let notice = logic::set_user_reminders(db, session.user_id, enabled)?;
+            let notice = logic::set_user_reminders(db, session.membership_id, enabled)?;
             Ok((notice, None))
         },
     )
@@ -2403,10 +2398,10 @@ async fn personal_calendar(State(state): State<AppState>, Path(file): Path<Strin
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
     let mut db = state.db.lock().expect("database lock");
-    let Some(discord_id) = store::calendar_discord_id(&mut db, token).ok().flatten() else {
+    let Some(user_id) = store::calendar_user_id(&mut db, token).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
-    match ics::user_feed(&mut db, &discord_id) {
+    match ics::user_feed(&mut db, user_id) {
         Ok(body) => calendar_response(body),
         Err(err) => plain_error(err),
     }
@@ -2434,9 +2429,6 @@ fn series_for_guild(
     guild_id: i64,
     public_id: &str,
 ) -> Result<store::Series, OpError> {
-    let Some(public_id) = crate::ids::parse_event_id(public_id) else {
-        return Err(OpError::NotFound);
-    };
     let series = store::series_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
     if series.guild_id != guild_id {
         return Err(OpError::NotFound);
@@ -2479,7 +2471,7 @@ fn bind_guild(conn: &mut Connection, session: &mut Session, guild_id: i64) -> Re
         &session.display_name,
     )?;
     session.guild_id = guild_id;
-    session.user_id = user.id;
+    session.membership_id = user.id;
     Ok(())
 }
 
@@ -2572,7 +2564,7 @@ fn page_for<'a>(
     Page {
         conn: db,
         guild_id: session.guild_id,
-        user_id: session.user_id,
+        membership_id: session.membership_id,
         notice: session.notice.as_deref(),
         invite_url: &state.invite_url,
         nav,
@@ -2631,26 +2623,24 @@ fn clear_cookie(response: &mut Response, name: &str) {
 fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
     let token = cookie(headers, "marian_session")?;
     let row = store::web_session(conn, &token).ok()??;
-    let fresh = clock::parse_stamp(&row.created_at)
-        .map(|at| Utc::now() - at < chrono::Duration::days(30))
-        .unwrap_or(false);
+    let fresh = Utc::now() - row.created_at < chrono::Duration::days(30);
     if !fresh {
         let _ = store::delete_web_session(conn, &token);
         return None;
     }
-    let user = store::user(conn, row.user_id).ok()??;
-    if user.guild_id != row.guild_id
-        || user.discord_id.as_deref() != Some(row.discord_user_id.as_str())
-    {
+    let user = store::membership(conn, row.membership_id).ok()??;
+    let discord_id = store::discord_id_for_membership(conn, user.id).ok()?;
+    if user.guild_id != row.guild_id || discord_id != row.discord_user_id {
         let _ = store::delete_web_session(conn, &token);
         return None;
     }
     let notice = cookie(headers, "marian_notice").map(|value| percent_decode(&value));
     Some(Session {
         discord_user_id: row.discord_user_id,
+        user_id: user.user_id,
         display_name: row.display_name,
         guild_id: row.guild_id,
-        user_id: row.user_id,
+        membership_id: row.membership_id,
         allowed: row.guilds,
         notice,
     })
@@ -2780,6 +2770,33 @@ fn invite_url(client_id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Insertable)]
+    #[diesel(table_name = schema::guilds)]
+    struct SeedGuild<'a> {
+        id: i64,
+        name: &'a str,
+        timezone: &'a str,
+        discord_id: &'a str,
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = schema::users)]
+    struct SeedUser<'a> {
+        discord_id: &'a str,
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = schema::memberships)]
+    struct SeedMembership<'a> {
+        user_id: i64,
+        guild_id: i64,
+        name: &'a str,
+        handle: &'a str,
+        color: &'a str,
+        reminders_enabled: bool,
+        organizer: bool,
+    }
+
     #[test]
     fn a_member_payload_is_the_current_role_list() {
         assert_eq!(server_in_path("/servers/99/settings"), Some("99"));
@@ -2878,26 +2895,31 @@ mod tests {
     async fn sign_in_is_required() {
         let mut conn = store::open_memory().unwrap();
         diesel::insert_into(schema::guilds::table)
-            .values((
-                schema::guilds::id.eq(1),
-                schema::guilds::name.eq("Guild"),
-                schema::guilds::timezone.eq("UTC"),
-                schema::guilds::discord_id.eq("99"),
-            ))
+            .values(&SeedGuild {
+                id: 1,
+                name: "Guild",
+                timezone: "UTC",
+                discord_id: "99",
+            })
             .execute(&mut conn)
             .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
         let user_id = diesel::insert_into(schema::users::table)
-            .values((
-                schema::users::guild_id.eq(1),
-                schema::users::name.eq("Nell"),
-                schema::users::handle.eq("nell"),
-                schema::users::color.eq("#1e3a6e"),
-                schema::users::reminders_enabled.eq(true),
-                schema::users::organizer.eq(true),
-                schema::users::discord_id.eq("42"),
-            ))
+            .values(&SeedUser { discord_id: "42" })
             .returning(schema::users::id)
+            .get_result::<i64>(&mut conn)
+            .unwrap();
+        let membership_id = diesel::insert_into(schema::memberships::table)
+            .values(&SeedMembership {
+                user_id,
+                guild_id: 1,
+                name: "Nell",
+                handle: "nell",
+                color: "#1e3a6e",
+                reminders_enabled: true,
+                organizer: true,
+            })
+            .returning(schema::memberships::id)
             .get_result::<i64>(&mut conn)
             .unwrap();
         store::insert_web_session(
@@ -2906,7 +2928,7 @@ mod tests {
             "42",
             "Nell",
             1,
-            user_id,
+            membership_id,
             &[1],
         )
         .unwrap();
@@ -3069,7 +3091,8 @@ mod tests {
     #[tokio::test]
     async fn google_callback_keeps_a_link_the_browser_did_not_start() {
         let mut conn = store::open_memory().unwrap();
-        let token = crate::google::begin_link(&mut conn, "42").unwrap();
+        let user_id = store::ensure_user(&mut conn, "42").unwrap();
+        let token = crate::google::begin_link(&mut conn, user_id).unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let db = Arc::new(Mutex::new(conn));
         let state = AppState {
@@ -3112,7 +3135,7 @@ mod tests {
             let mut guard = db.lock().unwrap();
             crate::google::claim_oauth(&mut guard, &token).unwrap()
         };
-        assert_eq!(still.as_deref(), Some("42"));
+        assert_eq!(still, Some(user_id));
 
         let open = client
             .get(format!("http://{addr}/auth/google/start/{token}"))

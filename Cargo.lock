@@ -483,10 +483,13 @@ checksum = "ebe9f7eaef33febd60290c5a9f3b0571d03c4c04a24739cd64808ce30e65a5d3"
 dependencies = [
  "bitflags",
  "byteorder",
+ "chrono",
  "diesel_derives",
  "downcast-rs",
  "itoa",
  "pq-sys",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1191,7 +1194,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "marian"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2917,6 +2920,7 @@ checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

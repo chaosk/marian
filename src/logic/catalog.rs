@@ -1,8 +1,9 @@
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::upsert::excluded;
 
 use super::access::{can_create, can_edit};
-use super::db::{log, must_event, must_user};
+use super::db::{log, must_event, must_membership};
 use super::model::*;
 use crate::error::OpError;
 use crate::schema;
@@ -10,12 +11,12 @@ use crate::store::{self, Connection};
 
 pub fn set_user_reminders(
     conn: &mut Connection,
-    user_id: i64,
+    membership_id: i64,
     enabled: bool,
 ) -> Result<String, OpError> {
-    let user = must_user(conn, user_id)?;
-    diesel::update(schema::users::table.filter(schema::users::id.eq(user_id)))
-        .set(schema::users::reminders_enabled.eq(enabled))
+    let user = must_membership(conn, membership_id)?;
+    diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
+        .set(schema::memberships::reminders_enabled.eq(enabled))
         .execute(conn)?;
     Ok(if enabled {
         format!("Reminders are on for {}.", user.name)
@@ -31,9 +32,9 @@ pub fn create_channel(
     name: &str,
     kind: &str,
 ) -> Result<i64, OpError> {
-    let actor = must_user(conn, actor_id)?;
+    let actor = must_membership(conn, actor_id)?;
     let settings = store::settings(conn, guild_id)?;
-    let roles = store::user_role_ids(conn, actor.id)?;
+    let roles = store::membership_role_ids(conn, &actor)?;
     let allowed = actor.organizer
         || match settings.role_channel {
             Some(role) => roles.contains(&role),
@@ -57,16 +58,25 @@ pub fn create_channel(
         .unwrap_or(0)
         + 1;
     let id = diesel::insert_into(schema::channels::table)
-        .values((
-            schema::channels::guild_id.eq(guild_id),
-            schema::channels::name.eq(&slug),
-            schema::channels::kind.eq(kind),
-            schema::channels::position.eq(position),
-        ))
+        .values(&NewChannel {
+            guild_id,
+            name: &slug,
+            kind,
+            position,
+        })
         .returning(schema::channels::id)
         .get_result(conn)?;
     log(conn, guild_id, None, &format!("Created #{slug}."))?;
     Ok(id)
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::channels)]
+struct NewChannel<'a> {
+    guild_id: i64,
+    name: &'a str,
+    kind: &'a str,
+    position: i64,
 }
 
 pub fn slug_channel(name: &str) -> String {
@@ -91,12 +101,12 @@ pub fn save_preset(
     name: &str,
     body: &PresetBody,
 ) -> Result<i64, OpError> {
-    let actor = must_user(conn, actor_id)?;
+    let actor = must_membership(conn, actor_id)?;
     if !actor.organizer && actor.guild_id != guild_id {
         return Err(OpError::NotFound);
     }
     let settings = store::settings(conn, guild_id)?;
-    let roles = store::user_role_ids(conn, actor.id)?;
+    let roles = store::membership_role_ids(conn, &actor)?;
     let allowed = actor.organizer
         || settings
             .role_signup
@@ -113,28 +123,37 @@ pub fn save_preset(
     if body.options.is_empty() {
         return Err(OpError::message("A preset needs at least one option."));
     }
-    let json = serde_json::to_string(body).map_err(|err| OpError::message(err.to_string()))?;
+    let json = serde_json::to_value(body).map_err(|err| OpError::message(err.to_string()))?;
     let id = diesel::insert_into(schema::presets::table)
-        .values((
-            schema::presets::public_id.eq(crate::ids::preset_id()),
-            schema::presets::guild_id.eq(guild_id),
-            schema::presets::name.eq(name),
-            schema::presets::body.eq(json),
-        ))
+        .values(&NewPreset {
+            public_id: crate::ids::preset_id(),
+            guild_id,
+            name,
+            body: json,
+        })
         .returning(schema::presets::id)
         .get_result(conn)?;
     Ok(id)
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::presets)]
+struct NewPreset<'a> {
+    public_id: uuid::Uuid,
+    guild_id: i64,
+    name: &'a str,
+    body: serde_json::Value,
+}
+
 pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Result<(), OpError> {
     let preset = store::preset(conn, preset_id)?.ok_or(OpError::NotFound)?;
-    let actor = must_user(conn, actor_id)?;
+    let actor = must_membership(conn, actor_id)?;
     if actor.guild_id != preset.guild_id {
         return Err(OpError::NotFound);
     }
     if !actor.organizer {
         let settings = store::settings(conn, preset.guild_id)?;
-        let roles = store::user_role_ids(conn, actor.id)?;
+        let roles = store::membership_role_ids(conn, &actor)?;
         let allowed = settings
             .role_signup
             .map(|role| roles.contains(&role))
@@ -166,11 +185,11 @@ pub fn library_add(
         emoji.trim()
     };
     diesel::insert_into(schema::option_library::table)
-        .values((
-            schema::option_library::guild_id.eq(guild_id),
-            schema::option_library::name.eq(name),
-            schema::option_library::emoji.eq(emoji),
-        ))
+        .values(&NewLibraryOption {
+            guild_id,
+            name,
+            emoji,
+        })
         .on_conflict((
             schema::option_library::guild_id,
             schema::option_library::name,
@@ -179,6 +198,14 @@ pub fn library_add(
         .set(schema::option_library::emoji.eq(excluded(schema::option_library::emoji)))
         .execute(conn)?;
     Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::option_library)]
+struct NewLibraryOption<'a> {
+    guild_id: i64,
+    name: &'a str,
+    emoji: &'a str,
 }
 
 pub fn library_remove(
@@ -202,7 +229,7 @@ fn require_option_editor(
     guild_id: i64,
     actor_id: i64,
 ) -> Result<(), OpError> {
-    let actor = must_user(conn, actor_id)?;
+    let actor = must_membership(conn, actor_id)?;
     if actor.guild_id != guild_id {
         return Err(OpError::NotFound);
     }
@@ -210,7 +237,7 @@ fn require_option_editor(
         return Ok(());
     }
     let settings = store::settings(conn, guild_id)?;
-    let roles = store::user_role_ids(conn, actor.id)?;
+    let roles = store::membership_role_ids(conn, &actor)?;
     let allowed = settings
         .role_signup
         .map(|role| roles.contains(&role))
@@ -230,9 +257,9 @@ pub fn manual_calendar_sync(
     actor_id: i64,
 ) -> Result<String, OpError> {
     let event = must_event(conn, event_id)?;
-    let actor = must_user(conn, actor_id)?;
+    let actor = must_membership(conn, actor_id)?;
     let settings = store::settings(conn, event.guild_id)?;
-    let roles = store::user_role_ids(conn, actor.id)?;
+    let roles = store::membership_role_ids(conn, &actor)?;
     if !can_edit(&actor, &event, &settings, &roles) {
         return Err(OpError::message("You can't sync this event."));
     }
@@ -241,7 +268,7 @@ pub fn manual_calendar_sync(
             "Post or schedule the event before syncing it.",
         ));
     }
-    let stamp = store::now_stamp();
+    let stamp = Utc::now();
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
         .set(schema::events::calendar_synced_at.eq(stamp))
         .execute(conn)?;
@@ -250,21 +277,31 @@ pub fn manual_calendar_sync(
     Ok(notice)
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::command_log)]
+struct NewCommand<'a> {
+    guild_id: i64,
+    membership_id: i64,
+    line: &'a str,
+    reply: &'a str,
+    created_at: DateTime<Utc>,
+}
+
 pub fn record_command(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     line: &str,
     reply: &str,
 ) -> Result<(), OpError> {
     diesel::insert_into(schema::command_log::table)
-        .values((
-            schema::command_log::guild_id.eq(guild_id),
-            schema::command_log::user_id.eq(user_id),
-            schema::command_log::line.eq(line),
-            schema::command_log::reply.eq(reply),
-            schema::command_log::created_at.eq(store::now_stamp()),
-        ))
+        .values(&NewCommand {
+            guild_id,
+            membership_id,
+            line,
+            reply,
+            created_at: Utc::now(),
+        })
         .execute(conn)?;
     Ok(())
 }

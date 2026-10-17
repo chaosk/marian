@@ -1,6 +1,6 @@
-use crate::store::{Event, Settings, User};
+use crate::store::{Event, Settings, Membership};
 
-pub fn can_create(user: &User, settings: &Settings, roles: &[i64]) -> bool {
+pub fn can_create(user: &Membership, settings: &Settings, roles: &[i64]) -> bool {
     if user.organizer {
         return true;
     }
@@ -10,8 +10,8 @@ pub fn can_create(user: &User, settings: &Settings, roles: &[i64]) -> bool {
     }
 }
 
-pub fn can_edit(user: &User, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
-    if user.organizer || user.id == event.created_by {
+pub fn can_edit(user: &Membership, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
+    if user.organizer || event.created_by == Some(user.id) {
         return true;
     }
     settings
@@ -20,8 +20,8 @@ pub fn can_edit(user: &User, event: &Event, settings: &Settings, roles: &[i64]) 
         .unwrap_or(false)
 }
 
-pub fn can_delete(user: &User, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
-    if user.organizer || user.id == event.created_by {
+pub fn can_delete(user: &Membership, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
+    if user.organizer || event.created_by == Some(user.id) {
         return true;
     }
     settings

@@ -20,7 +20,7 @@
       {% if guild_name %}
       <div class="server">
         <strong>{{ guild_name }}</strong>
-        {{ tz_label }}{% if park %} · clock parked{% endif %}
+        {{ tz_label }}
       </div>
       {% endif %}
       {% if guilds|length > 1 %}
@@ -44,7 +44,7 @@
         <a href="{{ base }}/google" class="{% if nav == 'google' %}active{% endif %}">Google Calendar</a>
         <a href="{{ base }}/settings" class="{% if nav == 'settings' %}active{% endif %}">Settings</a>
       </nav>
-      {% if user_id %}
+      {% if membership_id %}
       <div class="account">
         <p class="who">Signed in as <strong>{{ user_name }}</strong></p>
         {% if calendar_url %}

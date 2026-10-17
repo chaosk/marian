@@ -8,7 +8,6 @@ use diesel::prelude::*;
 use serde_json::json;
 
 use crate::auth;
-use crate::clock;
 use crate::error::OpError;
 use crate::ics;
 use crate::schema;
@@ -26,7 +25,7 @@ pub struct Status {
 
 pub enum Job {
     Upsert {
-        discord_user_id: String,
+        user_id: i64,
         event_id: i64,
         google_event_id: Option<String>,
         refresh_token: String,
@@ -35,7 +34,7 @@ pub enum Job {
         body: serde_json::Value,
     },
     Delete {
-        discord_user_id: String,
+        user_id: i64,
         event_id: i64,
         google_event_id: String,
         refresh_token: String,
@@ -44,17 +43,17 @@ pub enum Job {
 
 pub enum Outcome {
     Saved {
-        discord_user_id: String,
+        user_id: i64,
         event_id: i64,
         google_event_id: String,
         snapshot: String,
     },
     Removed {
-        discord_user_id: String,
+        user_id: i64,
         event_id: i64,
     },
     Failed {
-        discord_user_id: String,
+        user_id: i64,
         event_id: i64,
         message: String,
         auth_dead: bool,
@@ -62,7 +61,7 @@ pub enum Outcome {
 }
 
 pub struct RemoteAccess {
-    pub discord_user_id: String,
+    pub user_id: i64,
     pub refresh_token: String,
     pub google_event_ids: Vec<String>,
 }
@@ -77,31 +76,38 @@ enum GrantError {
     Retry(String),
 }
 
-#[derive(Queryable, Selectable)]
+#[derive(HasQuery, Identifiable, Associations, AsChangeset)]
 #[diesel(table_name = schema::google_accounts)]
+#[diesel(primary_key(user_id))]
+#[diesel(belongs_to(crate::store::User))]
+#[diesel(treat_none_as_null = true)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 struct Account {
-    discord_user_id: String,
+    user_id: i64,
     refresh_token: String,
     email: String,
     #[allow(dead_code)]
-    connected_at: String,
+    connected_at: DateTime<Utc>,
     last_error: String,
     auto_sync: bool,
     revoking: bool,
 }
 
-#[derive(Queryable, Selectable)]
+#[derive(HasQuery, Identifiable, Associations, AsChangeset)]
 #[diesel(table_name = schema::google_events)]
+#[diesel(primary_key(user_id, event_id))]
+#[diesel(belongs_to(Account, foreign_key = user_id))]
+#[diesel(belongs_to(crate::store::Event))]
+#[diesel(treat_none_as_null = true)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 struct Link {
-    discord_user_id: String,
+    user_id: i64,
     event_id: i64,
     google_event_id: Option<String>,
     content_hash: String,
     #[allow(dead_code)]
     last_error: String,
-    retry_at: Option<String>,
+    retry_at: Option<DateTime<Utc>>,
     forced: bool,
 }
 
@@ -144,8 +150,8 @@ pub fn authorize_url(client_id: &str, redirect_uri: &str, state: &str) -> String
     )
 }
 
-pub fn status(conn: &mut Connection, discord_user_id: &str) -> Result<Option<Status>, OpError> {
-    let account = account(conn, discord_user_id)?;
+pub fn status(conn: &mut Connection, user_id: i64) -> Result<Option<Status>, OpError> {
+    let account = account(conn, user_id)?;
     Ok(account.map(|account| Status {
         connected: account.last_error.is_empty(),
         reconnect: !account.last_error.is_empty(),
@@ -156,11 +162,11 @@ pub fn status(conn: &mut Connection, discord_user_id: &str) -> Result<Option<Sta
 
 pub fn on_calendar(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
     event_id: i64,
 ) -> Result<bool, OpError> {
     let id: Option<Option<String>> = schema::google_events::table
-        .filter(schema::google_events::discord_user_id.eq(discord_user_id))
+        .filter(schema::google_events::user_id.eq(user_id))
         .filter(schema::google_events::event_id.eq(event_id))
         .select(schema::google_events::google_event_id)
         .first(conn)
@@ -168,22 +174,52 @@ pub fn on_calendar(
     Ok(id.flatten().is_some())
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::google_accounts)]
+struct NewGoogleAccount<'a> {
+    user_id: i64,
+    refresh_token: &'a str,
+    email: &'a str,
+    connected_at: DateTime<Utc>,
+    last_error: &'a str,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::google_oauth)]
+struct NewGoogleOauth<'a> {
+    state: &'a str,
+    user_id: i64,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::google_events)]
+struct NewGoogleEvent<'a> {
+    user_id: i64,
+    event_id: i64,
+    google_event_id: Option<&'a str>,
+    content_hash: &'a str,
+    last_error: &'a str,
+    retry_at: Option<DateTime<Utc>>,
+    forced: Option<bool>,
+}
+
 pub fn save_account(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
     refresh_token: &str,
     email: &str,
 ) -> Result<(), OpError> {
-    let now = store::now_stamp();
+    let now = Utc::now();
     diesel::insert_into(schema::google_accounts::table)
-        .values((
-            schema::google_accounts::discord_user_id.eq(discord_user_id),
-            schema::google_accounts::refresh_token.eq(refresh_token),
-            schema::google_accounts::email.eq(email),
-            schema::google_accounts::connected_at.eq(&now),
-            schema::google_accounts::last_error.eq(""),
-        ))
-        .on_conflict(schema::google_accounts::discord_user_id)
+        .values(&NewGoogleAccount {
+            user_id,
+            refresh_token,
+            email,
+            connected_at: now,
+            last_error: "",
+        })
+        .on_conflict(schema::google_accounts::user_id)
         .do_update()
         .set((
             schema::google_accounts::refresh_token.eq(refresh_token),
@@ -197,19 +233,19 @@ pub fn save_account(
     Ok(())
 }
 
-pub fn begin_link(conn: &mut Connection, discord_user_id: &str) -> Result<String, OpError> {
+pub fn begin_link(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
     diesel::delete(
         schema::google_oauth::table
-            .filter(schema::google_oauth::discord_user_id.eq(discord_user_id)),
+            .filter(schema::google_oauth::user_id.eq(user_id)),
     )
     .execute(conn)?;
     let state = auth::random_token()?;
     diesel::insert_into(schema::google_oauth::table)
-        .values((
-            schema::google_oauth::state.eq(&state),
-            schema::google_oauth::discord_user_id.eq(discord_user_id),
-            schema::google_oauth::created_at.eq(store::now_stamp()),
-        ))
+        .values(&NewGoogleOauth {
+            state: &state,
+            user_id,
+            created_at: Utc::now(),
+        })
         .execute(conn)?;
     Ok(state)
 }
@@ -222,26 +258,24 @@ pub fn connect_url(public_base: &str, state: &str) -> Option<String> {
     Some(format!("{base}/auth/google/start/{state}"))
 }
 
-pub fn claim_oauth(conn: &mut Connection, state: &str) -> Result<Option<String>, OpError> {
-    let row: Option<(String, String)> = schema::google_oauth::table
+pub fn claim_oauth(conn: &mut Connection, state: &str) -> Result<Option<i64>, OpError> {
+    let row: Option<(i64, DateTime<Utc>)> = schema::google_oauth::table
         .filter(schema::google_oauth::state.eq(state))
         .select((
-            schema::google_oauth::discord_user_id,
+            schema::google_oauth::user_id,
             schema::google_oauth::created_at,
         ))
         .first(conn)
         .optional()?;
-    let Some((discord_user_id, created_at)) = row else {
+    let Some((user_id, created_at)) = row else {
         return Ok(None);
     };
-    let fresh = clock::parse_stamp(&created_at)
-        .ok()
-        .is_some_and(|at| Utc::now() - at < Duration::minutes(10));
+    let fresh = Utc::now() - created_at < Duration::minutes(10);
     if !fresh {
         finish_oauth(conn, state)?;
         return Ok(None);
     }
-    Ok(Some(discord_user_id))
+    Ok(Some(user_id))
 }
 
 pub fn finish_oauth(conn: &mut Connection, state: &str) -> Result<(), OpError> {
@@ -252,10 +286,10 @@ pub fn finish_oauth(conn: &mut Connection, state: &str) -> Result<(), OpError> {
 
 pub fn set_auto_sync(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
     on: bool,
 ) -> Result<(), OpError> {
-    let Some(account) = account(conn, discord_user_id)? else {
+    let Some(account) = account(conn, user_id)? else {
         return Err(OpError::message(
             "Connect Google Calendar with /google authorize.",
         ));
@@ -267,17 +301,17 @@ pub fn set_auto_sync(
     }
     diesel::update(
         schema::google_accounts::table
-            .filter(schema::google_accounts::discord_user_id.eq(discord_user_id)),
+            .filter(schema::google_accounts::user_id.eq(user_id)),
     )
     .set(schema::google_accounts::auto_sync.eq(on))
     .execute(conn)?;
     Ok(())
 }
 
-pub fn queue_revoke(conn: &mut Connection, discord_user_id: &str) -> Result<bool, OpError> {
+pub fn queue_revoke(conn: &mut Connection, user_id: i64) -> Result<bool, OpError> {
     let updated = diesel::update(
         schema::google_accounts::table
-            .filter(schema::google_accounts::discord_user_id.eq(discord_user_id)),
+            .filter(schema::google_accounts::user_id.eq(user_id)),
     )
     .set(schema::google_accounts::revoking.eq(true))
     .execute(conn)?;
@@ -286,10 +320,10 @@ pub fn queue_revoke(conn: &mut Connection, discord_user_id: &str) -> Result<bool
 
 pub fn queue_event(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
     event_id: i64,
 ) -> Result<(), OpError> {
-    let Some(account) = account(conn, discord_user_id)? else {
+    let Some(account) = account(conn, user_id)? else {
         return Err(OpError::message(
             "Connect Google Calendar with /google authorize.",
         ));
@@ -300,23 +334,24 @@ pub fn queue_event(
         ));
     }
     diesel::insert_into(schema::google_events::table)
-        .values((
-            schema::google_events::discord_user_id.eq(discord_user_id),
-            schema::google_events::event_id.eq(event_id),
-            schema::google_events::content_hash.eq(""),
-            schema::google_events::last_error.eq(""),
-            schema::google_events::retry_at.eq(Option::<String>::None),
-            schema::google_events::forced.eq(true),
-        ))
+        .values(&NewGoogleEvent {
+            user_id,
+            event_id,
+            google_event_id: None,
+            content_hash: "",
+            last_error: "",
+            retry_at: None,
+            forced: Some(true),
+        })
         .on_conflict((
-            schema::google_events::discord_user_id,
+            schema::google_events::user_id,
             schema::google_events::event_id,
         ))
         .do_update()
         .set((
             schema::google_events::content_hash.eq(""),
             schema::google_events::last_error.eq(""),
-            schema::google_events::retry_at.eq(Option::<String>::None),
+            schema::google_events::retry_at.eq(None::<DateTime<Utc>>),
             schema::google_events::forced.eq(true),
         ))
         .execute(conn)?;
@@ -324,14 +359,13 @@ pub fn queue_event(
 }
 
 pub fn ready_revokes(conn: &mut Connection) -> Result<Vec<RemoteAccess>, OpError> {
-    let accounts = schema::google_accounts::table
+    let users = Account::query()
         .filter(schema::google_accounts::revoking.eq(true))
-        .select(Account::as_select())
         .load(conn)?;
     let mut ready = Vec::new();
-    for account in accounts {
+    for account in users {
         let pending: i64 = schema::google_events::table
-            .filter(schema::google_events::discord_user_id.eq(&account.discord_user_id))
+            .filter(schema::google_events::user_id.eq(&account.user_id))
             .filter(schema::google_events::google_event_id.is_not_null())
             .count()
             .get_result(conn)?;
@@ -340,11 +374,11 @@ pub fn ready_revokes(conn: &mut Connection) -> Result<Vec<RemoteAccess>, OpError
         }
         diesel::delete(
             schema::google_events::table
-                .filter(schema::google_events::discord_user_id.eq(&account.discord_user_id)),
+                .filter(schema::google_events::user_id.eq(&account.user_id)),
         )
         .execute(conn)?;
         ready.push(RemoteAccess {
-            discord_user_id: account.discord_user_id,
+            user_id: account.user_id,
             refresh_token: account.refresh_token,
             google_event_ids: Vec::new(),
         });
@@ -354,31 +388,31 @@ pub fn ready_revokes(conn: &mut Connection) -> Result<Vec<RemoteAccess>, OpError
 
 pub fn remote_access(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
 ) -> Result<Option<RemoteAccess>, OpError> {
-    let Some(account) = account(conn, discord_user_id)? else {
+    let Some(account) = account(conn, user_id)? else {
         return Ok(None);
     };
     let ids = schema::google_events::table
-        .filter(schema::google_events::discord_user_id.eq(discord_user_id))
+        .filter(schema::google_events::user_id.eq(user_id))
         .select(schema::google_events::google_event_id)
         .load::<Option<String>>(conn)?;
     Ok(Some(RemoteAccess {
-        discord_user_id: account.discord_user_id,
+        user_id: account.user_id,
         refresh_token: account.refresh_token,
         google_event_ids: ids.into_iter().flatten().collect(),
     }))
 }
 
-pub fn delete_account(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
+pub fn delete_account(conn: &mut Connection, user_id: i64) -> Result<(), OpError> {
     diesel::delete(
         schema::google_events::table
-            .filter(schema::google_events::discord_user_id.eq(discord_user_id)),
+            .filter(schema::google_events::user_id.eq(user_id)),
     )
     .execute(conn)?;
     diesel::delete(
         schema::google_accounts::table
-            .filter(schema::google_accounts::discord_user_id.eq(discord_user_id)),
+            .filter(schema::google_accounts::user_id.eq(user_id)),
     )
     .execute(conn)?;
     Ok(())
@@ -386,15 +420,14 @@ pub fn delete_account(conn: &mut Connection, discord_user_id: &str) -> Result<()
 
 pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpError> {
     let now = Utc::now();
-    let accounts = schema::google_accounts::table
-        .select(Account::as_select())
+    let users = Account::query()
         .load(conn)?;
     let mut jobs = Vec::new();
-    for account in accounts {
+    for account in users {
         if jobs.len() >= BATCH {
             break;
         }
-        let links = links_for(conn, &account.discord_user_id)?;
+        let links = links_for(conn, account.user_id)?;
         if account.revoking {
             queue_deletes(conn, &account, &links, now, &mut jobs)?;
             continue;
@@ -403,7 +436,7 @@ pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpErro
             continue;
         }
         let desired = if account.auto_sync {
-            ics::events_for_person(conn, &account.discord_user_id)?
+            ics::events_for_person(conn, account.user_id)?
         } else {
             Vec::new()
         };
@@ -467,16 +500,16 @@ fn consider_upsert(
     });
     if same {
         if link.is_some_and(|link| link.forced) {
-            clear_forced(conn, &account.discord_user_id, event.id)?;
+            clear_forced(conn, account.user_id, event.id)?;
         }
         return Ok(());
     }
     jobs.push(Job::Upsert {
-        discord_user_id: account.discord_user_id.clone(),
+        user_id: account.user_id.clone(),
         event_id: event.id,
         google_event_id: link.and_then(|link| link.google_event_id.clone()),
         refresh_token: account.refresh_token.clone(),
-        marian_id: event.public_id.clone(),
+        marian_id: event.public_id.to_string(),
         snapshot: payload.snapshot,
         body: payload.body,
     });
@@ -527,7 +560,7 @@ fn drop_or_delete(
 ) -> Result<(), OpError> {
     match &link.google_event_id {
         Some(google_event_id) => jobs.push(Job::Delete {
-            discord_user_id: account.discord_user_id.clone(),
+            user_id: account.user_id.clone(),
             event_id: link.event_id,
             google_event_id: google_event_id.clone(),
             refresh_token: account.refresh_token.clone(),
@@ -540,7 +573,7 @@ fn drop_or_delete(
 fn drop_link(conn: &mut Connection, link: &Link) -> Result<(), OpError> {
     diesel::delete(
         schema::google_events::table
-            .filter(schema::google_events::discord_user_id.eq(&link.discord_user_id))
+            .filter(schema::google_events::user_id.eq(&link.user_id))
             .filter(schema::google_events::event_id.eq(link.event_id)),
     )
     .execute(conn)?;
@@ -549,12 +582,12 @@ fn drop_link(conn: &mut Connection, link: &Link) -> Result<(), OpError> {
 
 fn clear_forced(
     conn: &mut Connection,
-    discord_user_id: &str,
+    user_id: i64,
     event_id: i64,
 ) -> Result<(), OpError> {
     diesel::update(
         schema::google_events::table
-            .filter(schema::google_events::discord_user_id.eq(discord_user_id))
+            .filter(schema::google_events::user_id.eq(user_id))
             .filter(schema::google_events::event_id.eq(event_id)),
     )
     .set(schema::google_events::forced.eq(false))
@@ -565,22 +598,23 @@ fn clear_forced(
 pub fn record(conn: &mut Connection, outcome: Outcome) -> Result<(), OpError> {
     match outcome {
         Outcome::Saved {
-            discord_user_id,
+            user_id,
             event_id,
             google_event_id,
             snapshot,
         } => {
             diesel::insert_into(schema::google_events::table)
-                .values((
-                    schema::google_events::discord_user_id.eq(&discord_user_id),
-                    schema::google_events::event_id.eq(event_id),
-                    schema::google_events::google_event_id.eq(&google_event_id),
-                    schema::google_events::content_hash.eq(&snapshot),
-                    schema::google_events::last_error.eq(""),
-                    schema::google_events::retry_at.eq(Option::<String>::None),
-                ))
+                .values(&NewGoogleEvent {
+                    user_id,
+                    event_id,
+                    google_event_id: Some(&google_event_id),
+                    content_hash: &snapshot,
+                    last_error: "",
+                    retry_at: None,
+                    forced: None,
+                })
                 .on_conflict((
-                    schema::google_events::discord_user_id,
+                    schema::google_events::user_id,
                     schema::google_events::event_id,
                 ))
                 .do_update()
@@ -588,24 +622,24 @@ pub fn record(conn: &mut Connection, outcome: Outcome) -> Result<(), OpError> {
                     schema::google_events::google_event_id.eq(&google_event_id),
                     schema::google_events::content_hash.eq(&snapshot),
                     schema::google_events::last_error.eq(""),
-                    schema::google_events::retry_at.eq(Option::<String>::None),
+                    schema::google_events::retry_at.eq(None::<DateTime<Utc>>),
                     schema::google_events::forced.eq(false),
                 ))
                 .execute(conn)?;
         }
         Outcome::Removed {
-            discord_user_id,
+            user_id,
             event_id,
         } => {
             diesel::delete(
                 schema::google_events::table
-                    .filter(schema::google_events::discord_user_id.eq(&discord_user_id))
+                    .filter(schema::google_events::user_id.eq(&user_id))
                     .filter(schema::google_events::event_id.eq(event_id)),
             )
             .execute(conn)?;
         }
         Outcome::Failed {
-            discord_user_id,
+            user_id,
             event_id,
             message,
             auth_dead,
@@ -613,22 +647,24 @@ pub fn record(conn: &mut Connection, outcome: Outcome) -> Result<(), OpError> {
             if auth_dead {
                 diesel::update(
                     schema::google_accounts::table
-                        .filter(schema::google_accounts::discord_user_id.eq(&discord_user_id)),
+                        .filter(schema::google_accounts::user_id.eq(&user_id)),
                 )
                 .set(schema::google_accounts::last_error.eq(&message))
                 .execute(conn)?;
             }
-            let retry = clock::stamp(Utc::now() + Duration::seconds(60));
+            let retry = Utc::now() + Duration::seconds(60);
             diesel::insert_into(schema::google_events::table)
-                .values((
-                    schema::google_events::discord_user_id.eq(&discord_user_id),
-                    schema::google_events::event_id.eq(event_id),
-                    schema::google_events::content_hash.eq(""),
-                    schema::google_events::last_error.eq(&message),
-                    schema::google_events::retry_at.eq(&retry),
-                ))
+                .values(&NewGoogleEvent {
+                    user_id,
+                    event_id,
+                    google_event_id: None,
+                    content_hash: "",
+                    last_error: &message,
+                    retry_at: Some(retry),
+                    forced: None,
+                })
                 .on_conflict((
-                    schema::google_events::discord_user_id,
+                    schema::google_events::user_id,
                     schema::google_events::event_id,
                 ))
                 .do_update()
@@ -696,25 +732,25 @@ pub async fn push(
     client_secret: &str,
     job: Job,
 ) -> Outcome {
-    let (discord_user_id, event_id, refresh_token) = match &job {
+    let (user_id, event_id, refresh_token) = match &job {
         Job::Upsert {
-            discord_user_id,
+            user_id,
             event_id,
             refresh_token,
             ..
         }
         | Job::Delete {
-            discord_user_id,
+            user_id,
             event_id,
             refresh_token,
             ..
-        } => (discord_user_id.clone(), *event_id, refresh_token.clone()),
+        } => (user_id.clone(), *event_id, refresh_token.clone()),
     };
     let access = match access_token(http, client_id, client_secret, &refresh_token).await {
         Ok(token) => token,
         Err(GrantError::Dead(message)) => {
             return Outcome::Failed {
-                discord_user_id,
+                user_id,
                 event_id,
                 message,
                 auth_dead: true,
@@ -722,7 +758,7 @@ pub async fn push(
         }
         Err(GrantError::Retry(message)) => {
             return Outcome::Failed {
-                discord_user_id,
+                user_id,
                 event_id,
                 message,
                 auth_dead: false,
@@ -734,11 +770,11 @@ pub async fn push(
             google_event_id, ..
         } => match delete_event(http, &access, &google_event_id).await {
             Ok(()) => Outcome::Removed {
-                discord_user_id,
+                user_id,
                 event_id,
             },
             Err((message, auth_dead)) => Outcome::Failed {
-                discord_user_id,
+                user_id,
                 event_id,
                 message,
                 auth_dead,
@@ -757,7 +793,7 @@ pub async fn push(
                     Ok(id) => id,
                     Err((message, auth_dead)) => {
                         return Outcome::Failed {
-                            discord_user_id,
+                            user_id,
                             event_id,
                             message,
                             auth_dead,
@@ -767,13 +803,13 @@ pub async fn push(
             };
             match write_event(http, &access, existing.as_deref(), &body).await {
                 Ok(google_event_id) => Outcome::Saved {
-                    discord_user_id,
+                    user_id,
                     event_id,
                     google_event_id,
                     snapshot,
                 },
                 Err((message, auth_dead)) => Outcome::Failed {
-                    discord_user_id,
+                    user_id,
                     event_id,
                     message,
                     auth_dead,
@@ -807,26 +843,21 @@ pub async fn forget_remote(
     clean
 }
 
-fn account(conn: &mut Connection, discord_user_id: &str) -> Result<Option<Account>, OpError> {
-    Ok(schema::google_accounts::table
-        .filter(schema::google_accounts::discord_user_id.eq(discord_user_id))
-        .select(Account::as_select())
+fn account(conn: &mut Connection, user_id: i64) -> Result<Option<Account>, OpError> {
+    Ok(Account::query()
+        .filter(schema::google_accounts::user_id.eq(user_id))
         .first(conn)
         .optional()?)
 }
 
-fn links_for(conn: &mut Connection, discord_user_id: &str) -> Result<Vec<Link>, OpError> {
-    Ok(schema::google_events::table
-        .filter(schema::google_events::discord_user_id.eq(discord_user_id))
-        .select(Link::as_select())
+fn links_for(conn: &mut Connection, user_id: i64) -> Result<Vec<Link>, OpError> {
+    Ok(Link::query()
+        .filter(schema::google_events::user_id.eq(user_id))
         .load(conn)?)
 }
 
 fn waiting(link: &Link, now: DateTime<Utc>) -> bool {
-    link.retry_at
-        .as_deref()
-        .and_then(|stamp| clock::parse_stamp(stamp).ok())
-        .is_some_and(|at| at > now)
+    link.retry_at.is_some_and(|at| at > now)
 }
 
 struct Payload {
@@ -835,7 +866,7 @@ struct Payload {
 }
 
 fn payload(conn: &mut Connection, event: &Event, public_base: &str) -> Result<Payload, OpError> {
-    let start = clock::parse_stamp(&event.starts_at)?;
+    let start = event.starts_at;
     let end = start + Duration::minutes(event.duration_minutes);
     let channel = store::channel(conn, event.channel_id)?
         .map(|channel| format!("#{}", channel.name))
@@ -1137,7 +1168,8 @@ mod tests {
     #[test]
     fn a_sign_in_link_belongs_to_one_discord_account() {
         let mut conn = store::open_memory().unwrap();
-        let state = begin_link(&mut conn, "42").unwrap();
+        let user_id = store::ensure_user(&mut conn, "42").unwrap();
+        let state = begin_link(&mut conn, user_id).unwrap();
         let url = authorize_url(
             "1234567890-abcdefghijklmnopqrstuvwxyz.apps.googleusercontent.com",
             "https://marian.example/auth/google/callback",
@@ -1145,10 +1177,7 @@ mod tests {
         );
         assert!(url.len() <= 512, "{}", url.len());
         assert!(url.contains(&state));
-        assert_eq!(
-            claim_oauth(&mut conn, &state).unwrap().as_deref(),
-            Some("42")
-        );
+        assert_eq!(claim_oauth(&mut conn, &state).unwrap(), Some(user_id));
         finish_oauth(&mut conn, &state).unwrap();
         assert!(claim_oauth(&mut conn, &state).unwrap().is_none());
     }
@@ -1188,9 +1217,11 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name) VALUES (1, 1, 'social');
-            INSERT INTO users (id, guild_id, name, handle, color, discord_id) VALUES
-              (1, 1, 'Nell', 'nell', '#112233', 'u1'),
-              (2, 1, 'June', 'june', '#112233', 'u2');
+            INSERT INTO users (discord_id) VALUES ('u1'), ('u2');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'u1'
+            UNION ALL
+            SELECT 2, id, 1, 'June', 'june', '#112233' FROM users WHERE discord_id = 'u2';
             INSERT INTO events (public_id, guild_id, channel_id, title, description, starts_at, duration_minutes, status, created_by, created_at, updated_at) VALUES
               ('01900000-0000-7000-8000-000000000001', 1, 1, 'Nell hosts', 'Bring dice.', '2026-10-14T18:00:00Z', 90, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000002', 1, 1, 'June hosts accepted', '', '2026-10-15T18:00:00Z', 60, 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
@@ -1198,14 +1229,20 @@ mod tests {
             INSERT INTO signup_options (id, event_id, name, emoji, reminders_enabled, position) VALUES
               (1, 2, 'Accepted', '✅', true, 0),
               (2, 3, 'Declined', '❌', false, 0);
-            INSERT INTO signups (event_id, option_id, user_id, state, created_at) VALUES
+            INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
               (2, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (3, 2, 1, 'confirmed', '2026-10-13T00:00:00Z');
-            INSERT INTO google_accounts (discord_user_id, refresh_token, email, connected_at)
-              VALUES ('u1', 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z');
+            INSERT INTO google_accounts (user_id, refresh_token, email, connected_at)
+              SELECT id, 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z'
+              FROM users WHERE discord_id = 'u1';
             ",
         )
         .unwrap();
+        let person: i64 = schema::users::table
+            .filter(schema::users::discord_id.eq("u1"))
+            .select(schema::users::id)
+            .first(&mut conn)
+            .unwrap();
         let jobs = plan(&mut conn, "https://marian.example").unwrap();
         assert_eq!(jobs.len(), 2);
         let titles = jobs
@@ -1254,7 +1291,7 @@ mod tests {
         record(
             &mut conn,
             Outcome::Saved {
-                discord_user_id: "u1".into(),
+                user_id: person,
                 event_id: *event_id,
                 google_event_id: "g-nell".into(),
                 snapshot: snapshot.clone(),
@@ -1276,7 +1313,7 @@ mod tests {
         record(
             &mut conn,
             Outcome::Saved {
-                discord_user_id: "u1".into(),
+                user_id: person,
                 event_id: *other_id,
                 google_event_id: "g-june".into(),
                 snapshot: other_snapshot.clone(),
@@ -1286,7 +1323,7 @@ mod tests {
         assert!(plan(&mut conn, "https://marian.example")
             .unwrap()
             .is_empty());
-        assert!(on_calendar(&mut conn, "u1", *event_id).unwrap());
+        assert!(on_calendar(&mut conn, person, *event_id).unwrap());
 
         diesel::update(schema::events::table.filter(schema::events::id.eq(*event_id)))
             .set(schema::events::title.eq("Nell hosts later"))
@@ -1312,7 +1349,7 @@ mod tests {
         record(
             &mut conn,
             Outcome::Failed {
-                discord_user_id: "u1".into(),
+                user_id: person,
                 event_id: *event_id,
                 message: "Google Calendar didn't respond.".into(),
                 auth_dead: false,
@@ -1330,7 +1367,7 @@ mod tests {
         diesel::update(
             schema::google_events::table.filter(schema::google_events::event_id.eq(*event_id)),
         )
-        .set(schema::google_events::retry_at.eq(Option::<String>::None))
+        .set(schema::google_events::retry_at.eq(None::<DateTime<Utc>>))
         .execute(&mut conn)
         .unwrap();
         let jobs = plan(&mut conn, "https://marian.example").unwrap();
@@ -1344,7 +1381,7 @@ mod tests {
         record(
             &mut conn,
             Outcome::Failed {
-                discord_user_id: "u1".into(),
+                user_id: person,
                 event_id: *event_id,
                 message: "Google Calendar needs a new connection.".into(),
                 auth_dead: true,
@@ -1354,7 +1391,7 @@ mod tests {
         assert!(plan(&mut conn, "https://marian.example")
             .unwrap()
             .is_empty());
-        let status = status(&mut conn, "u1").unwrap().unwrap();
+        let status = status(&mut conn, person).unwrap().unwrap();
         assert!(status.reconnect);
         assert!(!status.connected);
     }

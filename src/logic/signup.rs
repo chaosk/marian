@@ -4,8 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::access::can_edit;
-use super::db::{log, must_event, must_option, must_role, must_user, role_names};
-use crate::clock;
+use super::db::{log, must_event, must_option, must_role, must_membership, role_names};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event};
@@ -14,19 +13,19 @@ pub fn signup(
     conn: &mut Connection,
     event_id: i64,
     option_id: i64,
-    user_id: i64,
+    membership_id: i64,
 ) -> Result<String, OpError> {
-    store::with_tx(conn, |tx| signup_tx(tx, event_id, option_id, user_id))
+    store::with_tx(conn, |tx| signup_tx(tx, event_id, option_id, membership_id))
 }
 
 fn signup_tx(
     conn: &mut Connection,
     event_id: i64,
     option_id: i64,
-    user_id: i64,
+    membership_id: i64,
 ) -> Result<String, OpError> {
     let event = must_event(conn, event_id)?;
-    let user = must_user(conn, user_id)?;
+    let user = must_membership(conn, membership_id)?;
     if user.guild_id != event.guild_id {
         return Err(OpError::message("That person isn't in this server."));
     }
@@ -38,11 +37,11 @@ fn signup_tx(
         return Err(OpError::message("Signups open once the event is posted."));
     }
     let now = Utc::now();
-    if let Some(existing) = find_signup(conn, option_id, user_id)? {
+    if let Some(existing) = find_signup(conn, option_id, membership_id)? {
         let state = existing.state.clone();
         diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
             .execute(conn)?;
-        fill_all(conn, event.id)?;
+        fill_all(conn, &event)?;
         sync_access(conn, event.id)?;
         let notice = if state == "waitlisted" {
             format!("{} left the {} waitlist.", user.name, option.name)
@@ -58,9 +57,9 @@ fn signup_tx(
             event.title
         )));
     }
-    let restricts = store::event_role_ids(conn, event.id, "restrict")?;
+    let restricts = store::event_role_ids(conn, &event, "restrict")?;
     if !restricts.is_empty() && !user.organizer {
-        let roles = store::user_role_ids(conn, user.id)?;
+        let roles = store::membership_role_ids(conn, &user)?;
         if !restricts.iter().any(|role| roles.contains(role)) {
             let names = role_names(conn, &restricts)?;
             return Err(OpError::message(format!(
@@ -70,7 +69,7 @@ fn signup_tx(
         }
     }
     if let Some(role_id) = option.role_id {
-        if !user.organizer && !store::user_has_role(conn, user.id, role_id)? {
+        if !user.organizer && !store::membership_has_role(conn, user.id, role_id)? {
             let role = must_role(conn, role_id)?;
             return Err(OpError::message(format!(
                 "{} can't take a {} spot. That option is limited to {}.",
@@ -103,15 +102,15 @@ fn signup_tx(
         "confirmed"
     };
     diesel::insert_into(schema::signups::table)
-        .values((
-            schema::signups::event_id.eq(event.id),
-            schema::signups::option_id.eq(option.id),
-            schema::signups::user_id.eq(user.id),
-            schema::signups::state.eq(state),
-            schema::signups::created_at.eq(clock::stamp(now)),
-        ))
+        .values(&NewSignup {
+            event_id: event.id,
+            option_id: option.id,
+            membership_id: user.id,
+            state,
+            created_at: now,
+        })
         .execute(conn)?;
-    fill_all(conn, event.id)?;
+    fill_all(conn, &event)?;
     sync_access(conn, event.id)?;
     let notice = if moved && state == "confirmed" {
         format!("{} moved to {}.", user.name, option.name)
@@ -134,9 +133,9 @@ pub fn organizer_response(
 ) -> Result<String, OpError> {
     store::with_tx(conn, |tx| {
         let event = must_event(tx, event_id)?;
-        let actor = must_user(tx, actor_id)?;
+        let actor = must_membership(tx, actor_id)?;
         let settings = store::settings(tx, event.guild_id)?;
-        let roles = store::user_role_ids(tx, actor.id)?;
+        let roles = store::membership_role_ids(tx, &actor)?;
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::message("You can't change these responses."));
         }
@@ -145,7 +144,7 @@ pub fn organizer_response(
                 "Post the event before editing its responses.",
             ));
         }
-        let target = must_user(tx, target_id)?;
+        let target = must_membership(tx, target_id)?;
         let option = must_option(tx, option_id)?;
         if option.event_id != event.id || target.guild_id != event.guild_id {
             return Err(OpError::NotFound);
@@ -157,7 +156,7 @@ pub fn organizer_response(
                 };
                 diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
                     .execute(tx)?;
-                fill_all(tx, event.id)?;
+                fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
                 let notice = format!("Removed {} from {}.", target.name, option.name);
                 log(tx, event.guild_id, Some(event.id), &notice)?;
@@ -175,20 +174,20 @@ pub fn organizer_response(
                     }
                 }
                 if find_signup(tx, option.id, target.id)?.is_some() {
-                    fill_all(tx, event.id)?;
+                    fill_all(tx, &event)?;
                     sync_access(tx, event.id)?;
                     return Ok(format!("{} is already on {}.", target.name, option.name));
                 }
                 diesel::insert_into(schema::signups::table)
-                    .values((
-                        schema::signups::event_id.eq(event.id),
-                        schema::signups::option_id.eq(option.id),
-                        schema::signups::user_id.eq(target_id),
-                        schema::signups::state.eq("confirmed"),
-                        schema::signups::created_at.eq(store::now_stamp()),
-                    ))
+                    .values(&NewSignup {
+                        event_id: event.id,
+                        option_id: option.id,
+                        membership_id: target_id,
+                        state: "confirmed",
+                        created_at: Utc::now(),
+                    })
                     .execute(tx)?;
-                fill_all(tx, event.id)?;
+                fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
                 let notice = format!("Added {} to {}.", target.name, option.name);
                 log(tx, event.guild_id, Some(event.id), &notice)?;
@@ -202,12 +201,9 @@ pub fn organizer_response(
 fn find_signup(
     conn: &mut Connection,
     option_id: i64,
-    user_id: i64,
+    membership_id: i64,
 ) -> Result<Option<store::Signup>, OpError> {
-    Ok(schema::signups::table
-        .filter(schema::signups::option_id.eq(option_id))
-        .filter(schema::signups::user_id.eq(user_id))
-        .select(store::Signup::as_select())
+    Ok(store::Signup::for_option_member(option_id, membership_id)
         .first(conn)
         .optional()?)
 }
@@ -215,13 +211,9 @@ fn find_signup(
 fn signups_for_user(
     conn: &mut Connection,
     event_id: i64,
-    user_id: i64,
+    membership_id: i64,
 ) -> Result<Vec<store::Signup>, OpError> {
-    Ok(schema::signups::table
-        .filter(schema::signups::event_id.eq(event_id))
-        .filter(schema::signups::user_id.eq(user_id))
-        .select(store::Signup::as_select())
-        .load(conn)?)
+    Ok(store::Signup::for_event_member(event_id, membership_id).load(conn)?)
 }
 
 fn count_state(conn: &mut Connection, option_id: i64, state: &str) -> Result<i64, OpError> {
@@ -232,8 +224,8 @@ fn count_state(conn: &mut Connection, option_id: i64, state: &str) -> Result<i64
         .get_result(conn)?)
 }
 
-pub(super) fn fill_all(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
-    for opt in store::options_for(conn, event_id)? {
+pub(super) fn fill_all(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
+    for opt in store::options_for(conn, event)? {
         fill_option(conn, opt.id)?;
     }
     Ok(())
@@ -253,16 +245,16 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
             .filter(schema::signups::option_id.eq(option_id))
             .filter(schema::signups::state.eq("waitlisted"))
             .order((schema::signups::created_at.asc(), schema::signups::id.asc()))
-            .select((schema::signups::id, schema::signups::user_id))
+            .select((schema::signups::id, schema::signups::membership_id))
             .first(conn)
             .optional()?;
-        let Some((signup_id, user_id)) = next else {
+        let Some((signup_id, membership_id)) = next else {
             break;
         };
         diesel::update(schema::signups::table.filter(schema::signups::id.eq(signup_id)))
             .set(schema::signups::state.eq("confirmed"))
             .execute(conn)?;
-        let user = must_user(conn, user_id)?;
+        let user = must_membership(conn, membership_id)?;
         let event = must_event(conn, option.event_id)?;
         log(
             conn,
@@ -280,8 +272,8 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
 pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
     let event = must_event(conn, event_id)?;
     let settings = store::settings(conn, event.guild_id)?;
-    let options = store::options_for(conn, event_id)?;
-    let signups = store::signups_for(conn, event_id)?;
+    let options = store::options_for(conn, &event)?;
+    let signups = store::signups_for(conn, &event)?;
     let mut reminding = HashSet::new();
     for signup in &signups {
         if signup.state != "confirmed" {
@@ -291,45 +283,43 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
             .iter()
             .any(|opt| opt.id == signup.option_id && opt.reminders_enabled)
         {
-            reminding.insert(signup.user_id);
+            reminding.insert(signup.membership_id);
         }
     }
     if event.thread_enabled && settings.auto_join_threads {
+        let name = super::discord::stored_thread_name(conn, &event)?;
         diesel::insert_into(schema::threads::table)
-            .values((
-                schema::threads::event_id.eq(event_id),
-                schema::threads::name.eq(&super::discord::stored_thread_name(conn, &event)?),
-            ))
+            .values(&NewThread {
+                event_id,
+                name: &name,
+            })
             .on_conflict_do_nothing()
             .execute(conn)?;
-        let members = store::thread_member_ids(conn, event_id)?;
-        for user_id in &reminding {
-            if !members.contains(user_id) {
-                diesel::insert_into(schema::thread_members::table)
-                    .values((
-                        schema::thread_members::event_id.eq(event_id),
-                        schema::thread_members::user_id.eq(user_id),
-                    ))
-                    .on_conflict_do_nothing()
-                    .execute(conn)?;
-                let user = must_user(conn, *user_id)?;
-                log(
-                    conn,
-                    event.guild_id,
-                    Some(event_id),
-                    &format!("Marian added {} to the thread.", user.name),
-                )?;
-            }
+        let members = store::thread_member_ids(conn, &event)?;
+        let joining: Vec<i64> = reminding
+            .iter()
+            .copied()
+            .filter(|membership_id| !members.contains(membership_id))
+            .collect();
+        insert_thread_members(conn, event_id, &joining)?;
+        for membership_id in joining {
+            let user = must_membership(conn, membership_id)?;
+            log(
+                conn,
+                event.guild_id,
+                Some(event_id),
+                &format!("Marian added {} to the thread.", user.name),
+            )?;
         }
-        for user_id in members {
-            if !reminding.contains(&user_id) {
+        for membership_id in members {
+            if !reminding.contains(&membership_id) {
                 diesel::delete(
                     schema::thread_members::table
                         .filter(schema::thread_members::event_id.eq(event_id))
-                        .filter(schema::thread_members::user_id.eq(user_id)),
+                        .filter(schema::thread_members::membership_id.eq(membership_id)),
                 )
                 .execute(conn)?;
-                let user = must_user(conn, user_id)?;
+                let user = must_membership(conn, membership_id)?;
                 log(
                     conn,
                     event.guild_id,
@@ -347,11 +337,11 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
             .take(80)
             .collect();
         let new_id = diesel::insert_into(schema::roles::table)
-            .values((
-                schema::roles::guild_id.eq(event.guild_id),
-                schema::roles::name.eq(name),
-                schema::roles::color.eq("#1e3a6e"),
-            ))
+            .values(&NewRole {
+                guild_id: event.guild_id,
+                name: &name,
+                color: "#1e3a6e",
+            })
             .returning(schema::roles::id)
             .get_result(conn)?;
         role_id = Some(new_id);
@@ -361,35 +351,31 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
     }
     if let Some(role_id) = role_id {
         let role_name = must_role(conn, role_id)?.name;
-        let grants = store::grant_user_ids(conn, event_id)?;
-        for user_id in &reminding {
-            if !grants.contains(user_id) {
-                diesel::insert_into(schema::role_grants::table)
-                    .values((
-                        schema::role_grants::event_id.eq(event_id),
-                        schema::role_grants::user_id.eq(user_id),
-                        schema::role_grants::role_id.eq(role_id),
-                    ))
-                    .on_conflict_do_nothing()
-                    .execute(conn)?;
-                let user = must_user(conn, *user_id)?;
-                log(
-                    conn,
-                    event.guild_id,
-                    Some(event_id),
-                    &format!("Marian gave {} the {} role.", user.name, role_name),
-                )?;
-            }
+        let grants = store::grant_membership_ids(conn, &event)?;
+        let granting: Vec<i64> = reminding
+            .iter()
+            .copied()
+            .filter(|membership_id| !grants.contains(membership_id))
+            .collect();
+        insert_role_grants(conn, event_id, role_id, &granting)?;
+        for membership_id in granting {
+            let user = must_membership(conn, membership_id)?;
+            log(
+                conn,
+                event.guild_id,
+                Some(event_id),
+                &format!("Marian gave {} the {} role.", user.name, role_name),
+            )?;
         }
-        for user_id in grants {
-            if !reminding.contains(&user_id) {
+        for membership_id in grants {
+            if !reminding.contains(&membership_id) {
                 diesel::delete(
                     schema::role_grants::table
                         .filter(schema::role_grants::event_id.eq(event_id))
-                        .filter(schema::role_grants::user_id.eq(user_id)),
+                        .filter(schema::role_grants::membership_id.eq(membership_id)),
                 )
                 .execute(conn)?;
-                let user = must_user(conn, user_id)?;
+                let user = must_membership(conn, membership_id)?;
                 log(
                     conn,
                     event.guild_id,
@@ -406,10 +392,91 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
 }
 
 pub(super) fn cutoff_passed(event: &Event, now: DateTime<Utc>) -> bool {
-    event
-        .cutoff_at
-        .as_deref()
-        .and_then(|value| clock::parse_stamp(value).ok())
-        .map(|cutoff| now >= cutoff)
-        .unwrap_or(false)
+    event.cutoff_at.is_some_and(|cutoff| now >= cutoff)
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::signups)]
+struct NewSignup<'a> {
+    event_id: i64,
+    option_id: i64,
+    membership_id: i64,
+    state: &'a str,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::threads)]
+struct NewThread<'a> {
+    event_id: i64,
+    name: &'a str,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::roles)]
+struct NewRole<'a> {
+    guild_id: i64,
+    name: &'a str,
+    color: &'a str,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::thread_members)]
+struct NewThreadMember {
+    event_id: i64,
+    membership_id: i64,
+}
+
+fn insert_thread_members(
+    conn: &mut Connection,
+    event_id: i64,
+    membership_ids: &[i64],
+) -> Result<(), OpError> {
+    let rows: Vec<_> = membership_ids
+        .iter()
+        .map(|membership_id| NewThreadMember {
+            event_id,
+            membership_id: *membership_id,
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    diesel::insert_into(schema::thread_members::table)
+        .values(&rows)
+        .on_conflict_do_nothing()
+        .execute(conn)?;
+    Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::role_grants)]
+struct NewRoleGrant {
+    event_id: i64,
+    membership_id: i64,
+    role_id: i64,
+}
+
+fn insert_role_grants(
+    conn: &mut Connection,
+    event_id: i64,
+    role_id: i64,
+    membership_ids: &[i64],
+) -> Result<(), OpError> {
+    let rows: Vec<_> = membership_ids
+        .iter()
+        .map(|membership_id| NewRoleGrant {
+            event_id,
+            membership_id: *membership_id,
+            role_id,
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    diesel::insert_into(schema::role_grants::table)
+        .values(&rows)
+        .on_conflict_do_nothing()
+        .execute(conn)?;
+    Ok(())
 }

@@ -6,12 +6,12 @@ use chrono_tz::Tz;
 use diesel::prelude::*;
 
 use super::db::must_guild;
-use super::event::replace_children;
+use super::event::{insert_event_roles, replace_children};
 use super::model::{OptionInput, ReminderInput, SeriesTemplate};
 use crate::clock;
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Connection, Series};
+use crate::store::{Connection, Series, StoredTemplate};
 
 #[derive(Debug, Clone)]
 pub struct EventTemplate {
@@ -34,7 +34,7 @@ pub struct EventTemplate {
 }
 
 pub struct Spawn<'a> {
-    pub created_by: i64,
+    pub created_by: Option<i64>,
     pub starts_at: DateTime<Utc>,
     pub post_at: Option<DateTime<Utc>>,
     pub status: &'a str,
@@ -43,53 +43,49 @@ pub struct Spawn<'a> {
     pub tz: Tz,
 }
 
-#[derive(Queryable, Selectable)]
-#[diesel(table_name = crate::schema::event_templates)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-struct StoredTemplate {
-    #[allow(dead_code)]
-    id: i64,
+#[derive(Insertable)]
+#[diesel(table_name = schema::event_templates)]
+struct NewTemplate<'a> {
     guild_id: i64,
     channel_id: i64,
-    title: String,
-    description: String,
+    title: &'a str,
+    description: &'a str,
     duration_minutes: i64,
-    color: String,
-    image_url: Option<String>,
+    color: &'a str,
+    image_url: Option<&'a str>,
     thread_enabled: bool,
     multiple_signups: bool,
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
     cutoff_offset_minutes: Option<i64>,
-    options_json: String,
-    reminders_json: String,
-    mention_role_ids: String,
-    restrict_role_ids: String,
-    #[allow(dead_code)]
-    created_at: String,
+    options_json: serde_json::Value,
+    reminders_json: serde_json::Value,
+    mention_role_ids: &'a [i64],
+    restrict_role_ids: &'a [i64],
+    created_at: DateTime<Utc>,
 }
 
 pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, OpError> {
     let id = diesel::insert_into(schema::event_templates::table)
-        .values((
-            schema::event_templates::guild_id.eq(template.guild_id),
-            schema::event_templates::channel_id.eq(template.channel_id),
-            schema::event_templates::title.eq(&template.title),
-            schema::event_templates::description.eq(&template.description),
-            schema::event_templates::duration_minutes.eq(template.duration_minutes),
-            schema::event_templates::color.eq(&template.color),
-            schema::event_templates::image_url.eq(template.image_url.as_deref()),
-            schema::event_templates::thread_enabled.eq(template.thread_enabled),
-            schema::event_templates::multiple_signups.eq(template.multiple_signups),
-            schema::event_templates::mention_everyone.eq(template.mention_everyone),
-            schema::event_templates::attendee_role_id.eq(template.attendee_role_id),
-            schema::event_templates::cutoff_offset_minutes.eq(template.cutoff_offset_minutes),
-            schema::event_templates::options_json.eq(to_json(&template.options)),
-            schema::event_templates::reminders_json.eq(to_json(&template.reminders)),
-            schema::event_templates::mention_role_ids.eq(to_json(&template.mention_role_ids)),
-            schema::event_templates::restrict_role_ids.eq(to_json(&template.restrict_role_ids)),
-            schema::event_templates::created_at.eq(store::now_stamp()),
-        ))
+        .values(&NewTemplate {
+            guild_id: template.guild_id,
+            channel_id: template.channel_id,
+            title: &template.title,
+            description: &template.description,
+            duration_minutes: template.duration_minutes,
+            color: &template.color,
+            image_url: template.image_url.as_deref(),
+            thread_enabled: template.thread_enabled,
+            multiple_signups: template.multiple_signups,
+            mention_everyone: template.mention_everyone,
+            attendee_role_id: template.attendee_role_id,
+            cutoff_offset_minutes: template.cutoff_offset_minutes,
+            options_json: to_json(&template.options),
+            reminders_json: to_json(&template.reminders),
+            mention_role_ids: &template.mention_role_ids,
+            restrict_role_ids: &template.restrict_role_ids,
+            created_at: Utc::now(),
+        })
         .returning(schema::event_templates::id)
         .get_result(conn)?;
     Ok(id)
@@ -111,8 +107,8 @@ pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Resul
             schema::event_templates::cutoff_offset_minutes.eq(template.cutoff_offset_minutes),
             schema::event_templates::options_json.eq(to_json(&template.options)),
             schema::event_templates::reminders_json.eq(to_json(&template.reminders)),
-            schema::event_templates::mention_role_ids.eq(to_json(&template.mention_role_ids)),
-            schema::event_templates::restrict_role_ids.eq(to_json(&template.restrict_role_ids)),
+            schema::event_templates::mention_role_ids.eq(&template.mention_role_ids),
+            schema::event_templates::restrict_role_ids.eq(&template.restrict_role_ids),
         ))
         .execute(conn)?;
     Ok(())
@@ -138,9 +134,8 @@ pub fn update_wording(
 }
 
 pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
-    let row = schema::event_templates::table
+    let row = StoredTemplate::query()
         .filter(schema::event_templates::id.eq(id))
-        .select(StoredTemplate::as_select())
         .first(conn)
         .optional()?
         .ok_or(OpError::NotFound)?;
@@ -157,10 +152,10 @@ pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
         mention_everyone: row.mention_everyone,
         attendee_role_id: row.attendee_role_id,
         cutoff_offset_minutes: row.cutoff_offset_minutes,
-        options: serde_json::from_str(&row.options_json).unwrap_or_default(),
-        reminders: serde_json::from_str(&row.reminders_json).unwrap_or_default(),
-        mention_role_ids: serde_json::from_str(&row.mention_role_ids).unwrap_or_default(),
-        restrict_role_ids: serde_json::from_str(&row.restrict_role_ids).unwrap_or_default(),
+        options: serde_json::from_value(row.options_json).unwrap_or_default(),
+        reminders: serde_json::from_value(row.reminders_json).unwrap_or_default(),
+        mention_role_ids: row.mention_role_ids,
+        restrict_role_ids: row.restrict_role_ids,
     })
 }
 
@@ -210,60 +205,69 @@ pub fn as_series(template: &EventTemplate) -> SeriesTemplate {
     }
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::events)]
+struct NewSpawnedEvent<'a> {
+    public_id: uuid::Uuid,
+    guild_id: i64,
+    channel_id: i64,
+    series_id: Option<i64>,
+    occurrence_index: Option<i64>,
+    title: &'a str,
+    description: &'a str,
+    starts_at: DateTime<Utc>,
+    duration_minutes: i64,
+    status: &'a str,
+    post_at: Option<DateTime<Utc>>,
+    color: &'a str,
+    image_url: Option<&'a str>,
+    cutoff_at: Option<DateTime<Utc>>,
+    mention_everyone: bool,
+    attendee_role_id: Option<i64>,
+    thread_enabled: bool,
+    multiple_signups: bool,
+    created_by: Option<i64>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 pub fn spawn(
     conn: &mut Connection,
     template: &EventTemplate,
     spec: &Spawn<'_>,
 ) -> Result<i64, OpError> {
-    let stamp = store::now_stamp();
+    let stamp = Utc::now();
     let cutoff = template
         .cutoff_offset_minutes
-        .map(|mins| clock::stamp(spec.starts_at - Duration::minutes(mins)));
+        .map(|mins| spec.starts_at - Duration::minutes(mins));
     let id = diesel::insert_into(schema::events::table)
-        .values((
-            schema::events::public_id.eq(crate::ids::event_id()),
-            schema::events::guild_id.eq(template.guild_id),
-            schema::events::channel_id.eq(template.channel_id),
-            schema::events::series_id.eq(spec.series_id),
-            schema::events::occurrence_index.eq(spec.occurrence_index),
-            schema::events::title.eq(fill(&template.title, spec.starts_at, spec.tz)),
-            schema::events::description.eq(fill(&template.description, spec.starts_at, spec.tz)),
-            schema::events::starts_at.eq(clock::stamp(spec.starts_at)),
-            schema::events::duration_minutes.eq(template.duration_minutes),
-            schema::events::status.eq(spec.status),
-            schema::events::post_at.eq(spec.post_at.map(clock::stamp)),
-            schema::events::color.eq(&template.color),
-            schema::events::image_url.eq(template.image_url.as_deref()),
-            schema::events::cutoff_at.eq(cutoff.as_deref()),
-            schema::events::mention_everyone.eq(template.mention_everyone),
-            schema::events::attendee_role_id.eq(template.attendee_role_id),
-            schema::events::thread_enabled.eq(template.thread_enabled),
-            schema::events::multiple_signups.eq(template.multiple_signups),
-            schema::events::created_by.eq(spec.created_by),
-            schema::events::created_at.eq(&stamp),
-            schema::events::updated_at.eq(&stamp),
-        ))
+        .values(&NewSpawnedEvent {
+            public_id: crate::ids::event_id(),
+            guild_id: template.guild_id,
+            channel_id: template.channel_id,
+            series_id: spec.series_id,
+            occurrence_index: spec.occurrence_index,
+            title: &fill(&template.title, spec.starts_at, spec.tz),
+            description: &fill(&template.description, spec.starts_at, spec.tz),
+            starts_at: spec.starts_at,
+            duration_minutes: template.duration_minutes,
+            status: spec.status,
+            post_at: spec.post_at,
+            color: &template.color,
+            image_url: template.image_url.as_deref(),
+            cutoff_at: cutoff,
+            mention_everyone: template.mention_everyone,
+            attendee_role_id: template.attendee_role_id,
+            thread_enabled: template.thread_enabled,
+            multiple_signups: template.multiple_signups,
+            created_by: spec.created_by,
+            created_at: stamp,
+            updated_at: stamp,
+        })
         .returning(schema::events::id)
         .get_result(conn)?;
     replace_children(conn, id, &template.options, &template.reminders)?;
-    for role_id in &template.mention_role_ids {
-        diesel::insert_into(schema::event_roles::table)
-            .values((
-                schema::event_roles::event_id.eq(id),
-                schema::event_roles::role_id.eq(role_id),
-                schema::event_roles::kind.eq("mention"),
-            ))
-            .execute(conn)?;
-    }
-    for role_id in &template.restrict_role_ids {
-        diesel::insert_into(schema::event_roles::table)
-            .values((
-                schema::event_roles::event_id.eq(id),
-                schema::event_roles::role_id.eq(role_id),
-                schema::event_roles::kind.eq("restrict"),
-            ))
-            .execute(conn)?;
-    }
+    insert_event_roles(conn, id, &template.mention_role_ids, &template.restrict_role_ids)?;
     Ok(id)
 }
 
@@ -283,6 +287,6 @@ pub fn fill(text: &str, start: DateTime<Utc>, tz: Tz) -> String {
     text.replace("{date}", &date)
 }
 
-fn to_json<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "[]".into())
+fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!([]))
 }

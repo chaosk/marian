@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::catalog::slug_channel;
@@ -8,7 +9,7 @@ use super::model::*;
 use crate::clock;
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Channel, Connection, User};
+use crate::store::{self, Channel, Connection, Membership};
 
 pub enum Attendance {
     Idle,
@@ -50,16 +51,16 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
     let settings = store::settings(conn, event.guild_id)?;
     let manage_thread = event.thread_enabled && settings.auto_join_threads;
     let desired_thread = if manage_thread {
-        let members = store::thread_member_ids(conn, event_id)?;
-        store::discord_ids_for_users(conn, &members)?
+        let members = store::thread_member_ids(conn, &event)?;
+        store::discord_ids_for_memberships(conn, &members)?
     } else {
         Vec::new()
     };
-    let applied_thread = store::applied_user_ids(conn, event_id, "thread")?;
+    let applied_thread = store::applied_membership_ids(conn, event_id, "thread")?;
     let (thread_add, thread_remove) = id_diff(&desired_thread, &applied_thread);
-    let grants = store::grant_user_ids(conn, event_id)?;
-    let desired_role = store::discord_ids_for_users(conn, &grants)?;
-    let applied_role = store::applied_user_ids(conn, event_id, "role")?;
+    let grants = store::grant_membership_ids(conn, &event)?;
+    let desired_role = store::discord_ids_for_memberships(conn, &grants)?;
+    let applied_role = store::applied_membership_ids(conn, event_id, "role")?;
     let (role_add, role_remove) = id_diff(&desired_role, &applied_role);
     let role = event
         .attendee_role_id
@@ -70,7 +71,7 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         channel_discord_id,
         message_id,
         thread_discord_id: store::thread_discord_id(conn, event_id)?,
-        thread_name: event_thread_name(&event.title, &event.starts_at, &guild.timezone),
+        thread_name: event_thread_name(&event.title, event.starts_at, &guild.timezone),
         thread_add,
         thread_remove,
         role_id: role.as_ref().map(|role| role.id),
@@ -90,12 +91,10 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
 
 /// Discord thread title: the event name, then its date in the guild's zone.
 /// Discord allows 100 characters, so a long name is shortened and the date stays.
-pub fn event_thread_name(title: &str, starts_at: &str, timezone: &str) -> String {
-    let date = clock::parse_stamp(starts_at).ok().and_then(|start| {
-        clock::zone(timezone)
-            .ok()
-            .map(|tz| clock::format_day(start.with_timezone(&tz).date_naive()))
-    });
+pub fn event_thread_name(title: &str, starts_at: DateTime<Utc>, timezone: &str) -> String {
+    let date = clock::zone(timezone)
+        .ok()
+        .map(|tz| clock::format_day(starts_at.with_timezone(&tz).date_naive()));
     let title = title.trim();
     let title = if title.is_empty() { "Event" } else { title };
     let Some(date) = date else {
@@ -113,11 +112,7 @@ pub(super) fn stored_thread_name(
     let timezone = store::guild(conn, event.guild_id)?
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
-    Ok(event_thread_name(
-        &event.title,
-        &event.starts_at,
-        &timezone,
-    ))
+    Ok(event_thread_name(&event.title, event.starts_at, &timezone))
 }
 
 fn id_diff(desired: &[String], applied: &[String]) -> (Vec<String>, Vec<String>) {
@@ -137,7 +132,12 @@ fn role_color(color: &str) -> u32 {
 /// Body of the ephemeral card shown before a Discord delete. The title of that card is
 /// "Delete event". A posted event is cancelled and its post is removed. Anything else
 /// that can still be deleted is removed outright.
-pub fn delete_confirm_body(title: &str, starts_at: &str, url: Option<&str>, posted: bool) -> String {
+pub fn delete_confirm_body(
+    title: &str,
+    starts_at: DateTime<Utc>,
+    url: Option<&str>,
+    posted: bool,
+) -> String {
     let name = title.trim();
     let name = if name.is_empty() { "Event" } else { name };
     let label = trim_chars(&name.replace(['\n', '\r'], " "), 200);
@@ -146,18 +146,13 @@ pub fn delete_confirm_body(title: &str, starts_at: &str, url: Option<&str>, post
         Some(url) => format!("[{label}]({url})"),
         None => label,
     };
-    let when = clock::parse_stamp(starts_at)
-        .ok()
-        .map(|start| format!(" · <t:{}:R>", start.timestamp()));
+    let when = format!(" · <t:{}:R>", starts_at.timestamp());
     let consequence = if posted {
         "This removes the Discord post. The event is marked cancelled."
     } else {
         "This deletes the event."
     };
-    match when {
-        Some(when) => format!("{head}{when}\n\n{consequence}"),
-        None => format!("{head}\n\n{consequence}"),
-    }
+    format!("{head}{when}\n\n{consequence}")
 }
 
 /// Text that sits above the embed. Discord only notifies `@everyone` and roles from this
@@ -184,9 +179,9 @@ pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
     line
 }
 
-fn mention_discord_roles(conn: &mut Connection, event_id: i64) -> Result<Vec<String>, OpError> {
+fn mention_discord_roles(conn: &mut Connection, event: &store::Event) -> Result<Vec<String>, OpError> {
     let mut roles = Vec::new();
-    for role_id in store::event_role_ids(conn, event_id, "mention")? {
+    for role_id in store::event_role_ids(conn, event, "mention")? {
         let Some(role) = store::role(conn, role_id)? else {
             continue;
         };
@@ -222,7 +217,7 @@ pub fn discord_view(
     };
     let guild = must_guild(conn, event.guild_id)?;
     let settings = store::settings(conn, event.guild_id)?;
-    let start = clock::parse_stamp(&event.starts_at)?;
+    let start = event.starts_at;
     let end = start + chrono::Duration::minutes(event.duration_minutes);
     let mut body = String::new();
     if !event.description.trim().is_empty() {
@@ -244,10 +239,10 @@ pub fn discord_view(
     if event.status != "posted" {
         body.push_str(&format!("\n\n_{}_", status_label(&event.status)));
     }
-    let options = store::options_for(conn, event.id)?;
-    let signups = store::signups_for(conn, event.id)?;
-    let users = store::list_users(conn, event.guild_id)?;
-    let names: HashMap<i64, String> = users.into_iter().map(|user| (user.id, user.name)).collect();
+    let options = store::options_for(conn, &event)?;
+    let signups = store::signups_for(conn, &event)?;
+    let memberships = store::list_memberships(conn, event.guild_id)?;
+    let names: HashMap<i64, String> = memberships.into_iter().map(|user| (user.id, user.name)).collect();
     let mut fields = Vec::new();
     let mut buttons = Vec::new();
     let closed = event.status != "posted" || event.signups_closed;
@@ -269,7 +264,7 @@ pub fn discord_view(
             lines.extend(
                 confirmed
                     .iter()
-                    .filter_map(|signup| names.get(&signup.user_id))
+                    .filter_map(|signup| names.get(&signup.membership_id))
                     .cloned(),
             );
         }
@@ -308,11 +303,14 @@ pub fn discord_view(
         tone: ButtonTone::Danger,
         disabled: false,
     });
-    let mention_roles = mention_discord_roles(conn, event.id)?;
-    let creator = store::user(conn, event.created_by)?
-        .map(|user| user.name)
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "Marian".into());
+    let mention_roles = mention_discord_roles(conn, &event)?;
+    let creator = match event.created_by {
+        Some(id) => store::membership(conn, id)?,
+        None => None,
+    }
+    .map(|user| user.name)
+    .filter(|name| !name.trim().is_empty())
+    .unwrap_or_else(|| "Marian".into());
     let image_url = event.image_url.as_deref().and_then(|url| {
         let url = url.trim();
         if url.starts_with("https://") || url.starts_with("http://") {
@@ -339,7 +337,7 @@ pub fn discord_view(
 pub fn web_event_url(
     public_url: &str,
     server: Option<&str>,
-    public_id: &str,
+    public_id: impl std::fmt::Display,
 ) -> Option<String> {
     let base = public_url.trim().trim_end_matches('/');
     let server = server.filter(|id| !id.is_empty())?;
@@ -360,6 +358,14 @@ pub fn remember_discord_message(
     Ok(())
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::guilds)]
+struct NewGuild<'a> {
+    name: &'a str,
+    timezone: &'a str,
+    discord_id: &'a str,
+}
+
 pub fn ensure_discord_guild(
     conn: &mut Connection,
     discord_id: &str,
@@ -373,20 +379,33 @@ pub fn ensure_discord_guild(
         }
         return store::guild(conn, guild.id)?.ok_or(OpError::NotFound);
     }
+    let name = if name.is_empty() {
+        "Discord server"
+    } else {
+        name
+    };
     let id = diesel::insert_into(schema::guilds::table)
-        .values((
-            schema::guilds::name.eq(if name.is_empty() {
-                "Discord server"
-            } else {
-                name
-            }),
-            schema::guilds::timezone.eq("UTC"),
-            schema::guilds::discord_id.eq(discord_id),
-        ))
+        .values(&NewGuild {
+            name,
+            timezone: "UTC",
+            discord_id,
+        })
         .returning(schema::guilds::id)
         .get_result(conn)?;
     store::insert_default_settings(conn, id)?;
     store::guild(conn, id)?.ok_or(OpError::NotFound)
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::memberships)]
+struct NewMembership<'a> {
+    user_id: i64,
+    guild_id: i64,
+    name: &'a str,
+    handle: &'a str,
+    color: &'a str,
+    reminders_enabled: bool,
+    organizer: bool,
 }
 
 pub fn ensure_discord_user(
@@ -394,14 +413,15 @@ pub fn ensure_discord_user(
     guild_id: i64,
     discord_id: &str,
     name: &str,
-) -> Result<User, OpError> {
-    if let Some(user) = store::user_by_discord(conn, guild_id, discord_id)? {
+) -> Result<Membership, OpError> {
+    let user_id = store::ensure_user(conn, discord_id)?;
+    if let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? {
         if user.name != name && !name.is_empty() {
-            diesel::update(schema::users::table.filter(schema::users::id.eq(user.id)))
-                .set(schema::users::name.eq(name))
+            diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
+                .set(schema::memberships::name.eq(name))
                 .execute(conn)?;
         }
-        return store::user(conn, user.id)?.ok_or(OpError::NotFound);
+        return store::membership(conn, user.id)?.ok_or(OpError::NotFound);
     }
     let handle = unique_handle(conn, guild_id, name, discord_id)?;
     let color = [
@@ -415,26 +435,36 @@ pub fn ensure_discord_user(
     } else {
         name.trim()
     };
-    let id = diesel::insert_into(schema::users::table)
-        .values((
-            schema::users::guild_id.eq(guild_id),
-            schema::users::name.eq(display),
-            schema::users::handle.eq(&handle),
-            schema::users::color.eq(color),
-            schema::users::reminders_enabled.eq(true),
-            schema::users::organizer.eq(false),
-            schema::users::discord_id.eq(discord_id),
-        ))
-        .returning(schema::users::id)
+    let id = diesel::insert_into(schema::memberships::table)
+        .values(&NewMembership {
+            user_id,
+            guild_id,
+            name: display,
+            handle: &handle,
+            color,
+            reminders_enabled: true,
+            organizer: false,
+        })
+        .returning(schema::memberships::id)
         .get_result(conn)?;
-    store::user(conn, id)?.ok_or(OpError::NotFound)
+    store::membership(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub fn set_organizer(conn: &mut Connection, user_id: i64, organizer: bool) -> Result<(), OpError> {
-    diesel::update(schema::users::table.filter(schema::users::id.eq(user_id)))
-        .set(schema::users::organizer.eq(organizer))
+pub fn set_organizer(conn: &mut Connection, membership_id: i64, organizer: bool) -> Result<(), OpError> {
+    diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
+        .set(schema::memberships::organizer.eq(organizer))
         .execute(conn)?;
     Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::channels)]
+struct NewChannel<'a> {
+    guild_id: i64,
+    name: &'a str,
+    kind: &'a str,
+    position: i64,
+    discord_id: &'a str,
 }
 
 pub fn ensure_discord_channel(
@@ -472,13 +502,13 @@ pub fn ensure_discord_channel(
         .unwrap_or(0)
         + 1;
     let id = diesel::insert_into(schema::channels::table)
-        .values((
-            schema::channels::guild_id.eq(guild_id),
-            schema::channels::name.eq(&slug),
-            schema::channels::kind.eq("text"),
-            schema::channels::position.eq(position),
-            schema::channels::discord_id.eq(discord_id),
-        ))
+        .values(&NewChannel {
+            guild_id,
+            name: &slug,
+            kind: "text",
+            position,
+            discord_id,
+        })
         .returning(schema::channels::id)
         .get_result(conn)?;
     store::channel(conn, id)?.ok_or(OpError::NotFound)
@@ -499,7 +529,7 @@ fn unique_handle(
         base = format!("user{}", &discord_id[discord_id.len().saturating_sub(6)..]);
     }
     base = base.chars().take(24).collect();
-    if store::user_by_handle(conn, guild_id, &base)?.is_none() {
+    if store::membership_by_handle(conn, guild_id, &base)?.is_none() {
         return Ok(base);
     }
     let suffix = &discord_id[discord_id.len().saturating_sub(4)..];
@@ -519,9 +549,11 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
-            INSERT INTO users (id, guild_id, name, handle, color) VALUES
-              (1, 1, 'Nell', 'nell', '#112233'),
-              (2, 1, 'June', 'june', '#112233');
+            INSERT INTO users (discord_id) VALUES ('nell'), ('june');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'nell'
+            UNION ALL
+            SELECT 2, id, 1, 'June', 'june', '#112233' FROM users WHERE discord_id = 'june';
             INSERT INTO events (
               public_id, guild_id, channel_id, title, description, starts_at, duration_minutes,
               status, created_by, created_at, updated_at
@@ -532,7 +564,7 @@ mod tests {
             INSERT INTO signup_options (id, event_id, name, emoji, position) VALUES
               (1, 1, 'Accepted', '✅', 0),
               (2, 1, 'Declined', '❌', 1);
-            INSERT INTO signups (event_id, option_id, user_id, state, created_at) VALUES
+            INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
               (1, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (1, 1, 2, 'confirmed', '2026-10-13T00:00:00Z'),
               (1, 2, 2, 'waitlisted', '2026-10-13T00:00:00Z');
@@ -575,8 +607,9 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
-            INSERT INTO users (id, guild_id, name, handle, color) VALUES
-              (1, 1, 'Nell', 'nell', '#112233');
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'nell';
             INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES
               (1, 1, 'Raiders', '#112233', '111'),
               (2, 1, 'Local only', '#112233', NULL),
@@ -612,9 +645,10 @@ mod tests {
 
     #[test]
     fn delete_confirm_names_the_event_and_says_what_delete_does() {
+        let when = clock::parse_stamp("2026-10-16T14:00:00Z").unwrap();
         let posted = delete_confirm_body(
             "Test",
-            "2026-10-16T14:00:00Z",
+            when,
             Some("https://marian.example.com/servers/1/events/abc"),
             true,
         );
@@ -625,8 +659,9 @@ mod tests {
             "{posted}"
         );
         assert!(posted.contains(":R>\n\nThis removes the Discord post. The event is marked cancelled."));
-        let draft = delete_confirm_body("Shore", "not-a-date", None, false);
-        assert_eq!(draft, "Shore\n\nThis deletes the event.");
+        let draft = delete_confirm_body("Shore", when, None, false);
+        assert!(draft.starts_with("Shore · <t:"), "{draft}");
+        assert!(draft.contains("This deletes the event."));
     }
 
     #[test]
@@ -641,9 +676,9 @@ mod tests {
         let second = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
         assert!(!second.organizer);
         set_organizer(&mut conn, first.id, true).unwrap();
-        assert!(store::user(&mut conn, first.id).unwrap().unwrap().organizer);
+        assert!(store::membership(&mut conn, first.id).unwrap().unwrap().organizer);
         set_organizer(&mut conn, first.id, false).unwrap();
-        assert!(!store::user(&mut conn, first.id).unwrap().unwrap().organizer);
+        assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().organizer);
     }
 
     #[test]

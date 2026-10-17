@@ -9,12 +9,12 @@ use crate::clock::{self, zone_label};
 use crate::error::OpError;
 use crate::ics;
 use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction};
-use crate::store::{self, Connection, Event, Settings, User};
+use crate::store::{self, Connection, Event, Settings, Membership};
 
 pub struct Page<'a> {
     pub conn: &'a mut Connection,
     pub guild_id: i64,
-    pub user_id: i64,
+    pub membership_id: i64,
     pub notice: Option<&'a str>,
     pub invite_url: &'a str,
     pub nav: &'a str,
@@ -60,6 +60,9 @@ pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
     let (settings, tz) = zone_of(page)?;
     let (week_start, week_end) = week_window(now, tz);
     let events = store::list_events(page.conn, page.guild_id)?;
+    let option_groups = store::options_by_event(page.conn, &events)?;
+    let signup_groups = store::signups_by_event(page.conn, &events)?;
+    let reminder_groups = store::reminders_by_event(page.conn, &events)?;
     let mut days: Vec<DayBucket> = Vec::new();
     let mut wrapped = Vec::new();
     let mut waiting = Vec::new();
@@ -67,14 +70,14 @@ pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
     let mut hero: Option<serde_json::Value> = None;
     let mut hero_start: Option<DateTime<Utc>> = None;
     let mut shown = 0usize;
-    for event in &events {
-        let start = clock::parse_stamp(&event.starts_at)?;
+    for (index, event) in events.iter().enumerate() {
+        let start = event.starts_at;
         let end = start + Duration::minutes(event.duration_minutes);
         if event.status == "scheduled" || event.status == "failed" {
             waiting.push(serde_json::json!({
                 "id": event.public_id,
                 "title": event.title,
-                "post_when": event.post_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_else(|| "when you publish it".into()),
+                "post_when": event.post_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_else(|| "when you publish it".into()),
             }));
         }
         if event.status == "posted" && end < now {
@@ -95,7 +98,16 @@ pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
                     && hero_start.map(|current| start < current).unwrap_or(true)
                 {
                     hero_start = Some(start);
-                    hero = Some(card_value(page.conn, event, &settings, tz, now, true)?);
+                    hero = Some(card_value(
+                        page.conn,
+                        event,
+                        &settings,
+                        tz,
+                        now,
+                        true,
+                        &option_groups[index],
+                        &signup_groups[index],
+                    )?);
                 }
                 let label = clock::format_day(start.with_timezone(&tz).date_naive());
                 let today =
@@ -110,11 +122,20 @@ pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
                 days.last_mut()
                     .unwrap()
                     .events
-                    .push(card_value(page.conn, event, &settings, tz, now, false)?);
+                    .push(card_value(
+                        page.conn,
+                        event,
+                        &settings,
+                        tz,
+                        now,
+                        false,
+                        &option_groups[index],
+                        &signup_groups[index],
+                    )?);
             }
         }
         if event.status == "posted" {
-            for rem in store::reminders_for(page.conn, event.id)? {
+            for rem in &reminder_groups[index] {
                 if rem.sent_at.is_none() {
                     reminders.push(serde_json::json!({
                         "id": event.public_id,
@@ -158,16 +179,16 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         return Err(OpError::NotFound);
     }
     let (settings, tz) = zone_of(page)?;
-    let user = must_user(page)?;
-    let roles = store::user_role_ids(page.conn, user.id)?;
+    let user = must_membership(page)?;
+    let roles = store::membership_role_ids(page.conn, &user)?;
     let can_edit = logic::can_edit(&user, &event, &settings, &roles);
-    let options = store::options_for(page.conn, event.id)?;
-    let signups = store::signups_for(page.conn, event.id)?;
-    let users = store::list_users(page.conn, page.guild_id)?;
+    let options = store::options_for(page.conn, &event)?;
+    let signups = store::signups_for(page.conn, &event)?;
+    let memberships = store::list_memberships(page.conn, page.guild_id)?;
     let role_rows = store::list_roles(page.conn, page.guild_id)?;
-    let restrict_ids = store::event_role_ids(page.conn, event.id, "restrict")?;
+    let restrict_ids = store::event_role_ids(page.conn, &event, "restrict")?;
     let now = Utc::now();
-    let start = clock::parse_stamp(&event.starts_at)?;
+    let start = event.starts_at;
     let closed = event.status != "posted" || event.signups_closed || cutoff_passed(&event, now);
     let mut option_views = Vec::new();
     let mut buttons = Vec::new();
@@ -187,9 +208,9 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         let mut field_lines = Vec::new();
         if settings.show_attendees {
             field_lines.extend(confirmed.iter().filter_map(|s| {
-                users
+                memberships
                     .iter()
-                    .find(|u| u.id == s.user_id)
+                    .find(|u| u.id == s.membership_id)
                     .map(|u| u.name.clone())
             }));
         }
@@ -220,12 +241,12 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
             "role": role_name,
             "reminders": opt.reminders_enabled,
             "pct": pct,
-            "confirmed": people(&users, &confirmed.iter().map(|s| s.user_id).collect::<Vec<_>>()),
-            "waiting": people(&users, &waiting.iter().map(|s| s.user_id).collect::<Vec<_>>()),
+            "confirmed": people(&memberships, &confirmed.iter().map(|s| s.membership_id).collect::<Vec<_>>()),
+            "waiting": people(&memberships, &waiting.iter().map(|s| s.membership_id).collect::<Vec<_>>()),
         }));
         let yours = signups
             .iter()
-            .any(|s| s.option_id == opt.id && s.user_id == user.id);
+            .any(|s| s.option_id == opt.id && s.membership_id == user.id);
         let (disabled, reason, wait, label) = button_state(
             &event,
             opt,
@@ -251,9 +272,9 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         .as_ref()
         .map(|c| c.name.clone())
         .unwrap_or_else(|| "deleted".into());
-    let reminders = store::reminders_for(page.conn, event.id)?;
-    let thread = store::thread_messages(page.conn, event.id)?;
-    let members = store::thread_member_ids(page.conn, event.id)?;
+    let reminders = store::reminders_for(page.conn, &event)?;
+    let thread = store::thread_messages(page.conn, &event)?;
+    let members = store::thread_member_ids(page.conn, &event)?;
     let series = event
         .series_id
         .and_then(|id| store::series(page.conn, id).ok().flatten());
@@ -267,9 +288,9 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
     };
     let google = ics::google_link(&event, &format!("#{channel_name}")).unwrap_or_default();
     let plus = ics::calendar_template(&event).unwrap_or_default();
-    let creator = users
+    let creator = memberships
         .iter()
-        .find(|person| person.id == event.created_by)
+        .find(|person| event.created_by == Some(person.id))
         .map(|person| person.name.clone())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Marian".into());
@@ -281,12 +302,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
             None
         }
     });
-    let google_synced = user
-        .discord_id
-        .as_deref()
-        .map(|discord_id| crate::google::on_calendar(page.conn, discord_id, event.id))
-        .transpose()?
-        .unwrap_or(false);
+    let google_synced = crate::google::on_calendar(page.conn, user.user_id, event.id)?;
     let web_url = format!(
         "/servers/{}/events/{}",
         store::discord_server_id(page.conn, event.guild_id).unwrap_or_default(),
@@ -296,7 +312,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
     ctx["series_id"] = Value::from(
         series
             .as_ref()
-            .map(|item| item.public_id.clone())
+            .map(|item| item.public_id.to_string())
             .unwrap_or_default(),
     );
     ctx["can_edit"] = context_bool(can_edit);
@@ -331,7 +347,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         "calendar_on": event.calendar_synced_at.is_some(),
         "google_synced": google_synced,
         "duration": clock::human_duration(event.duration_minutes),
-        "cutoff": event.cutoff_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
+        "cutoff": event.cutoff_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
         "attendee_role": event.attendee_role_id.and_then(|id| role_rows.iter().find(|r| r.id == id).map(|r| r.name.clone())).unwrap_or_default(),
         "series_note": series_note,
         "reminders": reminders.iter().map(|rem| serde_json::json!({
@@ -342,9 +358,9 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         "thread": thread.iter().map(|note| serde_json::json!({
             "body": note.body,
             "place": note.place,
-            "when": clock::parse_stamp(&note.created_at).map(|dt| clock::format_rel(dt, now)).unwrap_or_default(),
+            "when": clock::format_rel(note.created_at, now),
         })).collect::<Vec<_>>(),
-        "members": members.iter().filter_map(|id| users.iter().find(|u| u.id == *id).map(|u| u.name.clone())).collect::<Vec<_>>(),
+        "members": members.iter().filter_map(|id| memberships.iter().find(|u| u.id == *id).map(|u| u.name.clone())).collect::<Vec<_>>(),
     }));
     render("event.html", ctx)
 }
@@ -352,7 +368,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
 fn button_state(
     event: &Event,
     opt: &store::SignupOption,
-    user: &User,
+    user: &Membership,
     roles: &[i64],
     yours: bool,
     confirmed: usize,
@@ -616,7 +632,7 @@ pub fn recurring(page: &mut Page<'_>, query: ListQuery) -> Result<String, OpErro
             .iter()
             .find(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "draft"));
         let when = next
-            .and_then(|event| clock::parse_stamp(&event.starts_at).ok())
+            .map(|event| event.starts_at)
             .map(|dt| clock::format_when(dt, tz, settings.hour_24))
             .unwrap_or_else(|| "no upcoming date".into());
         rows.push(serde_json::json!({
@@ -653,9 +669,6 @@ pub fn series_page(
     public_id: &str,
     query: ListQuery,
 ) -> Result<String, OpError> {
-    let Some(public_id) = crate::ids::parse_event_id(public_id) else {
-        return Err(OpError::NotFound);
-    };
     let series = store::series_by_public(page.conn, public_id)?.ok_or(OpError::NotFound)?;
     if series.guild_id != page.guild_id {
         return Err(OpError::NotFound);
@@ -665,8 +678,8 @@ pub fn series_page(
     let title = template.title;
     let events = store::events_in_series(page.conn, series.id)?;
     let rows = events.iter().filter_map(|event| {
-        let start = clock::parse_stamp(&event.starts_at).ok()?;
-        let post = event.post_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default();
+        let start = event.starts_at;
+        let post = event.post_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default();
         Some(serde_json::json!({
             "id": event.public_id,
             "title": event.title,
@@ -698,15 +711,13 @@ pub fn series_page(
     let shown = matched[start..end].to_vec();
     let repeat_until = series
         .end_on
-        .as_deref()
-        .and_then(|value| clock::parse_stamp(value).ok())
         .map(|dt| clock::date_local(dt, tz))
         .unwrap_or_default();
     let mut ctx = shell(page)?;
     ctx["heading"] = Value::from(title);
     ctx["cadence"] = Value::from(clock::cadence_label(&series.cadence));
     ctx["active"] = context_bool(series.active);
-    ctx["series_id"] = Value::from(series.public_id.clone());
+    ctx["series_id"] = Value::from(series.public_id.to_string());
     ctx["repeat"] = Value::from(series.cadence);
     ctx["repeat_count"] = Value::from(
         series
@@ -727,7 +738,7 @@ pub fn series_page(
 pub fn presets(page: &mut Page<'_>) -> Result<String, OpError> {
     let mut items = Vec::new();
     for preset in store::list_presets(page.conn, page.guild_id)? {
-        let summary = serde_json::from_str::<logic::PresetBody>(&preset.body)
+        let summary = serde_json::from_value::<logic::PresetBody>(preset.body)
             .map(|body| {
                 body.options
                     .iter()
@@ -765,7 +776,7 @@ pub fn channels(page: &mut Page<'_>) -> Result<String, OpError> {
             "name": channel.name,
             "kind": if channel.kind == "event" { "Event channel" } else { "Text" },
             "count": count,
-            "purged": channel.purged_at.as_deref().and_then(|v| clock::parse_stamp(v).ok()).map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
+            "purged": channel.purged_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
         }));
     }
     let mut ctx = shell(page)?;
@@ -781,12 +792,12 @@ pub fn help_page() -> Result<String, OpError> {
 
 pub fn commands_page(page: &mut Page<'_>) -> Result<String, OpError> {
     let rows = store::list_commands(page.conn, page.guild_id, 30)?;
-    let users = store::list_users(page.conn, page.guild_id)?;
+    let memberships = store::list_memberships(page.conn, page.guild_id)?;
     let mut log = Vec::new();
     for row in rows.into_iter().rev() {
-        let name = users
+        let name = memberships
             .iter()
-            .find(|user| user.id == row.user_id)
+            .find(|user| row.membership_id == Some(user.id))
             .map(|user| user.name.clone())
             .unwrap_or_else(|| "Marian".into());
         log.push(serde_json::json!({"user": name, "line": row.line, "reply": row.reply}));
@@ -866,7 +877,7 @@ pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     }
     let settings = store::settings(page.conn, page.guild_id)?;
     let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
-    let user = store::user(page.conn, page.user_id)?;
+    let user = store::membership(page.conn, page.membership_id)?;
     let organizer = user.as_ref().map(|user| user.organizer).unwrap_or(false);
     let roles = store::list_roles(page.conn, page.guild_id)?;
     let mut ctx = shell(page)?;
@@ -886,7 +897,6 @@ pub fn settings_page(page: &mut Page<'_>) -> Result<String, OpError> {
     ctx["purge_channels"] = context_bool(settings.purge_channels);
     ctx["temp_roles"] = context_bool(settings.temp_roles);
     ctx["calendar_auto_sync"] = context_bool(settings.calendar_auto_sync);
-    ctx["park_clock"] = context_bool(settings.park_clock);
     ctx["zone_groups"] = Value::from_serialize(&clock::zone_groups(Utc::now(), &guild.timezone));
     ctx["digests"] = Value::from_serialize(
         &["off", "daily", "weekly"]
@@ -914,13 +924,11 @@ pub fn google_page(page: &mut Page<'_>) -> Result<String, OpError> {
         ctx.insert("empty_server", context_bool(true));
         return render("google.html", ctx);
     }
-    let user = store::user(page.conn, page.user_id)?;
-    let google = user
-        .as_ref()
-        .and_then(|person| person.discord_id.as_deref())
-        .map(|discord_id| crate::google::status(page.conn, discord_id))
-        .transpose()?
-        .flatten();
+    let user = store::membership(page.conn, page.membership_id)?;
+    let google = match &user {
+        Some(person) => crate::google::status(page.conn, person.user_id)?,
+        None => None,
+    };
     let mut ctx = shell(page)?;
     ctx["empty_server"] = context_bool(false);
     ctx["google_ready"] = context_bool(crate::google::configured_from_env());
@@ -1083,8 +1091,8 @@ pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft 
 
 pub fn form_from_event(conn: &mut Connection, event_id: i64, tz: Tz) -> Result<FormDraft, OpError> {
     let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
-    let options = store::options_for(conn, event_id)?;
-    let reminders = store::reminders_for(conn, event_id)?;
+    let options = store::options_for(conn, &event)?;
+    let reminders = store::reminders_for(conn, &event)?;
     let server = store::discord_server_id(conn, event.guild_id)?;
     let mut draft = blank_form(&server, None);
     draft.heading = format!("Edit {}", event.title);
@@ -1094,18 +1102,14 @@ pub fn form_from_event(conn: &mut Connection, event_id: i64, tz: Tz) -> Result<F
     draft.description = event.description.clone();
     draft.channel_id = event.channel_id.to_string();
     draft.color = event.color.clone();
-    draft.start = clock::datetime_local(clock::parse_stamp(&event.starts_at)?, tz);
+    draft.start = clock::datetime_local(event.starts_at, tz);
     draft.duration = event.duration_minutes.to_string();
     draft.cutoff = event
         .cutoff_at
-        .as_deref()
-        .and_then(|v| clock::parse_stamp(v).ok())
         .map(|dt| clock::datetime_local(dt, tz))
         .unwrap_or_default();
     draft.post_at = event
         .post_at
-        .as_deref()
-        .and_then(|v| clock::parse_stamp(v).ok())
         .map(|dt| clock::datetime_local(dt, tz))
         .unwrap_or_default();
     draft.options = finish_options(
@@ -1140,8 +1144,8 @@ pub fn form_from_event(conn: &mut Connection, event_id: i64, tz: Tz) -> Result<F
         .attendee_role_id
         .map(|id| id.to_string())
         .unwrap_or_default();
-    draft.mention_role_ids = store::event_role_ids(conn, event.id, "mention")?;
-    draft.restrict_role_ids = store::event_role_ids(conn, event.id, "restrict")?;
+    draft.mention_role_ids = store::event_role_ids(conn, &event, "mention")?;
+    draft.restrict_role_ids = store::event_role_ids(conn, &event, "restrict")?;
     draft.series_locked = event.series_id.is_some();
     let once = event.series_id.is_some_and(|id| {
         store::series(conn, id)
@@ -1577,7 +1581,7 @@ fn rows_for(
         .iter()
         .filter(|event| keep(event))
         .filter_map(|event| {
-            let start = clock::parse_stamp(&event.starts_at).ok()?;
+            let start = event.starts_at;
             Some(serde_json::json!({
                 "href": format!("/servers/{server}/events/{}", event.public_id),
                 "badge": logic::status_label(&event.status),
@@ -1595,10 +1599,10 @@ fn card_value(
     tz: Tz,
     now: DateTime<Utc>,
     hero: bool,
+    options: &[store::SignupOption],
+    signups: &[store::Signup],
 ) -> Result<serde_json::Value, OpError> {
-    let start = clock::parse_stamp(&event.starts_at)?;
-    let options = store::options_for(conn, event.id)?;
-    let signups = store::signups_for(conn, event.id)?;
+    let start = event.starts_at;
     let spots: Vec<serde_json::Value> = options
         .iter()
         .map(|opt| {
@@ -1655,10 +1659,10 @@ fn spots_join(options: &[store::SignupOption], signups: &[store::Signup]) -> Str
         .join(" · ")
 }
 
-fn people(users: &[User], ids: &[i64]) -> Vec<serde_json::Value> {
+fn people(memberships: &[Membership], ids: &[i64]) -> Vec<serde_json::Value> {
     ids.iter()
         .filter_map(|id| {
-            users.iter().find(|user| user.id == *id).map(|user| {
+            memberships.iter().find(|user| user.id == *id).map(|user| {
                 serde_json::json!({
                     "id": user.id,
                     "name": user.name,
@@ -1673,9 +1677,7 @@ fn activity_rows(page: &mut Page<'_>, limit: i64) -> Result<Vec<serde_json::Valu
     let now = Utc::now();
     let mut rows = Vec::new();
     for item in store::list_activity(page.conn, page.guild_id, limit)? {
-        let when = clock::parse_stamp(&item.created_at)
-            .map(|dt| clock::format_rel(dt, now))
-            .unwrap_or_default();
+        let when = clock::format_rel(item.created_at, now);
         let server = store::discord_server_id(page.conn, page.guild_id)?;
         let href = match item.event_id {
             Some(id) => match store::event(page.conn, id)? {
@@ -1690,12 +1692,7 @@ fn activity_rows(page: &mut Page<'_>, limit: i64) -> Result<Vec<serde_json::Valu
 }
 
 fn cutoff_passed(event: &Event, now: DateTime<Utc>) -> bool {
-    event
-        .cutoff_at
-        .as_deref()
-        .and_then(|v| clock::parse_stamp(v).ok())
-        .map(|dt| now >= dt)
-        .unwrap_or(false)
+    event.cutoff_at.is_some_and(|dt| now >= dt)
 }
 
 fn zone_of(page: &mut Page<'_>) -> Result<(Settings, Tz), OpError> {
@@ -1704,8 +1701,8 @@ fn zone_of(page: &mut Page<'_>) -> Result<(Settings, Tz), OpError> {
     Ok((settings, clock::zone(&guild.timezone)?))
 }
 
-fn must_user(page: &mut Page<'_>) -> Result<User, OpError> {
-    store::user(page.conn, page.user_id)?.ok_or(OpError::NotFound)
+fn must_membership(page: &mut Page<'_>) -> Result<Membership, OpError> {
+    store::membership(page.conn, page.membership_id)?.ok_or(OpError::NotFound)
 }
 
 struct Bag(HashMap<String, Value>);
@@ -1748,10 +1745,9 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
         ctx.insert("guild_id", Value::from(0));
         ctx.insert("base", Value::from(""));
         ctx.insert("tz_label", Value::from(""));
-        ctx.insert("park", context_bool(false));
-        ctx.insert("users", Value::from_serialize(&Vec::<Value>::new()));
+        ctx.insert("memberships", Value::from_serialize(&Vec::<Value>::new()));
         ctx.insert("guilds", Value::from_serialize(&Vec::<Value>::new()));
-        ctx.insert("user_id", Value::from(0));
+        ctx.insert("membership_id", Value::from(0));
         ctx.insert("user_name", Value::from(""));
         ctx.insert("reminders_on", context_bool(false));
         ctx.insert("draft_count", Value::from(0));
@@ -1762,14 +1758,13 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
         return Ok(ctx);
     }
     let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
-    let settings = store::settings(page.conn, page.guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
-    let users = store::list_users(page.conn, page.guild_id)?;
+    let memberships = store::list_memberships(page.conn, page.guild_id)?;
     let guilds = store::list_guilds(page.conn)?
         .into_iter()
         .filter(|guild| page.allowed_guilds.contains(&guild.id))
         .collect::<Vec<_>>();
-    let user = users.iter().find(|user| user.id == page.user_id);
+    let user = memberships.iter().find(|user| user.id == page.membership_id);
     let server = guild
         .discord_id
         .clone()
@@ -1779,11 +1774,10 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
     ctx.insert("guild_id", Value::from(server.clone()));
     ctx.insert("base", Value::from(format!("/servers/{server}")));
     ctx.insert("tz_label", Value::from(zone_label(tz)));
-    ctx.insert("park", context_bool(settings.park_clock));
     ctx.insert(
-        "users",
+        "memberships",
         Value::from_serialize(
-            &users
+            &memberships
                 .iter()
                 .map(|user| serde_json::json!({"id": user.id, "name": user.name}))
                 .collect::<Vec<_>>(),
@@ -1801,7 +1795,7 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
                 .collect::<Vec<_>>(),
         ),
     );
-    ctx.insert("user_id", Value::from(page.user_id));
+    ctx.insert("membership_id", Value::from(page.membership_id));
     ctx.insert(
         "user_name",
         Value::from(user.map(|u| u.name.as_str()).unwrap_or("")),
@@ -1829,12 +1823,13 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
         "routine_count",
         Value::from(logic::count_active(page.conn, page.guild_id)?),
     );
-    let calendar_url = user
-        .and_then(|person| person.discord_id.as_deref())
-        .map(|discord_id| store::ensure_calendar_token(page.conn, discord_id))
-        .transpose()?
-        .map(|token| format!("/calendar/{token}.ics"))
-        .unwrap_or_default();
+    let calendar_url = match user {
+        Some(person) => {
+            let token = store::ensure_calendar_token(page.conn, person.user_id)?;
+            format!("/calendar/{token}.ics")
+        }
+        None => String::new(),
+    };
     ctx.insert("calendar_url", Value::from(calendar_url));
     Ok(ctx)
 }
@@ -1949,14 +1944,32 @@ mod tests {
     use diesel::connection::SimpleConnection;
     use diesel::prelude::*;
 
+    #[derive(Insertable)]
+    #[diesel(table_name = schema::activity)]
+    struct SeedActivity<'a> {
+        guild_id: i64,
+        body: &'a str,
+        created_at: DateTime<Utc>,
+    }
+
+    #[derive(Insertable)]
+    #[diesel(table_name = schema::guilds)]
+    struct SeedGuild<'a> {
+        id: i64,
+        name: &'a str,
+        timezone: &'a str,
+        discord_id: &'a str,
+    }
+
     fn sample() -> Connection {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
-            INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer)
-              VALUES (1, 1, 'Nell', 'nell', '#112233', true, true);
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
         .unwrap();
@@ -2008,11 +2021,11 @@ mod tests {
         )
         .unwrap();
         diesel::insert_into(schema::activity::table)
-            .values((
-                schema::activity::guild_id.eq(1),
-                schema::activity::body.eq("Posted Raid."),
-                schema::activity::created_at.eq("2026-10-13T00:00:00Z"),
-            ))
+            .values(&SeedActivity {
+                guild_id: 1,
+                body: "Posted Raid.",
+                created_at: Utc.with_ymd_and_hms(2026, 10, 13, 0, 0, 0).unwrap(),
+            })
             .execute(&mut conn)
             .unwrap();
         let event_id = store::list_events(&mut conn, 1)
@@ -2024,7 +2037,7 @@ mod tests {
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 1,
+            membership_id: 1,
             notice: None,
             invite_url: "",
             nav: "schedule",
@@ -2087,10 +2100,7 @@ mod tests {
             settings.contains("Reminders post in the event thread."),
             "{settings}"
         );
-        assert!(
-            settings.contains("Every event stays the same distance from now."),
-            "{settings}"
-        );
+        assert!(!settings.contains("Park the clock"), "{settings}");
         page.nav = "commands";
         page.title = "Commands";
         let desk = commands_page(&mut page).unwrap();
@@ -2139,7 +2149,7 @@ mod tests {
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 1,
+            membership_id: 1,
             notice: None,
             invite_url: "",
             nav: "schedule",
@@ -2251,7 +2261,7 @@ mod tests {
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 1,
+            membership_id: 1,
             notice: None,
             invite_url: "",
             nav: "scheduled",
@@ -2383,7 +2393,7 @@ mod tests {
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 1,
+            membership_id: 1,
             notice: None,
             invite_url: "",
             nav: "recurring",
@@ -2391,7 +2401,7 @@ mod tests {
             allowed_guilds: &[1],
         };
         assert!(series_page(&mut page, "1", ListQuery::default()).is_err());
-        let html = series_page(&mut page, &series.public_id, ListQuery::default()).unwrap();
+        let html = series_page(&mut page, &series.public_id.to_string(), ListQuery::default()).unwrap();
         assert!(
             html.contains(&format!("/recurring/{}", series.public_id)),
             "{html}"
@@ -2401,7 +2411,7 @@ mod tests {
         assert!(html.contains("Vault"), "{html}");
         assert!(html.contains("aria-label=\"Search\""), "{html}");
         let missed =
-            series_page(&mut page, &series.public_id, ListQuery::new("no such", 1)).unwrap();
+            series_page(&mut page, &series.public_id.to_string(), ListQuery::new("no such", 1)).unwrap();
         assert!(missed.contains("No matches."), "{missed}");
         assert!(html.contains("value=\"weekly\" selected"), "{html}");
         assert!(html.contains("value=\"3\""), "{html}");
@@ -2422,19 +2432,19 @@ mod tests {
     fn settings_render_for_a_server_with_no_people() {
         let mut conn = store::open_memory().unwrap();
         diesel::insert_into(schema::guilds::table)
-            .values((
-                schema::guilds::id.eq(1),
-                schema::guilds::name.eq("Guild"),
-                schema::guilds::timezone.eq("UTC"),
-                schema::guilds::discord_id.eq("99"),
-            ))
+            .values(&SeedGuild {
+                id: 1,
+                name: "Guild",
+                timezone: "UTC",
+                discord_id: "99",
+            })
             .execute(&mut conn)
             .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 0,
+            membership_id: 0,
             notice: None,
             invite_url: "",
             nav: "settings",
@@ -2458,10 +2468,12 @@ mod tests {
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
-            INSERT INTO users (id, guild_id, name, handle, color, discord_id) VALUES
-              (1, 1, 'Nell', 'nell', '#112233', 'u1');
-            INSERT INTO google_accounts (discord_user_id, refresh_token, email, connected_at, auto_sync)
-              VALUES ('u1', 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z', false);
+            INSERT INTO users (discord_id) VALUES ('u1');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'u1';
+            INSERT INTO google_accounts (user_id, refresh_token, email, connected_at, auto_sync)
+              SELECT id, 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z', false
+              FROM users WHERE discord_id = 'u1';
             ",
         )
         .unwrap();
@@ -2469,7 +2481,7 @@ mod tests {
         let mut page = Page {
             conn: &mut conn,
             guild_id: 1,
-            user_id: 1,
+            membership_id: 1,
             notice: None,
             invite_url: "",
             nav: "google",

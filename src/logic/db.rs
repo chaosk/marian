@@ -1,8 +1,9 @@
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Channel, Connection, Event, User};
+use crate::store::{self, Channel, Connection, Event, Membership};
 
 pub(super) fn trim_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
@@ -18,6 +19,15 @@ pub(super) fn role_names(conn: &mut Connection, ids: &[i64]) -> Result<Vec<Strin
     Ok(names)
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::activity)]
+struct NewActivity<'a> {
+    guild_id: i64,
+    event_id: Option<i64>,
+    body: &'a str,
+    created_at: DateTime<Utc>,
+}
+
 pub(super) fn log(
     conn: &mut Connection,
     guild_id: i64,
@@ -25,12 +35,12 @@ pub(super) fn log(
     body: &str,
 ) -> Result<(), OpError> {
     diesel::insert_into(schema::activity::table)
-        .values((
-            schema::activity::guild_id.eq(guild_id),
-            schema::activity::event_id.eq(event_id),
-            schema::activity::body.eq(body),
-            schema::activity::created_at.eq(store::now_stamp()),
-        ))
+        .values(&NewActivity {
+            guild_id,
+            event_id,
+            body,
+            created_at: Utc::now(),
+        })
         .execute(conn)?;
     Ok(())
 }
@@ -39,8 +49,8 @@ pub(super) fn must_event(conn: &mut Connection, id: i64) -> Result<Event, OpErro
     store::event(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub(super) fn must_user(conn: &mut Connection, id: i64) -> Result<User, OpError> {
-    store::user(conn, id)?.ok_or(OpError::NotFound)
+pub(super) fn must_membership(conn: &mut Connection, id: i64) -> Result<Membership, OpError> {
+    store::membership(conn, id)?.ok_or(OpError::NotFound)
 }
 
 pub(super) fn must_channel(conn: &mut Connection, id: i64) -> Result<Channel, OpError> {

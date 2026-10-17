@@ -1,6 +1,6 @@
 [package]
 name = "marian"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 description = "Marian, the Discord scheduler"
 license = "MIT"
@@ -15,7 +15,7 @@ anyhow = "1"
 axum = "0.8.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
-diesel = { version = "2.3.14", default-features = false, features = ["postgres", "32-column-tables"] }
+diesel = { version = "2.3.14", default-features = false, features = ["postgres", "32-column-tables", "serde_json", "chrono", "uuid"] }
 diesel_migrations = { version = "2.3.2", default-features = false, features = ["postgres"] }
 minijinja = "2"
 opentelemetry = "0.33"
@@ -33,4 +33,4 @@ tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
-uuid = { version = "1.28.0", features = ["v7"] }
+uuid = { version = "1.28.0", features = ["v7", "serde"] }

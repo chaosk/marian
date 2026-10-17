@@ -309,6 +309,15 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::roles)]
+struct NewRole<'a> {
+    guild_id: i64,
+    name: &'a str,
+    color: &'a str,
+    discord_id: &'a str,
+}
+
 fn ensure_role(
     conn: &mut Connection,
     guild_id: i64,
@@ -333,12 +342,12 @@ fn ensure_role(
         return Ok(());
     }
     diesel::insert_into(schema::roles::table)
-        .values((
-            schema::roles::guild_id.eq(guild_id),
-            schema::roles::name.eq(name),
-            schema::roles::color.eq(&color),
-            schema::roles::discord_id.eq(discord_id),
-        ))
+        .values(&NewRole {
+            guild_id,
+            name,
+            color: &color,
+            discord_id,
+        })
         .execute(conn)?;
     Ok(())
 }
@@ -383,8 +392,8 @@ async fn routine_from_button(
     };
     let saved = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
-        logic::cast_run(&mut conn, run_id, user_id, day)
+        let membership_id = bind_clicker(&mut conn, &click)?;
+        logic::cast_run(&mut conn, run_id, membership_id, day)
     };
     let notice = match saved {
         Ok(effect) => {
@@ -412,8 +421,8 @@ async fn signup_from_button(
     };
     let signed = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
-        logic::signup(&mut conn, event_id, option_id, user_id)
+        let membership_id = bind_clicker(&mut conn, &click)?;
+        logic::signup(&mut conn, event_id, option_id, membership_id)
     };
     if let Err(err) = signed {
         return followup(ctx, component, &err.to_string()).await;
@@ -439,9 +448,9 @@ async fn edit_from_button(
     };
     let text = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
+        let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
-            Some(event) if event.created_by == user_id => {
+            Some(event) if event.created_by == Some(membership_id) => {
                 Some(event_link(&mut conn, &data.public_url, &event)?)
             }
             Some(_) => None,
@@ -466,10 +475,10 @@ async fn ask_delete(
     };
     let card = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
+        let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             None => Err("That event isn't here.".to_string()),
-            Some(event) if event.created_by != user_id => Ok(None),
+            Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event)
                 if !matches!(
                     event.status.as_str(),
@@ -487,7 +496,7 @@ async fn ask_delete(
                 );
                 Ok(Some(logic::delete_confirm_body(
                     &event.title,
-                    &event.starts_at,
+                    event.starts_at,
                     url.as_deref(),
                     event.status == "posted",
                 )))
@@ -530,15 +539,15 @@ async fn delete_from_button(
     };
     let removed = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let user_id = bind_clicker(&mut conn, &click)?;
+        let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             None => Err("That event isn't here.".to_string()),
-            Some(event) if event.created_by != user_id => Ok(None),
+            Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event) => {
                 let channel_discord = store::channel(&mut conn, event.channel_id)?
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
-                match logic::delete_event(&mut conn, event_id, user_id) {
+                match logic::delete_event(&mut conn, event_id, membership_id) {
                     Ok(notice) => Ok(Some((channel_discord, message_id, notice))),
                     Err(err) => Err(err.to_string()),
                 }
@@ -674,24 +683,20 @@ fn event_link(
 fn sync_roles(
     conn: &mut Connection,
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     roles: &[(String, String, String)],
 ) -> Result<(), Error> {
-    diesel::delete(schema::user_roles::table.filter(schema::user_roles::user_id.eq(user_id)))
+    diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::membership_id.eq(membership_id)))
         .execute(conn)?;
+    let mut role_ids = Vec::new();
     for (name, colour, discord_id) in roles {
         ensure_role(conn, guild_id, name, colour, discord_id)?;
         let Some(role) = store::role_by_name(conn, guild_id, name)? else {
             continue;
         };
-        diesel::insert_into(schema::user_roles::table)
-            .values((
-                schema::user_roles::user_id.eq(user_id),
-                schema::user_roles::role_id.eq(role.id),
-            ))
-            .on_conflict_do_nothing()
-            .execute(conn)?;
+        role_ids.push(role.id);
     }
+    store::insert_membership_roles(conn, membership_id, &role_ids)?;
     Ok(())
 }
 
@@ -1000,50 +1005,50 @@ async fn push_attendance(
     if !work.thread_add.is_empty() || !work.thread_remove.is_empty() {
         if work.thread_discord_id.is_none() && work.thread_add.is_empty() {
             let mut conn = db.lock().map_err(|_| "database lock")?;
-            for user_id in &work.thread_remove {
-                store::clear_applied(&mut conn, event_id, "thread", user_id)?;
+            for membership_id in &work.thread_remove {
+                store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
             }
         } else {
             let thread_id = open_thread(db, &http, event_id, &work).await?;
-            for user_id in &work.thread_add {
-                join_thread(&http, thread_id, user_id).await?;
+            for membership_id in &work.thread_add {
+                join_thread(&http, thread_id, membership_id).await?;
                 let mut conn = db.lock().map_err(|_| "database lock")?;
-                store::mark_applied(&mut conn, event_id, "thread", user_id)?;
+                store::mark_applied(&mut conn, event_id, "thread", membership_id)?;
             }
-            for user_id in &work.thread_remove {
-                leave_thread(&http, thread_id, user_id).await?;
+            for membership_id in &work.thread_remove {
+                leave_thread(&http, thread_id, membership_id).await?;
                 let mut conn = db.lock().map_err(|_| "database lock")?;
-                store::clear_applied(&mut conn, event_id, "thread", user_id)?;
+                store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
             }
         }
     }
     if work.role_discord_id.is_none() && work.role_add.is_empty() {
         let mut conn = db.lock().map_err(|_| "database lock")?;
-        for user_id in &work.role_remove {
-            store::clear_applied(&mut conn, event_id, "role", user_id)?;
+        for membership_id in &work.role_remove {
+            store::clear_applied(&mut conn, event_id, "role", membership_id)?;
         }
     } else if !work.role_add.is_empty() || !work.role_remove.is_empty() {
         let role_id = open_role(db, &http, &work).await?;
         let guild_id = serenity::GuildId::new(work.guild_discord_id.parse()?);
-        for user_id in &work.role_add {
-            let user = serenity::UserId::new(user_id.parse()?);
+        for membership_id in &work.role_add {
+            let user = serenity::UserId::new(membership_id.parse()?);
             match http.add_member_role(guild_id, user, role_id, None).await {
                 Ok(()) => {}
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
             let mut conn = db.lock().map_err(|_| "database lock")?;
-            store::mark_applied(&mut conn, event_id, "role", user_id)?;
+            store::mark_applied(&mut conn, event_id, "role", membership_id)?;
         }
-        for user_id in &work.role_remove {
-            let user = serenity::UserId::new(user_id.parse()?);
+        for membership_id in &work.role_remove {
+            let user = serenity::UserId::new(membership_id.parse()?);
             match http.remove_member_role(guild_id, user, role_id, None).await {
                 Ok(()) => {}
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
             let mut conn = db.lock().map_err(|_| "database lock")?;
-            store::clear_applied(&mut conn, event_id, "role", user_id)?;
+            store::clear_applied(&mut conn, event_id, "role", membership_id)?;
         }
     }
     Ok(())
@@ -1116,9 +1121,9 @@ async fn existing_thread(
     message.thread.map(|thread| thread.id.get())
 }
 
-async fn join_thread(http: &serenity::Http, thread_id: u64, user_id: &str) -> Result<(), Error> {
+async fn join_thread(http: &serenity::Http, thread_id: u64, membership_id: &str) -> Result<(), Error> {
     let thread = serenity::ChannelId::new(thread_id);
-    let user = serenity::UserId::new(user_id.parse()?);
+    let user = serenity::UserId::new(membership_id.parse()?);
     match thread.add_thread_member(http, user).await {
         Ok(()) => Ok(()),
         Err(err) if already_applied(&err) => Ok(()),
@@ -1126,9 +1131,9 @@ async fn join_thread(http: &serenity::Http, thread_id: u64, user_id: &str) -> Re
     }
 }
 
-async fn leave_thread(http: &serenity::Http, thread_id: u64, user_id: &str) -> Result<(), Error> {
+async fn leave_thread(http: &serenity::Http, thread_id: u64, membership_id: &str) -> Result<(), Error> {
     let thread = serenity::ChannelId::new(thread_id);
-    let user = serenity::UserId::new(user_id.parse()?);
+    let user = serenity::UserId::new(membership_id.parse()?);
     match thread.remove_thread_member(http, user).await {
         Ok(()) => Ok(()),
         Err(err) if already_applied(&err) => Ok(()),
@@ -1188,7 +1193,7 @@ async fn push_remind(
         };
         let guild = store::guild(&mut conn, event.guild_id)?;
         let settings = store::settings(&mut conn, event.guild_id)?;
-        let start = crate::clock::parse_stamp(&event.starts_at).map_err(|err| err.to_string())?;
+        let start = event.starts_at;
         let end = start + chrono::Duration::minutes(event.duration_minutes);
         let message_id = event.discord_message_id.filter(|id| !id.is_empty());
         let timezone = guild
@@ -1212,7 +1217,7 @@ async fn push_remind(
             thread_id: store::thread_discord_id(&mut conn, event_id)?,
             in_thread: event.thread_enabled && settings.thread_reminders,
             message_id,
-            thread_name: logic::event_thread_name(&event.title, &event.starts_at, &timezone),
+            thread_name: logic::event_thread_name(&event.title, event.starts_at, &timezone),
             title: event.title,
             start: start.timestamp(),
             end: end.timestamp(),
@@ -1277,7 +1282,7 @@ struct RemindPlan {
 
 struct Actor {
     guild_id: i64,
-    user_id: i64,
+    membership_id: i64,
     discord_user: String,
 }
 
@@ -1329,7 +1334,7 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     }
     Ok(Some(Actor {
         guild_id: guild.id,
-        user_id: user.id,
+        membership_id: user.id,
         discord_user,
     }))
 }
@@ -1343,7 +1348,7 @@ async fn desk(ctx: Context<'_>, line: &str) -> Result<(), Error> {
     let data = ctx.data();
     let (reply, refresh) = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let reply = crate::commands::execute(&mut conn, actor.guild_id, actor.user_id, line);
+        let reply = crate::commands::execute(&mut conn, actor.guild_id, actor.membership_id, line);
         let refresh = crate::serve::events_to_refresh(&mut conn, line, &reply);
         (reply, refresh)
     };
@@ -1465,7 +1470,7 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
         commands::start_event_dm(
             &mut conn,
             actor.guild_id,
-            actor.user_id,
+            actor.membership_id,
             &actor.discord_user,
             &channel.name,
             Some(&invoked_id),
@@ -1547,7 +1552,7 @@ async fn deliver(
     };
     let refresh = {
         let mut conn = data.db.lock().map_err(|_| "database lock")?;
-        let _ = logic::record_command(&mut conn, actor.guild_id, actor.user_id, label, &text);
+        let _ = logic::record_command(&mut conn, actor.guild_id, actor.membership_id, label, &text);
         crate::serve::events_to_refresh(&mut conn, label, &text)
     };
     for event_id in refresh {
@@ -1599,7 +1604,7 @@ async fn edit(
         commands::edit_event(
             &mut conn,
             actor.guild_id,
-            actor.user_id,
+            actor.membership_id,
             commands::EditChange {
                 event,
                 title,
@@ -1629,7 +1634,7 @@ async fn reminders(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::set_reminders(&mut conn, actor.user_id, enabled)
+        commands::set_reminders(&mut conn, actor.membership_id, enabled)
     };
     deliver(ctx, &actor, "/reminders", outcome).await
 }
@@ -1776,7 +1781,7 @@ async fn run_response(
             &user.id.get().to_string(),
             &name,
         )?;
-        commands::roster_action(&mut conn, actor.user_id, event, target.id, option, action)
+        commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action)
     };
     match outcome {
         Ok((reply, event_id)) => {
@@ -1803,7 +1808,7 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::apply_setting(&mut conn, actor.guild_id, actor.user_id, change)
+        commands::apply_setting(&mut conn, actor.guild_id, actor.membership_id, change)
     };
     deliver(ctx, &actor, label, outcome).await
 }
@@ -1823,7 +1828,6 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         "settings_thread_reminders",
         "settings_show_attendees",
         "settings_temp_roles",
-        "settings_park_clock",
         "settings_digest",
         "settings_post_lead",
         "settings_role"
@@ -2030,24 +2034,6 @@ async fn settings_temp_roles(
 #[poise::command(
     slash_command,
     guild_only,
-    rename = "park_clock",
-    description_localized("en-US", "Keep every event the same distance from now")
-)]
-async fn settings_park_clock(
-    ctx: Context<'_>,
-    #[description = "Park the clock on a test server"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings park_clock",
-        commands::Setting::ParkClock(enabled),
-    )
-    .await
-}
-
-#[poise::command(
-    slash_command,
-    guild_only,
     rename = "digest",
     description_localized("en-US", "How often Marian posts a digest")
 )]
@@ -2155,7 +2141,7 @@ async fn signup_options_add(
     let emoji = emoji.unwrap_or_else(|| "•".into());
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::add_library_option(&mut conn, actor.guild_id, actor.user_id, &name, &emoji)
+        commands::add_library_option(&mut conn, actor.guild_id, actor.membership_id, &name, &emoji)
     };
     deliver(ctx, &actor, "/signup_options add", outcome).await
 }
@@ -2177,7 +2163,7 @@ async fn signup_options_remove(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::remove_library_option(&mut conn, actor.guild_id, actor.user_id, &name)
+        commands::remove_library_option(&mut conn, actor.guild_id, actor.membership_id, &name)
     };
     deliver(ctx, &actor, "/signup_options remove", outcome).await
 }
@@ -2229,7 +2215,7 @@ async fn signup_presets_add(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::add_preset(&mut conn, actor.guild_id, actor.user_id, &name, &options)
+        commands::add_preset(&mut conn, actor.guild_id, actor.membership_id, &name, &options)
     };
     deliver(ctx, &actor, "/signup_presets add", outcome).await
 }
@@ -2251,7 +2237,7 @@ async fn signup_presets_remove(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::remove_preset(&mut conn, actor.guild_id, actor.user_id, &name)
+        commands::remove_preset(&mut conn, actor.guild_id, actor.membership_id, &name)
     };
     deliver(ctx, &actor, "/signup_presets remove", outcome).await
 }
@@ -2277,7 +2263,7 @@ async fn channel(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::create_named_channel(&mut conn, actor.guild_id, actor.user_id, &name, kind)
+        commands::create_named_channel(&mut conn, actor.guild_id, actor.membership_id, &name, kind)
     };
     deliver(ctx, &actor, "/channel", outcome).await
 }
@@ -2306,7 +2292,7 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::google_sign_in_url(&mut conn, actor.user_id)
+        commands::google_sign_in_url(&mut conn, actor.membership_id)
     };
     let url = match outcome {
         Ok(url) => url,
@@ -2317,7 +2303,7 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
         let _ = logic::record_command(
             &mut conn,
             actor.guild_id,
-            actor.user_id,
+            actor.membership_id,
             "/google authorize",
             "Sent a Google sign-in button.",
         );
@@ -2350,7 +2336,7 @@ async fn google_auto_sync(
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::google_auto_sync(&mut conn, actor.guild_id, actor.user_id, enabled)
+        commands::google_auto_sync(&mut conn, actor.guild_id, actor.membership_id, enabled)
     };
     deliver(ctx, &actor, "/google auto_sync", outcome).await
 }
@@ -2375,7 +2361,7 @@ async fn google_sync(
     let label = format!("/google sync {event}");
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::google_sync(&mut conn, actor.guild_id, actor.user_id, &event)
+        commands::google_sync(&mut conn, actor.guild_id, actor.membership_id, &event)
     };
     deliver(ctx, &actor, &label, outcome).await
 }
@@ -2394,7 +2380,7 @@ async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
     };
     let outcome = {
         let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
-        commands::google_revoke(&mut conn, actor.guild_id, actor.user_id)
+        commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id)
     };
     deliver(ctx, &actor, "/google revoke", outcome).await
 }

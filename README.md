@@ -8,10 +8,11 @@ Rust 1.99.1 (see `rust-toolchain.toml`).
 
 ```sh
 docker compose up -d
-DISCORD_TOKEN=... cargo run
+DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
+  DISCORD_TOKEN=... cargo run
 ```
 
-`docker compose` starts Postgres 17 and publishes it on `127.0.0.1:5433` (user `marian`, password `marian`, database `marian`). That is the default `DATABASE_URL`. Port 5433 leaves a Postgres already listening on 5432 alone. Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
+`docker compose` starts Postgres 17 and publishes it on `127.0.0.1:5432` (user `marian`, password `marian`, database `marian`). Set `DATABASE_URL` to that connection string. Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
 
 If `cargo` cannot find `libpq`, point pkg-config at it. Homebrew keeps it off the default path:
 
@@ -22,7 +23,7 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 | Variable | Default | Role |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
-| `DATABASE_URL` | `postgres://marian:marian@127.0.0.1:5433/marian` | Postgres connection string |
+| `DATABASE_URL` | required | Postgres connection string |
 | `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
 | `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
@@ -38,7 +39,8 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 ## Discord
 
 ```sh
-DISCORD_TOKEN=... DISCORD_CLIENT_ID=... \
+DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
+  DISCORD_TOKEN=... DISCORD_CLIENT_ID=... \
   MARIAN_PUBLIC_URL=https://marian.example.com \
   MARIAN_STATUS="marian.example.com | /event" \
   cargo run --release
@@ -67,7 +69,8 @@ https://marian.example.com/auth/discord/callback
 That host is `MARIAN_PUBLIC_URL`. Locally, with that variable empty, the redirect is `http://<host>/auth/discord/callback` from the request.
 
 ```sh
-DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
+DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
+  DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
   MARIAN_PUBLIC_URL=https://marian.example.com \
   cargo run --release
 ```
@@ -77,12 +80,12 @@ DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.5.3 -t ghcr.io/you/marian:0.5.3 .
-docker push ghcr.io/you/marian:0.5.3
+docker build --build-arg MARIAN_VERSION=0.6.0 -t ghcr.io/you/marian:0.6.0 .
+docker push ghcr.io/you/marian:0.6.0
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.5.3 \
+  --set image.tag=0.6.0 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

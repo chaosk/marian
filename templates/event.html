@@ -82,7 +82,7 @@
         {% if can_edit %}
         <form method="post" action="{{ base }}/events/{{ event.id }}/response">
           <input type="hidden" name="action" value="remove">
-          <input type="hidden" name="user_id" value="{{ person.id }}">
+          <input type="hidden" name="membership_id" value="{{ person.id }}">
           <input type="hidden" name="option_id" value="{{ opt.id }}">
           <button class="ghost" type="submit">Remove</button>
         </form>
@@ -97,8 +97,8 @@
       <form method="post" action="{{ base }}/events/{{ event.id }}/response" class="grid" style="margin-top:12px">
         <input type="hidden" name="action" value="add">
         <label class="field">Person
-          <select name="user_id">
-            {% for person in users %}
+          <select name="membership_id">
+            {% for person in memberships %}
             <option value="{{ person.id }}">{{ person.name }}</option>
             {% endfor %}
           </select>

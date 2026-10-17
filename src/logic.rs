@@ -39,12 +39,11 @@ pub use routine::{
 };
 pub use signup::{organizer_response, signup};
 pub use template::series_template;
-pub use tick::{discord_message_link, rebase, reminder_card, tick, ReminderCard};
+pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock;
     use crate::schema;
     use crate::store::{self, Connection};
     use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -61,11 +60,14 @@ mod tests {
               (1, 1, 'Officer', '#888888'),
               (2, 1, 'Tank', '#336699');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
-            INSERT INTO users (id, guild_id, name, handle, color, reminders_enabled, organizer) VALUES
-              (1, 1, 'Nell', 'nell', '#112233', true, true),
-              (2, 1, 'June', 'june', '#223344', true, false),
-              (3, 1, 'Samir', 'samir', '#334455', true, false);
-            INSERT INTO user_roles (user_id, role_id) VALUES (2, 2);
+            INSERT INTO users (discord_id) VALUES ('u1'), ('u2'), ('u3');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'u1'
+            UNION ALL
+            SELECT 2, id, 1, 'June', 'june', '#223344', true, false FROM users WHERE discord_id = 'u2'
+            UNION ALL
+            SELECT 3, id, 1, 'Samir', 'samir', '#334455', true, false FROM users WHERE discord_id = 'u3';
+            INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 2);
             ",
         )
         .unwrap();
@@ -140,14 +142,15 @@ mod tests {
             reminders_enabled: true,
         }];
         let id = save_event(&mut conn, event).unwrap();
-        let option = store::options_for(&mut conn, id).unwrap()[0].id;
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
         signup(&mut conn, id, option, 2).unwrap();
         let waiting = signup(&mut conn, id, option, 3).unwrap();
         assert!(waiting.contains("waiting"));
         signup(&mut conn, id, option, 2).unwrap();
-        let signups = store::signups_for(&mut conn, id).unwrap();
+        let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
-        assert_eq!(signups[0].user_id, 3);
+        assert_eq!(signups[0].membership_id, 3);
         assert_eq!(signups[0].state, "confirmed");
     }
 
@@ -161,7 +164,8 @@ mod tests {
         );
         gated.options[0].role_id = Some(2);
         let gated_id = save_event(&mut conn, gated).unwrap();
-        let gated_option = store::options_for(&mut conn, gated_id).unwrap()[0].id;
+        let gated = store::event(&mut conn, gated_id).unwrap().unwrap();
+        let gated_option = store::options_for(&mut conn, &gated).unwrap()[0].id;
         let err = signup(&mut conn, gated_id, gated_option, 3)
             .unwrap_err()
             .to_string();
@@ -173,7 +177,8 @@ mod tests {
         let mut closed = input("Late", Utc::now() + Duration::hours(4), SaveAction::Publish);
         closed.cutoff_at = Some(Utc::now() - Duration::minutes(1));
         let closed_id = save_event(&mut conn, closed).unwrap();
-        let closed_option = store::options_for(&mut conn, closed_id).unwrap()[0].id;
+        let closed = store::event(&mut conn, closed_id).unwrap().unwrap();
+        let closed_option = store::options_for(&mut conn, &closed).unwrap()[0].id;
         let err = signup(&mut conn, closed_id, closed_option, 2)
             .unwrap_err()
             .to_string();
@@ -191,10 +196,6 @@ mod tests {
             .set(schema::channels::discord_id.eq("c1"))
             .execute(&mut conn)
             .unwrap();
-        diesel::update(schema::users::table.filter(schema::users::id.eq(2)))
-            .set(schema::users::discord_id.eq("u2"))
-            .execute(&mut conn)
-            .unwrap();
         diesel::update(schema::roles::table.filter(schema::roles::id.eq(2)))
             .set(schema::roles::discord_id.eq("r2"))
             .execute(&mut conn)
@@ -206,7 +207,8 @@ mod tests {
             .set(schema::events::discord_message_id.eq("m1"))
             .execute(&mut conn)
             .unwrap();
-        let options = store::options_for(&mut conn, id).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
         signup(&mut conn, id, options[0].id, 2).unwrap();
         let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
             panic!("expected a Discord attendance plan");
@@ -237,11 +239,12 @@ mod tests {
             ),
         )
         .unwrap();
-        let options = store::options_for(&mut conn, id).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
         signup(&mut conn, id, options[0].id, 2).unwrap();
         let moved = signup(&mut conn, id, options[1].id, 2).unwrap();
         assert!(moved.contains("moved"));
-        let signups = store::signups_for(&mut conn, id).unwrap();
+        let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
     }
@@ -253,9 +256,9 @@ mod tests {
         scheduled.post_at = Some(Utc::now() + Duration::hours(2));
         let scheduled_id = save_event(&mut conn, scheduled).unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
-            .set(schema::events::post_at.eq(clock::stamp(Utc::now() - Duration::minutes(1))))
+            .set(schema::events::post_at.eq(Utc::now() - Duration::minutes(1)))
             .execute(&mut conn)
-            .unwrap();
+        .unwrap();
         let mut soon = input(
             "Dock",
             Utc::now() + Duration::minutes(10),
@@ -266,7 +269,8 @@ mod tests {
             message: "Boots on.".into(),
         }];
         let soon_id = save_event(&mut conn, soon).unwrap();
-        let option_id = store::options_for(&mut conn, soon_id).unwrap()[0].id;
+        let soon = store::event(&mut conn, soon_id).unwrap().unwrap();
+        let option_id = store::options_for(&mut conn, &soon).unwrap()[0].id;
         signup(&mut conn, soon_id, option_id, 2).unwrap();
         let report = tick(&mut conn, Utc::now()).unwrap();
         assert_eq!(
@@ -276,13 +280,13 @@ mod tests {
                 .status,
             "posted"
         );
-        let reminder = store::reminders_for(&mut conn, soon_id).unwrap();
+        let reminder = store::reminders_for(&mut conn, &soon).unwrap();
         assert!(reminder[0].sent_at.is_some());
         assert!(report.notes.iter().any(|note| note.contains("Dock")));
         assert!(report.jobs.iter().any(|job| matches!(
             job,
             crate::jobs::DiscordJob::Remind { text, message, .. }
-                if text == "June" && message == "Boots on."
+                if text == "<@u2>" && message == "Boots on."
         )));
     }
 
@@ -310,17 +314,16 @@ mod tests {
     #[test]
     fn a_thread_is_named_with_the_event_date() {
         let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
-        let stamp = crate::clock::stamp(start);
         assert_eq!(
-            event_thread_name("BotC #135", &stamp, "UTC"),
+            event_thread_name("BotC #135", start, "UTC"),
             "BotC #135 -- Wed, Oct 14"
         );
         assert_eq!(
-            event_thread_name("  ", &stamp, "Europe/Paris"),
+            event_thread_name("  ", start, "Europe/Paris"),
             "Event -- Wed, Oct 14"
         );
         let long = "A".repeat(120);
-        let name = event_thread_name(&long, &stamp, "UTC");
+        let name = event_thread_name(&long, start, "UTC");
         assert!(name.ends_with(" -- Wed, Oct 14"), "{name}");
         assert!(name.chars().count() <= 100, "{name}");
     }
@@ -343,15 +346,13 @@ mod tests {
             .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 3);
-        let third = clock::parse_stamp(&dates[2].starts_at).unwrap();
+        let third = dates[2].starts_at;
         diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
-            .set(schema::events::starts_at.eq(clock::stamp(
-                clock::parse_stamp(&dates[1].starts_at).unwrap() + Duration::days(1),
-            )))
+            .set(schema::events::starts_at.eq(dates[1].starts_at + Duration::days(1)))
             .execute(&mut conn)
-            .unwrap();
+        .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
-        assert_eq!(clock::parse_stamp(&dates[2].starts_at).unwrap(), third);
+        assert_eq!(dates[2].starts_at, third);
     }
 
     #[test]
@@ -406,7 +407,7 @@ mod tests {
             .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
-            .set(schema::events::starts_at.eq(clock::stamp(anchor + Duration::days(8))))
+            .set(schema::events::starts_at.eq(anchor + Duration::days(8)))
             .execute(&mut conn)
             .unwrap();
         save_series_repeat(
@@ -423,13 +424,13 @@ mod tests {
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(dates[0].status, "posted");
-        assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
+        assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
-            clock::parse_stamp(&dates[1].starts_at).unwrap(),
+            dates[1].starts_at,
             Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
         );
         assert_eq!(
-            clock::parse_stamp(&dates[3].starts_at).unwrap(),
+            dates[3].starts_at,
             Utc.with_ymd_and_hms(2026, 11, 26, 19, 0, 0).unwrap()
         );
     }
@@ -479,7 +480,7 @@ mod tests {
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(
-            clock::parse_stamp(&dates[2].starts_at).unwrap(),
+            dates[2].starts_at,
             Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
         );
         skip_event(&mut conn, dates[2].id, 1).unwrap();
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(dates[2].status, "skipped");
         assert_eq!(dates[3].status, "scheduled");
         assert_eq!(
-            clock::parse_stamp(&dates[3].starts_at).unwrap(),
+            dates[3].starts_at,
             Utc.with_ymd_and_hms(2026, 11, 5, 19, 0, 0).unwrap()
         );
     }
@@ -543,34 +544,10 @@ mod tests {
         .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 2);
-        assert_eq!(clock::parse_stamp(&dates[0].starts_at).unwrap(), anchor);
+        assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
-            clock::parse_stamp(&dates[1].starts_at).unwrap(),
+            dates[1].starts_at,
             Utc.with_ymd_and_hms(2026, 10, 22, 19, 0, 0).unwrap()
-        );
-    }
-
-    #[test]
-    fn parked_clock_keeps_the_same_lead_time() {
-        let mut conn = world();
-        let t0 = Utc::now();
-        let id = save_event(
-            &mut conn,
-            input("Later", t0 + Duration::hours(2), SaveAction::Publish),
-        )
-        .unwrap();
-        let mut settings = store::settings(&mut conn, 1).unwrap();
-        settings.park_clock = true;
-        store::update_settings(&mut conn, &settings).unwrap();
-        store::set_meta(&mut conn, "anchor:1", &clock::stamp(t0)).unwrap();
-        rebase(&mut conn, t0 + Duration::hours(5)).unwrap();
-        let start =
-            clock::parse_stamp(&store::event(&mut conn, id).unwrap().unwrap().starts_at).unwrap();
-        let lead = start - (t0 + Duration::hours(5));
-        assert!(
-            (lead.num_minutes() - 120).abs() < 2,
-            "lead was {} min",
-            lead.num_minutes()
         );
     }
 }

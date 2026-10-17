@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use diesel::prelude::*;
 
-use super::db::{log, must_event, must_guild, must_user};
+use super::db::{log, must_event, must_guild, must_membership};
 use super::lifecycle::archive_tx;
 use super::model::*;
 use super::series::{fill_series, mark_posted};
@@ -14,6 +14,15 @@ use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::thread_messages)]
+struct NewThreadMessage<'a> {
+    event_id: i64,
+    body: &'a str,
+    place: &'a str,
+    created_at: DateTime<Utc>,
+}
 
 pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpError> {
     let mut report = TickReport {
@@ -51,11 +60,7 @@ fn tick_guild(
         if event.status != "scheduled" || event.post_attempts >= 3 {
             continue;
         }
-        let Some(post_at) = event
-            .post_at
-            .as_deref()
-            .and_then(|value| clock::parse_stamp(value).ok())
-        else {
+        let Some(post_at) = event.post_at else {
             continue;
         };
         if post_at > now {
@@ -79,18 +84,19 @@ fn tick_guild(
         .jobs
         .extend(super::routine::maintain(conn, guild_id, now)?);
 
-    let reminders = grouped(store::reminders_in_guild(conn, guild_id)?, |rem| {
-        rem.event_id
-    });
     let mut people = None;
     let events = store::list_events(conn, guild_id)?;
-    for event in &events {
-        if event.status != "posted" {
-            continue;
-        }
-        let start = clock::parse_stamp(&event.starts_at)?;
-        let reminders = reminders.get(&event.id).map(Vec::as_slice).unwrap_or(&[]);
-        for rem in reminders {
+    let posted: Vec<Event> = events
+        .iter()
+        .filter(|event| event.status == "posted")
+        .cloned()
+        .collect();
+    let reminder_groups = store::reminders_by_event(conn, &posted)?;
+    let option_groups = store::options_by_event(conn, &posted)?;
+    let signup_groups = store::signups_by_event(conn, &posted)?;
+    for (index, event) in posted.iter().enumerate() {
+        let start = event.starts_at;
+        for rem in &reminder_groups[index] {
             if rem.sent_at.is_some() {
                 continue;
             }
@@ -98,9 +104,8 @@ fn tick_guild(
             if now < due {
                 continue;
             }
-            let stamp = clock::stamp(now);
             diesel::update(schema::reminders::table.filter(schema::reminders::id.eq(rem.id)))
-                .set(schema::reminders::sent_at.eq(&stamp))
+                .set(schema::reminders::sent_at.eq(now))
                 .execute(conn)?;
             if now > start + Duration::minutes(30) {
                 let note = format!("Missed the reminder window for {}.", event.title);
@@ -109,7 +114,12 @@ fn tick_guild(
                 continue;
             }
             let cached = guild_people(conn, guild_id, &mut people)?;
-            let text = reminder_text(conn, event, cached)?;
+            let text = reminder_text(
+                conn,
+                cached,
+                &option_groups[index],
+                &signup_groups[index],
+            )?;
             match text {
                 Some(text) => {
                     let place = if event.thread_enabled && settings.thread_reminders {
@@ -127,12 +137,12 @@ fn tick_guild(
                         body.push_str(rem.message.trim());
                     }
                     diesel::insert_into(schema::thread_messages::table)
-                        .values((
-                            schema::thread_messages::event_id.eq(event.id),
-                            schema::thread_messages::body.eq(&body),
-                            schema::thread_messages::place.eq(place),
-                            schema::thread_messages::created_at.eq(&stamp),
-                        ))
+                        .values(&NewThreadMessage {
+                            event_id: event.id,
+                            body: &body,
+                            place,
+                            created_at: now,
+                        })
                         .execute(conn)?;
                     let note = format!(
                         "Reminder sent for {}: {} before.",
@@ -162,7 +172,7 @@ fn tick_guild(
             diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .set((
                     schema::events::signups_closed.eq(true),
-                    schema::events::updated_at.eq(clock::stamp(now)),
+                    schema::events::updated_at.eq(now),
                 ))
                 .execute(conn)?;
             let note = format!("Signups for {} are closed.", event.title);
@@ -207,7 +217,7 @@ fn tick_guild(
                     if event.status != "posted" {
                         continue;
                     }
-                    let start = clock::parse_stamp(&event.starts_at)?;
+                    let start = event.starts_at;
                     if start.with_timezone(&tz).date_naive() == local.date_naive() {
                         names.push(format!(
                             "{} at {}",
@@ -232,7 +242,7 @@ fn tick_guild(
 
 fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
     let attempts = event.post_attempts + 1;
-    let stamp = store::now_stamp();
+    let stamp = Utc::now();
     if attempts >= 3 {
         diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
             .set((
@@ -270,10 +280,10 @@ fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
 fn guild_people<'a>(
     conn: &mut Connection,
     guild_id: i64,
-    cache: &'a mut Option<HashMap<i64, store::User>>,
-) -> Result<&'a HashMap<i64, store::User>, OpError> {
+    cache: &'a mut Option<HashMap<i64, store::Membership>>,
+) -> Result<&'a HashMap<i64, store::Membership>, OpError> {
     if cache.is_none() {
-        let loaded = store::list_users(conn, guild_id)?
+        let loaded = store::list_memberships(conn, guild_id)?
             .into_iter()
             .map(|user| (user.id, user))
             .collect();
@@ -292,40 +302,36 @@ fn grouped<T>(rows: Vec<T>, key: impl Fn(&T) -> i64) -> HashMap<i64, Vec<T>> {
 
 fn reminder_text(
     conn: &mut Connection,
-    event: &Event,
-    users: &HashMap<i64, store::User>,
+    memberships: &HashMap<i64, store::Membership>,
+    options: &[store::SignupOption],
+    signups: &[store::Signup],
 ) -> Result<Option<String>, OpError> {
-    let options = store::options_for(conn, event.id)?;
     let reminding: HashSet<i64> = options
         .iter()
         .filter(|opt| opt.reminders_enabled)
         .map(|opt| opt.id)
         .collect();
-    let signups = store::signups_for(conn, event.id)?;
     let mut mentions = Vec::new();
     let mut seen = HashSet::new();
     for signup in signups {
         if signup.state != "confirmed"
             || !reminding.contains(&signup.option_id)
-            || !seen.insert(signup.user_id)
+            || !seen.insert(signup.membership_id)
         {
             continue;
         }
         let owned;
-        let user = if let Some(user) = users.get(&signup.user_id) {
+        let user = if let Some(user) = memberships.get(&signup.membership_id) {
             user
         } else {
-            owned = must_user(conn, signup.user_id)?;
+            owned = must_membership(conn, signup.membership_id)?;
             &owned
         };
         if !user.reminders_enabled {
             continue;
         }
-        if let Some(discord_id) = &user.discord_id {
-            mentions.push(format!("<@{discord_id}>"));
-        } else {
-            mentions.push(user.name.clone());
-        }
+        let discord_id = store::discord_id_for_membership(conn, user.id)?;
+        mentions.push(format!("<@{discord_id}>"));
     }
     if mentions.is_empty() {
         return Ok(None);
@@ -376,159 +382,4 @@ pub fn reminder_card(
 
 pub fn discord_message_link(guild_id: &str, channel_id: &str, message_id: &str) -> String {
     format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}")
-}
-
-pub fn rebase(conn: &mut Connection, now: DateTime<Utc>) -> Result<(), OpError> {
-    let guilds = store::list_guilds(conn)?;
-    for guild in guilds {
-        let settings = store::settings(conn, guild.id)?;
-        if !settings.park_clock {
-            continue;
-        }
-        let key = format!("anchor:{}", guild.id);
-        let Some(anchor_s) = store::meta(conn, &key)? else {
-            store::set_meta(conn, &key, &clock::stamp(now))?;
-            continue;
-        };
-        let anchor = clock::parse_stamp(&anchor_s)?;
-        let delta = now - anchor;
-        if delta.num_seconds().abs() < 2 {
-            continue;
-        }
-        shift_guild(conn, guild.id, delta)?;
-        store::set_meta(conn, &key, &clock::stamp(now))?;
-    }
-    Ok(())
-}
-
-fn shift_guild(conn: &mut Connection, guild_id: i64, delta: Duration) -> Result<(), OpError> {
-    store::with_tx(conn, |tx| {
-        let events = schema::events::table
-            .filter(schema::events::guild_id.eq(guild_id))
-            .select(Event::as_select())
-            .load(tx)?;
-        for event in events {
-            diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
-                .set((
-                    schema::events::starts_at.eq(moved(&event.starts_at, delta)?),
-                    schema::events::post_at.eq(moved_opt(event.post_at.clone(), delta)?),
-                    schema::events::posted_at.eq(moved_opt(event.posted_at.clone(), delta)?),
-                    schema::events::archived_at.eq(moved_opt(event.archived_at.clone(), delta)?),
-                    schema::events::cutoff_at.eq(moved_opt(event.cutoff_at.clone(), delta)?),
-                    schema::events::created_at.eq(moved(&event.created_at, delta)?),
-                    schema::events::updated_at.eq(moved(&event.updated_at, delta)?),
-                    schema::events::calendar_synced_at
-                        .eq(moved_opt(event.calendar_synced_at.clone(), delta)?),
-                ))
-                .execute(tx)?;
-            let reminders = schema::reminders::table
-                .filter(schema::reminders::event_id.eq(event.id))
-                .select(store::Reminder::as_select())
-                .load(tx)?;
-            for rem in reminders {
-                if let Some(sent) = rem.sent_at {
-                    diesel::update(
-                        schema::reminders::table.filter(schema::reminders::id.eq(rem.id)),
-                    )
-                    .set(schema::reminders::sent_at.eq(moved(&sent, delta)?))
-                    .execute(tx)?;
-                }
-            }
-            let signups = schema::signups::table
-                .filter(schema::signups::event_id.eq(event.id))
-                .select(store::Signup::as_select())
-                .load(tx)?;
-            for signup in signups {
-                diesel::update(schema::signups::table.filter(schema::signups::id.eq(signup.id)))
-                    .set(schema::signups::created_at.eq(moved(&signup.created_at, delta)?))
-                    .execute(tx)?;
-            }
-            let messages = schema::thread_messages::table
-                .filter(schema::thread_messages::event_id.eq(event.id))
-                .select(store::ThreadMessage::as_select())
-                .load(tx)?;
-            for message in messages {
-                diesel::update(
-                    schema::thread_messages::table
-                        .filter(schema::thread_messages::id.eq(message.id)),
-                )
-                .set(schema::thread_messages::created_at.eq(moved(&message.created_at, delta)?))
-                .execute(tx)?;
-            }
-        }
-        let series_rows = schema::series::table
-            .filter(schema::series::guild_id.eq(guild_id))
-            .select(store::Series::as_select())
-            .load(tx)?;
-        for series in series_rows {
-            diesel::update(schema::series::table.filter(schema::series::id.eq(series.id)))
-                .set((
-                    schema::series::anchor_start.eq(moved(&series.anchor_start, delta)?),
-                    schema::series::end_on.eq(moved_opt(series.end_on.clone(), delta)?),
-                    schema::series::created_at.eq(moved(&series.created_at, delta)?),
-                ))
-                .execute(tx)?;
-        }
-        let runs: Vec<(i64, String, String, String)> = schema::routine_runs::table
-            .inner_join(schema::routines::table)
-            .filter(schema::routines::guild_id.eq(guild_id))
-            .select((
-                schema::routine_runs::id,
-                schema::routine_runs::opens_at,
-                schema::routine_runs::locks_at,
-                schema::routine_runs::created_at,
-            ))
-            .load(tx)?;
-        for (id, opens, locks, created) in runs {
-            diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(id)))
-                .set((
-                    schema::routine_runs::opens_at.eq(moved(&opens, delta)?),
-                    schema::routine_runs::locks_at.eq(moved(&locks, delta)?),
-                    schema::routine_runs::created_at.eq(moved(&created, delta)?),
-                ))
-                .execute(tx)?;
-        }
-        let activity = schema::activity::table
-            .filter(schema::activity::guild_id.eq(guild_id))
-            .order(schema::activity::id.desc())
-            .limit(100_000)
-            .select(store::Activity::as_select())
-            .load(tx)?;
-        for item in activity {
-            diesel::update(schema::activity::table.filter(schema::activity::id.eq(item.id)))
-                .set(schema::activity::created_at.eq(moved(&item.created_at, delta)?))
-                .execute(tx)?;
-        }
-        let commands = schema::command_log::table
-            .filter(schema::command_log::guild_id.eq(guild_id))
-            .order(schema::command_log::id.desc())
-            .limit(200)
-            .select(store::CommandRow::as_select())
-            .load(tx)?;
-        for row in commands {
-            diesel::update(schema::command_log::table.filter(schema::command_log::id.eq(row.id)))
-                .set(schema::command_log::created_at.eq(moved(&row.created_at, delta)?))
-                .execute(tx)?;
-        }
-        let channels = schema::channels::table
-            .filter(schema::channels::guild_id.eq(guild_id))
-            .select(store::Channel::as_select())
-            .load(tx)?;
-        for channel in channels {
-            if let Some(purged) = channel.purged_at {
-                diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
-                    .set(schema::channels::purged_at.eq(moved(&purged, delta)?))
-                    .execute(tx)?;
-            }
-        }
-        Ok(())
-    })
-}
-
-fn moved(value: &str, delta: Duration) -> Result<String, OpError> {
-    Ok(clock::stamp(clock::parse_stamp(value)? + delta))
-}
-
-fn moved_opt(value: Option<String>, delta: Duration) -> Result<Option<String>, OpError> {
-    value.as_deref().map(|item| moved(item, delta)).transpose()
 }
