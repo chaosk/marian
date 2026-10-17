@@ -24,6 +24,7 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
 | `DATABASE_URL` | required | Postgres connection string |
+| `MARIAN_DB_POOL` | `10` | How many Postgres connections this process keeps |
 | `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
 | `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
@@ -80,12 +81,12 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.6.0 -t ghcr.io/you/marian:0.6.0 .
-docker push ghcr.io/you/marian:0.6.0
+docker build --build-arg MARIAN_VERSION=0.6.1 -t ghcr.io/you/marian:0.6.1 .
+docker push ghcr.io/you/marian:0.6.1
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.6.0 \
+  --set image.tag=0.6.1 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

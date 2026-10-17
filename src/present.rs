@@ -85,6 +85,7 @@ pub fn home(page: &mut Page<'_>) -> Result<String, OpError> {
                 "id": event.public_id,
                 "title": event.title,
                 "when": clock::format_when(start, tz, settings.hour_24),
+                "color": event.color,
             }));
             continue;
         }
@@ -272,6 +273,41 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         .as_ref()
         .map(|c| c.name.clone())
         .unwrap_or_else(|| "deleted".into());
+    let mention_ids = store::event_role_ids(page.conn, &event, "mention")?;
+    let role_name = |id: i64| {
+        role_rows
+            .iter()
+            .find(|role| role.id == id)
+            .map(|role| role.name.clone())
+    };
+    let mut mentions = Vec::new();
+    if event.mention_everyone {
+        mentions.push("@everyone".to_string());
+    }
+    for id in &mention_ids {
+        if let Some(name) = role_name(*id) {
+            mentions.push(name);
+        }
+    }
+    let mut restrictions = Vec::new();
+    for id in &restrict_ids {
+        if let Some(name) = role_name(*id) {
+            restrictions.push(name);
+        }
+    }
+    let discord_url = (|| {
+        let channel_id = channel.as_ref()?.discord_id.as_deref()?.trim();
+        let message_id = event.discord_message_id.as_deref()?.trim();
+        if channel_id.is_empty() || message_id.is_empty() {
+            return None;
+        }
+        let server = store::discord_server_id(page.conn, event.guild_id).ok()?;
+        if server.is_empty() {
+            return None;
+        }
+        Some(logic::discord_message_link(&server, channel_id, message_id))
+    })()
+    .unwrap_or_default();
     let reminders = store::reminders_for(page.conn, &event)?;
     let thread = store::thread_messages(page.conn, &event)?;
     let members = store::thread_member_ids(page.conn, &event)?;
@@ -323,18 +359,70 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
             && event.series_id.is_some()
             && matches!(event.status.as_str(), "scheduled" | "draft"),
     );
+    let local = start.with_timezone(&tz);
+    let time_line = format!(
+        "{} – {} ({})",
+        clock::format_clock(local, settings.hour_24),
+        clock::format_end(start, event.duration_minutes, tz, settings.hour_24),
+        clock::human_duration(event.duration_minutes),
+    );
+    let signups_close = if event.signups_closed {
+        "Closed".to_string()
+    } else {
+        event
+            .cutoff_at
+            .map(|dt| clock::format_when(dt, tz, settings.hour_24))
+            .unwrap_or_else(|| "Never".into())
+    };
+    let reminder_rows: Vec<_> = reminders
+        .iter()
+        .map(|rem| {
+            serde_json::json!({
+                "offset": format!("{} before", clock::human_offset(rem.offset_minutes)),
+                "message": rem.message,
+                "state": if rem.sent_at.is_some() { "Sent" } else { "Waiting" },
+            })
+        })
+        .collect();
+    let thread_rows: Vec<_> = thread
+        .iter()
+        .map(|note| {
+            serde_json::json!({
+                "body": note.body,
+                "place": note.place,
+                "when": clock::format_rel(note.created_at, now),
+            })
+        })
+        .collect();
+    let member_names: Vec<_> = members
+        .iter()
+        .filter_map(|id| {
+            memberships
+                .iter()
+                .find(|user| user.id == *id)
+                .map(|user| user.name.clone())
+        })
+        .collect();
     ctx["event"] = Value::from_serialize(&serde_json::json!({
         "id": event.public_id,
         "title": event.title,
         "description": event.description,
         "when": clock::format_when(start, tz, settings.hour_24),
         "end": clock::format_end(start, event.duration_minutes, tz, settings.hour_24),
+        "date_line": clock::format_long_date(local.date_naive()),
+        "time_line": time_line,
+        "location": event.location.trim(),
         "rel": clock::format_rel(start, now),
         "channel": channel_name,
         "status": event.status,
         "status_label": logic::status_label(&event.status),
         "color": event.color,
-        "description": event.description,
+        "color_name": color_name(&event.color),
+        "multiple": if event.multiple_signups { "Yes" } else { "No" },
+        "signups_close": signups_close,
+        "mentions": mentions,
+        "restrictions": restrictions,
+        "discord_url": discord_url,
         "show_names": settings.show_attendees,
         "options": option_views,
         "buttons": buttons,
@@ -342,6 +430,7 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         "google_url": google,
         "plus_url": plus,
         "web_url": web_url,
+        "signup_notes": signup_notes(&event, &options, &signups, &user, &roles, &restrict_ids, &role_rows, now),
         "creator": creator,
         "image_url": image_url,
         "calendar_on": event.calendar_synced_at.is_some(),
@@ -350,19 +439,69 @@ pub fn event_page(page: &mut Page<'_>, event_id: i64) -> Result<String, OpError>
         "cutoff": event.cutoff_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
         "attendee_role": event.attendee_role_id.and_then(|id| role_rows.iter().find(|r| r.id == id).map(|r| r.name.clone())).unwrap_or_default(),
         "series_note": series_note,
-        "reminders": reminders.iter().map(|rem| serde_json::json!({
-            "offset": format!("{} before", clock::human_offset(rem.offset_minutes)),
-            "message": rem.message,
-            "state": if rem.sent_at.is_some() { "Sent" } else { "Waiting" },
-        })).collect::<Vec<_>>(),
-        "thread": thread.iter().map(|note| serde_json::json!({
-            "body": note.body,
-            "place": note.place,
-            "when": clock::format_rel(note.created_at, now),
-        })).collect::<Vec<_>>(),
-        "members": members.iter().filter_map(|id| memberships.iter().find(|u| u.id == *id).map(|u| u.name.clone())).collect::<Vec<_>>(),
+        "reminders": reminder_rows,
+        "thread": thread_rows,
+        "members": member_names,
     }));
     render("event.html", ctx)
+}
+
+fn signup_notes(
+    event: &Event,
+    options: &[store::SignupOption],
+    signups: &[store::Signup],
+    user: &Membership,
+    roles: &[i64],
+    restrict_ids: &[i64],
+    role_rows: &[store::Role],
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if event.status != "posted" {
+        notes.push("Signups open once the event is posted.".into());
+    }
+    if event.signups_closed || cutoff_passed(event, now) {
+        notes.push("Signups are closed.".into());
+    }
+    if !restrict_ids.is_empty()
+        && !user.organizer
+        && !restrict_ids.iter().any(|id| roles.contains(id))
+    {
+        notes.push("This event is limited to another role.".into());
+    }
+    for opt in options {
+        let yours = signups.iter().any(|signup| {
+            signup.option_id == opt.id
+                && signup.membership_id == user.id
+                && signup.state == "confirmed"
+        });
+        if yours {
+            continue;
+        }
+        if let Some(role_id) = opt.role_id {
+            if !user.organizer && !roles.contains(&role_id) {
+                let role_name = role_rows
+                    .iter()
+                    .find(|role| role.id == role_id)
+                    .map(|role| role.name.as_str())
+                    .unwrap_or("another role");
+                notes.push(format!("{} is limited to {role_name}.", opt.name));
+            }
+        }
+        if let Some(cap) = opt.capacity {
+            let confirmed = signups
+                .iter()
+                .filter(|signup| signup.option_id == opt.id && signup.state == "confirmed")
+                .count() as i64;
+            if confirmed >= cap && !opt.waitlist {
+                notes.push(format!("{} is full.", opt.name));
+            }
+        }
+    }
+    if notes.len() > 1 {
+        notes.retain(|note| note != "Signups open once the event is posted.");
+    }
+    notes
 }
 
 fn button_state(
@@ -953,6 +1092,7 @@ pub fn form_page(page: &mut Page<'_>, draft: &FormDraft) -> Result<String, OpErr
     ctx["action_url"] = Value::from(draft.action_url.clone());
     ctx["event_title"] = Value::from(draft.event_title.clone());
     ctx["description"] = Value::from(draft.description.clone());
+    ctx["location"] = Value::from(draft.location.clone());
     ctx["channels"] = channels;
     ctx["colors"] = colors(&draft.color);
     ctx["start"] = Value::from(draft.start.clone());
@@ -1011,6 +1151,7 @@ pub struct FormDraft {
     pub action_url: String,
     pub event_title: String,
     pub description: String,
+    pub location: String,
     pub channel_id: String,
     pub color: String,
     pub start: String,
@@ -1047,6 +1188,7 @@ pub fn blank_form(server: &str, preset: Option<logic::PresetBody>) -> FormDraft 
         action_url: format!("/servers/{server}/events/new"),
         event_title: String::new(),
         description: String::new(),
+        location: String::new(),
         channel_id: String::new(),
         color: "#1e3a6e".into(),
         start: String::new(),
@@ -1100,6 +1242,7 @@ pub fn form_from_event(conn: &mut Connection, event_id: i64, tz: Tz) -> Result<F
     draft.existing_id = Some(event.id);
     draft.event_title = event.title.clone();
     draft.description = event.description.clone();
+    draft.location = event.location.clone();
     draft.channel_id = event.channel_id.to_string();
     draft.color = event.color.clone();
     draft.start = clock::datetime_local(event.starts_at, tz);
@@ -1174,6 +1317,7 @@ pub fn form_from_map(
     draft.error = error;
     draft.event_title = map.get("title").cloned().unwrap_or_default();
     draft.description = map.get("description").cloned().unwrap_or_default();
+    draft.location = map.get("location").cloned().unwrap_or_default();
     draft.channel_id = map.get("channel_id").cloned().unwrap_or_default();
     draft.color = map
         .get("color")
@@ -1357,6 +1501,7 @@ pub fn input_from_form(
         channel_id: draft.channel_id.parse().unwrap_or(0),
         title: draft.event_title,
         description: draft.description,
+        location: draft.location,
         starts_at: start,
         duration_minutes: duration,
         color: draft.color,
@@ -1533,6 +1678,18 @@ fn form_refs(page: &mut Page<'_>, draft: &FormDraft) -> Result<(Value, Value), O
     ))
 }
 
+fn color_name(color: &str) -> &'static str {
+    match color {
+        "#1e3a6e" => "Marian blue",
+        "#2f6b4f" => "Tide green",
+        "#8a6232" => "Brass",
+        "#6b3a6b" => "Plum",
+        "#8d3a32" => "Seal red",
+        "#243038" => "Ink",
+        _ => "Custom",
+    }
+}
+
 fn colors(current: &str) -> Value {
     let palette = [
         ("#1e3a6e", "Marian blue"),
@@ -1587,6 +1744,7 @@ fn rows_for(
                 "badge": logic::status_label(&event.status),
                 "title": event.title,
                 "meta": clock::format_when(start, tz, settings.hour_24),
+                "color": event.color,
             }))
         })
         .collect()
@@ -1635,6 +1793,7 @@ fn card_value(
         "channel": channel,
         "status_label": logic::status_label(&event.status),
         "rel": clock::format_rel(start, now),
+        "color": event.color,
         "spots": spots,
     });
     if hero {
@@ -1755,6 +1914,7 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
         ctx.insert("series_count", Value::from(0));
         ctx.insert("routine_count", Value::from(0));
         ctx.insert("calendar_url", Value::from(""));
+        google_shell(&mut ctx, None, false);
         return Ok(ctx);
     }
     let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
@@ -1790,7 +1950,11 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
                 .iter()
                 .filter_map(|g| {
                     let id = g.discord_id.clone().filter(|id| !id.is_empty())?;
-                    Some(serde_json::json!({"id": id, "name": g.name}))
+                    Some(serde_json::json!({
+                        "id": id,
+                        "name": g.name,
+                        "initial": g.name.chars().next().unwrap_or('?').to_uppercase().to_string(),
+                    }))
                 })
                 .collect::<Vec<_>>(),
         ),
@@ -1831,7 +1995,36 @@ fn shell(page: &mut Page<'_>) -> Result<Bag, OpError> {
         None => String::new(),
     };
     ctx.insert("calendar_url", Value::from(calendar_url));
+    let google = match user {
+        Some(person) => crate::google::status(page.conn, person.user_id)?,
+        None => None,
+    };
+    google_shell(&mut ctx, google.as_ref(), crate::google::configured_from_env());
     Ok(ctx)
+}
+
+fn google_shell(ctx: &mut Bag, status: Option<&crate::google::Status>, ready: bool) {
+    ctx.insert("google_ready", context_bool(ready));
+    ctx.insert(
+        "google_connected",
+        context_bool(status.is_some_and(|status| status.connected)),
+    );
+    ctx.insert(
+        "google_reconnect",
+        context_bool(status.is_some_and(|status| status.reconnect)),
+    );
+    ctx.insert(
+        "google_auto_sync",
+        context_bool(status.is_some_and(|status| status.auto_sync)),
+    );
+    ctx.insert(
+        "google_email",
+        Value::from(
+            status
+                .map(|status| status.email.clone())
+                .unwrap_or_default(),
+        ),
+    );
 }
 
 fn asset_context(ctx: &mut Bag) {
@@ -1989,6 +2182,7 @@ mod tests {
                 channel_id: 1,
                 title: "Raid".into(),
                 description: "Meet at **the hall**. <script>".into(),
+                location: "The dock".into(),
                 starts_at: Utc::now() + Duration::hours(5),
                 duration_minutes: 60,
                 color: "#1e3a6e".into(),
@@ -2052,6 +2246,11 @@ mod tests {
         page.nav = "event";
         page.title = "Event";
         let body = event_page(&mut page, event_id).unwrap();
+        assert!(body.contains("Attendance"), "{body}");
+        assert!(body.contains("Channel"), "{body}");
+        assert!(body.contains("Organizer"), "{body}");
+        assert!(body.contains("Signups close"), "{body}");
+        assert!(body.contains("The dock"), "{body}");
         assert!(body.contains("d-kicker"), "{body}");
         assert!(body.contains("Time"), "{body}");
         assert!(body.contains("Created by Nell"), "{body}");
@@ -2062,6 +2261,7 @@ mod tests {
         assert!(body.contains("<strong>the hall</strong>"), "{body}");
         assert!(body.contains("&lt;script&gt;"), "{body}");
         let form = form_page(&mut page, &blank_form("99", None)).unwrap();
+        assert!(form.contains("name=\"location\""), "{form}");
         assert!(form.contains("Does not repeat"), "{form}");
         assert!(form.contains("Post now"), "{form}");
         assert!(form.contains("Add option"), "{form}");
@@ -2180,6 +2380,7 @@ mod tests {
                 channel_id: 1,
                 title: title.into(),
                 description: String::new(),
+                location: String::new(),
                 starts_at: start,
                 duration_minutes: duration,
                 color: "#1e3a6e".into(),
@@ -2229,6 +2430,7 @@ mod tests {
                     channel_id: 1,
                     title: format!("Slot {n:02}"),
                     description: String::new(),
+                    location: String::new(),
                     starts_at: Utc::now() + Duration::hours(10 + n),
                     duration_minutes: 60,
                     color: "#1e3a6e".into(),
@@ -2331,6 +2533,7 @@ mod tests {
                 channel_id: 1,
                 title: "Vault".into(),
                 description: String::new(),
+                location: String::new(),
                 starts_at: Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap(),
                 duration_minutes: 60,
                 color: "#1e3a6e".into(),

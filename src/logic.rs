@@ -105,6 +105,7 @@ mod tests {
             channel_id: 1,
             title: title.into(),
             description: String::new(),
+            location: String::new(),
             starts_at: start,
             duration_minutes: 60,
             color: "#1e3a6e".into(),

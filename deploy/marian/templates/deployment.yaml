@@ -54,6 +54,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "marian.secretName" . }}
                   key: {{ .Values.database.secretKey }}
+            - name: MARIAN_DB_POOL
+              value: {{ .Values.database.pool | default 10 | quote }}
             - name: MARIAN_PUBLIC_URL
               value: {{ include "marian.publicUrl" . | quote }}
             - name: MARIAN_STATUS

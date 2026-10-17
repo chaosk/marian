@@ -117,6 +117,7 @@ pub fn duplicate_event(
         channel_id: event.channel_id,
         title: event.title.clone(),
         description: event.description.clone(),
+        location: event.location.clone(),
         starts_at: event.starts_at + Duration::days(7),
         duration_minutes: event.duration_minutes,
         color: event.color.clone(),

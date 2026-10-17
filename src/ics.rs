@@ -52,7 +52,6 @@ fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
     let channel = store::channel(conn, event.channel_id)?
         .map(|ch| format!("#{}", ch.name))
         .unwrap_or_default();
-    let description = format!("{}\n{}", event.description.trim(), channel);
     Ok(format!(
         "BEGIN:VEVENT\r\nUID:marian-{}@marian\r\nDTSTAMP:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nDESCRIPTION:{}\r\nLOCATION:{}\r\nEND:VEVENT\r\n",
         event.public_id,
@@ -60,8 +59,8 @@ fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
         ics_time(start),
         ics_time(end),
         fold_escape(&event.title),
-        fold_escape(description.trim()),
-        fold_escape(&channel),
+        fold_escape(event.description.trim()),
+        fold_escape(&place(event, &channel)),
     ))
 }
 
@@ -70,8 +69,9 @@ pub fn calendar_template(event: &Event) -> Result<String, OpError> {
     let end = start + Duration::minutes(event.duration_minutes);
     let dates = format!("{}/{}", google_time(start), google_time(end));
     Ok(format!(
-        "http://www.google.com/calendar/event?action=TEMPLATE&text={}&details=&location=&dates={dates}",
+        "http://www.google.com/calendar/event?action=TEMPLATE&text={}&details=&location={}&dates={dates}",
         plus_encode(&event.title),
+        plus_encode(event.location.trim()),
     ))
 }
 
@@ -84,8 +84,17 @@ pub fn google_link(event: &Event, channel: &str) -> Result<String, OpError> {
         pct(&event.title),
         pct(&dates),
         pct(event.description.trim()),
-        pct(channel),
+        pct(&place(event, channel)),
     ))
+}
+
+fn place(event: &Event, channel: &str) -> String {
+    let location = event.location.trim();
+    if location.is_empty() {
+        channel.to_string()
+    } else {
+        location.to_string()
+    }
 }
 
 fn ics_time(dt: DateTime<Utc>) -> String {

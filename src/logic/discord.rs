@@ -224,6 +224,10 @@ pub fn discord_view(
         body.push_str(event.description.trim());
         body.push_str("\n\n");
     }
+    let location = event.location.trim();
+    if !location.is_empty() {
+        body.push_str(&format!("**Location**\n📍 {location}\n"));
+    }
     body.push_str(&format!(
         "**Time**\n<t:{}:F> - <t:{}:t>\n",
         start.timestamp(),
@@ -232,7 +236,9 @@ pub fn discord_view(
     let plus = crate::ics::calendar_template(&event)?;
     let web = web_event_url(public_url, guild.discord_id.as_deref(), &event.public_id);
     match web.as_deref() {
-        Some(url) => body.push_str(&format!("[+]({plus}) · [View on web]({url})\n")),
+        Some(url) => body.push_str(&format!(
+            "[+]({plus}) · [View on web]({url})\n",
+        )),
         None => body.push_str(&format!("[+]({plus})\n")),
     }
     body.push_str(&format!("🕐 <t:{}:R>", start.timestamp()));
@@ -588,6 +594,16 @@ mod tests {
             view.body
         );
         assert!(view.body.contains("🕐 <t:"), "{}", view.body);
+        assert!(!view.body.contains("**Location**"), "{}", view.body);
+        conn.batch_execute("UPDATE events SET location = 'The dock' WHERE id = 1")
+            .unwrap();
+        let placed = discord_view(&mut conn, 1, "https://marian.example.com")
+            .unwrap()
+            .unwrap();
+        let location_at = placed.body.find("**Location**").unwrap();
+        let time_at = placed.body.find("**Time**").unwrap();
+        assert!(location_at < time_at, "{}", placed.body);
+        assert!(placed.body.contains("📍 The dock"), "{}", placed.body);
         assert_eq!(view.footer, "Created by Nell");
         assert_eq!(view.fields.len(), 2);
         assert!(view.fields.iter().all(|field| field.inline));

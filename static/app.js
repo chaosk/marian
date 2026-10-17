@@ -1,3 +1,9 @@
+document.querySelectorAll("details.switcher").forEach((menu) => {
+  document.addEventListener("click", (event) => {
+    if (!menu.contains(event.target)) menu.removeAttribute("open");
+  });
+});
+
 document.querySelectorAll("[data-confirm]").forEach((form) => {
   form.addEventListener("submit", (event) => {
     if (!window.confirm(form.getAttribute("data-confirm"))) {

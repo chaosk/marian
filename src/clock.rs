@@ -277,6 +277,12 @@ where
     }
 }
 
+pub fn format_long_date(date: NaiveDate) -> String {
+    let day = date.format("%d").to_string();
+    let day = day.trim_start_matches('0');
+    format!("{} {day}, {}", date.format("%A, %B"), date.format("%Y"))
+}
+
 pub fn format_day(date: NaiveDate) -> String {
     let day = date.format("%d").to_string();
     let day = day.trim_start_matches('0');

@@ -14,7 +14,7 @@
 </section>
 {% else %}
 {% if hero %}
-<section class="hero">
+<section class="hero" style="border-left-color: {{ hero.color }}">
   <div>
     <p class="kicker">Next up · {{ hero.rel }}</p>
     <h2><a href="{{ base }}/events/{{ hero.id }}">{{ hero.title }}</a></h2>
@@ -32,7 +32,7 @@
   <h2>{{ day.label }}</h2>
   <div class="stack">
     {% for event in day.events %}
-    <a class="card" href="{{ base }}/events/{{ event.id }}">
+    <a class="card" style="border-left-color: {{ event.color }}" href="{{ base }}/events/{{ event.id }}">
       <div class="card-top">
         <h3>{{ event.title }}</h3>
         <span class="badge">{{ event.status_label }}</span>
@@ -57,7 +57,7 @@
   <h2>Wrapped, not archived yet</h2>
   <div class="stack">
     {% for event in wrapped %}
-    <a class="card" href="{{ base }}/events/{{ event.id }}">{{ event.title }} · {{ event.when }}</a>
+    <a class="card" style="border-left-color: {{ event.color }}" href="{{ base }}/events/{{ event.id }}">{{ event.title }} · {{ event.when }}</a>
     {% endfor %}
   </div>
 </section>

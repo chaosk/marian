@@ -19,7 +19,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
 struct Data {
-    db: Arc<Mutex<Connection>>,
+    db: store::Db,
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
     registered: Mutex<HashSet<u64>>,
@@ -27,7 +27,7 @@ struct Data {
 
 pub fn start(
     token: String,
-    db: Arc<Mutex<Connection>>,
+    db: store::Db,
     jobs: UnboundedReceiver<DiscordJob>,
     retry: UnboundedSender<DiscordJob>,
     public_url: String,
@@ -62,7 +62,7 @@ pub fn start(
 }
 
 async fn job_loop(
-    db: Arc<Mutex<Connection>>,
+    db: store::Db,
     mut jobs: UnboundedReceiver<DiscordJob>,
     retry: UnboundedSender<DiscordJob>,
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
@@ -88,7 +88,9 @@ async fn job_loop(
                     ..
                 } => push_remind(&db, &http, &public_url, *event_id, text, message).await,
                 DiscordJob::Attend { event_id, .. } => push_attendance(&db, &http, *event_id).await,
-                DiscordJob::Routine { run_id, .. } => push_routine(&db, &http, *run_id).await,
+                DiscordJob::Routine { run_id, .. } => {
+                    push_routine(&db, &http, &public_url, *run_id).await
+                }
             }
         }
         .instrument(span)
@@ -120,7 +122,7 @@ fn requeue(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
 
 async fn connect(
     token: &str,
-    db: Arc<Mutex<Connection>>,
+    db: store::Db,
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
     status: String,
@@ -206,7 +208,7 @@ async fn on_event(
             let (replies, posts) = {
                 let public_url = data.public_url.clone();
                 let author = new_message.author.id.get().to_string();
-                let mut conn = data.db.lock().map_err(|_| "database lock")?;
+                let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
                 let replies = commands::answer_event_dm(
                     &mut conn,
                     &author,
@@ -224,7 +226,7 @@ async fn on_event(
             }
             let replies = replies.map(|mut replies| {
                 if let Some(event_id) = posts.first() {
-                    if let Ok(mut conn) = data.db.lock() {
+                    if let Ok(mut conn) = data.db.get() {
                         if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id) {
                             commands::link_created_event(&mut replies, &url);
                         }
@@ -278,7 +280,7 @@ async fn register_guild(
 }
 
 fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
-    let mut conn = data.db.lock().map_err(|_| "database lock")?;
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
     let stored = logic::ensure_discord_guild(&mut conn, &guild.id.get().to_string(), &guild.name)?;
     for channel in guild.channels.values() {
         if !matches!(
@@ -391,20 +393,16 @@ async fn routine_from_button(
         return Ok(());
     };
     let saved = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let membership_id = bind_clicker(&mut conn, &click)?;
         logic::cast_run(&mut conn, run_id, membership_id, day)
     };
-    let notice = match saved {
-        Ok(effect) => {
-            if let Err(err) = push_routine(&data.db, &data.http, run_id).await {
-                tracing::warn!("could not refresh the routine poll: {err}");
-            }
-            effect.notice
-        }
-        Err(err) => err.to_string(),
-    };
-    followup(ctx, component, &notice).await?;
+    if let Err(err) = saved {
+        return followup(ctx, component, &err.to_string()).await;
+    }
+    if let Err(err) = push_routine(&data.db, &data.http, &data.public_url, run_id).await {
+        tracing::warn!("could not refresh the routine poll: {err}");
+    }
     Ok(())
 }
 
@@ -420,7 +418,7 @@ async fn signup_from_button(
         return Ok(());
     };
     let signed = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let membership_id = bind_clicker(&mut conn, &click)?;
         logic::signup(&mut conn, event_id, option_id, membership_id)
     };
@@ -447,7 +445,7 @@ async fn edit_from_button(
         return Ok(());
     };
     let text = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             Some(event) if event.created_by == Some(membership_id) => {
@@ -474,7 +472,7 @@ async fn ask_delete(
         return Ok(());
     };
     let card = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             None => Err("That event isn't here.".to_string()),
@@ -538,7 +536,7 @@ async fn delete_from_button(
         return Ok(());
     };
     let removed = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let membership_id = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             None => Err("That event isn't here.".to_string()),
@@ -571,7 +569,7 @@ async fn delete_from_button(
             .await;
         if let Err(err) = deleted {
             tracing::warn!("could not remove the Discord post: {err}");
-        } else if let Ok(mut conn) = data.db.lock() {
+        } else if let Ok(mut conn) = data.db.get() {
             diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
                 .set(schema::events::discord_message_id.eq(None::<String>))
                 .execute(&mut *conn)?;
@@ -774,13 +772,13 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
 }
 
 async fn push_sync(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
     let view = {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         logic::discord_view(&mut conn, event_id, public_url)?
     };
     let Some(view) = view else {
@@ -874,20 +872,21 @@ async fn push_sync(
         )
     };
     if let Some(message) = sent {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string())?;
     }
     Ok(())
 }
 
 async fn push_routine(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    public_url: &str,
     run_id: i64,
 ) -> Result<(), Error> {
     let post = {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
-        logic::routine_post(&mut conn, run_id)?
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        logic::routine_post(&mut conn, run_id, public_url)?
     };
     let Some(post) = post else {
         return Ok(());
@@ -898,10 +897,17 @@ async fn push_routine(
         .clone()
         .ok_or("Discord is not connected")?;
     let channel_id = serenity::ChannelId::new(post.channel_discord_id.parse()?);
-    let embed = serenity::CreateEmbed::new()
+    let mut embed = serenity::CreateEmbed::new()
         .title(clip(&post.title, 250))
         .description(clip(&post.body, 4000))
         .color(serenity::Colour::new(post.color));
+    for field in &post.fields {
+        embed = embed.field(
+            clip(&field.name, 256),
+            clip(&field.value, 1024),
+            field.inline,
+        );
+    }
     let sent = upsert_message(
         &http,
         channel_id,
@@ -911,7 +917,7 @@ async fn push_routine(
     )
     .await?;
     if let Some(message) = sent {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         logic::remember_routine_message(&mut conn, run_id, &message.id.get().to_string())?;
     }
     Ok(())
@@ -976,12 +982,12 @@ async fn upsert_message(
 }
 
 async fn push_attendance(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     event_id: i64,
 ) -> Result<(), Error> {
     let work = {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         match logic::attendance(&mut conn, event_id)? {
             logic::Attendance::Idle => return Ok(()),
             logic::Attendance::Waiting => {
@@ -1004,7 +1010,7 @@ async fn push_attendance(
         .ok_or("Discord is not connected")?;
     if !work.thread_add.is_empty() || !work.thread_remove.is_empty() {
         if work.thread_discord_id.is_none() && work.thread_add.is_empty() {
-            let mut conn = db.lock().map_err(|_| "database lock")?;
+            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             for membership_id in &work.thread_remove {
                 store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
             }
@@ -1012,18 +1018,18 @@ async fn push_attendance(
             let thread_id = open_thread(db, &http, event_id, &work).await?;
             for membership_id in &work.thread_add {
                 join_thread(&http, thread_id, membership_id).await?;
-                let mut conn = db.lock().map_err(|_| "database lock")?;
+                let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
                 store::mark_applied(&mut conn, event_id, "thread", membership_id)?;
             }
             for membership_id in &work.thread_remove {
                 leave_thread(&http, thread_id, membership_id).await?;
-                let mut conn = db.lock().map_err(|_| "database lock")?;
+                let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
                 store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
             }
         }
     }
     if work.role_discord_id.is_none() && work.role_add.is_empty() {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         for membership_id in &work.role_remove {
             store::clear_applied(&mut conn, event_id, "role", membership_id)?;
         }
@@ -1037,7 +1043,7 @@ async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let mut conn = db.lock().map_err(|_| "database lock")?;
+            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             store::mark_applied(&mut conn, event_id, "role", membership_id)?;
         }
         for membership_id in &work.role_remove {
@@ -1047,7 +1053,7 @@ async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let mut conn = db.lock().map_err(|_| "database lock")?;
+            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             store::clear_applied(&mut conn, event_id, "role", membership_id)?;
         }
     }
@@ -1055,7 +1061,7 @@ async fn push_attendance(
 }
 
 async fn open_thread(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &serenity::Http,
     event_id: i64,
     work: &logic::AttendanceWork,
@@ -1073,7 +1079,7 @@ async fn open_thread(
 }
 
 async fn thread_on_message(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &serenity::Http,
     event_id: i64,
     channel_id: &str,
@@ -1107,7 +1113,7 @@ async fn thread_on_message(
             None => return Err(err.into()),
         },
     };
-    let mut conn = db.lock().map_err(|_| "database lock")?;
+    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
     store::set_thread_discord_id(&mut conn, event_id, &thread_id.to_string())?;
     Ok(thread_id)
 }
@@ -1142,7 +1148,7 @@ async fn leave_thread(http: &serenity::Http, thread_id: u64, membership_id: &str
 }
 
 async fn open_role(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &serenity::Http,
     work: &logic::AttendanceWork,
 ) -> Result<serenity::RoleId, Error> {
@@ -1164,7 +1170,7 @@ async fn open_role(
                 .colour(work.role_color),
         )
         .await?;
-    let mut conn = db.lock().map_err(|_| "database lock")?;
+    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
     store::set_role_discord_id(&mut conn, stored_role_id, &role.id.get().to_string())?;
     Ok(role.id)
 }
@@ -1175,7 +1181,7 @@ fn already_applied(err: &serenity::Error) -> bool {
 }
 
 async fn push_remind(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: &str,
     event_id: i64,
@@ -1183,7 +1189,7 @@ async fn push_remind(
     message: &str,
 ) -> Result<(), Error> {
     let plan = {
-        let mut conn = db.lock().map_err(|_| "database lock")?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         let event =
             store::event(&mut conn, event_id)?.ok_or_else(|| "event missing".to_string())?;
         let channel = store::channel(&mut conn, event.channel_id)?
@@ -1249,7 +1255,13 @@ async fn push_remind(
     } else {
         plan.channel_id.parse()?
     };
-    let card = logic::reminder_card(&plan.title, plan.start, plan.end, plan.link.as_deref(), message);
+    let card = logic::reminder_card(
+        &plan.title,
+        plan.start,
+        plan.end,
+        plan.link.as_deref(),
+        message,
+    );
     let embed = serenity::CreateEmbed::new()
         .title(clip(&card.title, 256))
         .description(clip(&card.description, 4000))
@@ -1323,7 +1335,7 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
                 .collect::<Vec<_>>()
         })
     });
-    let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+    let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
     let user = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
     if let Some(manage) = manage {
@@ -1347,7 +1359,7 @@ async fn desk(ctx: Context<'_>, line: &str) -> Result<(), Error> {
     };
     let data = ctx.data();
     let (reply, refresh) = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let reply = crate::commands::execute(&mut conn, actor.guild_id, actor.membership_id, line);
         let refresh = crate::serve::events_to_refresh(&mut conn, line, &reply);
         (reply, refresh)
@@ -1456,7 +1468,7 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
         .map(|channel| channel.name)
         .unwrap_or_default();
     let started = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         let channel = logic::ensure_discord_channel(
             &mut conn,
             actor.guild_id,
@@ -1490,7 +1502,7 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
                 .await
             {
                 {
-                    let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+                    let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
                     commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
                 }
                 tracing::warn!("could not send the event questions: {err}");
@@ -1507,7 +1519,7 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
         }
         Err(err) => {
             {
-                let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+                let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
                 commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
             }
             tracing::warn!("could not open a DM: {err}");
@@ -1526,7 +1538,7 @@ async fn complete_channel(ctx: Context<'_>, partial: &str) -> Vec<serenity::Auto
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.lock() else {
+    let Ok(mut conn) = ctx.data().db.get() else {
         return Vec::new();
     };
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
@@ -1551,7 +1563,7 @@ async fn deliver(
         Err(err) => err.to_string(),
     };
     let refresh = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let _ = logic::record_command(&mut conn, actor.guild_id, actor.membership_id, label, &text);
         crate::serve::events_to_refresh(&mut conn, label, &text)
     };
@@ -1600,7 +1612,7 @@ async fn edit(
     };
     let label = format!("/edit {event}");
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::edit_event(
             &mut conn,
             actor.guild_id,
@@ -1633,7 +1645,7 @@ async fn reminders(
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::set_reminders(&mut conn, actor.membership_id, enabled)
     };
     deliver(ctx, &actor, "/reminders", outcome).await
@@ -1710,7 +1722,7 @@ async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoco
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.lock() else {
+    let Ok(mut conn) = ctx.data().db.get() else {
         return Vec::new();
     };
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
@@ -1730,7 +1742,7 @@ async fn complete_option(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoc
     let Some(event) = slash_arg(&ctx, "event") else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.lock() else {
+    let Ok(mut conn) = ctx.data().db.get() else {
         return Vec::new();
     };
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
@@ -1774,7 +1786,7 @@ async fn run_response(
     let name = crate::auth::discord_display_name(user.global_name.as_deref(), &user.name);
     let data = ctx.data();
     let outcome = {
-        let mut conn = data.db.lock().map_err(|_| "database lock")?;
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let target = logic::ensure_discord_user(
             &mut conn,
             actor.guild_id,
@@ -1807,7 +1819,7 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::apply_setting(&mut conn, actor.guild_id, actor.membership_id, change)
     };
     deliver(ctx, &actor, label, outcome).await
@@ -2116,7 +2128,7 @@ async fn signup_options_list(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::library_text(&mut conn, actor.guild_id)
     };
     deliver(ctx, &actor, "/signup_options list", outcome).await
@@ -2140,7 +2152,7 @@ async fn signup_options_add(
     };
     let emoji = emoji.unwrap_or_else(|| "•".into());
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::add_library_option(&mut conn, actor.guild_id, actor.membership_id, &name, &emoji)
     };
     deliver(ctx, &actor, "/signup_options add", outcome).await
@@ -2162,7 +2174,7 @@ async fn signup_options_remove(
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::remove_library_option(&mut conn, actor.guild_id, actor.membership_id, &name)
     };
     deliver(ctx, &actor, "/signup_options remove", outcome).await
@@ -2191,7 +2203,7 @@ async fn signup_presets_list(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::preset_text(&mut conn, actor.guild_id)
     };
     deliver(ctx, &actor, "/signup_presets list", outcome).await
@@ -2214,7 +2226,7 @@ async fn signup_presets_add(
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::add_preset(&mut conn, actor.guild_id, actor.membership_id, &name, &options)
     };
     deliver(ctx, &actor, "/signup_presets add", outcome).await
@@ -2236,7 +2248,7 @@ async fn signup_presets_remove(
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::remove_preset(&mut conn, actor.guild_id, actor.membership_id, &name)
     };
     deliver(ctx, &actor, "/signup_presets remove", outcome).await
@@ -2262,7 +2274,7 @@ async fn channel(
         _ => "text",
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::create_named_channel(&mut conn, actor.guild_id, actor.membership_id, &name, kind)
     };
     deliver(ctx, &actor, "/channel", outcome).await
@@ -2291,7 +2303,7 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::google_sign_in_url(&mut conn, actor.membership_id)
     };
     let url = match outcome {
@@ -2299,7 +2311,7 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
         Err(err) => return deliver(ctx, &actor, "/google authorize", Err(err)).await,
     };
     {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         let _ = logic::record_command(
             &mut conn,
             actor.guild_id,
@@ -2335,7 +2347,7 @@ async fn google_auto_sync(
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::google_auto_sync(&mut conn, actor.guild_id, actor.membership_id, enabled)
     };
     deliver(ctx, &actor, "/google auto_sync", outcome).await
@@ -2360,7 +2372,7 @@ async fn google_sync(
     };
     let label = format!("/google sync {event}");
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::google_sync(&mut conn, actor.guild_id, actor.membership_id, &event)
     };
     deliver(ctx, &actor, &label, outcome).await
@@ -2379,7 +2391,7 @@ async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let outcome = {
-        let mut conn = ctx.data().db.lock().map_err(|_| "database lock")?;
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
         commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id)
     };
     deliver(ctx, &actor, "/google revoke", outcome).await

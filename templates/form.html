@@ -16,6 +16,9 @@
       <textarea name="description">{{ description }}</textarea>
       <span class="meta">Use {date} for the event date.</span>
     </label>
+    <label class="field span-2">Location
+      <input name="location" maxlength="200" value="{{ location }}">
+    </label>
     <label class="field">Channel
       <select name="channel_id">
         {% for channel in channels %}

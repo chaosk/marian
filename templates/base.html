@@ -18,17 +18,27 @@
         <p>Marian<em>the discord scheduler</em></p>
       </div>
       {% if guild_name %}
-      <div class="server">
-        <strong>{{ guild_name }}</strong>
-        {{ tz_label }}
-      </div>
-      {% endif %}
-      {% if guilds|length > 1 %}
-      <nav class="servers">
-        {% for guild in guilds %}
-        <a href="/servers/{{ guild.id }}" class="{% if guild.id == guild_id %}active{% endif %}">{{ guild.name }}</a>
-        {% endfor %}
-      </nav>
+      <details class="switcher">
+        <summary>
+          <span>
+            <strong>{{ guild_name }}</strong>
+            <span class="switcher-zone">{{ tz_label }}</span>
+          </span>
+          <span class="switcher-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="switcher-menu">
+          {% for guild in guilds %}
+          <a href="/servers/{{ guild.id }}" class="{% if guild.id == guild_id %}current{% endif %}">
+            <span class="switcher-mark">{{ guild.initial }}</span>
+            <span class="switcher-label">{{ guild.name }}</span>
+            {% if guild.id == guild_id %}<span class="switcher-check" aria-hidden="true">✓</span>{% endif %}
+          </a>
+          {% endfor %}
+          {% if invite_url %}
+          <a class="switcher-add" href="{{ invite_url }}">+ Add server</a>
+          {% endif %}
+        </div>
+      </details>
       {% endif %}
       <nav class="nav">
         <a href="{{ base }}" class="{% if nav == 'schedule' %}active{% endif %}">Schedule</a>
@@ -41,7 +51,6 @@
         <a href="{{ base }}/channels" class="{% if nav == 'channels' %}active{% endif %}">Channels</a>
         <a href="{{ base }}/commands" class="{% if nav == 'commands' %}active{% endif %}">Command desk</a>
         <a href="{{ base }}/activity" class="{% if nav == 'activity' %}active{% endif %}">Activity</a>
-        <a href="{{ base }}/google" class="{% if nav == 'google' %}active{% endif %}">Google Calendar</a>
         <a href="{{ base }}/settings" class="{% if nav == 'settings' %}active{% endif %}">Settings</a>
       </nav>
       {% if membership_id %}
@@ -50,6 +59,34 @@
         {% if calendar_url %}
         <a class="calendar" href="{{ calendar_url }}">Calendar feed</a>
         {% endif %}
+        <div class="google-account">
+          <p class="who">Google Calendar</p>
+          {% if google_connected %}
+          <p class="google-mail">Connected{% if google_email %} as {{ google_email }}{% endif %}.</p>
+          {% elif google_reconnect %}
+          <p class="google-mail">Needs a new connection{% if google_email %}, last used {{ google_email }}{% endif %}.</p>
+          <a class="calendar" href="/auth/google?next={{ base }}">Connect again</a>
+          {% elif google_ready %}
+          <a class="calendar" href="/auth/google?next={{ base }}">Connect Google Calendar</a>
+          {% else %}
+          <p class="google-mail">Not set up on this server yet.</p>
+          {% endif %}
+          {% if google_connected or google_reconnect %}
+          <form method="post" action="{{ base }}/google">
+            <label class="google-sync">
+              <input type="checkbox" name="auto_sync" value="1" {% if google_auto_sync %}checked{% endif %}>
+              Keep your Google Calendar updated
+            </label>
+            <button type="submit">Save</button>
+          </form>
+          {% endif %}
+          {% if google_connected %}
+          <form method="post" action="/auth/google/disconnect">
+            <input type="hidden" name="next" value="{{ base }}">
+            <button type="submit" class="leave">Disconnect</button>
+          </form>
+          {% endif %}
+        </div>
         <div class="account-row">
           <form method="post" action="{{ base }}/me/reminders">
             <input type="hidden" name="enabled" value="{% if reminders_on %}0{% else %}1{% endif %}">
@@ -61,8 +98,8 @@
         </div>
       </div>
       {% endif %}
-      {% if invite_url %}
-      <a class="invite" href="{{ invite_url }}">Invite Marian to Discord</a>
+      {% if invite_url and not guild_name %}
+      <a class="invite" href="{{ invite_url }}">Invite Marian to a server</a>
       {% endif %}
     </aside>
     <main class="main" id="content">

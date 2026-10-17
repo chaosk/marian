@@ -29,7 +29,7 @@
   <tbody>
     {% for row in rows %}
     <tr>
-      <td><a href="{{ row.href }}">{{ row.title }}</a></td>
+      <td class="event-title" style="border-left-color: {{ row.color }}"><a href="{{ row.href }}">{{ row.title }}</a></td>
       <td class="fit">{{ row.meta }}</td>
       <td class="fit"><span class="badge">{{ row.badge }}</span></td>
     </tr>

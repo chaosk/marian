@@ -27,7 +27,7 @@ use crate::store::{self, Connection, Settings};
 
 #[derive(Clone)]
 struct AppState {
-    db: Arc<Mutex<Connection>>,
+    db: store::Db,
     discord: UnboundedSender<DiscordJob>,
     invite_url: String,
     http: reqwest::Client,
@@ -51,6 +51,7 @@ struct Session {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    store::load_dotenv();
     let _telemetry = crate::observe::init();
 
     let database_url = store::database_url()?;
@@ -74,8 +75,7 @@ pub fn run() -> anyhow::Result<()> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let conn = store::open(&database_url)?;
-    let db = Arc::new(Mutex::new(conn));
+    let db = store::pool(&database_url)?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState {
@@ -108,7 +108,7 @@ pub fn run() -> anyhow::Result<()> {
                 let span = tracing::info_span!("tick");
                 let _enter = span.enter();
                 let report = {
-                    let mut guard = db.lock().expect("database lock");
+                    let mut guard = db.get().expect("database");
                     logic::tick(&mut guard, Utc::now())
                 };
                 match report {
@@ -363,7 +363,7 @@ async fn show_help() -> Response {
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    let ok = state.db.lock().map(|mut conn| {
+    let ok = state.db.get().map(|mut conn| {
         diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
             .get_result::<i32>(&mut *conn)
             .is_ok()
@@ -389,13 +389,13 @@ async fn schedule(
 ) -> Response {
     let notice = cookie(&headers, "marian_notice").map(|value| percent_decode(&value));
     let signed_in = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers).is_some()
     };
     if !signed_in {
         return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
     }
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(session) = read_session(&mut db, &headers) else {
         return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
     };
@@ -446,7 +446,7 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     }
     let headers = request.headers().clone();
     let signed_in = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers).is_some()
     };
     if signed_in {
@@ -550,12 +550,12 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
 
 fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
     let server = server_in_path(path)?;
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     role_target(&mut db, headers, server)
 }
 
 fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     if let Err(err) = store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles)
     {
         tracing::warn!("could not store Discord roles: {err}");
@@ -623,7 +623,7 @@ async fn discord_member(
     }
     let response = crate::observe::send_traced(
         http.get(format!(
-            "https://discord.com/api/guilds/{guild_discord}/members/{user_discord}"
+            "https://discord.com/api/v10/guilds/{guild_discord}/members/{user_discord}"
         ))
         .header(
             header::AUTHORIZATION,
@@ -711,7 +711,7 @@ async fn auth_callback(
         Ok(ids) => ids,
         Err(err) => return redirect("/", &err),
     };
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let guilds = match store::list_guilds(&mut db) {
         Ok(guilds) => guilds,
         Err(err) => return plain_error(err),
@@ -787,7 +787,7 @@ async fn auth_callback(
 }
 
 async fn sync_google(
-    db: &Arc<Mutex<Connection>>,
+    db: &store::Db,
     http: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
@@ -797,7 +797,7 @@ async fn sync_google(
         return;
     }
     let jobs = {
-        let mut guard = db.lock().expect("database lock");
+        let mut guard = db.get().expect("database");
         crate::google::plan(&mut guard, public_base)
     };
     let jobs = match jobs {
@@ -815,13 +815,13 @@ async fn sync_google(
         {
             tracing::warn!("google calendar event {event_id}: {message}");
         }
-        let mut guard = db.lock().expect("database lock");
+        let mut guard = db.get().expect("database");
         if let Err(err) = crate::google::record(&mut guard, outcome) {
             tracing::warn!("google calendar: {err}");
         }
     }
     let revokes = {
-        let mut guard = db.lock().expect("database lock");
+        let mut guard = db.get().expect("database");
         match crate::google::ready_revokes(&mut guard) {
             Ok(rows) => rows,
             Err(err) => {
@@ -833,7 +833,7 @@ async fn sync_google(
     for access in revokes {
         let user_id = access.user_id;
         if crate::google::forget_remote(http, client_id, client_secret, access).await {
-            let mut guard = db.lock().expect("database lock");
+            let mut guard = db.get().expect("database");
             if let Err(err) = crate::google::delete_account(&mut guard, user_id) {
                 tracing::warn!("google calendar: {err}");
             }
@@ -860,14 +860,14 @@ async fn google_start(
         return redirect(&next, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let session = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers)
     };
     let Some(session) = session else {
         return redirect(&next, "Sign in with Discord.");
     };
     let state_token = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         match crate::google::begin_link(&mut db, session.user_id) {
             Ok(token) => token,
             Err(err) => return plain_error(err),
@@ -908,7 +908,7 @@ async fn google_open(
         return redirect("/", "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let pending = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         match crate::google::claim_oauth(&mut db, &token) {
             Ok(row) => row.is_some(),
             Err(err) => return plain_error(err),
@@ -965,7 +965,7 @@ async fn google_callback(
         next
     };
     if query.error.is_some() {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         let _ = crate::google::finish_oauth(&mut db, &returned);
         let mut response = redirect(
             &dest,
@@ -981,7 +981,7 @@ async fn google_callback(
         return redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let user_id = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         match crate::google::claim_oauth(&mut db, &returned) {
             Ok(Some(user_id)) => {
                 let _ = crate::google::finish_oauth(&mut db, &returned);
@@ -1010,7 +1010,7 @@ async fn google_callback(
     };
     let email = crate::google::account_email(&state.http, &access).await;
     {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         if let Err(err) = crate::google::save_account(&mut db, user_id, &refresh, &email) {
             return plain_error(err);
         }
@@ -1034,14 +1034,14 @@ async fn google_disconnect(
         .and_then(auth::safe_next)
         .unwrap_or_else(|| "/".into());
     let session = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers)
     };
     let Some(session) = session else {
         return redirect("/", "Sign in with Discord.");
     };
     let access = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         match crate::google::remote_access(&mut db, session.user_id) {
             Ok(access) => access,
             Err(err) => return plain_error(err),
@@ -1063,7 +1063,7 @@ async fn google_disconnect(
         true
     };
     {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         if let Err(err) = crate::google::delete_account(&mut db, session.user_id) {
             return plain_error(err);
         }
@@ -1090,7 +1090,7 @@ fn google_redirect(state: &AppState, headers: &HeaderMap) -> Option<String> {
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie(&headers, "marian_session") {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         let _ = store::delete_web_session(&mut db, &token);
     }
     let mut response = Redirect::to("/").into_response();
@@ -1154,7 +1154,7 @@ async fn discord_me(state: &AppState, access: &str) -> Result<DiscordMe, String>
     let response = crate::observe::send_traced(
         state
             .http
-            .get("https://discord.com/api/users/@me")
+            .get("https://discord.com/api/v10/users/@me")
             .bearer_auth(access),
     )
     .await
@@ -1173,7 +1173,7 @@ async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuil
     let mut found = Vec::new();
     let mut after = String::new();
     for _ in 0..5 {
-        let mut endpoint = "https://discord.com/api/users/@me/guilds?limit=200".to_string();
+        let mut endpoint = "https://discord.com/api/v10/users/@me/guilds?limit=200".to_string();
         if !after.is_empty() {
             endpoint.push_str("&after=");
             endpoint.push_str(&auth::encode(&after));
@@ -1185,18 +1185,19 @@ async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuil
             tracing::warn!("discord guilds returned {}", response.status());
             return Err("Discord didn't share your servers. Try again.".into());
         }
-        let guilds: Vec<DiscordGuild> = response
-            .json()
+        let body = response
+            .text()
             .await
             .map_err(|_| "Discord sent an unexpected server list.".to_string())?;
+        let guilds = member_guilds(&body).map_err(|err| {
+            tracing::warn!("discord guild list did not match: {err}");
+            "Discord sent an unexpected server list.".to_string()
+        })?;
         let page = guilds.len();
         if let Some(last) = guilds.last() {
             after = last.id.clone();
         }
-        found.extend(guilds.into_iter().map(|guild| MemberGuild {
-            manages: auth::manages_guild(guild.owner, &guild.permissions),
-            id: guild.id,
-        }));
+        found.extend(guilds);
         if page < 200 {
             break;
         }
@@ -1260,8 +1261,50 @@ struct DiscordGuild {
     id: String,
     #[serde(default)]
     owner: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "permission_bits")]
     permissions: String,
+}
+
+fn permission_bits<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bits;
+    impl serde::de::Visitor<'_> for Bits {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("permission bits as a string or a number")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<String, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<String, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+    }
+    deserializer.deserialize_any(Bits)
+}
+
+fn member_guilds(body: &str) -> Result<Vec<MemberGuild>, serde_json::Error> {
+    let guilds: Vec<DiscordGuild> = serde_json::from_str(body)?;
+    Ok(guilds
+        .into_iter()
+        .map(|guild| MemberGuild {
+            manages: auth::manages_guild(guild.owner, &guild.permissions),
+            id: guild.id,
+        })
+        .collect())
 }
 
 struct MemberGuild {
@@ -1394,7 +1437,7 @@ async fn create_routine(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, "/routines/new");
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -1409,7 +1452,6 @@ async fn create_routine(
             session.membership_id,
             input.channel_id,
             &input.title,
-            &input.prompt,
             &input.description,
             input.duration,
             input.start_minutes,
@@ -1444,7 +1486,7 @@ async fn update_routine(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -1460,7 +1502,6 @@ async fn update_routine(
             session.membership_id,
             input.channel_id,
             &input.title,
-            &input.prompt,
             &input.description,
             input.duration,
             input.start_minutes,
@@ -1491,7 +1532,7 @@ async fn save_routine_days(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -1528,7 +1569,7 @@ async fn vote_routine(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -1581,7 +1622,6 @@ async fn stop_routine(
 struct RoutineInput {
     channel_id: i64,
     title: String,
-    prompt: String,
     description: String,
     duration: i64,
     start_minutes: u16,
@@ -1604,7 +1644,6 @@ fn routine_input(map: &HashMap<String, String>) -> Result<RoutineInput, OpError>
     Ok(RoutineInput {
         channel_id,
         title: map.get("title").cloned().unwrap_or_default(),
-        prompt: map.get("prompt").cloned().unwrap_or_default(),
         description: map.get("description").cloned().unwrap_or_default(),
         duration,
         start_minutes: clock_minutes(map.get("start_time").map(String::as_str).unwrap_or(""))?,
@@ -1742,7 +1781,7 @@ async fn save_google(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, "/google");
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -1837,7 +1876,7 @@ fn save_form(
     id: Option<String>,
     map: HashMap<String, String>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2005,7 +2044,7 @@ async fn delete_event(
     Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
     let gone = {
-        let mut db = state.db.lock().expect("database lock");
+        let mut db = state.db.get().expect("database");
         store::event_by_public(&mut db, &public_id)
             .ok()
             .flatten()
@@ -2028,7 +2067,7 @@ async fn duplicate(
     headers: HeaderMap,
     Path((server, public_id)): Path<(String, String)>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2260,7 +2299,7 @@ async fn run_command(
     Path(server): Path<String>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2285,7 +2324,7 @@ async fn save_settings(
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
     let back = here(&server, "/settings");
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, &headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2397,7 +2436,7 @@ async fn personal_calendar(State(state): State<AppState>, Path(file): Path<Strin
     let Some(token) = personal_token(&file) else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(user_id) = store::calendar_user_id(&mut db, token).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
@@ -2489,7 +2528,7 @@ fn mutate(
     back: &str,
     body: impl FnOnce(&mut Connection, &Session) -> Result<(String, Option<i64>), OpError>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2517,7 +2556,7 @@ fn html(
     title: &str,
     render: impl FnOnce(&mut Page<'_>) -> Result<String, OpError>,
 ) -> Response {
-    let mut db = state.db.lock().expect("database lock");
+    let mut db = state.db.get().expect("database");
     let Some(mut session) = read_session(&mut db, headers) else {
         return redirect("/", "Sign in with Discord.");
     };
@@ -2770,6 +2809,20 @@ fn invite_url(client_id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_server_list_accepts_string_and_integer_permissions() {
+        let current = r#"[{"id":"1","owner":false,"permissions":"40"}]"#;
+        let legacy = r#"[{"id":"2","owner":false,"permissions":8,"permissions_new":"8"}]"#;
+        let parsed = member_guilds(current).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].manages);
+        let parsed = member_guilds(legacy).unwrap();
+        assert_eq!(parsed[0].id, "2");
+        assert!(parsed[0].manages);
+        let plain = member_guilds(r#"[{"id":"3","owner":false,"permissions":0}]"#).unwrap();
+        assert!(!plain[0].manages);
+    }
+
     #[derive(Insertable)]
     #[diesel(table_name = schema::guilds)]
     struct SeedGuild<'a> {
@@ -2934,7 +2987,7 @@ mod tests {
         .unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: store::pool_for(&mut conn).unwrap(),
             discord: tx,
             invite_url: "https://discord.com/oauth2/authorize?example".into(),
             http: reqwest::Client::new(),
@@ -3044,8 +3097,8 @@ mod tests {
         assert!(body.contains("class=\"calendar\""));
         assert!(body.contains(".ics"));
         assert!(body.contains("Sign out"));
-        assert!(body.contains("class=\"invite\""));
-        assert!(body.contains("Invite Marian to Discord"));
+        assert!(body.contains("switcher-add") || body.contains("class=\"invite\""));
+        assert!(body.contains("+ Add server"));
         assert!(body.contains(assets::mark()), "{body}");
         assert!(body.contains("servers&#x2f;99/settings"));
         assert!(!body.contains("Acting as"));
@@ -3059,7 +3112,7 @@ mod tests {
         assert_eq!(google.status(), StatusCode::OK);
         let google_body = google.text().await.unwrap();
         assert!(google_body.contains("Google client id"), "{google_body}");
-        assert!(google_body.contains("servers&#x2f;99/google"), "{google_body}");
+        assert!(google_body.contains("Not set up on this server yet."), "{google_body}");
 
         let week = client
             .get(format!("http://{addr}/"))
@@ -3094,7 +3147,7 @@ mod tests {
         let user_id = store::ensure_user(&mut conn, "42").unwrap();
         let token = crate::google::begin_link(&mut conn, user_id).unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let db = Arc::new(Mutex::new(conn));
+        let db = store::pool_for(&mut conn).unwrap();
         let state = AppState {
             db: db.clone(),
             discord: tx,
@@ -3132,7 +3185,7 @@ mod tests {
             .unwrap();
         assert_eq!(missed.status(), StatusCode::SEE_OTHER);
         let still = {
-            let mut guard = db.lock().unwrap();
+            let mut guard = db.get().unwrap();
             crate::google::claim_oauth(&mut guard, &token).unwrap()
         };
         assert_eq!(still, Some(user_id));

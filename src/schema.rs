@@ -157,6 +157,7 @@ diesel::table! {
         signups_closed -> Bool,
         post_attempts -> BigInt,
         discord_message_id -> Nullable<Text>,
+        location -> Text,
     }
 }
 

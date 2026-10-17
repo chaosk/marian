@@ -872,22 +872,28 @@ fn payload(conn: &mut Connection, event: &Event, public_base: &str) -> Result<Pa
         .map(|channel| format!("#{}", channel.name))
         .unwrap_or_default();
     let page = web_page(conn, event, public_base);
-    let description = [event.description.trim(), channel.as_str(), page.as_str()]
+    let description = [event.description.trim(), page.as_str()]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
+    let place = event.location.trim();
+    let location = if place.is_empty() {
+        channel.clone()
+    } else {
+        place.to_string()
+    };
     let description: String = description.chars().take(8000).collect();
     let start_at = google_time(start);
     let end_at = google_time(end);
     let snapshot = format!(
-        "{}\n{}\n{start_at}\n{end_at}\n{description}\n{channel}",
+        "{}\n{}\n{start_at}\n{end_at}\n{description}\n{location}",
         event.public_id, event.title
     );
     let body = json!({
         "summary": event.title,
         "description": description,
-        "location": channel,
+        "location": location,
         "start": {"dateTime": start_at, "timeZone": "UTC"},
         "end": {"dateTime": end_at, "timeZone": "UTC"},
         "extendedProperties": {"private": {"marian": event.public_id}},

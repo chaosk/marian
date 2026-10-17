@@ -15,7 +15,6 @@
       {% endfor %}
     </select>
   </label>
-  <label class="field span-2"><span>Poll question</span><input name="prompt" required maxlength="200" value="Which day should we play?"></label>
   <label class="field span-2"><span>Event description</span><textarea name="description" maxlength="2000" rows="4"></textarea><span class="meta">Use {date} for the event date.</span></label>
   <label class="field"><span>Poll opens</span>
     <select name="poll_weekday">
@@ -89,8 +88,7 @@
       {% endfor %}
     </select>
   </label>
-  <label class="field span-2"><span>Poll question</span><input name="prompt" required maxlength="200" value="{{ routine.prompt }}"></label>
-    <label class="field span-2"><span>Event description</span><textarea name="description" maxlength="2000" rows="4">{{ routine.description }}</textarea><span class="meta">Use {date} for the event date.</span></label>
+  <label class="field span-2"><span>Event description</span><textarea name="description" maxlength="2000" rows="4">{{ routine.description }}</textarea><span class="meta">Use {date} for the event date.</span></label>
   <label class="field"><span>Poll opens</span>
     <select name="poll_weekday">
       {% for day in weekdays %}
@@ -136,9 +134,20 @@
 <div class="stack">
   {% for row in routines %}
   <a class="card" href="{{ base }}/routines/{{ row.id }}">
-    <span class="badge">{% if row.active %}Active{% else %}Stopped{% endif %}</span>
-    <h3>{{ row.title }}</h3>
-    <p class="meta">#{{ row.channel }} · {{ row.next }}</p>
+    <div class="card-top">
+      <h3>{{ row.title }}</h3>
+      <span class="badge">{{ row.badge }}</span>
+    </div>
+    <p class="meta">#{{ row.channel }}</p>
+    {% if row.poll %}<p class="meta">{{ row.poll }}</p>{% endif %}
+    {% if row.event %}<p class="meta">{{ row.event }}</p>{% endif %}
+    {% if row.choices %}
+    <div class="pills">
+      {% for choice in row.choices %}
+      <span class="pill"><span>{{ choice.label }}</span><span>{{ choice.votes }}</span></span>
+      {% endfor %}
+    </div>
+    {% endif %}
   </a>
   {% else %}
   <p class="empty">No routines yet.</p>

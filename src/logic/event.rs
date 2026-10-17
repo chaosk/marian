@@ -108,6 +108,12 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
             "Keep the description under 2000 characters.",
         ));
     }
+    let location = input.location.trim().to_string();
+    if location.chars().count() > 200 {
+        return Err(OpError::message(
+            "Keep the location under 200 characters.",
+        ));
+    }
     if !(15..=1440).contains(&input.duration_minutes) {
         return Err(OpError::message(
             "Duration needs to be between 15 minutes and 24 hours.",
@@ -308,6 +314,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     Ok(CleanInput {
         title,
         description,
+        location,
         image_url,
         options,
         reminders,
@@ -329,6 +336,7 @@ struct NewEvent<'a> {
     channel_id: i64,
     title: String,
     description: String,
+    location: String,
     starts_at: DateTime<Utc>,
     duration_minutes: i64,
     status: &'a str,
@@ -359,6 +367,7 @@ fn insert_event_row(
         channel_id: input.channel_id,
         title,
         description,
+        location: clean.location.clone(),
         starts_at: input.starts_at,
         duration_minutes: input.duration_minutes,
         status: "draft",
@@ -387,6 +396,7 @@ struct EventEdits<'a> {
     channel_id: i64,
     title: String,
     description: String,
+    location: String,
     starts_at: DateTime<Utc>,
     duration_minutes: i64,
     color: &'a str,
@@ -413,6 +423,7 @@ fn update_event_row(
         channel_id: input.channel_id,
         title,
         description,
+        location: clean.location.clone(),
         starts_at: input.starts_at,
         duration_minutes: input.duration_minutes,
         color: &input.color,

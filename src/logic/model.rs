@@ -44,6 +44,7 @@ pub struct EventInput {
     pub channel_id: i64,
     pub title: String,
     pub description: String,
+    pub location: String,
     pub starts_at: DateTime<Utc>,
     pub duration_minutes: i64,
     pub color: String,
@@ -142,6 +143,7 @@ pub struct TickReport {
 pub struct CleanInput {
     pub title: String,
     pub description: String,
+    pub location: String,
     pub image_url: Option<String>,
     pub options: Vec<OptionInput>,
     pub reminders: Vec<ReminderInput>,

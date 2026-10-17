@@ -5,7 +5,6 @@ use std::sync::Once;
 use diesel::connection::Connection as DbConnection;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use diesel::sql_query;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use chrono::{DateTime, Utc};
@@ -15,6 +14,8 @@ use crate::error::OpError;
 use crate::schema;
 
 pub use diesel::pg::PgConnection as Connection;
+
+pub type Db = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<Connection>>;
 
 static TEST_SCHEMAS: AtomicU64 = AtomicU64::new(0);
 static TEST_CLEANUP: Once = Once::new();
@@ -149,6 +150,7 @@ pub struct Event {
     pub signups_closed: bool,
     pub post_attempts: i64,
     pub discord_message_id: Option<String>,
+    pub location: String,
 }
 
 #[derive(Debug, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -718,6 +720,70 @@ pub fn open(database_url: &str) -> Result<Connection, OpError> {
     Ok(conn)
 }
 
+pub fn pool(database_url: &str) -> Result<Db, OpError> {
+    let url = parse_database_url(database_url)?;
+    build_pool(&url, None, pool_size())
+}
+
+pub fn pool_for(conn: &mut Connection) -> Result<Db, OpError> {
+    let schema: String =
+        diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>("current_schema()"))
+            .get_result(conn)?;
+    build_pool(&database_url()?, Some(schema), 4)
+}
+
+fn pool_size() -> u32 {
+    std::env::var("MARIAN_DB_POOL")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(10)
+}
+
+fn build_pool(url: &str, schema: Option<String>, max_size: u32) -> Result<Db, OpError> {
+    let mut conn = connect(url)?;
+    if let Some(schema) = &schema {
+        set_search_path(&mut conn, schema)?;
+    }
+    crate::observe::install_query_trace(&mut conn, "postgresql");
+    migrate(&mut conn)?;
+    drop(conn);
+    let manager = diesel::r2d2::ConnectionManager::<Connection>::new(url);
+    diesel::r2d2::Pool::builder()
+        .max_size(max_size)
+        .test_on_check_out(true)
+        .connection_customizer(Box::new(Prepare { schema }))
+        .build(manager)
+        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))
+}
+
+#[derive(Debug)]
+struct Prepare {
+    schema: Option<String>,
+}
+
+impl diesel::r2d2::CustomizeConnection<Connection, diesel::r2d2::Error> for Prepare {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), diesel::r2d2::Error> {
+        if let Some(schema) = &self.schema {
+            set_search_path(conn, schema).map_err(diesel::r2d2::Error::QueryError)?;
+        }
+        crate::observe::install_query_trace(conn, "postgresql");
+        Ok(())
+    }
+}
+
+fn set_search_path(conn: &mut Connection, schema: &str) -> Result<(), diesel::result::Error> {
+    if !schema
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(diesel::result::Error::QueryBuilderError(
+            "The database schema name is not usable.".into(),
+        ));
+    }
+    conn.batch_execute(&format!("SET search_path TO {schema}"))
+}
+
 struct SchemaGuard {
     schema: String,
     admin_url: String,
@@ -826,12 +892,30 @@ fn normalize_scheme(database_url: &str) -> String {
     format!("{}:{rest}", scheme.to_ascii_lowercase())
 }
 
+pub fn load_dotenv() {
+    let Ok(text) = std::fs::read_to_string(".env") else {
+        return;
+    };
+    for line in text.lines() {
+        let Some((key, value)) = parse_dotenv_line(line) else {
+            continue;
+        };
+        if env_value(&key).is_some() {
+            continue;
+        }
+        // SAFETY: startup runs this before any other thread reads the environment.
+        unsafe { std::env::set_var(key, value) };
+    }
+}
+
 pub fn database_url() -> Result<String, OpError> {
-    let raw = env_value("DATABASE_URL").ok_or_else(|| {
-        OpError::message(
-            "Set DATABASE_URL to a Postgres connection string, such as postgres://marian:marian@127.0.0.1:5432/marian.",
-        )
-    })?;
+    let raw = env_value("DATABASE_URL")
+        .or_else(|| dotenv_value("DATABASE_URL"))
+        .ok_or_else(|| {
+            OpError::message(
+                "Set DATABASE_URL to a Postgres connection string, such as postgres://marian:marian@127.0.0.1:5432/marian.",
+            )
+        })?;
     parse_database_url(&raw)
 }
 
@@ -840,28 +924,32 @@ fn env_value(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| dotenv_value(key))
 }
 
 fn dotenv_value(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(".env").ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let (name, value) = line.split_once('=')?;
-        if name.trim() != key {
-            continue;
-        }
-        let value = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
-        if value.is_empty() {
-            return None;
-        }
-        return Some(value.to_string());
+    text.lines().find_map(|line| {
+        let (name, value) = parse_dotenv_line(line)?;
+        (name == key).then_some(value)
+    })
+}
+
+fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
     }
-    None
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let value = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+    if value.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
 }
 
 pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
@@ -1635,6 +1723,7 @@ pub fn calendar_user_id(conn: &mut Connection, token: &str) -> Result<Option<i64
 #[cfg(test)]
 mod tests {
     use diesel::prelude::{Insertable, QueryableByName, RunQueryDsl};
+    use diesel::sql_query;
 
     use super::*;
 
@@ -1666,6 +1755,23 @@ mod tests {
 
         assert!(parse_database_url("").is_err());
         assert!(parse_database_url("/data/marian.db").is_err());
+    }
+
+    #[test]
+    fn dotenv_lines_keep_the_value_after_the_first_equals() {
+        assert_eq!(
+            parse_dotenv_line("  export DATABASE_URL=postgres://marian:marian@127.0.0.1/marian  "),
+            Some((
+                "DATABASE_URL".to_string(),
+                "postgres://marian:marian@127.0.0.1/marian".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_dotenv_line("DISCORD_TOKEN=\"bot.token\""),
+            Some(("DISCORD_TOKEN".to_string(), "bot.token".to_string()))
+        );
+        assert_eq!(parse_dotenv_line("# PORT=1"), None);
+        assert_eq!(parse_dotenv_line("PORT="), None);
     }
 
     #[test]
@@ -1707,6 +1813,7 @@ mod tests {
                 "20261017080000".to_string(),
                 "20261017090000".to_string(),
                 "20261017100000".to_string(),
+                "20261017160000".to_string(),
             ]
         );
     }
