@@ -791,6 +791,7 @@ async fn push_sync(
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
+    crate::live::changed(event_id);
     post_event(db, http, public_url, event_id, true).await
 }
 

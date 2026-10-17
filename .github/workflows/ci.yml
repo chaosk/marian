@@ -32,14 +32,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
       - name: libpq
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev pkg-config
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace --exclude marian-frontend
+      - run: cargo test -p marian-app --features ssr --locked
 
   binary:
     name: Release binary
     if: github.event_name == 'push'
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,7 +60,7 @@ jobs:
       # rust-toolchain.toml, or the musl target lands on a compiler cargo does not use.
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       - name: musl linker
         run: |
           sudo apt-get update
@@ -66,18 +70,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: musl-release
+      - name: cargo-leptos
+        run: cargo install cargo-leptos --locked --debug
       - name: Build static binary
         env:
           MARIAN_VERSION: ${{ steps.version.outputs.version }}
           CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
         run: |
-          cargo build --release --locked --target x86_64-unknown-linux-musl --features static-libpq
+          cargo leptos build --release --bin-target-triple x86_64-unknown-linux-musl --bin-features static-libpq
           cp target/x86_64-unknown-linux-musl/release/marian marian
           file marian | grep -Eq "statically linked|static-pie linked"
       - uses: actions/upload-artifact@v7
         with:
           name: marian
           path: marian
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: target/site
           if-no-files-found: error
 
   release:
@@ -94,6 +105,10 @@ jobs:
         with:
           name: marian
           path: .
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: site
       - name: Image name
         id: image
         run: |

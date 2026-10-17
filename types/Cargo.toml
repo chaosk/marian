@@ -1,0 +1,12 @@
+[package]
+name = "marian-types"
+version = "0.6.2"
+edition = "2021"
+description = "Shapes and wording Marian's server and browser share"
+license = "MIT"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+chrono-tz = "0.10"
+serde = { version = "1", features = ["derive"] }

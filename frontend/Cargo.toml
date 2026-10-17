@@ -1,0 +1,16 @@
+[package]
+name = "marian-frontend"
+version = "0.6.2"
+edition = "2021"
+description = "Hydrates Marian's islands in the browser"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+console_error_panic_hook = "0.1"
+leptos = { workspace = true, features = ["hydrate", "islands"] }
+marian-app = { workspace = true, features = ["hydrate"] }
+wasm-bindgen = "0.2"

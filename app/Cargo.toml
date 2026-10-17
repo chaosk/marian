@@ -1,0 +1,58 @@
+[package]
+name = "marian-app"
+version = "0.6.2"
+edition = "2021"
+description = "Marian's web pages and islands"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { workspace = true, optional = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"], optional = true }
+js-sys = { version = "0.3", optional = true }
+leptos = { workspace = true, features = ["islands"] }
+leptos_axum = { workspace = true, optional = true }
+leptos_meta = { workspace = true }
+leptos_router = { workspace = true }
+marian = { workspace = true, optional = true }
+marian-types = { workspace = true }
+send_wrapper = "0.6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+  "Document",
+  "Element",
+  "EventSource",
+  "HtmlElement",
+  "HtmlFormElement",
+  "HtmlInputElement",
+  "HtmlSelectElement",
+  "HtmlTextAreaElement",
+  "Location",
+  "MessageEvent",
+  "Storage",
+  "Window",
+] }
+
+[features]
+hydrate = [
+  "leptos/hydrate",
+  "chrono/wasmbind",
+  "dep:gloo-net",
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+]
+ssr = [
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+  "dep:axum",
+  "dep:leptos_axum",
+  "dep:marian",
+]

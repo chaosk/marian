@@ -1055,6 +1055,13 @@ pub fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(),
     Ok(())
 }
 
+pub fn set_guild_timezone(conn: &mut Connection, guild_id: i64, timezone: &str) -> Result<(), OpError> {
+    diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
+        .set(schema::guilds::timezone.eq(timezone))
+        .execute(conn)?;
+    Ok(())
+}
+
 pub fn list_roles(conn: &mut Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
     Ok(Role::in_guild(guild_id)
         .order(schema::roles::id.asc())

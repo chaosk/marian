@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use diesel::prelude::*;
-use serde::Serialize;
-
 use super::access::can_create;
 use super::db::{log, must_guild, must_membership};
 use super::model::{DiscordField, OptionInput, ReminderInput};
@@ -13,6 +11,7 @@ use super::template::{self, Spawn};
 use uuid::Uuid;
 
 use crate::clock;
+pub use marian_types::{DayCheck, PollChoice, RoutineSummary, RoutineView, RunHistory, RunView};
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::schema;
@@ -73,14 +72,6 @@ struct Run {
     winner_weekday: Option<u8>,
     event_id: Option<i64>,
     discord_message_id: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DayCheck {
-    pub n: u8,
-    pub name: String,
-    pub on: bool,
-    pub votes: i64,
 }
 
 #[derive(Insertable)]
@@ -658,44 +649,6 @@ pub fn routine_page_data(
     }))
 }
 
-#[derive(Serialize)]
-pub struct RoutineView {
-    pub id: String,
-    pub title: String,
-    pub prompt: String,
-    pub description: String,
-    pub active: bool,
-    pub channel: String,
-    pub channel_id: i64,
-    pub poll_weekday: String,
-    pub poll_time: String,
-    pub lock_weekday: String,
-    pub lock_time: String,
-    pub start_time: String,
-    pub poll_when: String,
-    pub lock_when: String,
-    pub event_when: String,
-    pub duration_minutes: i64,
-    pub usual: Vec<DayCheck>,
-    pub run: Option<RunView>,
-    pub history: Vec<RunHistory>,
-}
-
-#[derive(Serialize)]
-pub struct RunView {
-    pub id: i64,
-    pub open: bool,
-    pub status: String,
-    pub days: Vec<DayCheck>,
-}
-
-#[derive(Serialize)]
-pub struct RunHistory {
-    pub when: String,
-    pub winner: String,
-    pub event_id: String,
-}
-
 pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<RoutineSummary>, OpError> {
     let guild = must_guild(conn, guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
@@ -766,24 +719,6 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
         });
     }
     Ok(rows)
-}
-
-#[derive(Serialize)]
-pub struct RoutineSummary {
-    pub id: String,
-    pub title: String,
-    pub channel: String,
-    pub active: bool,
-    pub badge: String,
-    pub poll: String,
-    pub event: String,
-    pub choices: Vec<PollChoice>,
-}
-
-#[derive(Serialize)]
-pub struct PollChoice {
-    pub label: String,
-    pub votes: i64,
 }
 
 fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store::Event>, OpError> {
@@ -1478,30 +1413,15 @@ mod tests {
         assert_eq!(rows[0].poll, "Poll opens Sun, Oct 18 · 10:00 AM");
         assert_eq!(rows[0].event, "Next event · Fri, Oct 16 · 7:00 PM");
         assert!(rows[0].choices.is_empty());
-        let page = crate::present::routine_detail(
-            &mut crate::present::Page {
-                conn: &mut conn,
-                guild_id: 1,
-                membership_id: 1,
-                notice: None,
-                invite_url: "",
-                nav: "routines",
-                title: "Routine",
-                allowed_guilds: &[1],
-            },
-            &public_id,
-        )
-        .unwrap();
         assert!(crate::ids::parse_event_id(&public_id).is_some());
-        assert!(page.contains(&public_id), "{page}");
-        assert!(page.contains("Days for the next poll"), "{page}");
-        assert!(page.contains("Days later weeks start from"), "{page}");
-        assert!(page.contains("Game night"), "{page}");
-        assert!(page.contains("Bring dice on {date}."), "{page}");
-        assert!(page.contains("value=\"10:00\""), "{page}");
-        assert!(page.contains("value=\"18:00\""), "{page}");
-        assert!(page.contains("value=\"19:00\""), "{page}");
-        assert!(page.contains("Save routine"), "{page}");
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        assert_eq!(shown.id, public_id);
+        assert!(!shown.run.as_ref().unwrap().open);
+        assert_eq!(shown.title, "Game night");
+        assert_eq!(shown.description, "Bring dice on {date}.");
+        assert_eq!(shown.poll_time, "10:00");
+        assert_eq!(shown.lock_time, "18:00");
+        assert_eq!(shown.start_time, "19:00");
         let locks = next.locks_at.clone();
         save_routine(
             &mut conn,
@@ -1527,37 +1447,14 @@ mod tests {
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.title, "Game night");
         assert!(event.description.starts_with("Bring dice on "));
-        let page = crate::present::routine_detail(
-            &mut crate::present::Page {
-                conn: &mut conn,
-                guild_id: 1,
-                membership_id: 1,
-                notice: None,
-                invite_url: "",
-                nav: "routines",
-                title: "Routine",
-                allowed_guilds: &[1],
-            },
-            &public_id,
-        )
-        .unwrap();
-        assert!(page.contains("Late night"), "{page}");
-        assert!(page.contains("Bring snacks."), "{page}");
-        assert!(page.contains(&public_id), "{page}");
-        let list = crate::present::routines_page(&mut crate::present::Page {
-            conn: &mut conn,
-            guild_id: 1,
-            membership_id: 1,
-            notice: None,
-            invite_url: "",
-            nav: "routines",
-            title: "Routines",
-            allowed_guilds: &[1],
-        })
-        .unwrap();
-        assert!(list.contains("Late night"), "{list}");
-        assert!(list.contains(&public_id), "{list}");
-        assert!(list.contains("New routine"), "{list}");
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        assert_eq!(shown.title, "Late night");
+        assert_eq!(shown.description, "Bring snacks.");
+        assert_eq!(shown.id, public_id);
+        let rows = list_routines(&mut conn, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Late night");
+        assert_eq!(rows[0].id, public_id);
     }
 
     #[test]
@@ -1627,21 +1524,6 @@ mod tests {
         assert_eq!(rows[0].choices[0].votes, 2);
         assert_eq!(rows[0].choices[1].label, "Fri, Oct 16");
         assert_eq!(rows[0].choices[1].votes, 0);
-        let page = crate::present::routines_page(&mut crate::present::Page {
-            conn: &mut conn,
-            guild_id: 1,
-            membership_id: 1,
-            notice: None,
-            invite_url: "",
-            nav: "routines",
-            title: "Routines",
-            allowed_guilds: &[1],
-        })
-        .unwrap();
-        assert!(page.contains("Voting"), "{page}");
-        assert!(page.contains("Poll locks Tue, Oct 13 · 6:00 PM"), "{page}");
-        assert!(page.contains("Thu, Oct 15"), "{page}");
-        assert!(page.contains("Fri, Oct 16"), "{page}");
         let post = routine_post(&mut conn, open.id, "https://marian.example")
             .unwrap()
             .unwrap();

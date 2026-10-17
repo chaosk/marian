@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-
-use chrono::{
-    DateTime, Datelike, Duration, NaiveDate, NaiveTime, Offset, SecondsFormat, TimeZone, Utc,
-    Weekday,
-};
-use chrono_tz::{Tz, TZ_VARIANTS};
-use serde::Serialize;
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
 
 use crate::error::OpError;
 
@@ -28,19 +22,11 @@ pub const ZONES: &[&str] = &[
     "UTC",
 ];
 
-const WEEKDAYS: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-
-pub fn weekday_name(day: u8) -> &'static str {
-    WEEKDAYS.get(day as usize).copied().unwrap_or("Monday")
-}
+pub use marian_types::labels::{cadence_label, weekday_name};
+pub use marian_types::time::{
+    date_local, datetime_local, format_clock, format_day, format_end, format_long_date,
+    format_rel, format_when, human_duration, human_offset, zone_groups, ZoneGroup, ZoneRow,
+};
 
 pub fn zone(name: &str) -> Result<Tz, OpError> {
     name.parse()
@@ -48,123 +34,7 @@ pub fn zone(name: &str) -> Result<Tz, OpError> {
 }
 
 pub fn zone_label(tz: Tz) -> String {
-    let offset = offset_text(offset_seconds(tz, Utc::now()));
-    if tz.name() == "UTC" {
-        return "UTC".into();
-    }
-    if fixed_gmt_alias(tz.name()) {
-        return offset;
-    }
-    format!("{} · {offset}", place_name(tz.name()))
-}
-
-#[derive(Serialize)]
-pub struct ZoneGroup {
-    pub offset: String,
-    pub zones: Vec<ZoneRow>,
-}
-
-#[derive(Serialize)]
-pub struct ZoneRow {
-    pub id: String,
-    pub label: String,
-    pub selected: bool,
-}
-
-pub fn zone_groups(now: DateTime<Utc>, selected: &str) -> Vec<ZoneGroup> {
-    let mut rows = TZ_VARIANTS
-        .iter()
-        .filter(|tz| tz.name() == selected || !fixed_gmt_alias(tz.name()))
-        .map(|tz| {
-            let id = tz.name().to_string();
-            let seconds = offset_seconds(*tz, now);
-            (seconds, id)
-        })
-        .collect::<Vec<_>>();
-    if !rows.iter().any(|(_, id)| id == selected) && !selected.is_empty() {
-        rows.push((0, selected.to_string()));
-    }
-    rows.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| place_name(&a.1).cmp(&place_name(&b.1)))
-    });
-    let mut groups: Vec<ZoneGroup> = Vec::new();
-    for (seconds, id) in rows {
-        let offset = if id == selected && !TZ_VARIANTS.iter().any(|tz| tz.name() == id) {
-            "Current".into()
-        } else {
-            offset_text(seconds)
-        };
-        if groups
-            .last()
-            .map(|group| group.offset != offset)
-            .unwrap_or(true)
-        {
-            groups.push(ZoneGroup {
-                offset,
-                zones: Vec::new(),
-            });
-        }
-        let label = if fixed_gmt_alias(&id) {
-            offset_text(seconds)
-        } else {
-            place_name(&id)
-        };
-        groups.last_mut().unwrap().zones.push(ZoneRow {
-            label,
-            selected: id == selected,
-            id,
-        });
-    }
-    for group in &mut groups {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for zone in &group.zones {
-            *counts.entry(zone.label.clone()).or_insert(0) += 1;
-        }
-        for zone in &mut group.zones {
-            if counts.get(&zone.label).copied().unwrap_or(0) > 1 {
-                zone.label = detailed_place(&zone.id);
-            }
-        }
-    }
-    groups
-}
-
-fn offset_seconds(tz: Tz, now: DateTime<Utc>) -> i32 {
-    tz.offset_from_utc_datetime(&now.naive_utc())
-        .fix()
-        .local_minus_utc()
-}
-
-fn offset_text(seconds: i32) -> String {
-    let sign = if seconds < 0 { '-' } else { '+' };
-    let seconds = seconds.abs();
-    let hours = seconds / 3600;
-    let mins = (seconds % 3600) / 60;
-    if mins == 0 {
-        format!("UTC{sign}{hours}")
-    } else {
-        format!("UTC{sign}{hours}:{mins:02}")
-    }
-}
-
-fn fixed_gmt_alias(id: &str) -> bool {
-    let name = id.rsplit('/').next().unwrap_or(id);
-    name == "GMT" || name == "GMT0" || name.starts_with("GMT+") || name.starts_with("GMT-")
-}
-
-fn place_name(id: &str) -> String {
-    id.rsplit('/').next().unwrap_or(id).replace('_', " ")
-}
-
-fn detailed_place(id: &str) -> String {
-    let mut parts: Vec<&str> = id.split('/').collect();
-    if parts.len() < 2 {
-        return id.replace('_', " ");
-    }
-    let city = parts.pop().unwrap().replace('_', " ");
-    let parent = parts.pop().unwrap().replace('_', " ");
-    format!("{city}, {parent}")
+    marian_types::time::zone_label(tz, Utc::now())
 }
 
 pub fn stamp(dt: DateTime<Utc>) -> String {
@@ -217,14 +87,6 @@ pub fn at_local(date: NaiveDate, hour: u32, minute: u32, tz: Tz) -> DateTime<Utc
         .with_timezone(&Utc)
 }
 
-pub fn datetime_local(dt: DateTime<Utc>, tz: Tz) -> String {
-    dt.with_timezone(&tz).format("%Y-%m-%dT%H:%M").to_string()
-}
-
-pub fn date_local(dt: DateTime<Utc>, tz: Tz) -> String {
-    dt.with_timezone(&tz).format("%Y-%m-%d").to_string()
-}
-
 pub fn anchor_at_clock(raw: &str, tz: Tz) -> Result<DateTime<Utc>, OpError> {
     let time = NaiveTime::parse_from_str(raw.trim(), "%H:%M")
         .map_err(|_| OpError::message("Use a clock time like 19:00."))?;
@@ -263,127 +125,6 @@ fn at_local_result(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, OpError> {
         .ok_or_else(|| OpError::message("That date doesn't land in this zone."))
 }
 
-pub fn format_clock<T: TimeZone>(local: DateTime<T>, hour24: bool) -> String
-where
-    T::Offset: std::fmt::Display,
-{
-    if hour24 {
-        local.format("%H:%M").to_string()
-    } else {
-        let hour = local.format("%I").to_string();
-        let hour = hour.trim_start_matches('0');
-        let hour = if hour.is_empty() { "0" } else { hour };
-        format!("{hour}:{} {}", local.format("%M"), local.format("%p"))
-    }
-}
-
-pub fn format_long_date(date: NaiveDate) -> String {
-    let day = date.format("%d").to_string();
-    let day = day.trim_start_matches('0');
-    format!("{} {day}, {}", date.format("%A, %B"), date.format("%Y"))
-}
-
-pub fn format_day(date: NaiveDate) -> String {
-    let day = date.format("%d").to_string();
-    let day = day.trim_start_matches('0');
-    format!("{} {day}", date.format("%a, %b"))
-}
-
-pub fn format_when(dt: DateTime<Utc>, tz: Tz, hour24: bool) -> String {
-    let local = dt.with_timezone(&tz);
-    format!(
-        "{} · {}",
-        format_day(local.date_naive()),
-        format_clock(local, hour24)
-    )
-}
-
-pub fn format_end(start: DateTime<Utc>, duration_minutes: i64, tz: Tz, hour24: bool) -> String {
-    let end = start + Duration::minutes(duration_minutes);
-    let local = end.with_timezone(&tz);
-    let start_local = start.with_timezone(&tz);
-    if local.date_naive() == start_local.date_naive() {
-        format_clock(local, hour24)
-    } else {
-        format!(
-            "{} · {}",
-            format_day(local.date_naive()),
-            format_clock(local, hour24)
-        )
-    }
-}
-
-pub fn format_rel(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let secs = (target - now).num_seconds();
-    if secs.abs() < 45 {
-        return "now".into();
-    }
-    let future = secs > 0;
-    let mins = secs.abs() / 60;
-    let text = if mins < 60 {
-        format!("{mins} min")
-    } else if mins < 60 * 36 {
-        let hours = mins / 60;
-        if hours == 1 {
-            "1 hr".into()
-        } else {
-            format!("{hours} hr")
-        }
-    } else {
-        let days = mins / (60 * 24);
-        if days == 1 {
-            "1 day".into()
-        } else {
-            format!("{days} days")
-        }
-    };
-    if future {
-        format!("in {text}")
-    } else {
-        format!("{text} ago")
-    }
-}
-
-pub fn human_offset(mins: i64) -> String {
-    if mins % 1440 == 0 && mins >= 1440 {
-        let days = mins / 1440;
-        if days == 1 {
-            "1 day".into()
-        } else {
-            format!("{days} days")
-        }
-    } else if mins % 60 == 0 && mins >= 60 {
-        let hours = mins / 60;
-        if hours == 1 {
-            "1 hour".into()
-        } else {
-            format!("{hours} hours")
-        }
-    } else if mins == 1 {
-        "1 minute".into()
-    } else {
-        format!("{mins} minutes")
-    }
-}
-
-pub fn human_duration(mins: i64) -> String {
-    if mins % 60 == 0 && mins >= 60 {
-        let hours = mins / 60;
-        let extra = mins % 60;
-        if extra == 0 {
-            if hours == 1 {
-                "1 hour".into()
-            } else {
-                format!("{hours} hours")
-            }
-        } else {
-            format!("{hours} hr {extra} min")
-        }
-    } else {
-        format!("{mins} min")
-    }
-}
-
 pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: &str, tz: Tz) -> DateTime<Utc> {
     let delta = (index - 1).max(0);
     let local = anchor.with_timezone(&tz);
@@ -403,17 +144,6 @@ pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: &str, tz: Tz
         .earliest()
         .unwrap_or_else(|| tz.from_utc_datetime(&date.and_time(time)))
         .with_timezone(&Utc)
-}
-
-pub fn cadence_label(cadence: &str) -> &'static str {
-    match cadence {
-        "daily" => "Daily",
-        "once" => "Once",
-        "weekly" => "Weekly",
-        "biweekly" => "Every two weeks",
-        "monthly" => "Monthly",
-        _ => "Repeating",
-    }
 }
 
 #[cfg(test)]

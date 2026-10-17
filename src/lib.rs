@@ -1,6 +1,7 @@
 //! Marian keeps a Discord community's events, signups, and reminders.
 
-mod assets;
+pub mod api;
+pub mod assets;
 mod auth;
 pub mod clock;
 pub mod commands;
@@ -10,11 +11,10 @@ pub mod google;
 pub mod ics;
 mod ids;
 pub mod jobs;
+mod live;
 pub mod logic;
-mod markdown;
 mod observe;
 pub mod parse;
-pub mod present;
 mod release_version;
 mod schema;
 pub mod serve;
