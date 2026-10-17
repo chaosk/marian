@@ -364,6 +364,72 @@ pub fn remember_discord_message(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct ChannelReverse {
+    pub name: String,
+    pub messages: Vec<String>,
+    pub repost: Vec<i64>,
+}
+
+pub fn channel_reverse_plan(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_channel_id: &str,
+) -> Result<ChannelReverse, OpError> {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_channel_id)? else {
+        return Err(OpError::message(
+            "Sort reverses the posts in an event channel.",
+        ));
+    };
+    if channel.kind != "event" {
+        return Err(OpError::message(
+            "Sort reverses the posts in an event channel.",
+        ));
+    }
+    let mut posts = Vec::new();
+    for event in store::list_events(conn, guild_id)? {
+        if event.channel_id != channel.id {
+            continue;
+        }
+        let Some(message_id) = event.discord_message_id.as_deref() else {
+            continue;
+        };
+        let message_id = message_id.trim();
+        if message_id.is_empty() {
+            continue;
+        }
+        let Some(snowflake) = message_id.parse::<u64>().ok() else {
+            continue;
+        };
+        posts.push((snowflake, event.id, message_id.to_string()));
+    }
+    posts.sort_by_key(|post| post.0);
+    if posts.len() < 2 {
+        return Err(OpError::message(
+            "This event channel has nothing to reverse.",
+        ));
+    }
+    let messages = posts.iter().map(|post| post.2.clone()).collect();
+    let repost = posts.iter().rev().map(|post| post.1).collect();
+    Ok(ChannelReverse {
+        name: channel.name,
+        messages,
+        repost,
+    })
+}
+
+pub fn detach_discord_posts(conn: &mut Connection, event_ids: &[i64]) -> Result<(), OpError> {
+    for event_id in event_ids {
+        diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
+            .set(schema::events::discord_message_id.eq(None::<String>))
+            .execute(conn)?;
+        diesel::update(schema::threads::table.filter(schema::threads::event_id.eq(event_id)))
+            .set(schema::threads::discord_id.eq(None::<String>))
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
 #[derive(Insertable)]
 #[diesel(table_name = schema::guilds)]
 struct NewGuild<'a> {
@@ -542,6 +608,50 @@ fn unique_handle(
     Ok(format!("{base}{suffix}"))
 }
 
+/// What to remove from an event channel after an event is posted or deleted.
+/// Pinned messages and the channel's event posts stay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventChannelPurge {
+    pub channel_id: i64,
+    pub discord_channel_id: String,
+    pub keep: HashSet<String>,
+}
+
+pub fn event_channel_purge(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<EventChannelPurge>, OpError> {
+    let event = must_event(conn, event_id)?;
+    let settings = store::settings(conn, event.guild_id)?;
+    if !settings.purge_channels {
+        return Ok(None);
+    }
+    let channel = must_channel(conn, event.channel_id)?;
+    if channel.kind != "event" {
+        return Ok(None);
+    }
+    let Some(discord_channel_id) = channel.discord_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let ids: Vec<Option<String>> = schema::events::table
+        .filter(schema::events::channel_id.eq(channel.id))
+        .select(schema::events::discord_message_id)
+        .load(conn)?;
+    let keep = ids.into_iter().flatten().filter(|id| !id.is_empty()).collect();
+    Ok(Some(EventChannelPurge {
+        channel_id: channel.id,
+        discord_channel_id,
+        keep,
+    }))
+}
+
+pub fn mark_channel_purged(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
+    diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
+        .set(schema::channels::purged_at.eq(Utc::now()))
+        .execute(conn)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use diesel::connection::SimpleConnection;
@@ -702,6 +812,80 @@ mod tests {
         let huge = "1".repeat(1990);
         assert_eq!(mention_line(true, &[huge]), "@everyone");
         assert_eq!(mention_line(false, &["42".into()]), "<@&42>");
+    }
+
+    #[test]
+    fn sort_reverses_posts_in_an_event_channel() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, discord_id) VALUES
+              (1, 1, 'events', 'event', '100'),
+              (2, 1, 'general', 'text', '200');
+            INSERT INTO events (
+              id, public_id, guild_id, channel_id, title, starts_at, duration_minutes,
+              status, created_at, updated_at, discord_message_id
+            ) VALUES
+              (1, '01900000-0000-7000-8000-000000000011', 1, 1, 'First', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '10'),
+              (2, '01900000-0000-7000-8000-000000000012', 1, 1, 'Second', '2026-10-15T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '20'),
+              (3, '01900000-0000-7000-8000-000000000013', 1, 1, 'Third', '2026-10-16T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '30'),
+              (4, '01900000-0000-7000-8000-000000000014', 1, 2, 'Elsewhere', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '40');
+            INSERT INTO threads (event_id, name, discord_id) VALUES (1, 'First', '900');
+            ",
+        )
+        .unwrap();
+        let refused = channel_reverse_plan(&mut conn, 1, "200").unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "Sort reverses the posts in an event channel."
+        );
+        let plan = channel_reverse_plan(&mut conn, 1, "100").unwrap();
+        assert_eq!(plan.name, "events");
+        assert_eq!(plan.messages, vec!["10", "20", "30"]);
+        assert_eq!(plan.repost, vec![3, 2, 1]);
+        detach_discord_posts(&mut conn, &plan.repost).unwrap();
+        let first = store::event(&mut conn, 1).unwrap().unwrap();
+        assert!(first.discord_message_id.is_none());
+        assert!(store::thread_discord_id(&mut conn, 1).unwrap().is_none());
+        let elsewhere = store::event(&mut conn, 4).unwrap().unwrap();
+        assert_eq!(elsewhere.discord_message_id.as_deref(), Some("40"));
+    }
+
+    #[test]
+    fn purge_keeps_event_posts_in_an_event_channel() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, discord_id) VALUES
+              (1, 1, 'events', 'event', '100'),
+              (2, 1, 'general', 'text', '200'),
+              (3, 1, 'unlinked', 'event', NULL);
+            INSERT INTO events (
+              id, public_id, guild_id, channel_id, title, starts_at, duration_minutes,
+              status, created_at, updated_at, discord_message_id
+            ) VALUES
+              (1, '01900000-0000-7000-8000-000000000021', 1, 1, 'First', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '10'),
+              (2, '01900000-0000-7000-8000-000000000022', 1, 1, 'Second', '2026-10-15T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '20'),
+              (3, '01900000-0000-7000-8000-000000000023', 1, 2, 'Elsewhere', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '40'),
+              (4, '01900000-0000-7000-8000-000000000024', 1, 3, 'Local', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL);
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let plan = event_channel_purge(&mut conn, 1).unwrap().unwrap();
+        assert_eq!(plan.discord_channel_id, "100");
+        let mut keep: Vec<_> = plan.keep.into_iter().collect();
+        keep.sort();
+        assert_eq!(keep, vec!["10".to_string(), "20".to_string()]);
+        assert!(event_channel_purge(&mut conn, 3).unwrap().is_none());
+        assert!(event_channel_purge(&mut conn, 4).unwrap().is_none());
+        diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))
+            .set(schema::settings::purge_channels.eq(false))
+            .execute(&mut conn)
+            .unwrap();
+        assert!(event_channel_purge(&mut conn, 1).unwrap().is_none());
     }
 }
 

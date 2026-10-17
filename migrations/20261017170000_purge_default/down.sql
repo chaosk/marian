@@ -1,0 +1,1 @@
+ALTER TABLE settings ALTER COLUMN purge_channels SET DEFAULT FALSE;

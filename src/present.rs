@@ -913,7 +913,7 @@ pub fn channels(page: &mut Page<'_>) -> Result<String, OpError> {
             .count();
         rows.push(serde_json::json!({
             "name": channel.name,
-            "kind": if channel.kind == "event" { "Event channel" } else { "Text" },
+            "kind": if channel.kind == "event" { "Event" } else { "Text" },
             "count": count,
             "purged": channel.purged_at.map(|dt| clock::format_when(dt, tz, settings.hour_24)).unwrap_or_default(),
         }));
@@ -2260,6 +2260,21 @@ mod tests {
         assert!(body.contains("✅"), "{body}");
         assert!(body.contains("<strong>the hall</strong>"), "{body}");
         assert!(body.contains("&lt;script&gt;"), "{body}");
+        page.nav = "channels";
+        page.title = "Channels";
+        let channels_body = channels(&mut page).unwrap();
+        assert!(channels_body.contains("<table>"), "{channels_body}");
+        assert!(channels_body.contains("#events"), "{channels_body}");
+        assert!(channels_body.contains(">Text<"), "{channels_body}");
+        assert!(channels_body.contains("channel-create"), "{channels_body}");
+        assert!(channels_body.contains("Create event channel"), "{channels_body}");
+        assert!(
+            channels_body.contains("An event channel is a Discord channel Marian creates for events."),
+            "{channels_body}"
+        );
+        assert!(!channels_body.contains("name=\"kind\""), "{channels_body}");
+        page.nav = "event";
+        page.title = "Event";
         let form = form_page(&mut page, &blank_form("99", None)).unwrap();
         assert!(form.contains("name=\"location\""), "{form}");
         assert!(form.contains("Does not repeat"), "{form}");

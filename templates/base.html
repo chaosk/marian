@@ -54,49 +54,50 @@
         <a href="{{ base }}/settings" class="{% if nav == 'settings' %}active{% endif %}">Settings</a>
       </nav>
       {% if membership_id %}
-      <div class="account">
-        <p class="who">Signed in as <strong>{{ user_name }}</strong></p>
-        {% if calendar_url %}
-        <a class="calendar" href="{{ calendar_url }}">Calendar feed</a>
-        {% endif %}
-        <div class="google-account">
-          <p class="who">Google Calendar</p>
+      <details class="switcher account-menu">
+        <summary>
+          <strong>{{ user_name }}</strong>
+          <span class="switcher-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="switcher-menu">
+          <form method="post" action="{{ base }}/me/reminders">
+            <input type="hidden" name="enabled" value="{% if reminders_on %}0{% else %}1{% endif %}">
+            <button type="submit" class="reminder-toggle" aria-pressed="{% if reminders_on %}true{% else %}false{% endif %}">
+              <span>Reminders</span>
+              <span class="toggle{% if reminders_on %} on{% endif %}" aria-hidden="true"><span></span></span>
+            </button>
+          </form>
           {% if google_connected %}
-          <p class="google-mail">Connected{% if google_email %} as {{ google_email }}{% endif %}.</p>
-          {% elif google_reconnect %}
-          <p class="google-mail">Needs a new connection{% if google_email %}, last used {{ google_email }}{% endif %}.</p>
-          <a class="calendar" href="/auth/google?next={{ base }}">Connect again</a>
-          {% elif google_ready %}
-          <a class="calendar" href="/auth/google?next={{ base }}">Connect Google Calendar</a>
-          {% else %}
-          <p class="google-mail">Not set up on this server yet.</p>
-          {% endif %}
-          {% if google_connected or google_reconnect %}
-          <form method="post" action="{{ base }}/google">
-            <label class="google-sync">
+          <p class="account-label">Google Calendar</p>
+          <p class="account-note">Connected{% if google_email %} as {{ google_email }}{% endif %}.</p>
+          <form method="post" action="{{ base }}/google" class="account-sync">
+            <label>
               <input type="checkbox" name="auto_sync" value="1" {% if google_auto_sync %}checked{% endif %}>
               Keep your Google Calendar updated
             </label>
             <button type="submit">Save</button>
           </form>
-          {% endif %}
-          {% if google_connected %}
           <form method="post" action="/auth/google/disconnect">
             <input type="hidden" name="next" value="{{ base }}">
-            <button type="submit" class="leave">Disconnect</button>
+            <button type="submit">Disconnect</button>
           </form>
+          {% elif google_reconnect %}
+          <a href="/auth/google?next={{ base }}">Google Calendar</a>
+          <p class="account-note">Needs a new connection{% if google_email %}, last used {{ google_email }}{% endif %}.</p>
+          {% elif google_ready %}
+          <a href="/auth/google?next={{ base }}">Google Calendar</a>
+          {% else %}
+          <p class="account-label">Google Calendar</p>
+          <p class="account-note">Not set up on this server yet.</p>
           {% endif %}
-        </div>
-        <div class="account-row">
-          <form method="post" action="{{ base }}/me/reminders">
-            <input type="hidden" name="enabled" value="{% if reminders_on %}0{% else %}1{% endif %}">
-            <button type="submit" class="remind{% if reminders_on %} on{% endif %}">{% if reminders_on %}Reminders on{% else %}Reminders off{% endif %}</button>
-          </form>
+          {% if calendar_url %}
+          <a class="calendar" href="{{ calendar_url }}">Calendar feed</a>
+          {% endif %}
           <form method="post" action="/logout">
-            <button type="submit" class="leave">Sign out</button>
+            <button type="submit">Sign out</button>
           </form>
         </div>
-      </div>
+      </details>
       {% endif %}
       {% if invite_url and not guild_name %}
       <a class="invite" href="{{ invite_url }}">Invite Marian to a server</a>

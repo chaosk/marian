@@ -47,10 +47,10 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
   cargo run --release
 ```
 
-Invite the bot with View Channel, Send Messages, Manage Messages, Embed Links, Read Message History, Mention Everyone, Add Reactions, Manage Roles, and the public-thread permissions. That set is the permissions integer `326686174272`:
+Invite the bot with View Channel, Manage Channels, Send Messages, Manage Messages, Embed Links, Read Message History, Mention Everyone, Add Reactions, Manage Roles, and the public-thread permissions. That set is the permissions integer `326686174288`:
 
 ```text
-https://discord.com/api/oauth2/authorize?client_id=YOUR_ID&permissions=326686174272&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=YOUR_ID&permissions=326686174288&scope=bot%20applications.commands
 ```
 
 Marian asks for the `GUILDS` and `DIRECT_MESSAGES` intents. It does not use privileged intents. A bad token is logged and retried; the dashboard stays up.
@@ -81,12 +81,12 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
 
 ```sh
-docker build --build-arg MARIAN_VERSION=0.6.1 -t ghcr.io/you/marian:0.6.1 .
-docker push ghcr.io/you/marian:0.6.1
+docker build --build-arg MARIAN_VERSION=0.6.2 -t ghcr.io/you/marian:0.6.2 .
+docker push ghcr.io/you/marian:0.6.2
 
 helm upgrade --install marian ./deploy/marian \
   --set image.repository=ghcr.io/you/marian \
-  --set image.tag=0.6.1 \
+  --set image.tag=0.6.2 \
   --set discord.token="$DISCORD_TOKEN" \
   --set discord.clientId="$DISCORD_CLIENT_ID" \
   --set discord.clientSecret="$DISCORD_CLIENT_SECRET" \

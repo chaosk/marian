@@ -30,7 +30,6 @@ pub fn create_channel(
     guild_id: i64,
     actor_id: i64,
     name: &str,
-    kind: &str,
 ) -> Result<i64, OpError> {
     let actor = must_membership(conn, actor_id)?;
     let settings = store::settings(conn, guild_id)?;
@@ -47,10 +46,16 @@ pub fn create_channel(
     if slug.is_empty() {
         return Err(OpError::message("Give the channel a name."));
     }
-    if store::channel_by_name(conn, guild_id, &slug)?.is_some() {
+    if let Some(existing) = store::channel_by_name(conn, guild_id, &slug)? {
+        let linked = existing
+            .discord_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty());
+        if existing.kind == "event" && !linked {
+            return Ok(existing.id);
+        }
         return Err(OpError::message(format!("#{slug} already exists.")));
     }
-    let kind = if kind == "event" { "event" } else { "text" };
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
         .select(diesel::dsl::max(schema::channels::position))
@@ -61,13 +66,32 @@ pub fn create_channel(
         .values(&NewChannel {
             guild_id,
             name: &slug,
-            kind,
+            kind: "event",
             position,
         })
         .returning(schema::channels::id)
         .get_result(conn)?;
-    log(conn, guild_id, None, &format!("Created #{slug}."))?;
     Ok(id)
+}
+
+pub fn bind_channel_discord(
+    conn: &mut Connection,
+    channel_id: i64,
+    discord_id: &str,
+) -> Result<String, OpError> {
+    let channel = store::channel(conn, channel_id)?.ok_or(OpError::NotFound)?;
+    diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
+        .set(schema::channels::discord_id.eq(discord_id))
+        .execute(conn)?;
+    let notice = format!("Created #{}.", channel.name);
+    log(conn, channel.guild_id, None, &notice)?;
+    Ok(notice)
+}
+
+pub fn discard_channel(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
+    diesel::delete(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
+        .execute(conn)?;
+    Ok(())
 }
 
 #[derive(Insertable)]
@@ -304,4 +328,41 @@ pub fn record_command(
         })
         .execute(conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::connection::SimpleConnection;
+
+    use super::*;
+
+    #[test]
+    fn an_event_channel_keeps_its_discord_id() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, organizer)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true FROM users WHERE discord_id = 'nell';
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let id = create_channel(&mut conn, 1, 1, "This is an event channel").unwrap();
+        let channel = store::channel(&mut conn, id).unwrap().unwrap();
+        assert_eq!(channel.name, "this-is-an-event-channel");
+        assert!(channel.discord_id.is_none());
+        let same = create_channel(&mut conn, 1, 1, "#This is an event channel").unwrap();
+        assert_eq!(same, id);
+        let notice = bind_channel_discord(&mut conn, id, "900").unwrap();
+        assert_eq!(notice, "Created #this-is-an-event-channel.");
+        let again = create_channel(&mut conn, 1, 1, "this-is-an-event-channel").unwrap_err();
+        assert_eq!(again.to_string(), "#this-is-an-event-channel already exists.");
+        let channel = store::channel(&mut conn, id).unwrap().unwrap();
+        assert_eq!(channel.discord_id.as_deref(), Some("900"));
+        assert_eq!(channel.kind, "event");
+        discard_channel(&mut conn, id).unwrap();
+        assert!(store::channel(&mut conn, id).unwrap().is_none());
+    }
 }

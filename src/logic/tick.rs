@@ -186,7 +186,7 @@ fn tick_guild(
             if now >= end + Duration::hours(settings.auto_archive_hours) {
                 let fresh = must_event(conn, event.id)?;
                 if fresh.status == "posted" {
-                    archive_tx(conn, &fresh, &settings)?;
+                    archive_tx(conn, &fresh)?;
                     report.jobs.push(DiscordJob::sync(event.id));
                     report.jobs.push(DiscordJob::attend(event.id));
                     report.notes.push(format!("Archived {}", event.title));

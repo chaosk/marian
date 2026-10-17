@@ -143,9 +143,11 @@ fn dispatch(
         "settings" => cmd_settings(conn, guild_id, membership_id, &pos, &map),
         "signup_options" => cmd_signup_options(conn, guild_id, membership_id, &pos, &map),
         "signup_presets" => cmd_presets(conn, guild_id, membership_id, &pos, &map),
-        "channel" => cmd_channel(conn, guild_id, membership_id, &pos, &map),
+        "channel" => Err(OpError::message(
+            "Create the channel from /channel in Discord or the channels page.",
+        )),
         "google" => cmd_google(conn, guild_id, membership_id, &pos, &map),
-        "sort" => Ok("Events are already in chronological order. Discord posts are refreshed in that same order when Marian syncs them.".into()),
+        "sort" => Ok("Run /sort inside an event channel. It reverses the order of the posts there.".into()),
         other => Err(OpError::message(format!("Unknown command /{other}. Try /help."))),
     }
 }
@@ -2174,32 +2176,18 @@ fn cmd_presets(
     }
 }
 
-pub fn create_named_channel(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    name: &str,
-    kind: &str,
-) -> Result<String, OpError> {
-    let id = logic::create_channel(conn, guild_id, membership_id, name, kind)?;
-    let channel = store::channel(conn, id)?.ok_or(OpError::NotFound)?;
-    Ok(format!("Created #{}.", channel.name))
-}
-
-fn cmd_channel(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let name = map
-        .get("name")
-        .cloned()
-        .or_else(|| pos.first().cloned())
-        .ok_or_else(|| OpError::message("Name the channel."))?;
-    let kind = map.get("kind").cloned().unwrap_or_else(|| "text".into());
-    create_named_channel(conn, guild_id, membership_id, &name, &kind)
+pub fn channel_request(line: &str) -> Option<String> {
+    let (cmd, rest) = split_cmd(line);
+    if cmd != "channel" {
+        return None;
+    }
+    let (pos, map) = fields(rest);
+    Some(
+        map.get("name")
+            .cloned()
+            .or_else(|| pos.first().cloned())
+            .unwrap_or_default(),
+    )
 }
 
 fn public_base() -> String {

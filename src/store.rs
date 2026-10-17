@@ -1016,7 +1016,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         show_attendees: true,
         hour_24: false,
         localize_time: true,
-        purge_channels: false,
+        purge_channels: true,
         temp_roles: false,
         calendar_auto_sync: true,
         role_event: None,
@@ -1814,6 +1814,7 @@ mod tests {
                 "20261017090000".to_string(),
                 "20261017100000".to_string(),
                 "20261017160000".to_string(),
+                "20261017170000".to_string(),
             ]
         );
     }

@@ -2,14 +2,14 @@ use chrono::{Duration, Utc};
 use diesel::prelude::*;
 
 use super::access::{can_delete, can_edit};
-use super::db::{log, must_channel, must_event, must_series, must_membership};
+use super::db::{log, must_event, must_series, must_membership};
 use super::event::save_event;
 use super::model::*;
 use super::series;
 use super::template;
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Connection, Event, Series, Settings, Membership};
+use crate::store::{self, Connection, Event, Series, Membership};
 
 pub fn archive_event(
     conn: &mut Connection,
@@ -24,15 +24,11 @@ pub fn archive_event(
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::message("You can't archive this event."));
         }
-        archive_tx(tx, &event, &settings)
+        archive_tx(tx, &event)
     })
 }
 
-pub(super) fn archive_tx(
-    conn: &mut Connection,
-    event: &Event,
-    settings: &Settings,
-) -> Result<String, OpError> {
+pub(super) fn archive_tx(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
     if event.status != "posted" {
         return Err(OpError::message("Only a posted event can be archived."));
     }
@@ -44,18 +40,6 @@ pub(super) fn archive_tx(
             schema::events::updated_at.eq(&stamp),
         ))
         .execute(conn)?;
-    let channel = must_channel(conn, event.channel_id)?;
-    if settings.purge_channels && channel.kind == "event" {
-        diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
-            .set(schema::channels::purged_at.eq(&stamp))
-            .execute(conn)?;
-        log(
-            conn,
-            event.guild_id,
-            Some(event.id),
-            &format!("Cleared #{} after {}.", channel.name, event.title),
-        )?;
-    }
     let notice = format!(
         "Archived {}. The responses stay in the archive.",
         event.title

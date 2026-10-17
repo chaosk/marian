@@ -2279,18 +2279,29 @@ async fn create_channel(
     Path(server): Path<String>,
     Form(map): Form<HashMap<String, String>>,
 ) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, "/channels"),
-        |db, session| {
-            let name = map.get("name").cloned().unwrap_or_default();
-            let kind = map.get("kind").cloned().unwrap_or_else(|| "text".into());
-            logic::create_channel(db, session.guild_id, session.membership_id, &name, &kind)?;
-            Ok((format!("Created #{}.", logic::slug_channel(&name)), None))
-        },
+    let mut db = state.db.get().expect("database");
+    let Some(mut session) = read_session(&mut db, &headers) else {
+        return redirect("/", "Sign in with Discord.");
+    };
+    if let Err(err) = bind_server(&mut db, &mut session, &server) {
+        return guild_error(err);
+    }
+    let name = map.get("name").cloned().unwrap_or_default();
+    drop(db);
+    let http = poise::serenity_prelude::Http::new(&state.bot_token);
+    let notice = match crate::gateway::open_event_channel(
+        &http,
+        &state.db,
+        session.guild_id,
+        session.membership_id,
+        &name,
     )
+    .await
+    {
+        Ok(text) => text,
+        Err(err) => err.to_string(),
+    };
+    redirect(&here(&server, "/channels"), &notice)
 }
 
 async fn run_command(
@@ -2307,6 +2318,31 @@ async fn run_command(
         return guild_error(err);
     }
     let line = map.get("line").cloned().unwrap_or_default();
+    if let Some(name) = commands::channel_request(&line) {
+        drop(db);
+        let http = poise::serenity_prelude::Http::new(&state.bot_token);
+        let reply = match crate::gateway::open_event_channel(
+            &http,
+            &state.db,
+            session.guild_id,
+            session.membership_id,
+            &name,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(err) => err.to_string(),
+        };
+        let mut db = state.db.get().expect("database");
+        let _ = logic::record_command(
+            &mut db,
+            session.guild_id,
+            session.membership_id,
+            &line,
+            &reply,
+        );
+        return redirect(&here(&server, "/commands"), &clip(&reply, 700));
+    }
     let reply = commands::execute(&mut db, session.guild_id, session.membership_id, &line);
     let ids = events_to_refresh(&mut db, &line, &reply);
     drop(db);
@@ -2801,7 +2837,7 @@ fn invite_url(client_id: &str) -> String {
         return String::new();
     }
     format!(
-        "https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=326686174272&scope=bot%20applications.commands"
+        "https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=326686174288&scope=bot%20applications.commands"
     )
 }
 
@@ -3089,9 +3125,14 @@ mod tests {
             .unwrap();
         assert_eq!(open.status(), StatusCode::OK);
         let body = open.text().await.unwrap();
-        assert!(body.contains("Signed in as <strong>Nell</strong>"));
-        assert!(body.contains("class=\"account\""));
+        assert!(body.contains("account-menu"));
+        assert!(body.contains("<strong>Nell</strong>"));
+        assert!(body.contains("class=\"reminder-toggle\""));
+        assert!(body.contains(">Reminders<"));
         assert!(body.contains("Calendar feed"));
+        let feed = body.find("Calendar feed").unwrap();
+        let leave = body.find("Sign out").unwrap();
+        assert!(feed < leave, "{body}");
         assert!(body.contains("Google Calendar"));
         assert!(!body.contains("Google client id"), "{body}");
         assert!(body.contains("class=\"calendar\""));

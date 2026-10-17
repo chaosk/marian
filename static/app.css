@@ -167,50 +167,76 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .sidebar select { background: #0f1e3b; color: white; border-color: rgba(255,255,255,0.15); }
 .sidebar .who { margin: 0; font-size: 13px; color: #d5d8e4; }
-.account {
+.account-menu .switcher-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.account-menu .switcher-menu form { margin: 0; }
+.account-menu .switcher-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent;
+  color: #243044;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.account-menu .switcher-menu button:hover,
+.account-menu .switcher-menu a:hover { background: #f6f3ea; color: #243044; }
+.account-menu .reminder-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.account-menu .toggle {
+  width: 36px;
+  height: 22px;
+  border-radius: 999px;
+  background: #d7d0c2;
+  position: relative;
+  flex: none;
+}
+.account-menu .toggle span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 2px rgba(20, 40, 77, 0.25);
+}
+.account-menu .toggle.on { background: var(--blue); }
+.account-menu .toggle.on span { left: 16px; }
+.account-menu a.calendar { color: #243044; font-size: 14px; font-weight: 600; text-decoration: none; }
+.account-menu .account-label {
+  margin: 6px 8px 0;
+  color: #243044;
+  font-size: 14px;
+  font-weight: 700;
+}
+.account-menu .account-note { margin: 0 8px 6px; color: var(--muted); font-size: 12px; }
+.account-menu .account-sync {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.06);
-}
-.account form { margin: 0; }
-.sidebar .account .who strong {
-  display: block;
-  margin-top: 1px;
-  color: white;
-  font-size: 16px;
-  font-weight: 700;
-}
-.sidebar a.calendar {
-  color: #f4efe4;
+  align-items: stretch;
+  gap: 8px;
+  padding: 4px 8px 8px;
+  color: #243044;
   font-size: 13px;
-  font-weight: 700;
-  text-decoration: none;
 }
-.sidebar a.calendar:hover { text-decoration: underline; }
-.google-account { display: flex; flex-direction: column; gap: 6px; }
-.google-mail { margin: 0; font-size: 12px; color: #d5d8e4; }
-.google-account form { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.google-sync { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.google-account input[type="checkbox"] { width: auto; margin: 0; }
-.account-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
-.sidebar .account button { width: 100%; padding: 6px 10px; font-size: 13px; }
-.sidebar .account button.remind.on {
-  background: rgba(244, 239, 228, 0.16);
-  border-color: rgba(217, 199, 162, 0.75);
-  color: #f4efe4;
-}
-.sidebar .account button.remind:hover { background: rgba(255, 255, 255, 0.1); }
-.sidebar .account button.leave {
+.account-menu .account-sync label { display: flex; align-items: flex-start; gap: 8px; }
+.account-menu .account-sync input { width: auto; margin: 0.15em 0 0; }
+.account-menu .account-sync button {
   width: auto;
-  background: transparent;
-  border-color: transparent;
-  color: #c5cad8;
-  padding-inline: 8px;
+  align-self: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
 }
-.sidebar .account button.leave:hover { color: white; background: rgba(255, 255, 255, 0.08); }
 .sidebar button, .ghost, .primary, .danger {
   border-radius: 999px;
   padding: 8px 14px;
@@ -226,6 +252,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .sidebar button { background: transparent; color: white; border-color: rgba(255,255,255,0.25); }
 .sidebar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); }
+.account-menu .switcher-menu button:hover:not(:disabled) { background: #f6f3ea; color: #243044; }
 .sidebar a.invite {
   margin-top: auto;
   background: #f4efe4;
@@ -251,6 +278,7 @@ button:disabled, .primary:disabled { cursor: not-allowed; }
 .finder input[type="search"] { width: 240px; }
 .page-head h1, .hero h2, .day h2 { font-family: var(--serif); font-weight: 560; letter-spacing: -0.02em; margin: 0; }
 .page-head h1 { font-size: 42px; line-height: 1; }
+.page-head .lede { max-width: 62ch; margin: 10px 0 0; }
 .lede, .muted { color: var(--muted); }
 .notice, .error {
   background: #fffdf8;
@@ -424,6 +452,16 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
 .sheet th { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
 .sheet th.fit, .sheet td.fit { white-space: nowrap; width: 1%; }
 .sheet tbody tr:last-child td { border-bottom: 0; }
+.sheet.compact th, .sheet.compact td { padding: 5px 12px; }
+.sheet.compact td { font-size: 14px; }
+.sheet + .panel { margin-top: 16px; }
+form.channel-create {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+form.channel-create .field { flex: 0 1 280px; min-width: 0; }
 .sheet td a { color: inherit; font-weight: 650; text-decoration: none; }
 .sheet tbody tr:hover { background: rgba(30, 58, 110, 0.04); }
 .sheet td a:hover { color: var(--blue); }

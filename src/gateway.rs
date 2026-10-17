@@ -542,17 +542,19 @@ async fn delete_from_button(
             None => Err("That event isn't here.".to_string()),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event) => {
+                let plan = logic::event_channel_purge(&mut conn, event.id)
+                    .map_err(|err| err.to_string())?;
                 let channel_discord = store::channel(&mut conn, event.channel_id)?
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
                 match logic::delete_event(&mut conn, event_id, membership_id) {
-                    Ok(notice) => Ok(Some((channel_discord, message_id, notice))),
+                    Ok(notice) => Ok(Some((plan, channel_discord, message_id, notice))),
                     Err(err) => Err(err.to_string()),
                 }
             }
         }
     };
-    let (channel_discord, message_id, notice) = match removed {
+    let (plan, channel_discord, message_id, notice) = match removed {
         Ok(Some(removed)) => removed,
         Ok(None) => return Ok(()),
         Err(text) => return followup(ctx, component, &text).await,
@@ -573,6 +575,18 @@ async fn delete_from_button(
             diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
                 .set(schema::events::discord_message_id.eq(None::<String>))
                 .execute(&mut *conn)?;
+        }
+        if let Some(plan) = plan {
+            if let Err(err) = purge_event_channel(&data.db, &http, plan).await {
+                tracing::warn!("could not purge the event channel: {err}");
+            }
+        }
+    } else if let Some(plan) = plan {
+        let http = data.http.lock().ok().and_then(|guard| guard.clone());
+        if let Some(http) = http {
+            if let Err(err) = purge_event_channel(&data.db, &http, plan).await {
+                tracing::warn!("could not purge the event channel: {err}");
+            }
         }
     }
     if let Err(err) = component
@@ -777,6 +791,16 @@ async fn push_sync(
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
+    post_event(db, http, public_url, event_id, true).await
+}
+
+async fn post_event(
+    db: &store::Db,
+    http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    public_url: &str,
+    event_id: i64,
+    notify: bool,
+) -> Result<(), Error> {
     let view = {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         logic::discord_view(&mut conn, event_id, public_url)?
@@ -822,7 +846,11 @@ async fn push_sync(
     // An edit notifies a mention only when that mention is new, so signup refreshes
     // of an unchanged line do not ping again.
     let content = logic::mention_line(view.mention_everyone, &view.mention_roles);
-    let mentions = event_mentions(view.mention_everyone, &view.mention_roles);
+    let mentions = if notify {
+        event_mentions(view.mention_everyone, &view.mention_roles)
+    } else {
+        serenity::CreateAllowedMentions::new()
+    };
     let sent = if let Some(message_id) = view
         .message_id
         .as_deref()
@@ -871,10 +899,62 @@ async fn push_sync(
                 .await?,
         )
     };
-    if let Some(message) = sent {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+    if let Some(message) = &sent {
         logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string())?;
     }
+    let status = store::event(&mut conn, event_id)?
+        .map(|event| event.status)
+        .unwrap_or_default();
+    let plan = if sent.is_some() || status == "cancelled" {
+        logic::event_channel_purge(&mut conn, event_id)?
+    } else {
+        None
+    };
+    drop(conn);
+    if let Some(plan) = plan {
+        if let Err(err) = purge_event_channel(db, &http, plan).await {
+            tracing::warn!("could not purge the event channel: {err}");
+        }
+    }
+    Ok(())
+}
+
+async fn purge_event_channel(
+    db: &store::Db,
+    http: &serenity::Http,
+    plan: logic::EventChannelPurge,
+) -> Result<(), Error> {
+    let channel_id = serenity::ChannelId::new(plan.discord_channel_id.parse()?);
+    let mut before = None;
+    for _ in 0..10 {
+        let mut query = serenity::builder::GetMessages::new().limit(100);
+        if let Some(id) = before {
+            query = query.before(id);
+        }
+        let batch = channel_id.messages(http, query).await?;
+        if batch.is_empty() {
+            break;
+        }
+        let oldest = batch.iter().map(|message| message.id).min();
+        for message in &batch {
+            if message.pinned || plan.keep.contains(&message.id.get().to_string()) {
+                continue;
+            }
+            if let Err(err) = channel_id.delete_message(http, message.id).await {
+                tracing::warn!("could not purge a message in the event channel: {err}");
+            }
+        }
+        if batch.len() < 100 {
+            break;
+        }
+        before = oldest;
+        if before.is_none() {
+            break;
+        }
+    }
+    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+    logic::mark_channel_purged(&mut conn, plan.channel_id)?;
     Ok(())
 }
 
@@ -1351,31 +1431,6 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     }))
 }
 
-async fn desk(ctx: Context<'_>, line: &str) -> Result<(), Error> {
-    ctx.defer_ephemeral().await?;
-    let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
-        return Ok(());
-    };
-    let data = ctx.data();
-    let (reply, refresh) = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let reply = crate::commands::execute(&mut conn, actor.guild_id, actor.membership_id, line);
-        let refresh = crate::serve::events_to_refresh(&mut conn, line, &reply);
-        (reply, refresh)
-    };
-    for event_id in refresh {
-        if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
-            tracing::warn!("could not refresh event {event_id}: {err}");
-        }
-        if let Err(err) = push_attendance(&data.db, &data.http, event_id).await {
-            tracing::warn!("could not update attendance for event {event_id}: {err}");
-        }
-    }
-    ctx.say(clip(&reply, 1800)).await?;
-    Ok(())
-}
-
 fn presence_line(status: &str) -> Option<String> {
     let line: String = status.trim().chars().take(128).collect();
     if line.is_empty() {
@@ -1577,14 +1632,6 @@ async fn deliver(
     }
     ctx.say(clip(&text, 1800)).await?;
     Ok(())
-}
-
-#[derive(poise::ChoiceParameter, Copy, Clone)]
-enum ChannelKind {
-    #[name = "Text"]
-    Text,
-    #[name = "Event channel"]
-    Event,
 }
 
 #[poise::command(
@@ -1975,11 +2022,11 @@ async fn settings_localize_time(
     slash_command,
     guild_only,
     rename = "purge",
-    description_localized("en-US", "Clear an event channel when the event archives")
+    description_localized("en-US", "Purge other messages from event channels")
 )]
 async fn settings_purge(
     ctx: Context<'_>,
-    #[description = "Clear the event channel on archive"] enabled: bool,
+    #[description = "On removes other messages when an event is posted or deleted"] enabled: bool,
 ) -> Result<(), Error> {
     setting(
         ctx,
@@ -2257,27 +2304,97 @@ async fn signup_presets_remove(
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Create a channel")
+    description_localized("en-US", "Create an event channel")
 )]
 async fn channel(
     ctx: Context<'_>,
     #[description = "Channel name"] name: String,
-    #[description = "Text, or an event channel"] kind: Option<ChannelKind>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
         ctx.say("Use Marian inside a server.").await?;
         return Ok(());
     };
-    let kind = match kind {
-        Some(ChannelKind::Event) => "event",
-        _ => "text",
-    };
-    let outcome = {
-        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::create_named_channel(&mut conn, actor.guild_id, actor.membership_id, &name, kind)
-    };
+    let outcome = open_event_channel(
+        ctx.http(),
+        &ctx.data().db,
+        actor.guild_id,
+        actor.membership_id,
+        &name,
+    )
+    .await;
     deliver(ctx, &actor, "/channel", outcome).await
+}
+
+pub async fn open_event_channel(
+    http: &serenity::Http,
+    db: &store::Db,
+    guild_id: i64,
+    membership_id: i64,
+    name: &str,
+) -> Result<String, crate::error::OpError> {
+    let guild_discord = {
+        let mut conn = db
+            .get()
+            .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+        store::guild(&mut conn, guild_id)?
+            .and_then(|guild| guild.discord_id)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| crate::error::OpError::message("This server isn't connected to Discord."))?
+    };
+    let guild_discord = guild_discord.parse::<u64>().map_err(|_| {
+        crate::error::OpError::message("This server isn't connected to Discord.")
+    })?;
+    let (channel_id, slug) = {
+        let mut conn = db
+            .get()
+            .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+        let id = logic::create_channel(&mut conn, guild_id, membership_id, name)?;
+        let channel = store::channel(&mut conn, id)?.ok_or(crate::error::OpError::NotFound)?;
+        (id, channel.name)
+    };
+    let created = serenity::GuildId::new(guild_discord)
+        .create_channel(
+            http,
+            serenity::CreateChannel::new(&slug).kind(serenity::ChannelType::Text),
+        )
+        .await;
+    let discord_channel = match created {
+        Ok(channel) => channel,
+        Err(err) => {
+            tracing::warn!("could not create the Discord channel: {err}");
+            if let Ok(mut conn) = db.get() {
+                let _ = logic::discard_channel(&mut conn, channel_id);
+            }
+            return Err(crate::error::OpError::message(channel_create_failure(&err)));
+        }
+    };
+    let mut conn = db
+        .get()
+        .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+    match logic::bind_channel_discord(
+        &mut conn,
+        channel_id,
+        &discord_channel.id.get().to_string(),
+    ) {
+        Ok(notice) => Ok(notice),
+        Err(err) => {
+            if let Err(delete_err) = discord_channel.delete(http).await {
+                tracing::warn!("could not remove the Discord channel: {delete_err}");
+            }
+            let _ = logic::discard_channel(&mut conn, channel_id);
+            Err(err)
+        }
+    }
+}
+
+fn channel_create_failure(err: &serenity::Error) -> String {
+    let text = err.to_string().to_ascii_lowercase();
+    if text.contains("missing permission") || text.contains("50013") || text.contains("50001") {
+        "Marian needs the Manage Channels permission. Give it to Marian's role in Server Settings, then try again.".into()
+    } else {
+        "Discord didn't create the channel.".into()
+    }
 }
 
 #[poise::command(
@@ -2400,10 +2517,63 @@ async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     guild_only,
-    description_localized("en-US", "Events stay in chronological order")
+    description_localized("en-US", "Reverse the posts in this event channel")
 )]
 async fn sort(ctx: Context<'_>) -> Result<(), Error> {
-    desk(ctx, "/sort").await
+    ctx.defer_ephemeral().await?;
+    let Some(actor) = remember_actor(&ctx).await? else {
+        ctx.say("Use Marian inside a server.").await?;
+        return Ok(());
+    };
+    let discord_channel = ctx.channel_id().get().to_string();
+    let plan = {
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
+        logic::channel_reverse_plan(&mut conn, actor.guild_id, &discord_channel)
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(err) => return deliver(ctx, &actor, "/sort", Err(err)).await,
+    };
+    let http = ctx
+        .data()
+        .http
+        .lock()
+        .map_err(|_| "http lock")?
+        .clone()
+        .ok_or("Discord is not connected")?;
+    for message in &plan.messages {
+        let message_id = serenity::MessageId::new(message.parse()?);
+        if let Err(err) = ctx.channel_id().delete_message(&http, message_id).await {
+            let text = err.to_string().to_ascii_lowercase();
+            if !text.contains("unknown") {
+                return Err(err.into());
+            }
+        }
+    }
+    {
+        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
+        logic::detach_discord_posts(&mut conn, &plan.repost)?;
+    }
+    for event_id in &plan.repost {
+        post_event(
+            &ctx.data().db,
+            &ctx.data().http,
+            &ctx.data().public_url,
+            *event_id,
+            false,
+        )
+        .await?;
+        if let Err(err) = push_attendance(&ctx.data().db, &ctx.data().http, *event_id).await {
+            tracing::warn!("could not update attendance for event {event_id}: {err}");
+        }
+    }
+    deliver(
+        ctx,
+        &actor,
+        "/sort",
+        Ok(format!("Reversed the posts in #{}.", plan.name)),
+    )
+    .await
 }
 
 #[poise::command(
