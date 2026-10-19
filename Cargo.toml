@@ -17,7 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 chrono-tz = "0.10"
 diesel = { version = "2.3.14", default-features = false, features = ["postgres", "r2d2", "32-column-tables", "serde_json", "chrono", "uuid"] }
 diesel_migrations = { version = "2.3.2", default-features = false, features = ["postgres"] }
-minijinja = "2"
+minijinja = "3"
 opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.33", features = ["trace"] }
