@@ -37,8 +37,8 @@ jobs:
       - name: libpq
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev pkg-config
       - uses: Swatinem/rust-cache@v2
+      # The server depends on the app with `ssr`, so this runs the app's tests too.
       - run: cargo test --locked --workspace --exclude marian-frontend
-      - run: cargo test -p marian-app --features ssr --locked
 
   binary:
     name: Release binary
@@ -70,8 +70,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: musl-release
+      # The release binary, checked against a pinned hash. Building it from
+      # source took minutes and ran the runner out of disk.
       - name: cargo-leptos
-        run: cargo install cargo-leptos --locked --debug
+        env:
+          VERSION: 0.3.11
+          SHA256: 1c9cf0e1e3ffae6c8b58d29281d949dab560cea613b80d361f323f93071df7c8
+        run: |
+          name=cargo-leptos-x86_64-unknown-linux-gnu
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/leptos-rs/cargo-leptos/releases/download/v$VERSION/$name.tar.gz"
+          echo "$SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-leptos" "$HOME/.cargo/bin/cargo-leptos"
+          cargo leptos --version
       - name: Build static binary
         env:
           MARIAN_VERSION: ${{ steps.version.outputs.version }}
