@@ -12,6 +12,10 @@ permissions:
 jobs:
   test:
     name: Test
+    # A branch in this repository is already tested by its push run, which also
+    # builds its image. A pull request runs the tests only when it comes from a
+    # fork, which has no push run here.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     services:
       postgres:
