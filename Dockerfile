@@ -20,7 +20,8 @@ RUN if [ -z "$MARIAN_VERSION" ]; then \
 ENV MARIAN_VERSION=$MARIAN_VERSION
 # --precompress leaves .br and .gz copies of the wasm, script, and stylesheet
 # beside them; the server sends those instead of compressing on each request.
-RUN cargo leptos build --release --precompress --bin-target-triple x86_64-unknown-linux-musl --bin-features static-libpq \
+# cargo-leptos takes the server's target from LEPTOS_BIN_TARGET_TRIPLE; it has no flag for it.
+RUN LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl cargo leptos build --release --precompress --bin-features static-libpq \
     && cp target/x86_64-unknown-linux-musl/release/marian /marian \
     && file /marian | grep -Eq "statically linked|static-pie linked"
 

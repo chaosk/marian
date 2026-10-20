@@ -88,8 +88,10 @@ jobs:
         env:
           MARIAN_VERSION: ${{ steps.version.outputs.version }}
           CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
+          # cargo-leptos takes the server's target from here; it has no flag for it.
+          LEPTOS_BIN_TARGET_TRIPLE: x86_64-unknown-linux-musl
         run: |
-          cargo leptos build --release --precompress --bin-target-triple x86_64-unknown-linux-musl --bin-features static-libpq
+          cargo leptos build --release --precompress --bin-features static-libpq
           cp target/x86_64-unknown-linux-musl/release/marian marian
           file marian | grep -Eq "statically linked|static-pie linked"
       - uses: actions/upload-artifact@v7
