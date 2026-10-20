@@ -1,0 +1,21 @@
+[package]
+name = "marian-server"
+version = "0.6.2"
+edition = "2021"
+description = "Marian, the Discord scheduler"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "marian"
+path = "src/main.rs"
+
+[features]
+static-libpq = ["marian/static-libpq"]
+
+[dependencies]
+axum = { workspace = true }
+leptos = { workspace = true, features = ["ssr"] }
+leptos_axum = { workspace = true }
+marian = { workspace = true }
+marian-app = { workspace = true, features = ["ssr"] }

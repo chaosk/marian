@@ -3,16 +3,16 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use diesel::prelude::*;
-use serde::Serialize;
-
 use super::access::can_create;
 use super::db::{log, must_guild, must_membership};
-use super::model::{DiscordField, OptionInput, ReminderInput};
+use super::event::clean_extras;
+use super::model::{DiscordField, EventExtras, OptionInput, ReminderInput};
 use super::series::mark_posted;
 use super::template::{self, Spawn};
 use uuid::Uuid;
 
 use crate::clock;
+pub use marian_types::{DayCheck, PollChoice, RoutineSummary, RoutineView, RunHistory, RunView};
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::schema;
@@ -20,7 +20,6 @@ use crate::store::{self, Connection};
 
 #[derive(Debug, Clone)]
 pub struct RoutineEffect {
-    pub notice: String,
     pub jobs: Vec<DiscordJob>,
 }
 
@@ -33,7 +32,12 @@ pub struct PollButton {
 #[derive(Debug, Clone)]
 pub struct RoutinePost {
     pub channel_discord_id: String,
+    /// The message to edit. For a locked poll, the results reply once it is up.
     pub message_id: Option<String>,
+    /// The final results of a locked poll, as their own message.
+    pub results: bool,
+    /// What the results answer: the post the event took over, when there was one.
+    pub reply_to: Option<String>,
     pub title: String,
     pub body: String,
     pub color: u32,
@@ -73,14 +77,8 @@ struct Run {
     winner_weekday: Option<u8>,
     event_id: Option<i64>,
     discord_message_id: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DayCheck {
-    pub n: u8,
-    pub name: String,
-    pub on: bool,
-    pub votes: i64,
+    public_id: uuid::Uuid,
+    results_message_id: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -135,6 +133,7 @@ pub fn create_routine(
     lock_weekday: u8,
     lock_minutes: u16,
     days: &[u8],
+    extras: Option<EventExtras>,
     now: DateTime<Utc>,
 ) -> Result<(i64, String, Vec<DiscordJob>), OpError> {
     let title = clean_title(title)?;
@@ -164,27 +163,17 @@ pub fn create_routine(
         }
         let stamp = now;
         let public_id = crate::ids::routine_id();
-        let template_id = template::insert(
-            tx,
-            &template::EventTemplate {
-                guild_id,
-                channel_id,
-                title: title.clone(),
-                description: description.clone(),
-                duration_minutes,
+        let extras = match extras {
+            Some(extras) => clean_extras(tx, guild_id, &extras)?,
+            None => EventExtras {
                 color: "#1e3a6e".into(),
-                image_url: None,
                 thread_enabled: settings.event_threads,
-                multiple_signups: false,
-                mention_everyone: false,
-                attendee_role_id: None,
-                cutoff_offset_minutes: None,
                 options: default_options(),
                 reminders: default_reminder(),
-                mention_role_ids: Vec::new(),
-                restrict_role_ids: Vec::new(),
+                ..Default::default()
             },
-        )?;
+        };
+        let template_id = template::insert(tx, &with_extras(guild_id, channel_id, &title, &description, duration_minutes, extras))?;
         let prompt = format!("Next event: {title}");
         let id = diesel::insert_into(schema::routines::table)
             .values(&NewRoutine {
@@ -241,6 +230,7 @@ pub fn save_routine(
     lock_weekday: u8,
     lock_minutes: u16,
     days: &[u8],
+    extras: Option<EventExtras>,
     now: DateTime<Utc>,
 ) -> Result<RoutineEffect, OpError> {
     let title = clean_title(title)?;
@@ -262,14 +252,24 @@ pub fn save_routine(
             return Err(OpError::NotFound);
         }
         let previous_channel = routine.channel_id;
-        template::update_wording(
-            tx,
-            routine.template_id,
-            channel_id,
-            &title,
-            &description,
-            duration_minutes,
-        )?;
+        match extras {
+            Some(extras) => {
+                let extras = clean_extras(tx, routine.guild_id, &extras)?;
+                template::update(
+                    tx,
+                    routine.template_id,
+                    &with_extras(routine.guild_id, channel_id, &title, &description, duration_minutes, extras),
+                )?;
+            }
+            None => template::update_wording(
+                tx,
+                routine.template_id,
+                channel_id,
+                &title,
+                &description,
+                duration_minutes,
+            )?,
+        }
         diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
             .set((
                 schema::routines::prompt.eq(format!("Next event: {title}")),
@@ -289,10 +289,7 @@ pub fn save_routine(
             None,
             &format!("Saved the {} routine.", routine.title),
         )?;
-        Ok(RoutineEffect {
-            notice: "Saved the routine.".into(),
-            jobs,
-        })
+        Ok(RoutineEffect { jobs })
     })
 }
 
@@ -348,10 +345,7 @@ pub fn save_run_days(
         } else {
             Vec::new()
         };
-        Ok(RoutineEffect {
-            notice: "Saved the days for this poll.".into(),
-            jobs,
-        })
+        Ok(RoutineEffect { jobs })
     })
 }
 
@@ -400,19 +394,7 @@ pub fn cast_run(
                 })
                 .execute(tx)?;
         }
-        let mine = selected_days(tx, run.id, membership_id)?;
-        let notice = if mine.is_empty() {
-            "Day vote cleared.".into()
-        } else {
-            let names = mine
-                .iter()
-                .map(|day| clock::weekday_name(*day))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            format!("You can make {names}.")
-        };
         Ok(RoutineEffect {
-            notice,
             jobs: vec![DiscordJob::routine(run.id)],
         })
     })
@@ -485,54 +467,52 @@ pub fn routine_post(
     let tz = clock::zone(&guild.timezone)?;
     let settings = store::settings(conn, routine.guild_id)?;
     let names = vote_names(conn, run.id)?;
-    let (body, fields) = if run.status == "locked" {
+    // Every day on the poll with who voted for it, open or final.
+    let fields = run
+        .days
+        .iter()
+        .map(|day| {
+            let people = names.get(day).cloned().unwrap_or_default();
+            let value = if people.is_empty() {
+                "-".to_string()
+            } else {
+                people.join("\n")
+            };
+            let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
+            let label = poll_day_label(*day, when.with_timezone(&tz).date_naive());
+            DiscordField {
+                name: format!("**{label}** ({})", people.len()),
+                value,
+                inline: true,
+            }
+        })
+        .collect();
+    let locked = run.status == "locked";
+    let body = if locked {
         let day = run.winner_weekday.unwrap_or(run.days[0]);
         let when = event_start(run.locks_at, day, routine.start_minutes, tz);
-        (
-            format!(
-                "Locked. {} won.\n\n{} is {}.",
-                clock::weekday_name(day),
-                routine.title,
-                clock::format_when(when, tz, settings.hour_24),
-            ),
-            Vec::new(),
+        let votes = names.get(&day).map(Vec::len).unwrap_or(0);
+        format!(
+            "**{}** won with {votes} {}. The event is in the post above.",
+            poll_day_label(day, when.with_timezone(&tz).date_naive()),
+            if votes == 1 { "vote" } else { "votes" },
         )
     } else {
-        let locks = clock::format_when(run.locks_at, tz, settings.hour_24);
-        let fields = run
-            .days
-            .iter()
-            .map(|day| {
-                let people = names.get(day).cloned().unwrap_or_default();
-                let value = if people.is_empty() {
-                    "-".to_string()
-                } else {
-                    people.join("\n")
-                };
-                let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
-                let label = poll_day_label(*day, when.with_timezone(&tz).date_naive());
-                DiscordField {
-                    name: format!("**{label}** ({})", people.len()),
-                    value,
-                    inline: true,
-                }
-            })
-            .collect();
-        (format!("Locks {locks}."), fields)
+        format!("Locks {}.", clock::format_when(run.locks_at, tz, settings.hour_24))
     };
-    let body = with_edit_link(
-        body,
-        public_url,
-        guild.discord_id.as_deref(),
-        routine.public_id,
-    );
+    // The results reply only reports; editing the routine is for the open poll.
+    let body = if locked {
+        body
+    } else {
+        with_edit_link(body, public_url, guild.discord_id.as_deref(), routine.public_id)
+    };
     let buttons = if run.status == "open" {
         run.days
             .iter()
             .map(|day| {
                 let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
                 PollButton {
-                    custom_id: format!("marian:w:{}:{day}", run.id),
+                    custom_id: format!("marian:w:{}:{day}", run.public_id),
                     label: poll_day_label(*day, when.with_timezone(&tz).date_naive()),
                 }
             })
@@ -540,10 +520,17 @@ pub fn routine_post(
     } else {
         Vec::new()
     };
+    let (message_id, reply_to, title) = if locked {
+        (run.results_message_id, run.discord_message_id, format!("Poll results: {}", routine.title))
+    } else {
+        (run.discord_message_id, None, format!("Next event: {}", routine.title))
+    };
     Ok(Some(RoutinePost {
         channel_discord_id: discord_id,
-        message_id: run.discord_message_id,
-        title: format!("Next event: {}", routine.title),
+        message_id,
+        results: locked,
+        reply_to,
+        title,
         body,
         color: 0x1e3a_6e,
         fields,
@@ -584,6 +571,17 @@ fn routine_url(public_url: &str, server: Option<&str>, public_id: Uuid) -> Optio
     Some(format!("{base}/servers/{server}/routines/{public_id}"))
 }
 
+pub fn remember_results_message(
+    conn: &mut Connection,
+    run_id: i64,
+    message_id: &str,
+) -> Result<(), OpError> {
+    diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run_id)))
+        .set(schema::routine_runs::results_message_id.eq(message_id))
+        .execute(conn)?;
+    Ok(())
+}
+
 pub fn remember_routine_message(
     conn: &mut Connection,
     run_id: i64,
@@ -607,9 +605,9 @@ pub fn routine_page_data(
     let settings = store::settings(conn, routine.guild_id)?;
     let channel = store::channel(conn, routine.channel_id)?;
     let run = editable_run(conn, routine.id)?;
-    let counts = match &run {
-        Some(run) if run.status == "open" => vote_counts(conn, run.id)?,
-        _ => HashMap::new(),
+    let (counts, names) = match &run {
+        Some(run) if run.status == "open" => (vote_counts(conn, run.id)?, vote_names(conn, run.id)?),
+        _ => (HashMap::new(), HashMap::new()),
     };
     let days_for = |selected: &[u8]| -> Vec<DayCheck> {
         (0..7)
@@ -618,18 +616,49 @@ pub fn routine_page_data(
                 name: clock::weekday_name(n).to_string(),
                 on: selected.contains(&n),
                 votes: counts.get(&n).copied().unwrap_or(0),
+                date: String::new(),
+                voters: Vec::new(),
             })
             .collect()
     };
+    // A poll's days in the order their events would fall once it locks.
+    let run_days = |run: &Run| -> Vec<DayCheck> {
+        let mut days: Vec<(DateTime<Utc>, DayCheck)> = days_for(&run.days)
+            .into_iter()
+            .map(|mut day| {
+                let start = event_start(run.locks_at, day.n, routine.start_minutes, tz);
+                day.date = clock::format_day(start.with_timezone(&tz).date_naive());
+                day.voters = names.get(&day.n).cloned().unwrap_or_default();
+                (start, day)
+            })
+            .collect();
+        days.sort_by_key(|(start, _)| *start);
+        days.into_iter().map(|(_, day)| day).collect()
+    };
     let history = recent_runs(conn, routine.id, tz, settings.hour_24)?;
+    let upcoming = match current_event(conn, routine.id)? {
+        Some(event) => {
+            let winner = runs_for(conn, routine.id)?
+                .into_iter()
+                .find(|run| run.event_id == Some(event.id))
+                .and_then(|run| run.winner_weekday)
+                .unwrap_or(0);
+            Some(RunHistory {
+                when: clock::format_when(event.starts_at, tz, settings.hour_24),
+                winner: clock::weekday_name(winner).to_string(),
+                href: event_path(&guild, &event.public_id),
+            })
+        }
+        None => None,
+    };
     Ok(Some(RoutineView {
         id: routine.public_id.to_string(),
         title: routine.title.clone(),
         prompt: routine.prompt.clone(),
         description: routine.description.clone(),
         active: routine.active,
+        channel_id: crate::ids::public::channel(conn, routine.channel_id)?,
         channel: channel.map(|channel| channel.name).unwrap_or_default(),
-        channel_id: routine.channel_id,
         poll_weekday: routine.poll_weekday.to_string(),
         poll_time: hhmm(routine.poll_minutes),
         lock_weekday: routine.lock_weekday.to_string(),
@@ -648,52 +677,20 @@ pub fn routine_page_data(
         event_when: clock_label(routine.start_minutes, settings.hour_24, tz),
         duration_minutes: routine.duration_minutes,
         usual: days_for(&routine.days),
+        event: {
+            let extras = routine_extras(conn, routine_id)?;
+            event_dto(conn, extras)?
+        },
         run: run.map(|run| RunView {
-            id: run.id,
             open: run.status == "open",
+            days: run_days(&run),
+            opens: clock::format_when(run.opens_at, tz, settings.hour_24),
+            locks: clock::format_when(run.locks_at, tz, settings.hour_24),
             status: run.status,
-            days: days_for(&run.days),
         }),
         history,
+        upcoming,
     }))
-}
-
-#[derive(Serialize)]
-pub struct RoutineView {
-    pub id: String,
-    pub title: String,
-    pub prompt: String,
-    pub description: String,
-    pub active: bool,
-    pub channel: String,
-    pub channel_id: i64,
-    pub poll_weekday: String,
-    pub poll_time: String,
-    pub lock_weekday: String,
-    pub lock_time: String,
-    pub start_time: String,
-    pub poll_when: String,
-    pub lock_when: String,
-    pub event_when: String,
-    pub duration_minutes: i64,
-    pub usual: Vec<DayCheck>,
-    pub run: Option<RunView>,
-    pub history: Vec<RunHistory>,
-}
-
-#[derive(Serialize)]
-pub struct RunView {
-    pub id: i64,
-    pub open: bool,
-    pub status: String,
-    pub days: Vec<DayCheck>,
-}
-
-#[derive(Serialize)]
-pub struct RunHistory {
-    pub when: String,
-    pub winner: String,
-    pub event_id: String,
 }
 
 pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<RoutineSummary>, OpError> {
@@ -754,7 +751,14 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
                 )
             })
             .unwrap_or_default();
+        let days: Vec<&str> = routine.days.iter().map(|day| clock::weekday_short(*day)).collect();
+        let schedule = format!(
+            "{} at {}",
+            days.join(", "),
+            clock_label(routine.start_minutes, settings.hour_24, tz)
+        );
         rows.push(RoutineSummary {
+            schedule,
             id: routine.public_id.to_string(),
             title: routine.title,
             channel: channel.map(|channel| channel.name).unwrap_or_default(),
@@ -766,24 +770,6 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
         });
     }
     Ok(rows)
-}
-
-#[derive(Serialize)]
-pub struct RoutineSummary {
-    pub id: String,
-    pub title: String,
-    pub channel: String,
-    pub active: bool,
-    pub badge: String,
-    pub poll: String,
-    pub event: String,
-    pub choices: Vec<PollChoice>,
-}
-
-#[derive(Serialize)]
-pub struct PollChoice {
-    pub label: String,
-    pub votes: i64,
 }
 
 fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store::Event>, OpError> {
@@ -930,9 +916,12 @@ fn advance(
             routine.lock_weekday,
             routine.lock_minutes,
         );
-        let already = runs
-            .iter()
-            .any(|run| run.opens_at == opens && run.status != "locked");
+        // An open poll is this week's, even when the schedule has moved since it
+        // opened: its window no longer matches, but a second poll would post a
+        // second event.
+        let already = runs.iter().any(|run| {
+            run.status == "open" || (run.opens_at == opens && run.status != "locked")
+        });
         if !already && locks > now {
             let days_json = days_json(&routine.days);
             let status = if opens <= now { "open" } else { "scheduled" };
@@ -982,7 +971,12 @@ fn lock_run(
         routine.start_minutes,
         tz,
     );
-    let event_id = insert_event(conn, routine, start, tz, now)?;
+    let event_id = insert_event(conn, routine, start, now)?;
+    // The event takes over the poll's post: its sync edits that message into the
+    // event, and the results go in a reply.
+    if let Some(message) = &run.discord_message_id {
+        super::discord::remember_discord_message(conn, event_id, message)?;
+    }
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
         .set((
             schema::routine_runs::status.eq("locked"),
@@ -1000,10 +994,11 @@ fn lock_run(
             clock::weekday_name(winner)
         ),
     )?;
+    // The event first, so the results reply lands under the finished post.
     Ok(vec![
-        DiscordJob::routine(run.id),
         DiscordJob::sync(event_id),
         DiscordJob::attend(event_id),
+        DiscordJob::routine(run.id),
     ])
 }
 
@@ -1011,7 +1006,6 @@ fn insert_event(
     conn: &mut Connection,
     routine: &Routine,
     start: DateTime<Utc>,
-    tz: Tz,
     now: DateTime<Utc>,
 ) -> Result<i64, OpError> {
     let template = template::load(conn, routine.template_id)?;
@@ -1025,7 +1019,6 @@ fn insert_event(
             status: "scheduled",
             series_id: None,
             occurrence_index: None,
-            tz,
         },
     )?;
     mark_posted(conn, id, now)?;
@@ -1114,6 +1107,139 @@ fn weekday_chrono(day: u8) -> Weekday {
     }
 }
 
+/// A routine's template: its wording, and everything else its events carry.
+fn with_extras(
+    guild_id: i64,
+    channel_id: i64,
+    title: &str,
+    description: &str,
+    duration_minutes: i64,
+    extras: EventExtras,
+) -> template::EventTemplate {
+    template::EventTemplate {
+        guild_id,
+        channel_id,
+        title: title.to_string(),
+        description: description.to_string(),
+        location: extras.location,
+        duration_minutes,
+        color: extras.color,
+        image_url: None,
+        thread_enabled: extras.thread_enabled,
+        multiple_signups: extras.multiple_signups,
+        mention_everyone: extras.mention_everyone,
+        attendee_role_id: extras.attendee_role_id,
+        cutoff_offset_minutes: extras.cutoff_offset_minutes,
+        options: extras.options,
+        reminders: extras.reminders,
+        mention_role_ids: extras.mention_role_ids,
+        restrict_role_ids: extras.restrict_role_ids,
+    }
+}
+
+/// The page's form of what a routine's events carry, roles by public id.
+pub fn event_dto(conn: &mut Connection, extras: EventExtras) -> Result<marian_types::RoutineEvent, OpError> {
+    use crate::ids::public;
+    let options = extras
+        .options
+        .into_iter()
+        .map(|opt| {
+            Ok(marian_types::SignupOption {
+                id: None,
+                role_id: public::role(conn, opt.role_id)?,
+                name: opt.name,
+                emoji: opt.emoji,
+                capacity: opt.capacity,
+                reminders: opt.reminders_enabled,
+            })
+        })
+        .collect::<Result<_, OpError>>()?;
+    Ok(marian_types::RoutineEvent {
+        location: extras.location,
+        color: extras.color,
+        thread_enabled: extras.thread_enabled,
+        multiple_signups: extras.multiple_signups,
+        mention_everyone: extras.mention_everyone,
+        attendee_role_id: public::role(conn, extras.attendee_role_id)?,
+        mention_role_ids: public::roles(conn, &extras.mention_role_ids)?,
+        restrict_role_ids: public::roles(conn, &extras.restrict_role_ids)?,
+        cutoff_minutes: extras.cutoff_offset_minutes,
+        options,
+        reminders: extras
+            .reminders
+            .into_iter()
+            .map(|rem| marian_types::Reminder {
+                offset_minutes: rem.offset_minutes,
+                message: rem.message,
+                sent: false,
+            })
+            .collect(),
+    })
+}
+
+/// What the page sent, as the routine keeps it. A role id from another server
+/// is refused.
+pub fn event_from(
+    conn: &mut Connection,
+    guild_id: i64,
+    event: &marian_types::RoutineEvent,
+) -> Result<EventExtras, OpError> {
+    use crate::ids::public;
+    let options = event
+        .options
+        .iter()
+        .map(|opt| {
+            Ok(OptionInput {
+                id: None,
+                name: opt.name.clone(),
+                emoji: opt.emoji.clone(),
+                capacity: opt.capacity,
+                role_id: public::role_id(conn, guild_id, opt.role_id.as_deref())?,
+                reminders_enabled: opt.reminders,
+            })
+        })
+        .collect::<Result<_, OpError>>()?;
+    Ok(EventExtras {
+        location: event.location.clone(),
+        color: event.color.clone(),
+        thread_enabled: event.thread_enabled,
+        multiple_signups: event.multiple_signups,
+        mention_everyone: event.mention_everyone,
+        attendee_role_id: public::role_id(conn, guild_id, event.attendee_role_id.as_deref())?,
+        mention_role_ids: public::role_ids(conn, guild_id, &event.mention_role_ids)?,
+        restrict_role_ids: public::role_ids(conn, guild_id, &event.restrict_role_ids)?,
+        cutoff_offset_minutes: event.cutoff_minutes,
+        options,
+        reminders: event
+            .reminders
+            .iter()
+            .map(|rem| ReminderInput {
+                offset_minutes: rem.offset_minutes,
+                message: rem.message.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// What a routine's events carry beyond their wording, as its page shows it.
+pub fn routine_extras(conn: &mut Connection, routine_id: i64) -> Result<EventExtras, OpError> {
+    let routine = must_routine(conn, routine_id)?;
+    let template = template::load(conn, routine.template_id)?;
+    Ok(EventExtras {
+        location: template.location,
+        color: template.color,
+        thread_enabled: template.thread_enabled,
+        multiple_signups: template.multiple_signups,
+        mention_everyone: template.mention_everyone,
+        attendee_role_id: template.attendee_role_id,
+        mention_role_ids: template.mention_role_ids,
+        restrict_role_ids: template.restrict_role_ids,
+        cutoff_offset_minutes: template.cutoff_offset_minutes,
+        options: template.options,
+        reminders: template.reminders,
+    })
+}
+
 fn default_options() -> Vec<OptionInput> {
     vec![
         option("Accepted", "✅", true),
@@ -1128,7 +1254,6 @@ fn option(name: &str, emoji: &str, reminders: bool) -> OptionInput {
         name: name.into(),
         emoji: emoji.into(),
         capacity: None,
-        waitlist: false,
         role_id: None,
         reminders_enabled: reminders,
     }
@@ -1182,7 +1307,7 @@ fn check_clock(weekday: u8, minutes: u16) -> Result<(), OpError> {
 
 fn require_owner(conn: &mut Connection, routine: &Routine, actor_id: i64) -> Result<(), OpError> {
     let actor = must_membership(conn, actor_id)?;
-    if routine.created_by == Some(actor.id) || actor.organizer {
+    if routine.created_by == Some(actor.id) || actor.server_manager {
         return Ok(());
     }
     Err(OpError::message(
@@ -1225,21 +1350,20 @@ fn vote_counts(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, i64>, O
     Ok(counts)
 }
 
-fn selected_days(conn: &mut Connection, run_id: i64, membership_id: i64) -> Result<Vec<u8>, OpError> {
-    let rows: Vec<String> = schema::routine_votes::table
-        .filter(schema::routine_votes::run_id.eq(run_id))
-        .filter(schema::routine_votes::membership_id.eq(membership_id))
-        .order(schema::routine_votes::choice.asc())
-        .select(schema::routine_votes::choice)
-        .load(conn)?;
-    let mut days = Vec::new();
-    for choice in rows {
-        if let Ok(day) = choice.parse::<u8>() {
-            days.push(day);
-        }
-    }
-    days.sort_unstable();
-    Ok(days)
+/// A poll's row key, from the public id its Discord buttons carry.
+pub fn run_by_public(conn: &mut Connection, public: uuid::Uuid) -> Result<Option<i64>, OpError> {
+    Ok(schema::routine_runs::table
+        .filter(schema::routine_runs::public_id.eq(public))
+        .select(schema::routine_runs::id)
+        .first::<i64>(conn)
+        .optional()?)
+}
+
+/// This week's poll while people can vote on it.
+pub fn open_run_id(conn: &mut Connection, routine_id: i64) -> Result<Option<i64>, OpError> {
+    Ok(editable_run(conn, routine_id)?
+        .filter(|run| run.status == "open")
+        .map(|run| run.id))
 }
 
 fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
@@ -1272,7 +1396,7 @@ fn recent_runs(
         rows.push(RunHistory {
             when: clock::format_when(event.starts_at, tz, hour24),
             winner: clock::weekday_name(run.winner_weekday.unwrap_or(0)).to_string(),
-            event_id: event_path(&guild, &event.public_id),
+            href: event_path(&guild, &event.public_id),
         });
     }
     Ok(rows)
@@ -1341,6 +1465,8 @@ fn run_from_stored(row: store::RoutineRun) -> Run {
         winner_weekday: row.winner_weekday.map(|day| day as u8),
         event_id: row.event_id,
         discord_message_id: row.discord_message_id,
+        public_id: row.public_id,
+        results_message_id: row.results_message_id,
     }
 }
 
@@ -1404,7 +1530,7 @@ mod tests {
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'play', 'text', 0);
             INSERT INTO users (discord_id) VALUES ('nell'), ('june');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell'
             UNION ALL
             SELECT 2, id, 1, 'June', 'june', '#112233', true, false FROM users WHERE discord_id = 'june';
@@ -1436,6 +1562,17 @@ mod tests {
             1,
             18 * 60,
             &[3, 4],
+            Some(EventExtras {
+                location: "The cellar".into(),
+                color: "#2f6b4f".into(),
+                multiple_signups: true,
+                options: vec![option("Playing", "🎲", true), option("Watching", "👀", false)],
+                reminders: vec![ReminderInput {
+                    offset_minutes: 60,
+                    message: "Snacks".into(),
+                }],
+                ..Default::default()
+            }),
             at(2026, 10, 12, 12, 0),
         )
         .unwrap();
@@ -1467,9 +1604,18 @@ mod tests {
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.status, "posted");
         assert_eq!(event.title, "Game night");
-        assert!(event.description.starts_with("Bring dice on "));
-        assert!(!event.description.contains("{date}"));
+        assert_eq!(event.description, "Bring dice on {date}.", "wording is copied as written");
         assert_eq!(event.starts_at, at(2026, 10, 16, 19, 0));
+        assert_eq!(event.location, "The cellar", "the event carries the routine's details");
+        assert_eq!(event.color, "#2f6b4f");
+        assert!(event.multiple_signups);
+        let names: Vec<String> = store::options_for(&mut conn, &event).unwrap().into_iter().map(|opt| opt.name).collect();
+        assert_eq!(names, ["Playing", "Watching"]);
+        let reminders = store::reminders_for(&mut conn, &event).unwrap();
+        assert_eq!((reminders[0].offset_minutes, reminders[0].message.as_str()), (60, "Snacks"));
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        assert_eq!(shown.event.location, "The cellar");
+        assert_eq!(shown.event.options.len(), 2);
         let next = editable_run(&mut conn, id).unwrap().unwrap();
         assert_eq!(next.status, "scheduled");
         assert_eq!(next.days, vec![3, 4]);
@@ -1478,30 +1624,27 @@ mod tests {
         assert_eq!(rows[0].poll, "Poll opens Sun, Oct 18 · 10:00 AM");
         assert_eq!(rows[0].event, "Next event · Fri, Oct 16 · 7:00 PM");
         assert!(rows[0].choices.is_empty());
-        let page = crate::present::routine_detail(
-            &mut crate::present::Page {
-                conn: &mut conn,
-                guild_id: 1,
-                membership_id: 1,
-                notice: None,
-                invite_url: "",
-                nav: "routines",
-                title: "Routine",
-                allowed_guilds: &[1],
-            },
-            &public_id,
-        )
-        .unwrap();
         assert!(crate::ids::parse_event_id(&public_id).is_some());
-        assert!(page.contains(&public_id), "{page}");
-        assert!(page.contains("Days for the next poll"), "{page}");
-        assert!(page.contains("Days later weeks start from"), "{page}");
-        assert!(page.contains("Game night"), "{page}");
-        assert!(page.contains("Bring dice on {date}."), "{page}");
-        assert!(page.contains("value=\"10:00\""), "{page}");
-        assert!(page.contains("value=\"18:00\""), "{page}");
-        assert!(page.contains("value=\"19:00\""), "{page}");
-        assert!(page.contains("Save routine"), "{page}");
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        assert_eq!(shown.id, public_id);
+        assert!(!shown.run.as_ref().unwrap().open);
+        let run = shown.run.as_ref().unwrap();
+        assert_eq!(run.opens, "Sun, Oct 18 · 10:00 AM");
+        assert_eq!(run.locks, "Tue, Oct 20 · 6:00 PM");
+        let order: Vec<&str> = run.days.iter().map(|day| day.date.as_str()).collect();
+        assert_eq!(
+            order,
+            ["Tue, Oct 20", "Wed, Oct 21", "Thu, Oct 22", "Fri, Oct 23", "Sat, Oct 24", "Sun, Oct 25", "Mon, Oct 26"],
+            "days run in the order their events fall after the lock"
+        );
+        let upcoming = shown.upcoming.as_ref().unwrap();
+        assert_eq!((upcoming.winner.as_str(), upcoming.when.as_str()), ("Friday", "Fri, Oct 16 · 7:00 PM"));
+        assert_eq!(rows[0].schedule, "Thu, Fri at 7:00 PM");
+        assert_eq!(shown.title, "Game night");
+        assert_eq!(shown.description, "Bring dice on {date}.");
+        assert_eq!(shown.poll_time, "10:00");
+        assert_eq!(shown.lock_time, "18:00");
+        assert_eq!(shown.start_time, "19:00");
         let locks = next.locks_at.clone();
         save_routine(
             &mut conn,
@@ -1517,6 +1660,7 @@ mod tests {
             1,
             18 * 60,
             &[3, 4],
+            None,
             at(2026, 10, 13, 18, 0),
         )
         .unwrap();
@@ -1527,37 +1671,42 @@ mod tests {
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.title, "Game night");
         assert!(event.description.starts_with("Bring dice on "));
-        let page = crate::present::routine_detail(
-            &mut crate::present::Page {
-                conn: &mut conn,
-                guild_id: 1,
-                membership_id: 1,
-                notice: None,
-                invite_url: "",
-                nav: "routines",
-                title: "Routine",
-                allowed_guilds: &[1],
-            },
-            &public_id,
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        assert_eq!(shown.title, "Late night");
+        assert_eq!(shown.description, "Bring snacks.");
+        assert_eq!(shown.id, public_id);
+        let rows = list_routines(&mut conn, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Late night");
+        assert_eq!(rows[0].id, public_id);
+    }
+
+    #[test]
+    fn moving_the_poll_while_one_is_open_keeps_a_single_poll() {
+        let mut conn = world();
+        let (id, _, _) = create_routine(
+            &mut conn, 1, 1, 1, "Game night", "", 120, 19 * 60, 6, 10 * 60, 1, 18 * 60, &[3, 4], None,
+            at(2026, 10, 12, 12, 0),
         )
         .unwrap();
-        assert!(page.contains("Late night"), "{page}");
-        assert!(page.contains("Bring snacks."), "{page}");
-        assert!(page.contains(&public_id), "{page}");
-        let list = crate::present::routines_page(&mut crate::present::Page {
-            conn: &mut conn,
-            guild_id: 1,
-            membership_id: 1,
-            notice: None,
-            invite_url: "",
-            nav: "routines",
-            title: "Routines",
-            allowed_guilds: &[1],
-        })
-        .unwrap();
-        assert!(list.contains("Late night"), "{list}");
-        assert!(list.contains(&public_id), "{list}");
-        assert!(list.contains("New routine"), "{list}");
+        // The poll opened Sunday at 10:00. Now it opens at 9:30, then at 22:30.
+        for (minutes, now) in [(9 * 60 + 30, at(2026, 10, 12, 13, 0)), (22 * 60 + 30, at(2026, 10, 12, 14, 0))] {
+            save_routine(
+                &mut conn, id, 1, 1, "Game night", "", 120, 19 * 60, 6, minutes, 1, 18 * 60, &[3, 4], None, now,
+            )
+            .unwrap();
+            maintain(&mut conn, 1, now).unwrap();
+        }
+        let live: Vec<String> = runs_for(&mut conn, id)
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.status != "locked")
+            .map(|run| run.status)
+            .collect();
+        assert_eq!(live, ["open"], "one poll, not one per schedule change");
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let events = jobs.iter().filter(|job| matches!(job, DiscordJob::Sync { .. })).count();
+        assert_eq!(events, 1, "locking posts one event");
     }
 
     #[test]
@@ -1577,6 +1726,7 @@ mod tests {
             1,
             18 * 60,
             &[0],
+            None,
             at(2026, 10, 12, 12, 0),
         )
         .unwrap();
@@ -1592,6 +1742,52 @@ mod tests {
             .unwrap();
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.starts_at, at(2026, 10, 19, 19, 0));
+    }
+
+    #[test]
+    fn a_locked_poll_hands_its_post_to_the_event_and_replies_with_results() {
+        let mut conn = world();
+        conn.batch_execute("UPDATE channels SET discord_id = '123' WHERE id = 1")
+            .unwrap();
+        let (id, _, _) = create_routine(
+            &mut conn, 1, 1, 1, "Game night", "", 120, 19 * 60, 6, 10 * 60, 1, 18 * 60, &[3, 4], None,
+            at(2026, 10, 12, 12, 0),
+        )
+        .unwrap();
+        let open = editable_run(&mut conn, id).unwrap().unwrap();
+        remember_routine_message(&mut conn, open.id, "555").unwrap();
+        cast_run(&mut conn, open.id, 1, 3).unwrap();
+        cast_run(&mut conn, open.id, 2, 3).unwrap();
+        cast_run(&mut conn, open.id, 2, 4).unwrap();
+
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let event_id = jobs
+            .iter()
+            .find_map(|job| match job {
+                DiscordJob::Sync { event_id, .. } => Some(*event_id),
+                _ => None,
+            })
+            .unwrap();
+        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        assert_eq!(event.discord_message_id.as_deref(), Some("555"), "the event edits the poll's post");
+        let sync = jobs.iter().position(|job| matches!(job, DiscordJob::Sync { .. })).unwrap();
+        let results = jobs.iter().position(|job| matches!(job, DiscordJob::Routine { .. })).unwrap();
+        assert!(sync < results, "the event goes up before the results reply: {jobs:?}");
+
+        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        assert!(post.results);
+        assert_eq!(post.reply_to.as_deref(), Some("555"));
+        assert_eq!(post.message_id, None, "no reply yet, so one is sent");
+        assert_eq!(post.title, "Poll results: Game night");
+        assert!(post.body.starts_with("**Thursday, Oct 15** won with 2 votes."), "{}", post.body);
+        assert!(post.buttons.is_empty());
+        assert!(!post.body.contains("[Edit]"), "no edit link on the results: {}", post.body);
+        assert_eq!(post.fields[0].value, "Nell\nJune");
+        assert_eq!(post.fields[1].value, "June");
+
+        remember_results_message(&mut conn, open.id, "777").unwrap();
+        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        assert_eq!(post.message_id.as_deref(), Some("777"), "a second run edits the reply instead of posting again");
     }
 
     #[test]
@@ -1613,12 +1809,17 @@ mod tests {
             1,
             18 * 60,
             &[3, 4],
+            None,
             at(2026, 10, 12, 12, 0),
         )
         .unwrap();
         let open = editable_run(&mut conn, id).unwrap().unwrap();
         cast_run(&mut conn, open.id, 1, 3).unwrap();
         cast_run(&mut conn, open.id, 2, 3).unwrap();
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let thursday = shown.run.unwrap().days.into_iter().find(|day| day.n == 3).unwrap();
+        assert_eq!(thursday.voters, ["Nell", "June"], "the page names who voted, as the post does");
+        assert!(shown.usual.iter().all(|day| day.voters.is_empty()));
         let rows = list_routines(&mut conn, 1).unwrap();
         assert_eq!(rows[0].badge, "Voting");
         assert_eq!(rows[0].poll, "Poll locks Tue, Oct 13 · 6:00 PM");
@@ -1627,21 +1828,6 @@ mod tests {
         assert_eq!(rows[0].choices[0].votes, 2);
         assert_eq!(rows[0].choices[1].label, "Fri, Oct 16");
         assert_eq!(rows[0].choices[1].votes, 0);
-        let page = crate::present::routines_page(&mut crate::present::Page {
-            conn: &mut conn,
-            guild_id: 1,
-            membership_id: 1,
-            notice: None,
-            invite_url: "",
-            nav: "routines",
-            title: "Routines",
-            allowed_guilds: &[1],
-        })
-        .unwrap();
-        assert!(page.contains("Voting"), "{page}");
-        assert!(page.contains("Poll locks Tue, Oct 13 · 6:00 PM"), "{page}");
-        assert!(page.contains("Thu, Oct 15"), "{page}");
-        assert!(page.contains("Fri, Oct 16"), "{page}");
         let post = routine_post(&mut conn, open.id, "https://marian.example")
             .unwrap()
             .unwrap();
@@ -1662,5 +1848,10 @@ mod tests {
         assert_eq!(post.fields[1].value, "-");
         assert!(post.fields[1].inline);
         assert_eq!(post.buttons[0].label, "Thursday, Oct 15");
+        // The button names the poll by its public id, which leads back to the poll.
+        let run = post.buttons[0].custom_id.split(':').nth(2).unwrap();
+        let run = uuid::Uuid::parse_str(run).expect("a public id, not a row number");
+        assert_eq!(run.get_version_num(), 7);
+        assert_eq!(run_by_public(&mut conn, run).unwrap(), open_run_id(&mut conn, id).unwrap());
     }
 }

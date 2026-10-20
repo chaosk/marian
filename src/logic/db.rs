@@ -28,18 +28,35 @@ struct NewActivity<'a> {
     created_at: DateTime<Utc>,
 }
 
+/// How long the same note about one event keeps folding into the last one.
+const LOG_GROUPING: chrono::Duration = chrono::Duration::minutes(15);
+
+/// Notes a change in the server's activity. The same note about the same event
+/// within a short while, such as several quick edits, replaces the earlier one,
+/// so the run reads as one line at the top with the latest time.
 pub(super) fn log(
     conn: &mut Connection,
     guild_id: i64,
     event_id: Option<i64>,
     body: &str,
 ) -> Result<(), OpError> {
+    let now = Utc::now();
+    if let Some(event_id) = event_id {
+        diesel::delete(
+            schema::activity::table
+                .filter(schema::activity::guild_id.eq(guild_id))
+                .filter(schema::activity::event_id.eq(event_id))
+                .filter(schema::activity::body.eq(body))
+                .filter(schema::activity::created_at.gt(now - LOG_GROUPING)),
+        )
+        .execute(conn)?;
+    }
     diesel::insert_into(schema::activity::table)
         .values(&NewActivity {
             guild_id,
             event_id,
             body,
-            created_at: Utc::now(),
+            created_at: now,
         })
         .execute(conn)?;
     Ok(())

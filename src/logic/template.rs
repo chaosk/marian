@@ -1,14 +1,11 @@
-//! Shared event wording. A series or a routine keeps one template.
-//! Creating an event copies it and fills `{date}` with that event's date.
+//! Shared event wording. A series or a routine keeps one template, and each
+//! event it makes copies the wording as written.
 
 use chrono::{DateTime, Duration, Utc};
-use chrono_tz::Tz;
 use diesel::prelude::*;
 
-use super::db::must_guild;
 use super::event::{insert_event_roles, replace_children};
 use super::model::{OptionInput, ReminderInput, SeriesTemplate};
-use crate::clock;
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{Connection, Series, StoredTemplate};
@@ -19,6 +16,7 @@ pub struct EventTemplate {
     pub channel_id: i64,
     pub title: String,
     pub description: String,
+    pub location: String,
     pub duration_minutes: i64,
     pub color: String,
     pub image_url: Option<String>,
@@ -40,7 +38,6 @@ pub struct Spawn<'a> {
     pub status: &'a str,
     pub series_id: Option<i64>,
     pub occurrence_index: Option<i64>,
-    pub tz: Tz,
 }
 
 #[derive(Insertable)]
@@ -50,6 +47,7 @@ struct NewTemplate<'a> {
     channel_id: i64,
     title: &'a str,
     description: &'a str,
+    location: &'a str,
     duration_minutes: i64,
     color: &'a str,
     image_url: Option<&'a str>,
@@ -72,6 +70,7 @@ pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, Op
             channel_id: template.channel_id,
             title: &template.title,
             description: &template.description,
+            location: &template.location,
             duration_minutes: template.duration_minutes,
             color: &template.color,
             image_url: template.image_url.as_deref(),
@@ -97,6 +96,7 @@ pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Resul
             schema::event_templates::channel_id.eq(template.channel_id),
             schema::event_templates::title.eq(&template.title),
             schema::event_templates::description.eq(&template.description),
+            schema::event_templates::location.eq(&template.location),
             schema::event_templates::duration_minutes.eq(template.duration_minutes),
             schema::event_templates::color.eq(&template.color),
             schema::event_templates::image_url.eq(template.image_url.as_deref()),
@@ -144,6 +144,7 @@ pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
         channel_id: row.channel_id,
         title: row.title,
         description: row.description,
+        location: row.location,
         duration_minutes: row.duration_minutes,
         color: row.color,
         image_url: row.image_url,
@@ -170,6 +171,7 @@ pub fn from_series(guild_id: i64, template: &SeriesTemplate) -> EventTemplate {
         channel_id: template.channel_id,
         title: template.title.clone(),
         description: template.description.clone(),
+        location: template.location.clone(),
         duration_minutes: template.duration_minutes,
         color: template.color.clone(),
         image_url: template.image_url.clone(),
@@ -189,6 +191,7 @@ pub fn as_series(template: &EventTemplate) -> SeriesTemplate {
     SeriesTemplate {
         title: template.title.clone(),
         description: template.description.clone(),
+        location: template.location.clone(),
         duration_minutes: template.duration_minutes,
         channel_id: template.channel_id,
         color: template.color.clone(),
@@ -215,6 +218,7 @@ struct NewSpawnedEvent<'a> {
     occurrence_index: Option<i64>,
     title: &'a str,
     description: &'a str,
+    location: &'a str,
     starts_at: DateTime<Utc>,
     duration_minutes: i64,
     status: &'a str,
@@ -247,8 +251,9 @@ pub fn spawn(
             channel_id: template.channel_id,
             series_id: spec.series_id,
             occurrence_index: spec.occurrence_index,
-            title: &fill(&template.title, spec.starts_at, spec.tz),
-            description: &fill(&template.description, spec.starts_at, spec.tz),
+            title: &template.title,
+            description: &template.description,
+            location: &template.location,
             starts_at: spec.starts_at,
             duration_minutes: template.duration_minutes,
             status: spec.status,
@@ -269,22 +274,6 @@ pub fn spawn(
     replace_children(conn, id, &template.options, &template.reminders)?;
     insert_event_roles(conn, id, &template.mention_role_ids, &template.restrict_role_ids)?;
     Ok(id)
-}
-
-pub fn fill_text(
-    conn: &mut Connection,
-    guild_id: i64,
-    text: &str,
-    start: DateTime<Utc>,
-) -> Result<String, OpError> {
-    let guild = must_guild(conn, guild_id)?;
-    let tz = clock::zone(&guild.timezone)?;
-    Ok(fill(text, start, tz))
-}
-
-pub fn fill(text: &str, start: DateTime<Utc>, tz: Tz) -> String {
-    let date = clock::format_day(start.with_timezone(&tz).date_naive());
-    text.replace("{date}", &date)
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {

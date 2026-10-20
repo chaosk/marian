@@ -1,0 +1,13 @@
+# Leptos views nest into types too deep for rustc to lay out; release builds of
+# the frontend stop with "queries overflow the depth limit". Erasing component
+# types fixes that. cargo-leptos adds this only to debug builds, and merges
+# these flags into its own, so this covers release, plain cargo, and tests.
+[build]
+rustflags = ["--cfg", "erase_components"]
+
+# The browser build also keeps Leptos's debug messages in release: a hydration
+# mismatch names the view that failed and the node it found, and a disposed
+# signal names where it was made, instead of a bare "unreachable". Cargo uses a
+# target's flags in place of [build] ones, so erase_components is repeated.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "erase_components", "--cfg", "leptos_debuginfo"]

@@ -252,6 +252,8 @@ pub fn discord_view(
     let mut fields = Vec::new();
     let mut buttons = Vec::new();
     let closed = event.status != "posted" || event.signups_closed;
+    // A finished event's post is a record; nothing on it can be pressed.
+    let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
     for opt in &options {
         let confirmed: Vec<_> = signups
             .iter()
@@ -288,7 +290,7 @@ pub fn discord_view(
             inline: true,
         });
         buttons.push(DiscordButton {
-            role: ButtonRole::Signup(opt.id),
+            role: ButtonRole::Signup(opt.public_id),
             label: String::new(),
             emoji: opt.emoji.clone(),
             tone: ButtonTone::Secondary,
@@ -309,6 +311,9 @@ pub fn discord_view(
         tone: ButtonTone::Danger,
         disabled: false,
     });
+    if finished {
+        buttons.clear();
+    }
     let mention_roles = mention_discord_roles(conn, &event)?;
     let creator = match event.created_by {
         Some(id) => store::membership(conn, id)?,
@@ -326,6 +331,7 @@ pub fn discord_view(
         }
     });
     Ok(Some(DiscordView {
+        event: event.public_id,
         channel_id,
         message_id: event.discord_message_id.clone(),
         title: event.title,
@@ -477,7 +483,7 @@ struct NewMembership<'a> {
     handle: &'a str,
     color: &'a str,
     reminders_enabled: bool,
-    organizer: bool,
+    server_manager: bool,
 }
 
 pub fn ensure_discord_user(
@@ -515,16 +521,16 @@ pub fn ensure_discord_user(
             handle: &handle,
             color,
             reminders_enabled: true,
-            organizer: false,
+            server_manager: false,
         })
         .returning(schema::memberships::id)
         .get_result(conn)?;
     store::membership(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub fn set_organizer(conn: &mut Connection, membership_id: i64, organizer: bool) -> Result<(), OpError> {
+pub fn set_server_manager(conn: &mut Connection, membership_id: i64, server_manager: bool) -> Result<(), OpError> {
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
-        .set(schema::memberships::organizer.eq(organizer))
+        .set(schema::memberships::server_manager.eq(server_manager))
         .execute(conn)?;
     Ok(())
 }
@@ -637,7 +643,13 @@ pub fn event_channel_purge(
         .filter(schema::events::channel_id.eq(channel.id))
         .select(schema::events::discord_message_id)
         .load(conn)?;
-    let keep = ids.into_iter().flatten().filter(|id| !id.is_empty()).collect();
+    // A routine's results reply sits under its event's post and stays with it.
+    let results: Vec<Option<String>> = schema::routine_runs::table
+        .inner_join(schema::events::table.on(schema::routine_runs::event_id.eq(schema::events::id.nullable())))
+        .filter(schema::events::channel_id.eq(channel.id))
+        .select(schema::routine_runs::results_message_id)
+        .load(conn)?;
+    let keep = ids.into_iter().chain(results).flatten().filter(|id| !id.is_empty()).collect();
     Ok(Some(EventChannelPurge {
         channel_id: channel.id,
         discord_channel_id,
@@ -791,20 +803,20 @@ mod tests {
     }
 
     #[test]
-    fn signing_in_does_not_make_the_first_member_an_organizer() {
+    fn signing_in_does_not_make_the_first_member_a_server_manager() {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
             "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
         )
         .unwrap();
         let first = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
-        assert!(!first.organizer);
+        assert!(!first.server_manager);
         let second = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
-        assert!(!second.organizer);
-        set_organizer(&mut conn, first.id, true).unwrap();
-        assert!(store::membership(&mut conn, first.id).unwrap().unwrap().organizer);
-        set_organizer(&mut conn, first.id, false).unwrap();
-        assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().organizer);
+        assert!(!second.server_manager);
+        set_server_manager(&mut conn, first.id, true).unwrap();
+        assert!(store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
+        set_server_manager(&mut conn, first.id, false).unwrap();
+        assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
     }
 
     #[test]
@@ -874,11 +886,25 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
+        // The second event came from a routine poll; its results reply stays too.
+        conn.batch_execute(
+            "
+            INSERT INTO event_templates (id, guild_id, channel_id, title, duration_minutes, created_at)
+              VALUES (1, 1, 1, 'Game night', 60, '2026-10-01T00:00:00Z');
+            INSERT INTO routines (id, public_id, guild_id, template_id, prompt, start_minutes, poll_weekday,
+              poll_minutes, lock_weekday, lock_minutes, days_json, created_at)
+              VALUES (1, '01900000-0000-7000-8000-000000000031', 1, 1, '', 1140, 6, 600, 1, 1080, '{3}', '2026-10-01T00:00:00Z');
+            INSERT INTO routine_runs (routine_id, opens_at, locks_at, status, days_json, event_id, discord_message_id,
+              results_message_id, created_at)
+              VALUES (1, '2026-10-11T10:00:00Z', '2026-10-13T18:00:00Z', 'locked', '{3}', 2, '20', '21', '2026-10-11T10:00:00Z');
+            ",
+        )
+        .unwrap();
         let plan = event_channel_purge(&mut conn, 1).unwrap().unwrap();
         assert_eq!(plan.discord_channel_id, "100");
         let mut keep: Vec<_> = plan.keep.into_iter().collect();
         keep.sort();
-        assert_eq!(keep, vec!["10".to_string(), "20".to_string()]);
+        assert_eq!(keep, vec!["10".to_string(), "20".to_string(), "21".to_string()]);
         assert!(event_channel_purge(&mut conn, 3).unwrap().is_none());
         assert!(event_channel_purge(&mut conn, 4).unwrap().is_none());
         diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))

@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use diesel::prelude::*;
 
 use super::access::{can_delete, can_edit};
@@ -94,6 +94,11 @@ pub fn duplicate_event(
     let event = must_event(conn, event_id)?;
     let options = store::options_for(conn, &event)?;
     let reminders = store::reminders_for(conn, &event)?;
+    // A week later at the same time on the clock, even across a daylight saving change.
+    let zone = store::guild(conn, event.guild_id)?
+        .map(|guild| guild.timezone)
+        .unwrap_or_else(|| "UTC".into());
+    let starts_at = crate::clock::occurrence_start(event.starts_at, 2, "weekly", crate::clock::zone(&zone)?);
     let input = EventInput {
         id: None,
         guild_id: event.guild_id,
@@ -102,7 +107,7 @@ pub fn duplicate_event(
         title: event.title.clone(),
         description: event.description.clone(),
         location: event.location.clone(),
-        starts_at: event.starts_at + Duration::days(7),
+        starts_at,
         duration_minutes: event.duration_minutes,
         color: event.color.clone(),
         image_url: event.image_url.clone(),
@@ -120,7 +125,6 @@ pub fn duplicate_event(
                 name: opt.name,
                 emoji: opt.emoji,
                 capacity: opt.capacity,
-                waitlist: opt.waitlist,
                 role_id: opt.role_id,
                 reminders_enabled: opt.reminders_enabled,
             })
@@ -225,7 +229,7 @@ fn may_change_series(
     if actor.guild_id != series.guild_id {
         return Err(OpError::NotFound);
     }
-    if actor.organizer {
+    if actor.server_manager {
         return Ok(());
     }
     let settings = store::settings(conn, series.guild_id)?;

@@ -133,6 +133,45 @@ fn trace_filter() -> EnvFilter {
         .add_directive("tonic=off".parse().expect("tonic filter"))
 }
 
+/// The trace a page was rendered in, as a W3C `traceparent`. The page carries
+/// it so a report from the browser joins the trace of the render it came from.
+#[derive(Clone, Debug)]
+pub struct PageTrace(pub String);
+
+/// The current span as a `traceparent`, when traces are exported.
+pub fn traceparent() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    if !EXPORT.load(Ordering::Relaxed) {
+        return None;
+    }
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let found = span.span_context();
+    found.is_valid().then(|| {
+        format!(
+            "00-{}-{}-{:02x}",
+            found.trace_id(),
+            found.span_id(),
+            found.trace_flags().to_u8()
+        )
+    })
+}
+
+/// The parent a `traceparent` names, or nothing when it doesn't parse.
+pub fn parent_from(traceparent: &str) -> Option<Context> {
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry::trace::TraceContextExt;
+
+    let carrier = std::collections::HashMap::from([(
+        "traceparent".to_string(),
+        traceparent.trim().to_string(),
+    )]);
+    let context = opentelemetry_sdk::propagation::TraceContextPropagator::new().extract(&carrier);
+    context.span().span_context().is_valid().then_some(context)
+}
+
 pub fn install_query_trace(conn: &mut impl Connection, system: &'static str) {
     conn.set_instrumentation(QueryTrace { system });
 }
@@ -288,7 +327,7 @@ fn push_limited(out: &mut String, c: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::{statement_shape, traces_endpoint};
+    use super::{parent_from, statement_shape, traceparent, traces_endpoint, EXPORT};
 
     #[test]
     fn statement_shape_hides_values() {
@@ -307,6 +346,45 @@ mod tests {
         let long = format!("SELECT '{}'", "n".repeat(600));
         assert!(statement_shape(&long).len() <= 500);
         assert!(!statement_shape(&long).contains('n'));
+    }
+
+    #[test]
+    fn a_page_carries_the_span_it_was_rendered_in() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider};
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use std::sync::atomic::Ordering;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        EXPORT.store(true, Ordering::Relaxed);
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("http");
+            let _enter = span.enter();
+            let written = traceparent().expect("a traceparent");
+            let context = span.context();
+            let current = context.span();
+            let ids = current.span_context();
+            assert_eq!(written, format!("00-{}-{}-01", ids.trace_id(), ids.span_id()));
+            let parent = parent_from(&written).unwrap();
+            assert_eq!(parent.span().span_context().span_id(), ids.span_id());
+        });
+    }
+
+    #[test]
+    fn a_traceparent_names_its_parent() {
+        use opentelemetry::trace::TraceContextExt;
+
+        let parent = parent_from("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").unwrap();
+        let span = parent.span();
+        assert_eq!(
+            span.span_context().trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert!(parent_from("").is_none());
+        assert!(parent_from("not a trace").is_none());
     }
 
     #[test]

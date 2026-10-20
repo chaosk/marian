@@ -9,10 +9,21 @@ Rust 1.99.1 (see `rust-toolchain.toml`).
 ```sh
 docker compose up -d
 DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
-  DISCORD_TOKEN=... cargo run
+  DISCORD_TOKEN=... cargo leptos watch
 ```
 
 `docker compose` starts Postgres 17 and publishes it on `127.0.0.1:5432` (user `marian`, password `marian`, database `marian`). Set `DATABASE_URL` to that connection string. Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
+
+The dashboard is a Leptos app: pages render on the server and hydrate in the browser. `cargo-leptos` builds both sides and serves the wasm and CSS from `target/site`:
+
+```sh
+cargo install cargo-leptos --locked
+cargo leptos watch
+```
+
+`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A musl image sets `LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl` and passes `--bin-features static-libpq`.
+
+Pages ask `/api` for the resources they need. Event pages hold a live connection at `/api/servers/<id>/events/<event>/live` and refresh when a signup changes in Discord. `cargo test --workspace --exclude marian-frontend` runs the server and page tests. `cargo test -p marian-app --features ssr` covers the pages as the server renders them.
 
 If `cargo` cannot find `libpq`, point pkg-config at it. Homebrew keeps it off the default path:
 
@@ -44,7 +55,7 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
   DISCORD_TOKEN=... DISCORD_CLIENT_ID=... \
   MARIAN_PUBLIC_URL=https://marian.example.com \
   MARIAN_STATUS="marian.example.com | /event" \
-  cargo run --release
+  cargo leptos watch --release
 ```
 
 Invite the bot with View Channel, Manage Channels, Send Messages, Manage Messages, Embed Links, Read Message History, Mention Everyone, Add Reactions, Manage Roles, and the public-thread permissions. That set is the permissions integer `326686174288`:
@@ -73,7 +84,7 @@ That host is `MARIAN_PUBLIC_URL`. Locally, with that variable empty, the redirec
 DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
   DISCORD_TOKEN=... DISCORD_CLIENT_ID=... DISCORD_CLIENT_SECRET=... \
   MARIAN_PUBLIC_URL=https://marian.example.com \
-  cargo run --release
+  cargo leptos watch --release
 ```
 
 ## Install on Kubernetes

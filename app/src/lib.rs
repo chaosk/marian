@@ -1,0 +1,178 @@
+//! Marian's web pages, rendered on the server and hydrated in the browser.
+
+#![recursion_limit = "256"]
+
+use leptos::prelude::*;
+use leptos_meta::{provide_meta_context, Link, Meta, MetaTags, Stylesheet, Title};
+use leptos_router::components::{ParentRoute, Route, Router, Routes};
+use leptos_router::hooks::{use_params_map, use_query_map};
+use leptos_router::path;
+
+pub mod api;
+mod client;
+mod format;
+mod widgets;
+mod markdown;
+mod pages;
+mod cache;
+mod shell;
+
+use api::Failure;
+
+pub(crate) use leptos_router::components::A;
+
+pub fn shell(options: LeptosOptions) -> impl IntoView {
+    let site_json = api::site_json();
+    let notice_json = api::notice_json();
+    let trace = api::page_trace();
+    view! {
+        <!DOCTYPE html>
+        <html lang="en">
+            <head>
+                <meta charset="utf-8"/>
+                <meta name="viewport" content="width=device-width, initial-scale=1"/>
+                {trace.map(|trace| view! { <meta name="traceparent" content=trace/> })}
+                <script id="marian-site" type="application/json" inner_html=site_json></script>
+                <script id="marian-notice" type="application/json" inner_html=notice_json></script>
+                <AutoReload options=options.clone()/>
+                <HydrationScripts options/>
+                <MetaTags/>
+            </head>
+            <body>
+                <App/>
+            </body>
+        </html>
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PageTitle(RwSignal<String>);
+
+#[derive(Clone, Copy)]
+pub(crate) struct ServerTitle(pub(crate) RwSignal<String>);
+
+/// Sets the page half of the tab title. The shell adds the server name.
+pub(crate) fn title(text: impl Into<String>) {
+    if let Some(PageTitle(page)) = use_context() {
+        page.set(text.into());
+    }
+}
+
+#[component]
+pub fn App() -> impl IntoView {
+    provide_meta_context();
+    cache::provide();
+    client::provide_toasts();
+    let page = RwSignal::new(String::new());
+    let server = RwSignal::new(String::new());
+    provide_context(PageTitle(page));
+    provide_context(ServerTitle(server));
+    let tab = move || {
+        let page = page.get();
+        let server = server.get();
+        let body = match (page.is_empty(), server.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => page,
+            (true, false) => server,
+            (false, false) => format!("{page} · {server}"),
+        };
+        if body.is_empty() {
+            "Marian".into()
+        } else {
+            format!("{body} · Marian")
+        }
+    };
+    view! {
+        <Meta name="description" content="Events for your Discord server."/>
+        <Link rel="icon" href="/favicon.svg" type_="image/svg+xml"/>
+        <Link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap"/>
+        <Stylesheet id="marian" href="/pkg/marian.css"/>
+        <Router>
+            <Routes fallback=pages::misc::NotFound>
+                <Route path=path!("/") view=pages::misc::Front/>
+                <Route path=path!("/help") view=pages::misc::Help/>
+                <ParentRoute path=path!("/servers/:server") view=shell::ServerShell>
+                    <Route path=path!("") view=pages::home::Schedule/>
+                    <Route path=path!("events") view=pages::lists::AllEvents/>
+                    <Route path=path!("events/new") view=pages::event::NewEvent/>
+                    <Route path=path!("events/:id") view=pages::event::EventPage/>
+                    <Route path=path!("upcoming") view=pages::lists::Upcoming/>
+                    <Route path=path!("drafts") view=pages::lists::Drafts/>
+                    <Route path=path!("scheduled") view=pages::lists::Scheduled/>
+                    <Route path=path!("archive") view=pages::lists::Archive/>
+                    <Route path=path!("activity") view=pages::lists::ActivityLog/>
+                    <Route path=path!("recurring") view=pages::series::Recurring/>
+                    <Route path=path!("recurring/:id") view=pages::series::SeriesPage/>
+                    <Route path=path!("routines") view=pages::routines::Routines/>
+                    <Route path=path!("routines/new") view=pages::routines::NewRoutine/>
+                    <Route path=path!("routines/:id") view=pages::routines::RoutinePage/>
+                    <Route path=path!("presets") view=pages::presets::Presets/>
+                    <Route path=path!("channels") view=pages::channels::Channels/>
+                    <Route path=path!("commands") view=pages::commands::Commands/>
+                    <Route path=path!("settings") view=pages::settings::Settings/>
+                    <Route path=path!("google") view=pages::settings::Google/>
+                </ParentRoute>
+            </Routes>
+        </Router>
+        <Title text=tab/>
+    }
+}
+
+/// A path parameter of the current route.
+fn param(name: &str) -> String {
+    use_params_map().with_untracked(|params| params.get(name).unwrap_or_default())
+}
+
+/// A query parameter of the current address.
+fn query(name: &str) -> String {
+    use_query_map().with_untracked(|query| query.get(name).unwrap_or_default())
+}
+
+/// `/servers/{server}` for the server in the address.
+fn base() -> String {
+    format!("/servers/{}", param("server"))
+}
+
+pub(crate) fn failed(failure: Failure) -> impl IntoView {
+    status(failure.status);
+    if failure.missing() {
+        return pages::misc::NotFound().into_any();
+    }
+    view! { <p class="error">{failure.message}</p> }.into_any()
+}
+
+/// Sets the response status during server rendering.
+fn status(code: u16) {
+    #[cfg(feature = "ssr")]
+    if let (Some(response), Ok(code)) = (
+        use_context::<leptos_axum::ResponseOptions>(),
+        axum::http::StatusCode::from_u16(code),
+    ) {
+        response.set_status(code);
+    }
+    #[cfg(not(feature = "ssr"))]
+    let _ = code;
+}
+
+/// Sends the browser elsewhere during server rendering.
+fn redirect(to: &str) {
+    #[cfg(feature = "ssr")]
+    leptos_axum::redirect(to);
+    #[cfg(not(feature = "ssr"))]
+    let _ = to;
+}
+
+fn border(color: &str) -> String {
+    format!("border-left-color: {color}")
+}
+
+fn md(source: &str) -> impl IntoView {
+    view! { <div class="md" inner_html=markdown::render(source)></div> }
+}
+
+fn head(heading: &'static str) -> impl IntoView {
+    title(heading);
+    view! {
+        <div class="page-head"><div><h1>{heading}</h1></div></div>
+    }
+}

@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::Json;
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
@@ -15,15 +16,14 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::assets;
 use crate::auth;
-use crate::clock;
-use crate::commands;
 use crate::error::OpError;
 use crate::ics;
 use crate::jobs::DiscordJob;
-use crate::logic::{self, OptionInput, PresetBody};
-use crate::present::{self, Page};
-use crate::schema;
-use crate::store::{self, Connection, Settings};
+use crate::logic;
+use crate::store::{self, Connection};
+
+mod report;
+mod rest;
 
 #[derive(Clone)]
 struct AppState {
@@ -40,17 +40,10 @@ struct AppState {
     member_roles: Arc<Mutex<MemberRoles>>,
 }
 
-struct Session {
-    discord_user_id: String,
-    user_id: i64,
-    display_name: String,
-    guild_id: i64,
-    membership_id: i64,
-    allowed: Vec<i64>,
-    notice: Option<String>,
-}
+use crate::api::{cookie, Viewer as Session};
 
-pub fn run() -> anyhow::Result<()> {
+/// Runs Marian: the gateway, the tick, and the web service with `pages` for everything else.
+pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> anyhow::Result<()> {
     store::load_dotenv();
     let _telemetry = crate::observe::init();
 
@@ -91,10 +84,14 @@ pub fn run() -> anyhow::Result<()> {
         bot_token: token.clone(),
         member_roles: member_roles_cache(),
     };
-    let app = router(state.clone());
-
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        let web = crate::api::Web {
+            db: state.db.clone(),
+            invite_url: state.invite_url.clone(),
+            oauth_ready: oauth_ready(&state),
+        };
+        let app = router(state.clone(), pages(web));
         crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status);
         let db = state.db.clone();
         let discord = state.discord.clone();
@@ -145,14 +142,12 @@ pub fn run() -> anyhow::Result<()> {
     })
 }
 
-fn router(state: AppState) -> Router {
+fn router(state: AppState, pages: Router) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
-        .route("/help", get(show_help))
         .route("/favicon.svg", get(asset))
         .route("/static/{*file}", get(asset))
-        .route("/", get(schedule))
         .route("/auth/discord", get(auth_start))
         .route("/auth/discord/callback", get(auth_callback))
         .route("/auth/google", get(google_start))
@@ -160,74 +155,15 @@ fn router(state: AppState) -> Router {
         .route("/auth/google/callback", get(google_callback))
         .route("/auth/google/disconnect", post(google_disconnect))
         .route("/logout", post(logout))
-        .route("/servers/{guild_id}", get(server_home))
-        .route(
-            "/servers/{guild_id}/events/new",
-            get(new_event).post(create_event),
-        )
-        .route("/servers/{guild_id}/events/{id}", get(show_event))
-        .route(
-            "/servers/{guild_id}/events/{id}/edit",
-            get(edit_event).post(save_event),
-        )
-        .route("/servers/{guild_id}/events/{id}/signup", post(signup))
-        .route("/servers/{guild_id}/events/{id}/response", post(response))
-        .route("/servers/{guild_id}/events/{id}/archive", post(archive))
-        .route("/servers/{guild_id}/events/{id}/delete", post(delete_event))
-        .route("/servers/{guild_id}/events/{id}/duplicate", post(duplicate))
-        .route("/servers/{guild_id}/events/{id}/skip", post(skip))
-        .route("/servers/{guild_id}/drafts", get(drafts))
-        .route("/servers/{guild_id}/scheduled", get(scheduled))
-        .route("/servers/{guild_id}/recurring", get(recurring))
-        .route(
-            "/servers/{guild_id}/recurring/{id}",
-            get(series).post(save_series),
-        )
-        .route("/servers/{guild_id}/recurring/{id}/end", post(end_series))
-        .route(
-            "/servers/{guild_id}/routines",
-            get(routines_page).post(create_routine),
-        )
-        .route("/servers/{guild_id}/routines/new", get(new_routine))
-        .route(
-            "/servers/{guild_id}/routines/{id}",
-            get(show_routine).post(update_routine),
-        )
-        .route(
-            "/servers/{guild_id}/routines/{id}/days",
-            post(save_routine_days),
-        )
-        .route("/servers/{guild_id}/routines/{id}/vote", post(vote_routine))
-        .route("/servers/{guild_id}/routines/{id}/stop", post(stop_routine))
-        .route("/servers/{guild_id}/archive", get(archive_list))
-        .route(
-            "/servers/{guild_id}/presets",
-            get(presets_page).post(save_preset),
-        )
-        .route("/servers/{guild_id}/presets/library", post(save_library))
-        .route("/servers/{guild_id}/presets/{id}/delete", post(delete_preset))
-        .route(
-            "/servers/{guild_id}/channels",
-            get(channels_page).post(create_channel),
-        )
-        .route(
-            "/servers/{guild_id}/commands",
-            get(commands_page).post(run_command),
-        )
-        .route("/servers/{guild_id}/activity", get(activity))
-        .route(
-            "/servers/{guild_id}/settings",
-            get(settings_page).post(save_settings),
-        )
-        .route(
-            "/servers/{guild_id}/google",
-            get(google_page).post(save_google),
-        )
-        .route("/servers/{guild_id}/me/reminders", post(toggle_reminders))
         .route("/calendar/{file}", get(personal_calendar))
-        .layer(middleware::from_fn_with_state(state.clone(), require_login))
+        .nest("/api", rest::router())
+        .with_state(state.clone())
+        .merge(pages)
+        .layer(middleware::from_fn(revalidate_site))
+        .layer(middleware::from_fn_with_state(state, require_login))
+        .layer(tower_http::compression::CompressionLayer::new())
+        .layer(middleware::from_fn(mark_page_trace))
         .layer(http_trace())
-        .with_state(state)
 }
 
 #[derive(Clone, Copy)]
@@ -344,22 +280,71 @@ fn parse_ip(text: &str) -> Option<String> {
     Some(ip.to_canonical().to_string())
 }
 
+/// Hands a page render the trace it runs in. The shell writes it into the
+/// page, and a browser error report sends it back.
+async fn mark_page_trace(mut request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let page = request.method() == axum::http::Method::GET
+        && !path.starts_with("/api/")
+        && !path.starts_with("/pkg/");
+    if page {
+        if let Some(trace) = crate::observe::traceparent() {
+            request
+                .extensions_mut()
+                .insert(crate::observe::PageTrace(trace));
+        }
+    }
+    next.run(request).await
+}
+
 fn quiet_path(path: &str) -> bool {
     path == "/healthz"
         || path == "/readyz"
         || path == "/favicon.svg"
         || path.starts_with("/static/")
+        || path.ends_with("/live")
+}
+
+/// The site's script, wasm, and stylesheet. A release build made with
+/// `--precompress` leaves `.br` and `.gz` copies beside each file, compressed
+/// once at the highest setting; a browser that accepts one gets it as is, and
+/// the compression layer leaves it alone. Without the copies (a debug build)
+/// the plain file goes out and is compressed on the way.
+pub fn site_files(dir: impl AsRef<std::path::Path>) -> tower_http::services::ServeDir {
+    tower_http::services::ServeDir::new(dir)
+        .precompressed_br()
+        .precompressed_gzip()
+}
+
+/// The script and its wasm keep fixed names across builds, so a browser that
+/// guesses one is still fresh can pair it with the other from a newer build and
+/// fail to start. Making it ask each time keeps the pair together. A file that
+/// hasn't changed since the browser's copy is answered with 304 here, in case
+/// whatever served it didn't look at `If-Modified-Since`.
+async fn revalidate_site(request: Request, next: Next) -> Response {
+    if !request.uri().path().starts_with("/pkg/") {
+        return next.run(request).await;
+    }
+    let since = request.headers().get(header::IF_MODIFIED_SINCE).cloned();
+    let mut response = next.run(request).await;
+    let unchanged = response.status() == StatusCode::OK
+        && since.is_some()
+        && response.headers().get(header::LAST_MODIFIED) == since.as_ref();
+    if unchanged {
+        let mut fresh = StatusCode::NOT_MODIFIED.into_response();
+        if let Some(modified) = response.headers().get(header::LAST_MODIFIED) {
+            fresh.headers_mut().insert(header::LAST_MODIFIED, modified.clone());
+        }
+        response = fresh;
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 async fn health() -> &'static str {
     "ok"
-}
-
-async fn show_help() -> Response {
-    match present::help_page() {
-        Ok(body) => Html(body).into_response(),
-        Err(err) => plain_error(err),
-    }
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
@@ -382,66 +367,30 @@ async fn asset(request: Request) -> Response {
     )
 }
 
-async fn schedule(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<NextQuery>,
-) -> Response {
-    let notice = cookie(&headers, "marian_notice").map(|value| percent_decode(&value));
-    let signed_in = {
-        let mut db = state.db.get().expect("database");
-        read_session(&mut db, &headers).is_some()
-    };
-    if !signed_in {
-        return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
-    }
-    let mut db = state.db.get().expect("database");
-    let Some(session) = read_session(&mut db, &headers) else {
-        return landing_response(&state, query.next.as_deref().unwrap_or(""), notice);
-    };
-    let server = match store::discord_server_id(&mut db, session.guild_id) {
-        Ok(server) => server,
-        Err(err) => return plain_error(err),
-    };
-    Redirect::to(&here(&server, "")).into_response()
-}
-
-async fn server_home(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "schedule",
-        "This week",
-        present::home,
-    )
-}
-
-fn landing_response(state: &AppState, next: &str, notice: Option<String>) -> Response {
-    let next = auth::safe_next(next).unwrap_or_default();
-    let ready = oauth_ready(state);
-    match present::landing(
-        &state.invite_url,
-        &next,
-        notice.as_deref().unwrap_or(""),
-        ready,
-    ) {
-        Ok(body) => html_ok(body, notice.is_some()),
-        Err(err) => plain_error(err),
-    }
+fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
+    crate::api::viewer(conn, headers)
 }
 
 fn oauth_ready(state: &AppState) -> bool {
     !state.client_id.trim().is_empty() && !state.client_secret.trim().is_empty()
 }
 
+/// Asks for Discord sign-in before server pages and the REST API, and keeps roles fresh.
 async fn require_login(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let path = request.uri().path().to_string();
-    if auth::is_public(&path) {
+    let full = request.uri().path().to_string();
+    let api = full
+        .strip_prefix("/api")
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let path = match api {
+        Some("") => "/".to_string(),
+        Some(rest) => rest.to_string(),
+        None => full.clone(),
+    };
+    let gated = match api {
+        Some(_) => !auth::is_public(&path),
+        None => path.starts_with("/servers/") || path == "/servers",
+    };
+    if !gated {
         return next.run(request).await;
     }
     let headers = request.headers().clone();
@@ -453,15 +402,19 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         refresh_member_roles(&state, &path, &headers).await;
         return next.run(request).await;
     }
-    if request.method() == Method::GET || request.method() == Method::HEAD {
-        let target = request
-            .uri()
-            .path_and_query()
-            .map(|value| value.as_str())
-            .unwrap_or("/");
-        return Redirect::to(&auth::login_location(target)).into_response();
+    let target = match request.uri().query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path,
+    };
+    let login = auth::login_location(&target);
+    if api.is_some() {
+        let body = marian_types::Problem {
+            error: "Sign in with Discord.".into(),
+            redirect: Some(login),
+        };
+        return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
-    redirect("/", "Sign in with Discord.")
+    nav_redirect(&login, "Sign in with Discord.")
 }
 
 struct RoleTarget {
@@ -643,10 +596,10 @@ async fn auth_start(
     Query(query): Query<NextQuery>,
 ) -> Response {
     if !oauth_ready(&state) {
-        return redirect("/", "Sign-in is not configured yet.");
+        return nav_redirect("/", "Sign-in is not configured yet.");
     }
     let Some(redirect_uri) = oauth_redirect(&state, &headers) else {
-        return redirect("/", "Set MARIAN_PUBLIC_URL so Discord can send you back.");
+        return nav_redirect("/", "Set MARIAN_PUBLIC_URL so Discord can send you back.");
     };
     let state_token = match auth::random_token() {
         Ok(token) => token,
@@ -680,36 +633,36 @@ async fn auth_callback(
     Query(query): Query<DiscordCallback>,
 ) -> Response {
     if query.error.is_some() {
-        return redirect("/", "Sign-in was cancelled.");
+        return nav_redirect("/", "Sign-in was cancelled.");
     }
     let Some(code) = query.code.as_deref().filter(|code| !code.is_empty()) else {
-        return redirect("/", "Discord didn't send a sign-in code.");
+        return nav_redirect("/", "Discord didn't send a sign-in code.");
     };
     let Some(returned) = query.state.as_deref() else {
-        return redirect("/", "That sign-in expired. Try again.");
+        return nav_redirect("/", "That sign-in expired. Try again.");
     };
     let Some((expected, next)) =
         cookie(&headers, "marian_oauth").and_then(|raw| auth::unpack_oauth(&raw))
     else {
-        return redirect("/", "That sign-in expired. Try again.");
+        return nav_redirect("/", "That sign-in expired. Try again.");
     };
     if returned != expected {
-        return redirect("/", "That sign-in expired. Try again.");
+        return nav_redirect("/", "That sign-in expired. Try again.");
     }
     let Some(redirect_uri) = oauth_redirect(&state, &headers) else {
-        return redirect("/", "Set MARIAN_PUBLIC_URL so Discord can send you back.");
+        return nav_redirect("/", "Set MARIAN_PUBLIC_URL so Discord can send you back.");
     };
     let access = match discord_token(&state, code, &redirect_uri).await {
         Ok(token) => token,
-        Err(err) => return redirect("/", &err),
+        Err(err) => return nav_redirect("/", &err),
     };
     let me = match discord_me(&state, &access).await {
         Ok(me) => me,
-        Err(err) => return redirect("/", &err),
+        Err(err) => return nav_redirect("/", &err),
     };
     let member_of = match discord_guilds(&state, &access).await {
         Ok(ids) => ids,
-        Err(err) => return redirect("/", &err),
+        Err(err) => return nav_redirect("/", &err),
     };
     let mut db = state.db.get().expect("database");
     let guilds = match store::list_guilds(&mut db) {
@@ -723,7 +676,7 @@ async fn auth_callback(
     let discord_ids: Vec<String> = member_of.iter().map(|guild| guild.id.clone()).collect();
     let allowed = auth::guilds_in_common(&pairs, &discord_ids);
     if allowed.is_empty() {
-        return redirect("/", "Marian isn't in a server you belong to yet.");
+        return nav_redirect("/", "Marian isn't in a server you belong to yet.");
     }
     let name = auth::discord_display_name(me.global_name.as_deref(), &me.username);
     let mut signed_in = None;
@@ -741,7 +694,7 @@ async fn auth_callback(
             .iter()
             .find(|guild| guild.id == discord_id)
             .is_some_and(|guild| guild.manages);
-        if let Err(err) = logic::set_organizer(&mut db, user.id, manages) {
+        if let Err(err) = logic::set_server_manager(&mut db, user.id, manages) {
             return plain_error(err);
         }
         if signed_in.is_none() {
@@ -749,7 +702,7 @@ async fn auth_callback(
         }
     }
     let Some((guild_id, membership_id)) = signed_in else {
-        return redirect("/", "Marian isn't in a server you belong to yet.");
+        return nav_redirect("/", "Marian isn't in a server you belong to yet.");
     };
     let token = match auth::random_token() {
         Ok(token) => token,
@@ -854,17 +807,17 @@ async fn google_start(
         .and_then(auth::safe_next)
         .unwrap_or_else(|| "/".into());
     if !crate::google::configured(&state.google_client_id, &state.google_client_secret) {
-        return redirect(&next, "Google Calendar is not configured yet.");
+        return nav_redirect(&next, "Google Calendar is not configured yet.");
     }
     let Some(redirect_uri) = google_redirect(&state, &headers) else {
-        return redirect(&next, "Set MARIAN_PUBLIC_URL so Google can send you back.");
+        return nav_redirect(&next, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let session = {
         let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers)
     };
     let Some(session) = session else {
-        return redirect(&next, "Sign in with Discord.");
+        return nav_redirect(&next, "Sign in with Discord.");
     };
     let state_token = {
         let mut db = state.db.get().expect("database");
@@ -896,16 +849,16 @@ async fn google_open(
     Path(token): Path<String>,
 ) -> Response {
     if token.len() != 64 || !token.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return redirect(
+        return nav_redirect(
             "/",
             "That Google Calendar connection expired. Run /google authorize again.",
         );
     }
     if !crate::google::configured(&state.google_client_id, &state.google_client_secret) {
-        return redirect("/", "Google Calendar is not configured yet.");
+        return nav_redirect("/", "Google Calendar is not configured yet.");
     }
     let Some(redirect_uri) = google_redirect(&state, &headers) else {
-        return redirect("/", "Set MARIAN_PUBLIC_URL so Google can send you back.");
+        return nav_redirect("/", "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let pending = {
         let mut db = state.db.get().expect("database");
@@ -915,7 +868,7 @@ async fn google_open(
         }
     };
     if !pending {
-        return redirect(
+        return nav_redirect(
             "/",
             "That Google Calendar connection expired. Run /google authorize again.",
         );
@@ -954,7 +907,7 @@ async fn google_callback(
 ) -> Response {
     let returned = query.state.clone().unwrap_or_default();
     let Some(next) = matched_google_next(&headers, &returned) else {
-        return redirect(
+        return nav_redirect(
             "/",
             "That Google Calendar connection expired. Run /google authorize again.",
         );
@@ -967,7 +920,7 @@ async fn google_callback(
     if query.error.is_some() {
         let mut db = state.db.get().expect("database");
         let _ = crate::google::finish_oauth(&mut db, &returned);
-        let mut response = redirect(
+        let mut response = nav_redirect(
             &dest,
             "The Google Calendar connection stopped before it finished.",
         );
@@ -975,10 +928,10 @@ async fn google_callback(
         return response;
     }
     let Some(code) = query.code.as_deref().filter(|code| !code.is_empty()) else {
-        return redirect(&dest, "Google didn't send a connection code.");
+        return nav_redirect(&dest, "Google didn't send a connection code.");
     };
     let Some(redirect_uri) = google_redirect(&state, &headers) else {
-        return redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
+        return nav_redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let user_id = {
         let mut db = state.db.get().expect("database");
@@ -988,7 +941,7 @@ async fn google_callback(
                 user_id
             }
             Ok(None) => {
-                return redirect(
+                return nav_redirect(
                     &dest,
                     "That Google Calendar connection expired. Run /google authorize again.",
                 );
@@ -1006,7 +959,7 @@ async fn google_callback(
     .await
     {
         Ok(tokens) => tokens,
-        Err(err) => return redirect(&dest, &err),
+        Err(err) => return nav_redirect(&dest, &err),
     };
     let email = crate::google::account_email(&state.http, &access).await;
     {
@@ -1015,7 +968,7 @@ async fn google_callback(
             return plain_error(err);
         }
     }
-    let mut response = redirect(
+    let mut response = nav_redirect(
         &dest,
         "Google Calendar is connected. Marian will add events you created and events you accepted, and update them when they change.",
     );
@@ -1038,7 +991,7 @@ async fn google_disconnect(
         read_session(&mut db, &headers)
     };
     let Some(session) = session else {
-        return redirect("/", "Sign in with Discord.");
+        return nav_redirect("/", "Sign in with Discord.");
     };
     let access = {
         let mut db = state.db.get().expect("database");
@@ -1073,7 +1026,7 @@ async fn google_disconnect(
     } else {
         "Google Calendar is disconnected. Check it for any events that stayed behind."
     };
-    redirect(&next, notice)
+    nav_redirect(&next, notice)
 }
 
 fn google_redirect(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -1211,21 +1164,6 @@ struct NextQuery {
 }
 
 #[derive(serde::Deserialize)]
-struct ListForm {
-    #[serde(default)]
-    q: String,
-    #[serde(default)]
-    page: String,
-}
-
-impl ListForm {
-    fn into_list(self) -> present::ListQuery {
-        let page = self.page.trim().parse().unwrap_or(1);
-        present::ListQuery::new(self.q, page)
-    }
-}
-
-#[derive(serde::Deserialize)]
 struct DiscordCallback {
     code: Option<String>,
     state: Option<String>,
@@ -1312,1162 +1250,6 @@ struct MemberGuild {
     manages: bool,
 }
 
-async fn drafts(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Query(query): Query<ListForm>,
-) -> Response {
-    let query = query.into_list();
-    html(&state, &headers, &server, "drafts", "Drafts", move |page| {
-        present::list_page(page, "drafts", query)
-    })
-}
-
-async fn scheduled(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Query(query): Query<ListForm>,
-) -> Response {
-    let query = query.into_list();
-    html(
-        &state,
-        &headers,
-        &server,
-        "scheduled",
-        "Scheduled posts",
-        move |page| present::list_page(page, "scheduled", query),
-    )
-}
-
-async fn archive_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Query(query): Query<ListForm>,
-) -> Response {
-    let query = query.into_list();
-    html(
-        &state,
-        &headers,
-        &server,
-        "archive",
-        "Archive",
-        move |page| present::list_page(page, "archive", query),
-    )
-}
-
-async fn activity(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(&state, &headers, &server, "activity", "Activity", |page| {
-        present::list_page(page, "activity", present::ListQuery::default())
-    })
-}
-
-async fn recurring(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Query(query): Query<ListForm>,
-) -> Response {
-    let query = query.into_list();
-    html(
-        &state,
-        &headers,
-        &server,
-        "recurring",
-        "Recurring",
-        move |page| present::recurring(page, query),
-    )
-}
-
-async fn routines_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "routines",
-        "Routines",
-        present::routines_page,
-    )
-}
-
-async fn new_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "routines",
-        "New routine",
-        present::routine_form,
-    )
-}
-
-async fn show_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "routines",
-        "Routine",
-        move |page| present::routine_detail(page, &public_id),
-    )
-}
-
-async fn create_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, "/routines/new");
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let parsed = routine_input(&map);
-    let result = match parsed {
-        Ok(input) => logic::create_routine(
-            &mut db,
-            session.guild_id,
-            session.membership_id,
-            input.channel_id,
-            &input.title,
-            &input.description,
-            input.duration,
-            input.start_minutes,
-            input.poll_weekday,
-            input.poll_minutes,
-            input.lock_weekday,
-            input.lock_minutes,
-            &input.days,
-            chrono::Utc::now(),
-        ),
-        Err(err) => Err(err),
-    };
-    match result {
-        Ok((_id, public_id, jobs)) => {
-            drop(db);
-            for job in jobs {
-                enqueue(&state.discord, job);
-            }
-            redirect(
-                &here(&server, &format!("/routines/{public_id}")),
-                "Saved the routine.",
-            )
-        }
-        Err(err) => redirect(&back, &err.to_string()),
-    }
-}
-
-async fn update_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let result = (|| {
-        let id = logic::routine_in_guild(&mut db, session.guild_id, &public_id)?;
-        let input = routine_input(&map)?;
-        logic::save_routine(
-            &mut db,
-            id,
-            session.membership_id,
-            input.channel_id,
-            &input.title,
-            &input.description,
-            input.duration,
-            input.start_minutes,
-            input.poll_weekday,
-            input.poll_minutes,
-            input.lock_weekday,
-            input.lock_minutes,
-            &input.days,
-            chrono::Utc::now(),
-        )
-    })();
-    match result {
-        Ok(effect) => {
-            drop(db);
-            for job in effect.jobs {
-                enqueue(&state.discord, job);
-            }
-            redirect(&back, &effect.notice)
-        }
-        Err(err) => redirect(&back, &err.to_string()),
-    }
-}
-
-async fn save_routine_days(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let days = checked_days(&map);
-    let result = (|| {
-        let id = logic::routine_in_guild(&mut db, session.guild_id, &public_id)?;
-        if map.get("scope").map(String::as_str) == Some("usual") {
-            logic::save_usual_days(&mut db, id, session.membership_id, &days)
-                .map(|notice| (notice, Vec::new()))
-        } else {
-            logic::save_run_days(&mut db, id, session.membership_id, &days)
-                .map(|effect| (effect.notice, effect.jobs))
-        }
-    })();
-    match result {
-        Ok((notice, jobs)) => {
-            drop(db);
-            for job in jobs {
-                enqueue(&state.discord, job);
-            }
-            redirect(&back, &notice)
-        }
-        Err(err) => redirect(&back, &err.to_string()),
-    }
-}
-
-async fn vote_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, &format!("/routines/{public_id}"));
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let Some(day) = map.get("day").and_then(|value| value.parse().ok()) else {
-        return redirect(&back, "Pick a day.");
-    };
-    let run_id = match logic::routine_in_guild(&mut db, session.guild_id, &public_id)
-        .and_then(|id| logic::routine_page_data(&mut db, id))
-    {
-        Ok(Some(view)) => view.run.map(|run| run.id),
-        Ok(None) => None,
-        Err(err) => return redirect(&back, &err.to_string()),
-    };
-    let Some(run_id) = run_id else {
-        return redirect(&back, "That poll is closed.");
-    };
-    match logic::cast_run(&mut db, run_id, session.membership_id, day) {
-        Ok(effect) => {
-            drop(db);
-            for job in effect.jobs {
-                enqueue(&state.discord, job);
-            }
-            redirect(&back, &effect.notice)
-        }
-        Err(err) => redirect(&back, &err.to_string()),
-    }
-}
-
-async fn stop_routine(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/routines/{public_id}")),
-        move |db, session| {
-            let id = logic::routine_in_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::stop_routine(db, id, session.membership_id)?;
-            Ok((notice, None))
-        },
-    )
-}
-
-struct RoutineInput {
-    channel_id: i64,
-    title: String,
-    description: String,
-    duration: i64,
-    start_minutes: u16,
-    poll_weekday: u8,
-    poll_minutes: u16,
-    lock_weekday: u8,
-    lock_minutes: u16,
-    days: Vec<u8>,
-}
-
-fn routine_input(map: &HashMap<String, String>) -> Result<RoutineInput, OpError> {
-    let channel_id = map
-        .get("channel")
-        .and_then(|value| value.parse().ok())
-        .ok_or_else(|| OpError::message("Pick a channel."))?;
-    let duration = map
-        .get("duration")
-        .and_then(|value| value.parse().ok())
-        .ok_or_else(|| OpError::message("Give the event a length in minutes."))?;
-    Ok(RoutineInput {
-        channel_id,
-        title: map.get("title").cloned().unwrap_or_default(),
-        description: map.get("description").cloned().unwrap_or_default(),
-        duration,
-        start_minutes: clock_minutes(map.get("start_time").map(String::as_str).unwrap_or(""))?,
-        poll_weekday: weekday_field(map, "poll_weekday")?,
-        poll_minutes: clock_minutes(map.get("poll_time").map(String::as_str).unwrap_or(""))?,
-        lock_weekday: weekday_field(map, "lock_weekday")?,
-        lock_minutes: clock_minutes(map.get("lock_time").map(String::as_str).unwrap_or(""))?,
-        days: checked_days(map),
-    })
-}
-
-fn weekday_field(map: &HashMap<String, String>, key: &str) -> Result<u8, OpError> {
-    map.get(key)
-        .and_then(|value| value.parse().ok())
-        .filter(|day| *day < 7)
-        .ok_or_else(|| OpError::message("Pick a weekday."))
-}
-
-fn clock_minutes(raw: &str) -> Result<u16, OpError> {
-    let Some((hour, minute)) = raw.split_once(':') else {
-        return Err(OpError::message("Pick a time."));
-    };
-    let hour: u16 = hour.parse().map_err(|_| OpError::message("Pick a time."))?;
-    let minute: u16 = minute
-        .parse()
-        .map_err(|_| OpError::message("Pick a time."))?;
-    if hour > 23 || minute > 59 {
-        return Err(OpError::message("Pick a time."));
-    }
-    Ok(hour * 60 + minute)
-}
-
-fn checked_days(map: &HashMap<String, String>) -> Vec<u8> {
-    (0..7)
-        .filter(|day| map.contains_key(&format!("day_{day}")))
-        .collect()
-}
-
-async fn series(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Query(query): Query<ListForm>,
-) -> Response {
-    let query = query.into_list();
-    html(
-        &state,
-        &headers,
-        &server,
-        "recurring",
-        "Series",
-        move |page| present::series_page(page, &public_id, query),
-    )
-}
-
-async fn presets_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "presets",
-        "Presets",
-        present::presets,
-    )
-}
-
-async fn channels_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "channels",
-        "Channels",
-        present::channels,
-    )
-}
-
-async fn commands_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "commands",
-        "Command desk",
-        present::commands_page,
-    )
-}
-
-async fn settings_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "settings",
-        "Settings",
-        present::settings_page,
-    )
-}
-
-async fn google_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "google",
-        "Google Calendar",
-        present::google_page,
-    )
-}
-
-async fn save_google(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, "/google");
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let notice = match commands::google_auto_sync(
-        &mut db,
-        session.guild_id,
-        session.membership_id,
-        map.contains_key("auto_sync"),
-    ) {
-        Ok(notice) => notice,
-        Err(err) => return redirect(&back, &err.to_string()),
-    };
-    drop(db);
-    redirect(&back, &notice)
-}
-
-async fn show_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    html(&state, &headers, &server, "event", "Event", move |page| {
-        let event = event_for_guild(page.conn, page.guild_id, &public_id)?;
-        present::event_page(page, event.id)
-    })
-}
-
-async fn new_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    html(&state, &headers, &server, "event", "New event", |page| {
-        let preset = query.get("preset").and_then(|raw| {
-            store::preset_by_public(page.conn, raw)
-                .ok()
-                .flatten()
-                .filter(|preset| preset.guild_id == page.guild_id)
-                .and_then(|preset| serde_json::from_value::<PresetBody>(preset.body).ok())
-        });
-        present::form_page(page, &present::blank_form(&server, preset))
-    })
-}
-
-async fn edit_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    html(
-        &state,
-        &headers,
-        &server,
-        "event",
-        "Edit event",
-        move |page| {
-            let guild = store::guild(page.conn, page.guild_id)?.ok_or(OpError::NotFound)?;
-            let tz = clock::zone(&guild.timezone)?;
-            let event = event_for_guild(page.conn, page.guild_id, &public_id)?;
-            let draft = present::form_from_event(page.conn, event.id, tz)?;
-            present::form_page(page, &draft)
-        },
-    )
-}
-
-async fn create_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    save_form(&state, &headers, &server, None, map)
-}
-
-async fn save_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    save_form(&state, &headers, &server, Some(public_id), map)
-}
-
-fn save_form(
-    state: &AppState,
-    headers: &HeaderMap,
-    server: &str,
-    id: Option<String>,
-    map: HashMap<String, String>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, server) {
-        return guild_error(err);
-    }
-    let existing = match id.as_deref() {
-        Some(public_id) => match store::event_by_public(&mut db, public_id) {
-            Ok(Some(event)) if event.guild_id == session.guild_id => Some(event),
-            Ok(_) => return render_missing(state, &mut db, &session),
-            Err(err) => return plain_error(err),
-        },
-        None => None,
-    };
-    let guild = match store::guild(&mut db, session.guild_id) {
-        Ok(Some(guild)) => guild,
-        Ok(None) => return render_missing(state, &mut db, &session),
-        Err(err) => return plain_error(err),
-    };
-    let tz = match clock::zone(&guild.timezone) {
-        Ok(tz) => tz,
-        Err(err) => return plain_error(err),
-    };
-    let input = match present::input_from_form(
-        &map,
-        session.guild_id,
-        session.membership_id,
-        tz,
-        existing.as_ref(),
-    ) {
-        Ok(input) => input,
-        Err(err) => {
-            return form_again(
-                state,
-                &mut db,
-                &session,
-                &map,
-                existing.as_ref(),
-                tz,
-                err.to_string(),
-            );
-        }
-    };
-    match logic::save_event(&mut db, input) {
-        Ok(event_id) => {
-            let saved = store::event(&mut db, event_id).ok().flatten();
-            let public_id = saved
-                .as_ref()
-                .map(|event| event.public_id.clone())
-                .unwrap_or_default();
-            drop(db);
-            enqueue(&state.discord, DiscordJob::sync(event_id));
-            redirect(&here(server, &format!("/events/{public_id}")), "Saved.")
-        }
-        Err(OpError::NotFound) => render_missing(state, &mut db, &session),
-        Err(err) => form_again(
-            state,
-            &mut db,
-            &session,
-            &map,
-            existing.as_ref(),
-            tz,
-            err.to_string(),
-        ),
-    }
-}
-
-fn form_again(
-    state: &AppState,
-    db: &mut Connection,
-    session: &Session,
-    map: &HashMap<String, String>,
-    existing: Option<&store::Event>,
-    tz: chrono_tz::Tz,
-    error: String,
-) -> Response {
-    let server = store::discord_server_id(db, session.guild_id).unwrap_or_default();
-    let draft = present::form_from_map(map, &server, existing, error, tz);
-    let mut page = page_for(state, db, session, "event", "Edit event");
-    match present::form_page(&mut page, &draft) {
-        Ok(body) => html_ok(body, session.notice.is_some()),
-        Err(err) => plain_error(err),
-    }
-}
-
-async fn signup(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let option_id = map
-        .get("option_id")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/events/{public_id}")),
-        move |db, session| {
-            let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::signup(db, event.id, option_id, session.membership_id)?;
-            Ok((notice, Some(event.id)))
-        },
-    )
-}
-
-async fn response(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let option_id = map
-        .get("option_id")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let membership_id = map
-        .get("membership_id")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let action = map.get("action").cloned().unwrap_or_else(|| "add".into());
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/events/{public_id}")),
-        move |db, session| {
-            let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::organizer_response(
-                db,
-                event.id,
-                session.membership_id,
-                membership_id,
-                option_id,
-                &action,
-            )?;
-            Ok((notice, Some(event.id)))
-        },
-    )
-}
-
-async fn archive(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/events/{public_id}")),
-        move |db, session| {
-            let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::archive_event(db, event.id, session.membership_id)?;
-            Ok((notice, Some(event.id)))
-        },
-    )
-}
-
-async fn delete_event(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    let gone = {
-        let mut db = state.db.get().expect("database");
-        store::event_by_public(&mut db, &public_id)
-            .ok()
-            .flatten()
-            .map(|event| matches!(event.status.as_str(), "draft" | "scheduled" | "failed"))
-    };
-    let back = if gone.unwrap_or(false) {
-        here(&server, "")
-    } else {
-        here(&server, &format!("/events/{public_id}"))
-    };
-    mutate(&state, &headers, &server, &back, move |db, session| {
-        let event = event_for_guild(db, session.guild_id, &public_id)?;
-        let notice = logic::delete_event(db, event.id, session.membership_id)?;
-        Ok((notice, Some(event.id)))
-    })
-}
-
-async fn duplicate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let id = match event_for_guild(&mut db, session.guild_id, &public_id) {
-        Ok(event) => event.id,
-        Err(OpError::NotFound) => return render_missing(&state, &mut db, &session),
-        Err(err) => return plain_error(err),
-    };
-    match logic::duplicate_event(&mut db, id, session.membership_id) {
-        Ok(new_id) => {
-            let copy = store::event(&mut db, new_id)
-                .ok()
-                .flatten()
-                .map(|event| event.public_id)
-                .unwrap_or_default();
-            drop(db);
-            redirect(
-                &here(&server, &format!("/events/{copy}/edit")),
-                "A draft copy is ready, one week later.",
-            )
-        }
-        Err(err) => redirect(
-            &here(&server, &format!("/events/{public_id}")),
-            &err.to_string(),
-        ),
-    }
-}
-
-async fn skip(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/events/{public_id}")),
-        move |db, session| {
-            let event = event_for_guild(db, session.guild_id, &public_id)?;
-            let notice = logic::skip_event(db, event.id, session.membership_id)?;
-            Ok((notice, None))
-        },
-    )
-}
-
-async fn save_series(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, &format!("/recurring/{public_id}"));
-    mutate(&state, &headers, &server, &back, move |db, session| {
-        let id = series_for_guild(db, session.guild_id, &public_id)?.id;
-        let guild = store::guild(db, session.guild_id)?.ok_or(OpError::NotFound)?;
-        let tz = clock::zone(&guild.timezone)?;
-        let cadence = map.get("repeat").map(|value| value.trim()).unwrap_or("");
-        let repeat_count = map
-            .get("repeat_count")
-            .map(|value| value.trim())
-            .unwrap_or("");
-        let repeat_until = map
-            .get("repeat_until")
-            .map(|value| value.trim())
-            .unwrap_or("");
-        let max_occurrences = if repeat_count.is_empty() {
-            None
-        } else {
-            Some(
-                repeat_count
-                    .parse()
-                    .map_err(|_| OpError::message("The date count needs to be a number."))?,
-            )
-        };
-        let end_on = if repeat_until.is_empty() {
-            None
-        } else {
-            Some(clock::parse_date(repeat_until, tz)?)
-        };
-        let notice = logic::save_series_repeat(
-            db,
-            id,
-            session.membership_id,
-            logic::RepeatSpec {
-                cadence: cadence.to_string(),
-                end_on,
-                max_occurrences,
-            },
-        )?;
-        Ok((notice, None))
-    })
-}
-
-async fn end_series(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, &format!("/recurring/{public_id}")),
-        move |db, session| {
-            let id = series_for_guild(db, session.guild_id, &public_id)?.id;
-            let notice = logic::end_series(db, id, session.membership_id)?;
-            Ok((notice, None))
-        },
-    )
-}
-
-async fn save_preset(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, "/presets"),
-        |db, session| {
-            let name = map.get("name").cloned().unwrap_or_default();
-            let options = map
-                .get("options")
-                .map(|raw| {
-                    raw.split(',')
-                        .map(str::trim)
-                        .filter(|part| !part.is_empty())
-                        .map(|part| library_option(db, session.guild_id, part))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let body = PresetBody {
-                multiple_signups: map.contains_key("multiple"),
-                options,
-            };
-            logic::save_preset(db, session.guild_id, session.membership_id, &name, &body)?;
-            Ok((format!("Saved the {name} preset."), None))
-        },
-    )
-}
-
-async fn delete_preset(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((server, public_id)): Path<(String, String)>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, "/presets"),
-        move |db, session| {
-            let preset = store::preset_by_public(db, &public_id)?.ok_or(OpError::NotFound)?;
-            if preset.guild_id != session.guild_id {
-                return Err(OpError::NotFound);
-            }
-            logic::delete_preset(db, preset.id, session.membership_id)?;
-            Ok(("Removed the preset.".into(), None))
-        },
-    )
-}
-
-async fn save_library(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, "/presets"),
-        |db, session| {
-            let name = map.get("name").cloned().unwrap_or_default();
-            let emoji = map.get("emoji").cloned().unwrap_or_default();
-            logic::library_add(db, session.guild_id, session.membership_id, &name, &emoji)?;
-            Ok((format!("Added {name} to the option library."), None))
-        },
-    )
-}
-
-fn library_option(conn: &mut Connection, guild_id: i64, name: &str) -> OptionInput {
-    let known = store::list_library(conn, guild_id).ok().and_then(|rows| {
-        rows.into_iter()
-            .find(|row| row.name.eq_ignore_ascii_case(name))
-    });
-    OptionInput {
-        id: None,
-        name: name.to_string(),
-        emoji: known.map(|row| row.emoji).unwrap_or_else(|| "•".into()),
-        capacity: None,
-        waitlist: false,
-        role_id: None,
-        reminders_enabled: true,
-    }
-}
-
-async fn create_channel(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let name = map.get("name").cloned().unwrap_or_default();
-    drop(db);
-    let http = poise::serenity_prelude::Http::new(&state.bot_token);
-    let notice = match crate::gateway::open_event_channel(
-        &http,
-        &state.db,
-        session.guild_id,
-        session.membership_id,
-        &name,
-    )
-    .await
-    {
-        Ok(text) => text,
-        Err(err) => err.to_string(),
-    };
-    redirect(&here(&server, "/channels"), &notice)
-}
-
-async fn run_command(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let line = map.get("line").cloned().unwrap_or_default();
-    if let Some(name) = commands::channel_request(&line) {
-        drop(db);
-        let http = poise::serenity_prelude::Http::new(&state.bot_token);
-        let reply = match crate::gateway::open_event_channel(
-            &http,
-            &state.db,
-            session.guild_id,
-            session.membership_id,
-            &name,
-        )
-        .await
-        {
-            Ok(text) => text,
-            Err(err) => err.to_string(),
-        };
-        let mut db = state.db.get().expect("database");
-        let _ = logic::record_command(
-            &mut db,
-            session.guild_id,
-            session.membership_id,
-            &line,
-            &reply,
-        );
-        return redirect(&here(&server, "/commands"), &clip(&reply, 700));
-    }
-    let reply = commands::execute(&mut db, session.guild_id, session.membership_id, &line);
-    let ids = events_to_refresh(&mut db, &line, &reply);
-    drop(db);
-    for id in ids {
-        enqueue(&state.discord, DiscordJob::sync(id));
-        enqueue(&state.discord, DiscordJob::attend(id));
-    }
-    redirect(&here(&server, "/commands"), &clip(&reply, 700))
-}
-
-async fn save_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let back = here(&server, "/settings");
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, &headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, &server) {
-        return guild_error(err);
-    }
-    let user = match store::membership(&mut db, session.membership_id) {
-        Ok(Some(user)) => user,
-        _ => return redirect(&back, "Sign in again before changing settings."),
-    };
-    if !user.organizer {
-        return redirect(
-            &back,
-            "Only someone who runs the server can change settings.",
-        );
-    }
-    let mut settings = match store::settings(&mut db, session.guild_id) {
-        Ok(settings) => settings,
-        Err(err) => return redirect(&back, &err.to_string()),
-    };
-    let timezone = map.get("timezone").cloned().unwrap_or_else(|| "UTC".into());
-    if clock::zone(&timezone).is_err() {
-        return redirect(&back, "That timezone isn't one Marian knows.");
-    }
-    match apply_settings(&mut settings, &map) {
-        Ok(()) => {}
-        Err(err) => return redirect(&back, &err.to_string()),
-    }
-    if let Err(err) =
-        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(session.guild_id)))
-            .set(schema::guilds::timezone.eq(&timezone))
-            .execute(&mut *db)
-    {
-        return redirect(&back, &err.to_string());
-    }
-    if let Err(err) = store::update_settings(&mut db, &settings) {
-        return redirect(&back, &err.to_string());
-    }
-    drop(db);
-    redirect(&back, "Settings saved.")
-}
-
-fn apply_settings(settings: &mut Settings, map: &HashMap<String, String>) -> Result<(), OpError> {
-    settings.default_reminder_minutes = bounded(map, "default_reminder_minutes", 1, 10080)?;
-    settings.auto_archive_hours = bounded(map, "auto_archive_hours", 1, 168)?;
-    settings.post_lead_hours = bounded(map, "post_lead_hours", 0, 336)?;
-    settings.digest = match map.get("digest").map(String::as_str).unwrap_or("off") {
-        "daily" => "daily".into(),
-        "weekly" => "weekly".into(),
-        _ => "off".into(),
-    };
-    settings.role_event = optional_id(map, "role_event");
-    settings.role_edit = optional_id(map, "role_edit");
-    settings.role_delete = optional_id(map, "role_delete");
-    settings.role_channel = optional_id(map, "role_channel");
-    settings.role_signup = optional_id(map, "role_signup");
-    settings.thread_reminders = map.contains_key("thread_reminders");
-    settings.auto_archive = map.contains_key("auto_archive");
-    settings.event_threads = map.contains_key("event_threads");
-    settings.auto_join_threads = map.contains_key("auto_join_threads");
-    settings.show_attendees = map.contains_key("show_attendees");
-    settings.hour_24 = map.contains_key("hour_24");
-    settings.localize_time = map.contains_key("localize_time");
-    settings.purge_channels = map.contains_key("purge_channels");
-    settings.temp_roles = map.contains_key("temp_roles");
-    settings.calendar_auto_sync = map.contains_key("calendar_auto_sync");
-    Ok(())
-}
-
-fn bounded(map: &HashMap<String, String>, key: &str, min: i64, max: i64) -> Result<i64, OpError> {
-    let raw = map.get(key).map(String::as_str).unwrap_or("");
-    let value = raw
-        .parse::<i64>()
-        .map_err(|_| OpError::message(format!("{key} needs to be a number.")))?;
-    if !(min..=max).contains(&value) {
-        return Err(OpError::message(format!(
-            "{key} needs to be between {min} and {max}."
-        )));
-    }
-    Ok(value)
-}
-
-fn optional_id(map: &HashMap<String, String>, key: &str) -> Option<i64> {
-    map.get(key)
-        .and_then(|value| value.parse().ok())
-        .filter(|id| *id > 0)
-}
-
-async fn toggle_reminders(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(server): Path<String>,
-    Form(map): Form<HashMap<String, String>>,
-) -> Response {
-    let enabled = map.get("enabled").map(|value| value == "1").unwrap_or(true);
-    mutate(
-        &state,
-        &headers,
-        &server,
-        &here(&server, ""),
-        |db, session| {
-            let notice = logic::set_user_reminders(db, session.membership_id, enabled)?;
-            Ok((notice, None))
-        },
-    )
-}
-
 async fn personal_calendar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
     let Some(token) = personal_token(&file) else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
@@ -2499,176 +1281,25 @@ fn calendar_response(body: String) -> Response {
         .into_response()
 }
 
-fn series_for_guild(
-    conn: &mut Connection,
-    guild_id: i64,
-    public_id: &str,
-) -> Result<store::Series, OpError> {
-    let series = store::series_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if series.guild_id != guild_id {
-        return Err(OpError::NotFound);
-    }
-    Ok(series)
-}
-
-fn event_for_guild(
-    conn: &mut Connection,
-    guild_id: i64,
-    public_id: &str,
-) -> Result<store::Event, OpError> {
-    let event = store::event_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if event.guild_id != guild_id {
-        return Err(OpError::NotFound);
-    }
-    Ok(event)
-}
-
-fn here(server: &str, rest: &str) -> String {
-    format!("/servers/{server}{rest}")
-}
-
-fn bind_server(conn: &mut Connection, session: &mut Session, server: &str) -> Result<(), OpError> {
-    let guild = store::guild_by_discord(conn, server)?.ok_or(OpError::NotFound)?;
-    bind_guild(conn, session, guild.id)
-}
-
-fn bind_guild(conn: &mut Connection, session: &mut Session, guild_id: i64) -> Result<(), OpError> {
-    if guild_id <= 0 || !session.allowed.contains(&guild_id) {
-        return Err(OpError::message("That server isn't one you signed into."));
-    }
-    if store::guild(conn, guild_id)?.is_none() {
-        return Err(OpError::NotFound);
-    }
-    let user = logic::ensure_discord_user(
-        conn,
-        guild_id,
-        &session.discord_user_id,
-        &session.display_name,
-    )?;
-    session.guild_id = guild_id;
-    session.membership_id = user.id;
-    Ok(())
-}
-
-fn guild_error(err: OpError) -> Response {
-    match err {
-        OpError::NotFound => (StatusCode::NOT_FOUND, "That server isn't here.").into_response(),
-        other => redirect("/", &other.to_string()),
-    }
-}
-
-fn mutate(
-    state: &AppState,
-    headers: &HeaderMap,
-    server: &str,
-    back: &str,
-    body: impl FnOnce(&mut Connection, &Session) -> Result<(String, Option<i64>), OpError>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, server) {
-        return guild_error(err);
-    }
-    match body(&mut db, &session) {
-        Ok((notice, sync)) => {
-            drop(db);
-            if let Some(event_id) = sync {
-                enqueue(&state.discord, DiscordJob::sync(event_id));
-                enqueue(&state.discord, DiscordJob::attend(event_id));
-            }
-            redirect(back, &notice)
-        }
-        Err(err) => redirect(back, &err.to_string()),
-    }
-}
-
-fn html(
-    state: &AppState,
-    headers: &HeaderMap,
-    server: &str,
-    nav: &str,
-    title: &str,
-    render: impl FnOnce(&mut Page<'_>) -> Result<String, OpError>,
-) -> Response {
-    let mut db = state.db.get().expect("database");
-    let Some(mut session) = read_session(&mut db, headers) else {
-        return redirect("/", "Sign in with Discord.");
-    };
-    if let Err(err) = bind_server(&mut db, &mut session, server) {
-        return guild_error(err);
-    }
-    let mut page = page_for(state, &mut db, &session, nav, title);
-    match render(&mut page) {
-        Ok(body) => html_ok(body, session.notice.is_some()),
-        Err(OpError::NotFound) => match present::not_found(&mut page) {
-            Ok(body) => {
-                let mut response = Html(body).into_response();
-                *response.status_mut() = StatusCode::NOT_FOUND;
-                if session.notice.is_some() {
-                    clear_cookie(&mut response, "marian_notice");
-                }
-                response
-            }
-            Err(err) => plain_error(err),
-        },
-        Err(err) => plain_error(err),
-    }
-}
-
-fn render_missing(state: &AppState, db: &mut Connection, session: &Session) -> Response {
-    let mut page = page_for(state, db, session, "event", "Missing");
-    match present::not_found(&mut page) {
-        Ok(body) => {
-            let mut response = Html(body).into_response();
-            *response.status_mut() = StatusCode::NOT_FOUND;
-            response
-        }
-        Err(err) => plain_error(err),
-    }
-}
-
-fn page_for<'a>(
-    state: &'a AppState,
-    db: &'a mut Connection,
-    session: &'a Session,
-    nav: &'a str,
-    title: &'a str,
-) -> Page<'a> {
-    Page {
-        conn: db,
-        guild_id: session.guild_id,
-        membership_id: session.membership_id,
-        notice: session.notice.as_deref(),
-        invite_url: &state.invite_url,
-        nav,
-        title,
-        allowed_guilds: &session.allowed,
-    }
-}
-
-fn html_ok(body: String, clear_notice: bool) -> Response {
-    let mut response = Html(body).into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    if clear_notice {
-        clear_cookie(&mut response, "marian_notice");
-    }
-    response
+fn error_json(status: StatusCode, text: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": text }))).into_response()
 }
 
 fn plain_error(err: OpError) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+    error_json(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string())
 }
 
-fn redirect(path: &str, notice: &str) -> Response {
-    let path = if path.starts_with('/') && !path.starts_with("//") {
+fn safe_path(path: &str) -> &str {
+    if path.starts_with('/') && !path.starts_with("//") {
         path
     } else {
         "/"
-    };
+    }
+}
+
+/// A browser redirect for sign-in and sign-out, which leave the app.
+fn nav_redirect(path: &str, notice: &str) -> Response {
+    let path = safe_path(path);
     let mut response = Redirect::to(path).into_response();
     let value = format!(
         "marian_notice={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=120",
@@ -2693,43 +1324,6 @@ fn clear_cookie(response: &mut Response, name: &str) {
     if let Ok(header) = HeaderValue::from_str(&raw) {
         response.headers_mut().append(header::SET_COOKIE, header);
     }
-}
-
-fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
-    let token = cookie(headers, "marian_session")?;
-    let row = store::web_session(conn, &token).ok()??;
-    let fresh = Utc::now() - row.created_at < chrono::Duration::days(30);
-    if !fresh {
-        let _ = store::delete_web_session(conn, &token);
-        return None;
-    }
-    let user = store::membership(conn, row.membership_id).ok()??;
-    let discord_id = store::discord_id_for_membership(conn, user.id).ok()?;
-    if user.guild_id != row.guild_id || discord_id != row.discord_user_id {
-        let _ = store::delete_web_session(conn, &token);
-        return None;
-    }
-    let notice = cookie(headers, "marian_notice").map(|value| percent_decode(&value));
-    Some(Session {
-        discord_user_id: row.discord_user_id,
-        user_id: user.user_id,
-        display_name: row.display_name,
-        guild_id: row.guild_id,
-        membership_id: row.membership_id,
-        allowed: row.guilds,
-        notice,
-    })
-}
-
-fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let mut bits = part.trim().splitn(2, '=');
-        if bits.next() == Some(name) {
-            return bits.next().map(|value| value.to_string());
-        }
-    }
-    None
 }
 
 fn enqueue(sender: &UnboundedSender<DiscordJob>, job: DiscordJob) {
@@ -2813,24 +1407,6 @@ fn percent_encode(text: &str) -> String {
     out
 }
 
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                out.push(value);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 fn invite_url(client_id: &str) -> String {
     let client_id = client_id.trim();
     if client_id.is_empty() {
@@ -2844,6 +1420,8 @@ fn invite_url(client_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::percent_decode;
+    use crate::schema;
 
     #[test]
     fn a_server_list_accepts_string_and_integer_permissions() {
@@ -2883,7 +1461,7 @@ mod tests {
         handle: &'a str,
         color: &'a str,
         reminders_enabled: bool,
-        organizer: bool,
+        server_manager: bool,
     }
 
     #[test]
@@ -2981,6 +1559,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn site_files_go_out_precompressed_when_the_browser_takes_it() {
+        let dir = std::env::temp_dir().join(format!("marian-pkg-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = "fn main() {} ".repeat(400);
+        std::fs::write(dir.join("marian.wasm"), &plain).unwrap();
+        std::fs::write(dir.join("marian.wasm.br"), b"brotli bytes").unwrap();
+
+        let mut conn = store::open_memory().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState {
+            db: store::pool_for(&mut conn).unwrap(),
+            discord: tx,
+            invite_url: String::new(),
+            http: reqwest::Client::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            public_url: String::new(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
+            bot_token: String::new(),
+            member_roles: member_roles_cache(),
+        };
+        let app = router(state, Router::new().nest_service("/pkg", site_files(&dir)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        });
+        // No automatic decoding, so the bytes on the wire are what's checked.
+        let client = reqwest::Client::builder().no_gzip().no_brotli().build().unwrap();
+        let url = format!("http://{addr}/pkg/marian.wasm");
+        let fetch = |encoding: &'static str| {
+            let request = client.get(&url).header(header::ACCEPT_ENCODING, encoding);
+            async move { request.send().await.unwrap() }
+        };
+
+        let br = fetch("gzip, br").await;
+        assert_eq!(br.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
+        assert_eq!(br.headers().get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        let modified = br.headers().get(header::LAST_MODIFIED).cloned().unwrap();
+        assert_eq!(br.bytes().await.unwrap().as_ref(), b"brotli bytes", "the stored copy, not compressed again");
+
+        // No .gz copy here: the plain file is compressed on the way instead.
+        let gzip = fetch("gzip").await;
+        assert_eq!(gzip.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert!(gzip.bytes().await.unwrap().len() < plain.len());
+
+        let identity = fetch("identity").await;
+        assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(identity.text().await.unwrap(), plain);
+
+        let again = client
+            .get(&url)
+            .header(header::ACCEPT_ENCODING, "br")
+            .header(header::IF_MODIFIED_SINCE, modified)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn sign_in_is_required() {
         let mut conn = store::open_memory().unwrap();
         diesel::insert_into(schema::guilds::table)
@@ -3006,7 +1649,7 @@ mod tests {
                 handle: "nell",
                 color: "#1e3a6e",
                 reminders_enabled: true,
-                organizer: true,
+                server_manager: true,
             })
             .returning(schema::memberships::id)
             .get_result::<i64>(&mut conn)
@@ -3035,7 +1678,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
         };
-        let app = router(state);
+        let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -3050,20 +1693,18 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        let home = client.get(format!("http://{addr}/")).send().await.unwrap();
-        assert_eq!(home.status(), StatusCode::OK);
+        let deep = client
+            .get(format!("http://{addr}/servers/99/settings"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deep.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            home.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-cache"
+            deep.headers().get(header::LOCATION).unwrap(),
+            "/?next=%2Fservers%2F99%2Fsettings"
         );
-        let body = home.text().await.unwrap();
-        assert!(body.contains("Sign in with Discord"));
-        assert!(body.contains("class=\"gate-actions\""));
-        assert!(body.contains("Invite Marian"));
-        assert!(body.contains("Events for your server"));
-        let mark = assets::mark();
-        assert!(body.contains(mark), "{body}");
 
+        let mark = assets::mark();
         let picture = client
             .get(format!("http://{addr}{mark}"))
             .send()
@@ -3107,62 +1748,100 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         let blocked = client
-            .get(format!("http://{addr}/servers/99/settings"))
+            .get(format!("http://{addr}/api/servers/99/settings"))
             .send()
             .await
             .unwrap();
-        assert_eq!(blocked.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            blocked.headers().get(header::LOCATION).unwrap(),
-            "/?next=%2Fservers%2F99%2Fsettings"
-        );
+        assert_eq!(blocked.status(), StatusCode::UNAUTHORIZED);
+        let blocked: serde_json::Value = blocked.json().await.unwrap();
+        assert_eq!(blocked["redirect"], "/?next=%2Fservers%2F99%2Fsettings");
 
-        let open = client
-            .get(format!("http://{addr}/servers/99/settings"))
-            .header(header::COOKIE, "marian_session=session-token-value")
+        let signed = |request: reqwest::RequestBuilder| {
+            request.header(header::COOKIE, "marian_session=session-token-value")
+        };
+        let me: marian_types::Me = signed(client.get(format!("http://{addr}/api/me")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(me.name, "Nell");
+        assert_eq!(me.last_server.as_deref(), Some("99"));
+        assert_eq!(me.servers[0].name, "Guild");
+
+        let membership: marian_types::Membership =
+            signed(client.get(format!("http://{addr}/api/servers/99/me")))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(membership.name, "Nell");
+        assert!(membership.reminders_enabled);
+        assert!(membership.calendar_url.ends_with(".ics"));
+        assert!(!membership.google.ready);
+
+        let open = signed(client.get(format!("http://{addr}/api/servers/99/settings")))
             .send()
             .await
             .unwrap();
         assert_eq!(open.status(), StatusCode::OK);
-        let body = open.text().await.unwrap();
-        assert!(body.contains("account-menu"));
-        assert!(body.contains("<strong>Nell</strong>"));
-        assert!(body.contains("class=\"reminder-toggle\""));
-        assert!(body.contains(">Reminders<"));
-        assert!(body.contains("Calendar feed"));
-        let feed = body.find("Calendar feed").unwrap();
-        let leave = body.find("Sign out").unwrap();
-        assert!(feed < leave, "{body}");
-        assert!(body.contains("Google Calendar"));
-        assert!(!body.contains("Google client id"), "{body}");
-        assert!(body.contains("class=\"calendar\""));
-        assert!(body.contains(".ics"));
-        assert!(body.contains("Sign out"));
-        assert!(body.contains("switcher-add") || body.contains("class=\"invite\""));
-        assert!(body.contains("+ Add server"));
-        assert!(body.contains(assets::mark()), "{body}");
-        assert!(body.contains("servers&#x2f;99/settings"));
-        assert!(!body.contains("Acting as"));
+        let mut settings: marian_types::Settings = open.json().await.unwrap();
+        assert_eq!(settings.timezone, "UTC");
+        settings.hour_24 = !settings.hour_24;
+        settings.timezone = "Europe/Warsaw".into();
+        let saved: marian_types::Done =
+            signed(client.put(format!("http://{addr}/api/servers/99/settings")))
+                .json(&settings)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert!(saved.location.is_none());
+        let server: marian_types::Server =
+            signed(client.get(format!("http://{addr}/api/servers/99")))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(server.timezone, "Europe/Warsaw");
+        assert_eq!(server.hour_24, settings.hour_24);
 
-        let google = client
-            .get(format!("http://{addr}/servers/99/google"))
-            .header(header::COOKIE, "marian_session=session-token-value")
+        settings.default_reminder_minutes = -1;
+        let refused = signed(client.put(format!("http://{addr}/api/servers/99/settings")))
+            .json(&settings)
             .send()
             .await
             .unwrap();
-        assert_eq!(google.status(), StatusCode::OK);
-        let google_body = google.text().await.unwrap();
-        assert!(google_body.contains("Google client id"), "{google_body}");
-        assert!(google_body.contains("Not set up on this server yet."), "{google_body}");
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        let week = client
-            .get(format!("http://{addr}/"))
-            .header(header::COOKIE, "marian_session=session-token-value")
+        let drafts: marian_types::Paged<marian_types::EventSummary> =
+            signed(client.get(format!("http://{addr}/api/servers/99/events?view=drafts")))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(drafts.total, 0);
+
+        let elsewhere = signed(client.get(format!("http://{addr}/api/servers/77/settings")))
             .send()
             .await
             .unwrap();
-        assert_eq!(week.status(), StatusCode::SEE_OTHER);
-        assert_eq!(week.headers().get(header::LOCATION).unwrap(), "/servers/99");
+        assert_eq!(elsewhere.status(), StatusCode::NOT_FOUND);
+
+        let missing = signed(client.get(format!("http://{addr}/api/servers/99/nowhere")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         let start = client
             .get(format!("http://{addr}/auth/discord?next=/events/3"))
@@ -3202,7 +1881,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
         };
-        let app = router(state);
+        let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

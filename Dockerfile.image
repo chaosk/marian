@@ -1,5 +1,5 @@
-# Packages the static binary CI already built. Postgres TLS reads Debian's CA
-# bundle; Discord uses rustls and does not.
+# Packages the static binary and site CI already built. Postgres TLS reads
+# Debian's CA bundle; Discord uses rustls and does not.
 FROM debian:bookworm-slim AS certs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -10,8 +10,12 @@ ARG MARIAN_VERSION
 LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY marian /marian
+COPY site /site
 USER 65532:65532
 ENV PORT=8080 \
-    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    LEPTOS_SITE_ROOT=/site \
+    LEPTOS_SITE_PKG_DIR=pkg \
+    LEPTOS_OUTPUT_NAME=marian
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

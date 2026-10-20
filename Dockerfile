@@ -6,29 +6,11 @@ RUN apt-get update \
 # already matches the host, so the wrapper drops the flag.
 COPY ci/musl-cc /usr/local/bin/musl-cc
 RUN chmod +x /usr/local/bin/musl-cc \
-    && arch="$(uname -m)" \
-    && case "$arch" in \
-         x86_64) target=x86_64-unknown-linux-musl ;; \
-         aarch64|arm64) target=aarch64-unknown-linux-musl ;; \
-         *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
-       esac \
-    && rustup target add "$target" \
-    && printf '%s\n' "$target" > /musl-target
+    && rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl \
+    && cargo install cargo-leptos --locked --debug
 WORKDIR /src
-ENV CC_x86_64_unknown_linux_musl=/usr/local/bin/musl-cc \
-    CC_aarch64_unknown_linux_musl=/usr/local/bin/musl-cc
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src \
-    && printf 'fn main() {}\n' > src/main.rs \
-    && printf '\n' > src/lib.rs \
-    && target="$(cat /musl-target)" \
-    && cargo build --release --locked --target "$target" --features static-libpq \
-    && rm -rf src
-COPY build.rs ./
-COPY src ./src
-COPY templates ./templates
-COPY migrations ./migrations
-COPY static ./static
+ENV CC_x86_64_unknown_linux_musl=/usr/local/bin/musl-cc
+COPY . .
 # A branch build passes the commit hash. A tag build passes the version number.
 ARG MARIAN_VERSION
 RUN if [ -z "$MARIAN_VERSION" ]; then \
@@ -36,10 +18,11 @@ RUN if [ -z "$MARIAN_VERSION" ]; then \
       exit 1; \
     fi
 ENV MARIAN_VERSION=$MARIAN_VERSION
-RUN find src templates migrations static build.rs -exec touch {} + \
-    && target="$(cat /musl-target)" \
-    && cargo build --release --locked --target "$target" --features static-libpq \
-    && cp "target/$target/release/marian" /marian \
+# --precompress leaves .br and .gz copies of the wasm, script, and stylesheet
+# beside them; the server sends those instead of compressing on each request.
+# cargo-leptos takes the server's target from LEPTOS_BIN_TARGET_TRIPLE; it has no flag for it.
+RUN LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl cargo leptos build --release --precompress --bin-features static-libpq \
+    && cp target/x86_64-unknown-linux-musl/release/marian /marian \
     && file /marian | grep -Eq "statically linked|static-pie linked"
 
 FROM debian:bookworm-slim AS certs
@@ -52,8 +35,12 @@ ARG MARIAN_VERSION
 LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /marian /marian
+COPY --from=build /src/target/site /site
 USER 65532:65532
 ENV PORT=8080 \
-    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    LEPTOS_SITE_ROOT=/site \
+    LEPTOS_SITE_PKG_DIR=pkg \
+    LEPTOS_OUTPUT_NAME=marian
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

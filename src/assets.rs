@@ -18,18 +18,8 @@ struct File {
 
 struct Catalog {
     files: Vec<File>,
-    css: String,
-    js: String,
     mark: String,
     icon: String,
-}
-
-pub fn css() -> &'static str {
-    catalog().css.as_str()
-}
-
-pub fn js() -> &'static str {
-    catalog().js.as_str()
 }
 
 pub fn mark() -> &'static str {
@@ -65,25 +55,17 @@ pub fn response(path: &str, if_none_match: Option<&HeaderValue>) -> Response {
 fn catalog() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        let css_body = include_str!("../static/app.css").as_bytes();
-        let js_body = include_str!("../static/app.js").as_bytes();
         let mark_body = include_bytes!("../static/marian.png").as_slice();
         let icon_body = FAVICON.as_bytes();
-        let css = fingerprinted("/static/app", "css", css_body);
-        let js = fingerprinted("/static/app", "js", js_body);
         let mark = fingerprinted("/static/marian", "png", mark_body);
         let icon = fingerprinted("/static/favicon", "svg", icon_body);
         let files = vec![
-            file(&css, css_body, "text/css; charset=utf-8", true),
-            file(&js, js_body, "text/javascript; charset=utf-8", true),
             file(&mark, mark_body, "image/png", true),
             file(&icon, icon_body, "image/svg+xml", true),
             file("/favicon.svg", icon_body, "image/svg+xml", false),
         ];
         Catalog {
             files,
-            css,
-            js,
             mark,
             icon,
         }
@@ -150,10 +132,10 @@ mod tests {
 
     #[test]
     fn a_fingerprinted_file_is_immutable_and_revalidates() {
-        let path = css();
-        assert!(path.starts_with("/static/app."));
-        assert!(path.ends_with(".css"));
-        assert_ne!(path, "/static/app.css");
+        let path = mark();
+        assert!(path.starts_with("/static/marian."));
+        assert!(path.ends_with(".png"));
+        assert_ne!(path, "/static/marian.png");
         let first = response(path, None);
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(
@@ -169,7 +151,7 @@ mod tests {
         assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
         assert!(again.headers().get(header::CONTENT_TYPE).is_none());
         assert_eq!(
-            response("/static/missing.css", None).status(),
+            response("/static/missing.png", None).status(),
             StatusCode::NOT_FOUND
         );
     }
