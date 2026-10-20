@@ -90,8 +90,15 @@ jobs:
           CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
           # cargo-leptos takes the server's target from here; it has no flag for it.
           LEPTOS_BIN_TARGET_TRIPLE: x86_64-unknown-linux-musl
+        # The wasm and the server build in separate target directories, so they
+        # run side by side instead of one after the other.
         run: |
-          cargo leptos build --release --precompress --bin-features static-libpq
+          cargo leptos build --release --precompress --frontend-only &
+          front=$!
+          cargo leptos build --release --server-only --bin-features static-libpq &
+          server=$!
+          wait "$front"
+          wait "$server"
           cp target/x86_64-unknown-linux-musl/release/marian marian
           file marian | grep -Eq "statically linked|static-pie linked"
       - uses: actions/upload-artifact@v7
