@@ -29,13 +29,17 @@ diesel::table! {
         purge_channels -> Bool,
         temp_roles -> Bool,
         calendar_auto_sync -> Bool,
-        role_event -> Nullable<BigInt>,
-        role_edit -> Nullable<BigInt>,
-        role_delete -> Nullable<BigInt>,
-        role_channel -> Nullable<BigInt>,
-        role_signup -> Nullable<BigInt>,
         post_lead_hours -> BigInt,
         digest -> Text,
+        waitlist -> Bool,
+    }
+}
+
+diesel::table! {
+    permission_roles (guild_id, kind, role_id) {
+        guild_id -> BigInt,
+        kind -> Text,
+        role_id -> BigInt,
     }
 }
 
@@ -46,6 +50,7 @@ diesel::table! {
         name -> Text,
         color -> Text,
         discord_id -> Nullable<Text>,
+        public_id -> Uuid,
     }
 }
 
@@ -58,6 +63,7 @@ diesel::table! {
         position -> BigInt,
         purged_at -> Nullable<Timestamptz>,
         discord_id -> Nullable<Text>,
+        public_id -> Uuid,
     }
 }
 
@@ -77,7 +83,8 @@ diesel::table! {
         handle -> Text,
         color -> Text,
         reminders_enabled -> Bool,
-        organizer -> Bool,
+        server_manager -> Bool,
+        public_id -> Uuid,
     }
 }
 
@@ -108,6 +115,7 @@ diesel::table! {
         mention_role_ids -> Array<BigInt>,
         restrict_role_ids -> Array<BigInt>,
         created_at -> Timestamptz,
+        location -> Text,
     }
 }
 
@@ -176,10 +184,10 @@ diesel::table! {
         name -> Text,
         emoji -> Text,
         capacity -> Nullable<BigInt>,
-        waitlist -> Bool,
         role_id -> Nullable<BigInt>,
         reminders_enabled -> Bool,
         position -> BigInt,
+        public_id -> Uuid,
     }
 }
 
@@ -390,6 +398,8 @@ diesel::table! {
         event_id -> Nullable<BigInt>,
         discord_message_id -> Nullable<Text>,
         created_at -> Timestamptz,
+        public_id -> Uuid,
+        results_message_id -> Nullable<Text>,
     }
 }
 
@@ -451,8 +461,12 @@ diesel::joinable!(routine_runs -> events (event_id));
 diesel::joinable!(routine_votes -> routine_runs (run_id));
 diesel::joinable!(routine_votes -> memberships (membership_id));
 
+diesel::joinable!(permission_roles -> guilds (guild_id));
+diesel::joinable!(permission_roles -> roles (role_id));
+
 diesel::allow_tables_to_appear_in_same_query!(
     users,
+    permission_roles,
     activity,
     applied_access,
     calendar_feeds,

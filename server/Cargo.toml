@@ -15,7 +15,7 @@ static-libpq = ["marian/static-libpq"]
 
 [dependencies]
 axum = { workspace = true }
-leptos = { workspace = true, features = ["ssr", "islands"] }
+leptos = { workspace = true, features = ["ssr"] }
 leptos_axum = { workspace = true }
 marian = { workspace = true }
 marian-app = { workspace = true, features = ["ssr"] }

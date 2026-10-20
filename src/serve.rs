@@ -22,6 +22,7 @@ use crate::jobs::DiscordJob;
 use crate::logic;
 use crate::store::{self, Connection};
 
+mod report;
 mod rest;
 
 #[derive(Clone)]
@@ -158,8 +159,10 @@ fn router(state: AppState, pages: Router) -> Router {
         .nest("/api", rest::router())
         .with_state(state.clone())
         .merge(pages)
+        .layer(middleware::from_fn(revalidate_site))
         .layer(middleware::from_fn_with_state(state, require_login))
         .layer(tower_http::compression::CompressionLayer::new())
+        .layer(middleware::from_fn(mark_page_trace))
         .layer(http_trace())
 }
 
@@ -277,11 +280,67 @@ fn parse_ip(text: &str) -> Option<String> {
     Some(ip.to_canonical().to_string())
 }
 
+/// Hands a page render the trace it runs in. The shell writes it into the
+/// page, and a browser error report sends it back.
+async fn mark_page_trace(mut request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let page = request.method() == axum::http::Method::GET
+        && !path.starts_with("/api/")
+        && !path.starts_with("/pkg/");
+    if page {
+        if let Some(trace) = crate::observe::traceparent() {
+            request
+                .extensions_mut()
+                .insert(crate::observe::PageTrace(trace));
+        }
+    }
+    next.run(request).await
+}
+
 fn quiet_path(path: &str) -> bool {
     path == "/healthz"
         || path == "/readyz"
         || path == "/favicon.svg"
         || path.starts_with("/static/")
+        || path.ends_with("/live")
+}
+
+/// The site's script, wasm, and stylesheet. A release build made with
+/// `--precompress` leaves `.br` and `.gz` copies beside each file, compressed
+/// once at the highest setting; a browser that accepts one gets it as is, and
+/// the compression layer leaves it alone. Without the copies (a debug build)
+/// the plain file goes out and is compressed on the way.
+pub fn site_files(dir: impl AsRef<std::path::Path>) -> tower_http::services::ServeDir {
+    tower_http::services::ServeDir::new(dir)
+        .precompressed_br()
+        .precompressed_gzip()
+}
+
+/// The script and its wasm keep fixed names across builds, so a browser that
+/// guesses one is still fresh can pair it with the other from a newer build and
+/// fail to start. Making it ask each time keeps the pair together. A file that
+/// hasn't changed since the browser's copy is answered with 304 here, in case
+/// whatever served it didn't look at `If-Modified-Since`.
+async fn revalidate_site(request: Request, next: Next) -> Response {
+    if !request.uri().path().starts_with("/pkg/") {
+        return next.run(request).await;
+    }
+    let since = request.headers().get(header::IF_MODIFIED_SINCE).cloned();
+    let mut response = next.run(request).await;
+    let unchanged = response.status() == StatusCode::OK
+        && since.is_some()
+        && response.headers().get(header::LAST_MODIFIED) == since.as_ref();
+    if unchanged {
+        let mut fresh = StatusCode::NOT_MODIFIED.into_response();
+        if let Some(modified) = response.headers().get(header::LAST_MODIFIED) {
+            fresh.headers_mut().insert(header::LAST_MODIFIED, modified.clone());
+        }
+        response = fresh;
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 async fn health() -> &'static str {
@@ -635,7 +694,7 @@ async fn auth_callback(
             .iter()
             .find(|guild| guild.id == discord_id)
             .is_some_and(|guild| guild.manages);
-        if let Err(err) = logic::set_organizer(&mut db, user.id, manages) {
+        if let Err(err) = logic::set_server_manager(&mut db, user.id, manages) {
             return plain_error(err);
         }
         if signed_in.is_none() {
@@ -1402,7 +1461,7 @@ mod tests {
         handle: &'a str,
         color: &'a str,
         reminders_enabled: bool,
-        organizer: bool,
+        server_manager: bool,
     }
 
     #[test]
@@ -1500,6 +1559,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn site_files_go_out_precompressed_when_the_browser_takes_it() {
+        let dir = std::env::temp_dir().join(format!("marian-pkg-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = "fn main() {} ".repeat(400);
+        std::fs::write(dir.join("marian.wasm"), &plain).unwrap();
+        std::fs::write(dir.join("marian.wasm.br"), b"brotli bytes").unwrap();
+
+        let mut conn = store::open_memory().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState {
+            db: store::pool_for(&mut conn).unwrap(),
+            discord: tx,
+            invite_url: String::new(),
+            http: reqwest::Client::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            public_url: String::new(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
+            bot_token: String::new(),
+            member_roles: member_roles_cache(),
+        };
+        let app = router(state, Router::new().nest_service("/pkg", site_files(&dir)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        });
+        // No automatic decoding, so the bytes on the wire are what's checked.
+        let client = reqwest::Client::builder().no_gzip().no_brotli().build().unwrap();
+        let url = format!("http://{addr}/pkg/marian.wasm");
+        let fetch = |encoding: &'static str| {
+            let request = client.get(&url).header(header::ACCEPT_ENCODING, encoding);
+            async move { request.send().await.unwrap() }
+        };
+
+        let br = fetch("gzip, br").await;
+        assert_eq!(br.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
+        assert_eq!(br.headers().get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        let modified = br.headers().get(header::LAST_MODIFIED).cloned().unwrap();
+        assert_eq!(br.bytes().await.unwrap().as_ref(), b"brotli bytes", "the stored copy, not compressed again");
+
+        // No .gz copy here: the plain file is compressed on the way instead.
+        let gzip = fetch("gzip").await;
+        assert_eq!(gzip.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert!(gzip.bytes().await.unwrap().len() < plain.len());
+
+        let identity = fetch("identity").await;
+        assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(identity.text().await.unwrap(), plain);
+
+        let again = client
+            .get(&url)
+            .header(header::ACCEPT_ENCODING, "br")
+            .header(header::IF_MODIFIED_SINCE, modified)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn sign_in_is_required() {
         let mut conn = store::open_memory().unwrap();
         diesel::insert_into(schema::guilds::table)
@@ -1525,7 +1649,7 @@ mod tests {
                 handle: "nell",
                 color: "#1e3a6e",
                 reminders_enabled: true,
-                organizer: true,
+                server_manager: true,
             })
             .returning(schema::memberships::id)
             .get_result::<i64>(&mut conn)
@@ -1677,7 +1801,7 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-        assert_eq!(saved.notice, "Settings saved.");
+        assert!(saved.location.is_none());
         let server: marian_types::Server =
             signed(client.get(format!("http://{addr}/api/servers/99")))
                 .send()
@@ -1689,7 +1813,7 @@ mod tests {
         assert_eq!(server.timezone, "Europe/Warsaw");
         assert_eq!(server.hour_24, settings.hour_24);
 
-        settings.default_reminder_minutes = 0;
+        settings.default_reminder_minutes = -1;
         let refused = signed(client.put(format!("http://{addr}/api/servers/99/settings")))
             .json(&settings)
             .send()

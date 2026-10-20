@@ -33,12 +33,35 @@ pub struct Guild {
     pub discord_id: Option<String>,
 }
 
+/// A server's settings row, without the roles each permission names.
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
 #[diesel(table_name = crate::schema::settings)]
 #[diesel(primary_key(guild_id))]
 #[diesel(belongs_to(Guild))]
 #[diesel(treat_none_as_null = true)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+struct SettingsRow {
+    guild_id: i64,
+    default_reminder_minutes: i64,
+    thread_reminders: bool,
+    auto_archive: bool,
+    auto_archive_hours: i64,
+    event_threads: bool,
+    auto_join_threads: bool,
+    show_attendees: bool,
+    hour_24: bool,
+    localize_time: bool,
+    purge_channels: bool,
+    temp_roles: bool,
+    calendar_auto_sync: bool,
+    post_lead_hours: i64,
+    digest: String,
+    waitlist: bool,
+}
+
+/// A server's settings. Each `role_*` list names the roles that may do one
+/// thing; an empty list leaves it to the default for that permission.
+#[derive(Debug, Clone)]
 pub struct Settings {
     pub guild_id: i64,
     pub default_reminder_minutes: i64,
@@ -53,13 +76,89 @@ pub struct Settings {
     pub purge_channels: bool,
     pub temp_roles: bool,
     pub calendar_auto_sync: bool,
-    pub role_event: Option<i64>,
-    pub role_edit: Option<i64>,
-    pub role_delete: Option<i64>,
-    pub role_channel: Option<i64>,
-    pub role_signup: Option<i64>,
+    pub role_event: Vec<i64>,
+    pub role_edit: Vec<i64>,
+    pub role_delete: Vec<i64>,
+    pub role_channel: Vec<i64>,
+    pub role_signup: Vec<i64>,
     pub post_lead_hours: i64,
     pub digest: String,
+    /// A full option takes more signups onto a waitlist that moves up as spots open.
+    pub waitlist: bool,
+}
+
+/// The permission names stored with each role, and the matching settings field.
+const PERMISSION_KINDS: [&str; 5] = ["event", "edit", "delete", "channel", "signup"];
+
+impl Settings {
+    fn permission(&self, kind: &str) -> &[i64] {
+        match kind {
+            "event" => &self.role_event,
+            "edit" => &self.role_edit,
+            "delete" => &self.role_delete,
+            "channel" => &self.role_channel,
+            _ => &self.role_signup,
+        }
+    }
+
+    fn permission_mut(&mut self, kind: &str) -> &mut Vec<i64> {
+        match kind {
+            "event" => &mut self.role_event,
+            "edit" => &mut self.role_edit,
+            "delete" => &mut self.role_delete,
+            "channel" => &mut self.role_channel,
+            _ => &mut self.role_signup,
+        }
+    }
+
+    fn row(&self) -> SettingsRow {
+        SettingsRow {
+            guild_id: self.guild_id,
+            default_reminder_minutes: self.default_reminder_minutes,
+            thread_reminders: self.thread_reminders,
+            auto_archive: self.auto_archive,
+            auto_archive_hours: self.auto_archive_hours,
+            event_threads: self.event_threads,
+            auto_join_threads: self.auto_join_threads,
+            show_attendees: self.show_attendees,
+            hour_24: self.hour_24,
+            localize_time: self.localize_time,
+            purge_channels: self.purge_channels,
+            temp_roles: self.temp_roles,
+            calendar_auto_sync: self.calendar_auto_sync,
+            post_lead_hours: self.post_lead_hours,
+            digest: self.digest.clone(),
+            waitlist: self.waitlist,
+        }
+    }
+}
+
+impl From<SettingsRow> for Settings {
+    fn from(row: SettingsRow) -> Self {
+        Self {
+            guild_id: row.guild_id,
+            default_reminder_minutes: row.default_reminder_minutes,
+            thread_reminders: row.thread_reminders,
+            auto_archive: row.auto_archive,
+            auto_archive_hours: row.auto_archive_hours,
+            event_threads: row.event_threads,
+            auto_join_threads: row.auto_join_threads,
+            show_attendees: row.show_attendees,
+            hour_24: row.hour_24,
+            localize_time: row.localize_time,
+            purge_channels: row.purge_channels,
+            temp_roles: row.temp_roles,
+            calendar_auto_sync: row.calendar_auto_sync,
+            role_event: Vec::new(),
+            role_edit: Vec::new(),
+            role_delete: Vec::new(),
+            role_channel: Vec::new(),
+            role_signup: Vec::new(),
+            post_lead_hours: row.post_lead_hours,
+            digest: row.digest,
+            waitlist: row.waitlist,
+        }
+    }
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable)]
@@ -84,7 +183,9 @@ pub struct Membership {
     pub handle: String,
     pub color: String,
     pub reminders_enabled: bool,
-    pub organizer: bool,
+    pub server_manager: bool,
+    /// The id the API shows. The sequential `id` never leaves the server.
+    pub public_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -98,6 +199,8 @@ pub struct Role {
     pub name: String,
     pub color: String,
     pub discord_id: Option<String>,
+    /// The id the API shows. The sequential `id` never leaves the server.
+    pub public_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -113,6 +216,8 @@ pub struct Channel {
     pub position: i64,
     pub purged_at: Option<DateTime<Utc>>,
     pub discord_id: Option<String>,
+    /// The id the API shows. The sequential `id` never leaves the server.
+    pub public_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -180,6 +285,7 @@ pub(crate) struct StoredTemplate {
     pub(crate) restrict_role_ids: Vec<i64>,
     #[allow(dead_code)]
     pub(crate) created_at: DateTime<Utc>,
+    pub(crate) location: String,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -242,6 +348,10 @@ pub struct RoutineRun {
     pub event_id: Option<i64>,
     pub discord_message_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// The id its Discord buttons carry. The sequential `id` never leaves the server.
+    pub public_id: uuid::Uuid,
+    /// The reply with the results, once the poll has locked.
+    pub results_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -255,10 +365,11 @@ pub struct SignupOption {
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
-    pub waitlist: bool,
     pub role_id: Option<i64>,
     pub reminders_enabled: bool,
     pub position: i64,
+    /// The id the API shows. The sequential `id` never leaves the server.
+    pub public_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -1019,13 +1130,14 @@ pub fn default_settings(guild_id: i64) -> Settings {
         purge_channels: true,
         temp_roles: false,
         calendar_auto_sync: true,
-        role_event: None,
-        role_edit: None,
-        role_delete: None,
-        role_channel: None,
-        role_signup: None,
+        role_event: Vec::new(),
+        role_edit: Vec::new(),
+        role_delete: Vec::new(),
+        role_channel: Vec::new(),
+        role_signup: Vec::new(),
         post_lead_hours: 48,
         digest: "off".into(),
+        waitlist: false,
     }
 }
 
@@ -1043,15 +1155,57 @@ pub fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(
 }
 
 pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpError> {
-    Settings::query()
+    let row: SettingsRow = SettingsRow::query()
         .filter(schema::settings::guild_id.eq(guild_id))
         .first(conn)
         .optional()?
-        .ok_or_else(|| OpError::message("This server has no settings yet."))
+        .ok_or_else(|| OpError::message("This server has no settings yet."))?;
+    let mut settings = Settings::from(row);
+    let granted: Vec<(String, i64)> = schema::permission_roles::table
+        .filter(schema::permission_roles::guild_id.eq(guild_id))
+        .order(schema::permission_roles::role_id.asc())
+        .select((schema::permission_roles::kind, schema::permission_roles::role_id))
+        .load(conn)?;
+    for (kind, role_id) in granted {
+        if PERMISSION_KINDS.contains(&kind.as_str()) {
+            settings.permission_mut(&kind).push(role_id);
+        }
+    }
+    Ok(settings)
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = schema::permission_roles)]
+struct NewPermissionRole<'a> {
+    guild_id: i64,
+    kind: &'a str,
+    role_id: i64,
+}
+
+/// Saves the settings row and replaces the roles each permission names.
 pub fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
-    diesel::update(settings).set(settings).execute(conn)?;
+    let row = settings.row();
+    diesel::update(&row).set(&row).execute(conn)?;
+    diesel::delete(
+        schema::permission_roles::table.filter(schema::permission_roles::guild_id.eq(settings.guild_id)),
+    )
+    .execute(conn)?;
+    let mut rows = Vec::new();
+    for kind in PERMISSION_KINDS {
+        let mut ids = settings.permission(kind).to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        rows.extend(ids.into_iter().map(|role_id| NewPermissionRole {
+            guild_id: settings.guild_id,
+            kind,
+            role_id,
+        }));
+    }
+    if !rows.is_empty() {
+        diesel::insert_into(schema::permission_roles::table)
+            .values(&rows)
+            .execute(conn)?;
+    }
     Ok(())
 }
 
@@ -1378,14 +1532,20 @@ pub fn event_role_ids(
     Ok(roles.into_iter().map(|role| role.id).collect())
 }
 
+pub fn count_activity(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+    Ok(Activity::in_guild(guild_id).count().get_result(conn)?)
+}
+
 pub fn list_activity(
     conn: &mut Connection,
     guild_id: i64,
     limit: i64,
+    offset: i64,
 ) -> Result<Vec<Activity>, OpError> {
     Ok(Activity::in_guild(guild_id)
         .order(schema::activity::id.desc())
         .limit(limit)
+        .offset(offset)
         .load(conn)?)
 }
 
@@ -1410,16 +1570,6 @@ pub fn list_library(conn: &mut Connection, guild_id: i64) -> Result<Vec<LibraryO
     Ok(LibraryOption::query()
         .filter(schema::option_library::guild_id.eq(guild_id))
         .order(schema::option_library::name.asc())
-        .load(conn)?)
-}
-
-pub fn thread_messages(
-    conn: &mut Connection,
-    event: &Event,
-) -> Result<Vec<ThreadMessage>, OpError> {
-    Ok(ThreadMessage::belonging_to(event)
-        .order(schema::thread_messages::id.asc())
-        .select(ThreadMessage::as_select())
         .load(conn)?)
 }
 
@@ -1556,6 +1706,28 @@ pub fn count_status(conn: &mut Connection, guild_id: i64, status: &str) -> Resul
         .filter(schema::events::status.eq(status))
         .count()
         .get_result(conn)?)
+}
+
+/// Posted events that have not ended, plus scheduled posts.
+pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+    let now = Utc::now();
+    let rows: Vec<(String, DateTime<Utc>, i64)> = schema::events::table
+        .filter(schema::events::guild_id.eq(guild_id))
+        .filter(schema::events::status.eq_any(["posted", "scheduled"]))
+        .select((
+            schema::events::status,
+            schema::events::starts_at,
+            schema::events::duration_minutes,
+        ))
+        .load(conn)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(status, starts, minutes)| match status.as_str() {
+            "posted" => *starts + chrono::Duration::minutes(*minutes) >= now,
+            "scheduled" => true,
+            _ => false,
+        })
+        .count() as i64)
 }
 
 pub fn count_active_series(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
@@ -1822,6 +1994,13 @@ mod tests {
                 "20261017100000".to_string(),
                 "20261017160000".to_string(),
                 "20261017170000".to_string(),
+                "20261018090000".to_string(),
+                "20261018100000".to_string(),
+                "20261018110000".to_string(),
+                "20261019090000".to_string(),
+                "20261019130000".to_string(),
+                "20261019150000".to_string(),
+                "20261019170000".to_string(),
             ]
         );
     }

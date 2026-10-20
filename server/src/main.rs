@@ -8,7 +8,9 @@ fn main() {
             .expect("Leptos settings")
             .leptos_options;
         let routes = generate_route_list(marian_app::App);
+        let pkg = format!("{}/{}", options.site_root, options.site_pkg_dir);
         Router::new()
+            .nest_service(&format!("/{}", options.site_pkg_dir), marian::serve::site_files(pkg))
             .leptos_routes_with_context(
                 &options,
                 routes,

@@ -165,6 +165,7 @@ pub fn is_public(path: &str) -> bool {
             | "/auth/discord"
             | "/auth/discord/callback"
             | "/logout"
+            | "/client-errors"
     ) || crate::assets::is_static(path)
         || personal_calendar(path)
         || google_connect(path)

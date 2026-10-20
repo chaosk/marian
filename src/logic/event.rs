@@ -8,7 +8,6 @@ use super::db::{log, must_channel, must_event, must_role, must_membership};
 use super::model::*;
 use super::series::{apply_series_template, ensure_series, link_new_series, mark_posted};
 use super::signup::{fill_all, sync_access};
-use super::template;
 use crate::clock;
 use crate::error::OpError;
 use crate::schema;
@@ -170,63 +169,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
     }
 
-    let mut options = Vec::new();
-    for opt in &input.options {
-        let name = opt.name.trim().to_string();
-        if name.is_empty() {
-            continue;
-        }
-        if name.chars().count() > 40 {
-            return Err(OpError::message(
-                "Signup option names stay under 40 characters.",
-            ));
-        }
-        let emoji = {
-            let raw = opt.emoji.trim();
-            let raw = if raw.is_empty() { "•" } else { raw };
-            if raw.chars().count() > 8 {
-                return Err(OpError::message("Keep each option emoji short."));
-            }
-            raw.to_string()
-        };
-        if let Some(cap) = opt.capacity {
-            if cap < 1 || cap > 500 {
-                return Err(OpError::message(
-                    "Capacity has to be at least 1, or left open.",
-                ));
-            }
-        }
-        if opt.waitlist && opt.capacity.is_none() {
-            return Err(OpError::message(format!(
-                "{name} has a waitlist but no capacity. Set a cap, or turn the waitlist off."
-            )));
-        }
-        if let Some(role_id) = opt.role_id {
-            let role = must_role(conn, role_id)?;
-            if role.guild_id != input.guild_id {
-                return Err(OpError::message(
-                    "An option is limited to a role from another server.",
-                ));
-            }
-        }
-        options.push(OptionInput {
-            id: opt.id,
-            name,
-            emoji,
-            capacity: opt.capacity,
-            waitlist: opt.waitlist,
-            role_id: opt.role_id,
-            reminders_enabled: opt.reminders_enabled,
-        });
-    }
-    if options.is_empty() {
-        return Err(OpError::message("Add at least one signup option."));
-    }
-    if options.len() > 8 {
-        return Err(OpError::message(
-            "An event can have up to 8 signup options.",
-        ));
-    }
+    let options = clean_options(conn, input.guild_id, &input.options)?;
     if let Some(existing) = &existing {
         if existing.status == "posted" {
             let current = store::options_for(conn, existing)?;
@@ -243,27 +186,14 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
     }
 
-    let mut reminders = Vec::new();
-    for rem in &input.reminders {
-        if rem.offset_minutes == 0 && rem.message.trim().is_empty() {
-            continue;
-        }
-        if !(1..=10_080).contains(&rem.offset_minutes) {
-            return Err(OpError::message(
-                "Reminders need to be between 1 minute and 7 days out.",
-            ));
-        }
-        if rem.message.chars().count() > 300 {
-            return Err(OpError::message(
-                "Keep reminder notes under 300 characters.",
-            ));
-        }
-        reminders.push(ReminderInput {
-            offset_minutes: rem.offset_minutes,
-            message: rem.message.trim().to_string(),
-        });
-    }
-    if reminders.is_empty() && !matches!(input.action, SaveAction::Draft) {
+    let mut reminders = clean_reminders(&input.reminders)?;
+    // An event that goes out gets the server's reminder when it has none. Later
+    // saves keep an empty list empty, so reminders can be cleared.
+    // Zero minutes turns the server's default reminder off.
+    if reminders.is_empty()
+        && settings.default_reminder_minutes > 0
+        && matches!(input.action, SaveAction::Publish | SaveAction::Schedule)
+    {
         reminders.push(ReminderInput {
             offset_minutes: settings.default_reminder_minutes.clamp(1, 10_080),
             message: String::new(),
@@ -322,6 +252,221 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     })
 }
 
+/// Checks a list of options, dropping the unnamed ones.
+fn clean_options(
+    conn: &mut Connection,
+    guild_id: i64,
+    input: &[OptionInput],
+) -> Result<Vec<OptionInput>, OpError> {
+    let mut options = Vec::new();
+    for opt in input {
+        let name = opt.name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if name.chars().count() > 40 {
+            return Err(OpError::message(
+                "Signup option names stay under 40 characters.",
+            ));
+        }
+        let emoji = {
+            let raw = opt.emoji.trim();
+            let raw = if raw.is_empty() { "•" } else { raw };
+            if raw.chars().count() > 8 {
+                return Err(OpError::message("Keep each option emoji short."));
+            }
+            raw.to_string()
+        };
+        if let Some(cap) = opt.capacity {
+            if cap < 1 || cap > 500 {
+                return Err(OpError::message(
+                    "Capacity has to be at least 1, or left open.",
+                ));
+            }
+        }
+        if let Some(role_id) = opt.role_id {
+            let role = must_role(conn, role_id)?;
+            if role.guild_id != guild_id {
+                return Err(OpError::message(
+                    "An option is limited to a role from another server.",
+                ));
+            }
+        }
+        options.push(OptionInput {
+            id: opt.id,
+            name,
+            emoji,
+            capacity: opt.capacity,
+            role_id: opt.role_id,
+            reminders_enabled: opt.reminders_enabled,
+        });
+    }
+    if options.is_empty() {
+        return Err(OpError::message("Add at least one signup option."));
+    }
+    if options.len() > 8 {
+        return Err(OpError::message(
+            "An event can have up to 8 signup options.",
+        ));
+    }
+    Ok(options)
+}
+
+/// Changes an event's options in their new order. Options with an id are updated,
+/// options without one are added, and none are taken away, so signups stay put.
+pub fn save_options(
+    conn: &mut Connection,
+    event_id: i64,
+    actor_id: i64,
+    input: &[OptionInput],
+) -> Result<(), OpError> {
+    if input.iter().any(|opt| opt.name.trim().is_empty()) {
+        return Err(OpError::message("Give each option a name."));
+    }
+    store::with_tx(conn, |tx| {
+        let event = must_event(tx, event_id)?;
+        let actor = must_membership(tx, actor_id)?;
+        let settings = store::settings(tx, event.guild_id)?;
+        let roles = store::membership_role_ids(tx, &actor)?;
+        if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
+            return Err(OpError::message(
+                "You can edit events you created, or any event if you run the server.",
+            ));
+        }
+        if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
+            return Err(OpError::message(
+                "That date is already closed. Duplicate it if you need another one.",
+            ));
+        }
+        let options = clean_options(tx, event.guild_id, input)?;
+        let current: HashSet<i64> = store::options_for(tx, &event)?
+            .iter()
+            .map(|opt| opt.id)
+            .collect();
+        let kept: HashSet<i64> = options.iter().filter_map(|opt| opt.id).collect();
+        if kept.iter().any(|id| !current.contains(id)) {
+            return Err(OpError::NotFound);
+        }
+        if options.iter().filter(|opt| opt.id.is_some()).count() != kept.len() {
+            return Err(OpError::NotFound);
+        }
+        let removed: Vec<i64> = current.difference(&kept).copied().collect();
+        if !removed.is_empty() {
+            // Once posted, people may have picked an option, so options only come and go before.
+            if event.status == "posted" {
+                return Err(OpError::message("Every option this event has needs to stay."));
+            }
+            diesel::delete(
+                schema::signup_options::table
+                    .filter(schema::signup_options::event_id.eq(event.id))
+                    .filter(schema::signup_options::id.eq_any(&removed)),
+            )
+            .execute(tx)?;
+        }
+        for (index, opt) in options.iter().enumerate() {
+            let position = index as i64;
+            match opt.id {
+                Some(id) => {
+                    diesel::update(
+                        schema::signup_options::table
+                            .filter(schema::signup_options::id.eq(id))
+                            .filter(schema::signup_options::event_id.eq(event.id)),
+                    )
+                    .set((
+                        schema::signup_options::name.eq(&opt.name),
+                        schema::signup_options::emoji.eq(&opt.emoji),
+                        schema::signup_options::capacity.eq(opt.capacity),
+                        schema::signup_options::role_id.eq(opt.role_id),
+                        schema::signup_options::reminders_enabled.eq(opt.reminders_enabled),
+                        schema::signup_options::position.eq(position),
+                    ))
+                    .execute(tx)?;
+                }
+                None => {
+                    diesel::insert_into(schema::signup_options::table)
+                        .values(&NewSignupOption {
+                            event_id: event.id,
+                            name: &opt.name,
+                            emoji: &opt.emoji,
+                            capacity: opt.capacity,
+                            role_id: opt.role_id,
+                            reminders_enabled: opt.reminders_enabled,
+                            position,
+                        })
+                        .execute(tx)?;
+                }
+            }
+        }
+        if event.status == "posted" {
+            fill_all(tx, &event)?;
+            sync_access(tx, event.id)?;
+        }
+        Ok(())
+    })
+}
+
+/// Checks reminders, dropping empty ones.
+pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInput>, OpError> {
+    let mut reminders = Vec::new();
+    for rem in input {
+        if rem.offset_minutes == 0 && rem.message.trim().is_empty() {
+            continue;
+        }
+        if !(1..=10_080).contains(&rem.offset_minutes) {
+            return Err(OpError::message(
+                "Reminders need to be between 1 minute and 7 days out.",
+            ));
+        }
+        if rem.message.chars().count() > 300 {
+            return Err(OpError::message(
+                "Keep reminder notes under 300 characters.",
+            ));
+        }
+        reminders.push(ReminderInput {
+            offset_minutes: rem.offset_minutes,
+            message: rem.message.trim().to_string(),
+        });
+    }
+    if reminders.len() > 5 {
+        return Err(OpError::message("An event can have up to 5 reminders."));
+    }
+    Ok(reminders)
+}
+
+/// Checks what a routine's events carry, with the same rules as an event's.
+pub(super) fn clean_extras(conn: &mut Connection, guild_id: i64, extras: &EventExtras) -> Result<EventExtras, OpError> {
+    let location = extras.location.trim().to_string();
+    if location.chars().count() > 200 {
+        return Err(OpError::message("Keep the location under 200 characters."));
+    }
+    if !valid_color(&extras.color) {
+        return Err(OpError::message("Pick one of the event colors."));
+    }
+    for role_id in extras
+        .mention_role_ids
+        .iter()
+        .chain(extras.restrict_role_ids.iter())
+        .chain(extras.attendee_role_id.iter())
+    {
+        if must_role(conn, *role_id)?.guild_id != guild_id {
+            return Err(OpError::message("A selected role isn't from this server."));
+        }
+    }
+    if extras.cutoff_offset_minutes.is_some_and(|mins| mins < 0) {
+        return Err(OpError::message("Signups have to close before the event starts."));
+    }
+    let options = clean_options(conn, guild_id, &extras.options)?
+        .into_iter()
+        .map(|opt| OptionInput { id: None, ..opt })
+        .collect();
+    Ok(EventExtras {
+        location,
+        options,
+        reminders: clean_reminders(&extras.reminders)?,
+        ..extras.clone()
+    })
+}
+
 fn valid_color(color: &str) -> bool {
     let bytes = color.as_bytes();
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
@@ -358,9 +503,8 @@ fn insert_event_row(
     clean: &CleanInput,
     now: DateTime<Utc>,
 ) -> Result<i64, OpError> {
-    let title = template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?;
-    let description =
-        template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?;
+    let title = clean.title.clone();
+    let description = clean.description.clone();
     let row = NewEvent {
         public_id: crate::ids::event_id(),
         guild_id: input.guild_id,
@@ -402,6 +546,8 @@ struct EventEdits<'a> {
     color: &'a str,
     image_url: Option<&'a str>,
     cutoff_at: Option<DateTime<Utc>>,
+    /// Follows the cutoff: a later one, or none, opens signups again.
+    signups_closed: bool,
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
     thread_enabled: bool,
@@ -416,9 +562,8 @@ fn update_event_row(
     clean: &CleanInput,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let title = template::fill_text(conn, input.guild_id, &clean.title, input.starts_at)?;
-    let description =
-        template::fill_text(conn, input.guild_id, &clean.description, input.starts_at)?;
+    let title = clean.title.clone();
+    let description = clean.description.clone();
     let edits = EventEdits {
         channel_id: input.channel_id,
         title,
@@ -429,6 +574,7 @@ fn update_event_row(
         color: &input.color,
         image_url: clean.image_url.as_deref(),
         cutoff_at: input.cutoff_at,
+        signups_closed: input.cutoff_at.is_some_and(|cutoff| now >= cutoff),
         mention_everyone: input.mention_everyone,
         attendee_role_id: input.attendee_role_id,
         thread_enabled: input.thread_enabled,
@@ -478,7 +624,6 @@ fn update_options_in_place(
             schema::signup_options::name.eq(&opt.name),
             schema::signup_options::emoji.eq(&opt.emoji),
             schema::signup_options::capacity.eq(opt.capacity),
-            schema::signup_options::waitlist.eq(opt.waitlist),
             schema::signup_options::role_id.eq(opt.role_id),
             schema::signup_options::reminders_enabled.eq(opt.reminders_enabled),
             schema::signup_options::position.eq(index as i64),
@@ -508,7 +653,6 @@ struct NewSignupOption<'a> {
     name: &'a str,
     emoji: &'a str,
     capacity: Option<i64>,
-    waitlist: bool,
     role_id: Option<i64>,
     reminders_enabled: bool,
     position: i64,
@@ -527,7 +671,6 @@ fn insert_options(
             name: &opt.name,
             emoji: &opt.emoji,
             capacity: opt.capacity,
-            waitlist: opt.waitlist,
             role_id: opt.role_id,
             reminders_enabled: opt.reminders_enabled,
             position: index as i64,
@@ -649,10 +792,7 @@ fn transition(
                 conn,
                 event.guild_id,
                 Some(id),
-                &format!(
-                    "Updated {}. The posted message now shows the new details.",
-                    event.title
-                ),
+                &format!("Updated {}.", event.title),
             )?;
         }
         ("draft" | "scheduled" | "failed", SaveAction::Publish) => {

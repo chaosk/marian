@@ -87,6 +87,7 @@ fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
     SeriesTemplate {
         title: clean.title.clone(),
         description: clean.description.clone(),
+        location: clean.location.clone(),
         duration_minutes: input.duration_minutes,
         channel_id: input.channel_id,
         color: input.color.clone(),
@@ -133,16 +134,15 @@ fn apply_template_to_event(
     template: &SeriesTemplate,
 ) -> Result<(), OpError> {
     let start = event.starts_at;
-    let guild = must_guild(conn, event.guild_id)?;
-    let tz = clock::zone(&guild.timezone)?;
     let cutoff = template
         .cutoff_offset_minutes
         .map(|mins| start - Duration::minutes(mins));
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
         .set((
             schema::events::channel_id.eq(template.channel_id),
-            schema::events::title.eq(template::fill(&template.title, start, tz)),
-            schema::events::description.eq(template::fill(&template.description, start, tz)),
+            schema::events::title.eq(&template.title),
+            schema::events::description.eq(&template.description),
+            schema::events::location.eq(&template.location),
             schema::events::duration_minutes.eq(template.duration_minutes),
             schema::events::color.eq(&template.color),
             schema::events::image_url.eq(template.image_url.as_deref()),
@@ -334,7 +334,6 @@ pub(super) fn fill_series(
                 creator,
                 index,
                 start,
-                tz,
             )?;
             scheduled += 1;
         }
@@ -350,7 +349,6 @@ pub(super) fn insert_occurrence(
     creator: Option<i64>,
     index: i64,
     start: DateTime<Utc>,
-    tz: Tz,
 ) -> Result<i64, OpError> {
     let post_at = start - Duration::hours(series.post_lead_hours);
     let stored = template::from_series(series.guild_id, template);
@@ -364,7 +362,6 @@ pub(super) fn insert_occurrence(
             status: "scheduled",
             series_id: Some(series.id),
             occurrence_index: Some(index),
-            tz,
         },
     )
 }

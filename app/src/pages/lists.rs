@@ -2,8 +2,30 @@ use leptos::prelude::*;
 use marian_types as dto;
 
 use crate::format::{self, clock_of, status_label, window};
-use crate::islands::Finder;
-use crate::{api, base, border, head, load, param, query};
+use crate::widgets::Finder;
+use crate::cache::{self, show, when, Ready};
+use crate::{api, base, border, head, query, title, A};
+
+#[component]
+pub fn Upcoming() -> impl IntoView {
+    event_list(
+        dto::EventView::Upcoming,
+        "Upcoming",
+        "Nothing coming up.",
+        "Posted and scheduled events show up here.",
+    )
+}
+
+/// Every event on the server, whatever its state.
+#[component]
+pub fn AllEvents() -> impl IntoView {
+    event_list(
+        dto::EventView::All,
+        "Events",
+        "No events yet.",
+        "Create one with New event on the Schedule.",
+    )
+}
 
 #[component]
 pub fn Drafts() -> impl IntoView {
@@ -36,24 +58,23 @@ fn event_list(
     empty_title: &'static str,
     empty_body: &'static str,
 ) -> impl IntoView {
-    let server = param("server");
-    let q = query("q");
-    let page = query("page").parse().ok();
-    let data = async move {
-        let here = api::server(&server).await?;
-        let rows = api::events(
-            &server,
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let events = cache::listen(cache::events_scope(), move || {
+        let q = leptos_router::hooks::use_query_map().with(|map| map.get("q").unwrap_or_default());
+        let page = leptos_router::hooks::use_query_map()
+            .with(|map| map.get("page").and_then(|value| value.parse().ok()));
+        cache::events_key(
+            cache::server_key(),
             &dto::EventQuery {
                 view,
-                q: q.clone(),
+                q,
                 page,
                 ..Default::default()
             },
         )
-        .await?;
-        Ok((here, rows, q))
-    };
-    load(data, move |(server, rows, q)| {
+    });
+    when(move || (server.get(), events.get()).ready(), move |(server, rows)| {
+            let q = query("q");
         let clock = clock_of(&server);
         let base = base();
         let searchable = !rows.items.is_empty() || !q.is_empty();
@@ -61,14 +82,19 @@ fn event_list(
             let lines = rows
                 .items
                 .iter()
+                .cloned()
                 .map(|event| {
+                    let href = format!("{base}/events/{}", event.id);
+                    let style = border(&event.color);
+                    let when = clock.when(event.starts_at);
+                    let status = status_label(&event.status);
                     view! {
                         <tr>
-                            <td class="event-title" style=border(&event.color)>
-                                <a href=format!("{base}/events/{}", event.id)>{event.title.clone()}</a>
+                            <td class="event-title" style=style>
+                                <A href=href>{event.title}</A>
                             </td>
-                            <td class="fit">{clock.when(event.starts_at)}</td>
-                            <td class="fit"><span class="badge">{status_label(&event.status)}</span></td>
+                            <td class="fit">{when}</td>
+                            <td class="fit"><span class="badge">{status}</span></td>
                         </tr>
                     }
                 })
@@ -90,6 +116,7 @@ fn event_list(
         } else {
             view! { <section class="empty"><h2>{empty_title}</h2><p>{empty_body}</p></section> }.into_any()
         };
+        title(heading);
         view! {
             <div class="page-head">
                 <div><h1>{heading}</h1></div>
@@ -102,16 +129,22 @@ fn event_list(
 
 #[component]
 pub fn ActivityLog() -> impl IntoView {
-    let server = param("server");
-    let data = async move { api::activity(&server, 80).await };
-    load(data, |rows| {
+    let rows = cache::listen(cache::activity_scope(), || {
+        let page = leptos_router::hooks::use_query_map()
+            .with(|map| map.get("page").and_then(|value| value.parse().ok()))
+            .unwrap_or(1);
+        (cache::server_key(), page, 25)
+    });
+    show(rows, |rows| {
         let now = format::now();
         let base = base();
-        let body = if rows.is_empty() {
+        let body = if rows.items.is_empty() {
             view! { <section class="empty"><h2>"The log is empty."</h2><p>"Signups and posts will show up here."</p></section> }.into_any()
         } else {
             let items = rows
-                .into_iter()
+                .items
+                .iter()
+                .cloned()
                 .map(|row| {
                     let href = row
                         .event_id
@@ -119,13 +152,17 @@ pub fn ActivityLog() -> impl IntoView {
                         .unwrap_or_else(|| format!("{base}/activity"));
                     view! {
                         <li>
-                            <a href=href>{row.body}</a>
+                            <A href=href>{row.body}</A>
                             <time>{format::format_rel(row.created_at, now)}</time>
                         </li>
                     }
                 })
                 .collect_view();
-            view! { <ul class="log-list">{items}</ul> }.into_any()
+            view! {
+                <ul class="log-list">{items}</ul>
+                {pager(&rows, "")}
+            }
+            .into_any()
         };
         view! { {head("Activity")} {body} }
     })
@@ -138,8 +175,8 @@ fn pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView {
         <div class="pager">
             <p class="muted">{window(page)}</p>
             <div>
-                {prev.map(|href| view! { <a class="ghost" href=href>"Previous"</a> })}
-                {next.map(|href| view! { <a class="ghost" href=href>"Next"</a> })}
+                {prev.map(|href| view! { <A href=href attr:class="ghost">"Previous"</A> })}
+                {next.map(|href| view! { <A href=href attr:class="ghost">"Next"</A> })}
             </div>
         </div>
     }

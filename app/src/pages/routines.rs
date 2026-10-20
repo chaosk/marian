@@ -1,233 +1,446 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::format::weekday_name;
-use crate::islands::{ActionButton, JsonForm};
-use crate::{api, base, head, load, param};
+use crate::format::{self, clock_of};
+use crate::pages::event::role_cells;
+use crate::widgets::{
+    numbered, routine_problems, tally, template_event, TallyRow, unsaved_signups, ActionButton, EventColor, EventCutoff,
+    EventLocation, EventReminders, LeaveGuard, LocalDraft, MultipleToggle, PollMoment, PollTally, RoutineChannel,
+    RoutineDescription, RoutineEdit, RoutineTime, RoutineTitle, SignupPanel, ThreadToggle, UsualDays,
+};
+use crate::cache::{self, ask, when, Ready};
+use crate::{base, client, title, A};
 
 #[component]
 pub fn Routines() -> impl IntoView {
-    let server = param("server");
-    let data = async move { api::routines(&server).await };
-    load(data, |rows| {
+    ask(cache::routines_scope(), cache::server_key, |rows| {
         let base = base();
         let cards = if rows.is_empty() {
-            view! { <p class="empty">"No routines yet."</p> }.into_any()
+            view! {
+                <section class="empty">
+                    <h2>"No routines yet."</h2>
+                    <p>"A routine asks the server which day suits them each week, then posts the event."</p>
+                </section>
+            }
+            .into_any()
         } else {
-            rows.into_iter()
+            let cards = rows
+                .into_iter()
                 .map(|row| {
-                    let pills = (!row.choices.is_empty()).then(|| {
-                        let pills = row
-                            .choices
-                            .iter()
-                            .map(|choice| {
-                                view! { <span class="pill"><span>{choice.label.clone()}</span><span>{choice.votes}</span></span> }
-                            })
-                            .collect_view();
-                        view! { <div class="pills">{pills}</div> }
+                    let votes = (!row.choices.is_empty()).then(|| {
+                        tally(
+                            row.choices
+                                .iter()
+                                .map(|choice| TallyRow {
+                                    label: choice.label.clone(),
+                                    votes: choice.votes,
+                                    voters: Vec::new(),
+                                })
+                                .collect(),
+                        )
                     });
+                    let badge = format!("badge {}", state_class(&row.badge));
+                    let meta = [format!("#{}", row.channel), row.schedule.clone()]
+                        .into_iter()
+                        .filter(|part| part.len() > 1)
+                        .collect::<Vec<_>>()
+                        .join(" · ");
                     view! {
-                        <a class="card" href=format!("{base}/routines/{}", row.id)>
+                        <A href=format!("{base}/routines/{}", row.id) attr:class="card routine-card">
                             <div class="card-top">
                                 <h3>{row.title}</h3>
-                                <span class="badge">{row.badge}</span>
+                                <span class=badge>{row.badge}</span>
                             </div>
-                            <p class="meta">"#"{row.channel}</p>
-                            {(!row.poll.is_empty()).then(|| view! { <p class="meta">{row.poll.clone()}</p> })}
-                            {(!row.event.is_empty()).then(|| view! { <p class="meta">{row.event.clone()}</p> })}
-                            {pills}
-                        </a>
+                            <p class="meta">{meta}</p>
+                            {votes}
+                            <div class="routine-card-foot">
+                                {(!row.poll.is_empty()).then(|| view! { <p class="meta">{row.poll.clone()}</p> })}
+                                {(!row.event.is_empty()).then(|| view! { <p class="meta">{row.event.clone()}</p> })}
+                            </div>
+                        </A>
                     }
                 })
-                .collect_view()
-                .into_any()
+                .collect_view();
+            view! { <div class="routine-cards">{cards}</div> }.into_any()
         };
+        title("Routines");
         view! {
             <div class="page-head">
                 <div><h1>"Routines"</h1></div>
-                <a class="primary" href=format!("{base}/routines/new")>"New routine"</a>
+                <A href=format!("{base}/routines/new") attr:class="primary">"New routine"</A>
             </div>
-            <div class="stack">{cards}</div>
+            {cards}
         }
     })
 }
 
+/// The badge colour for a routine's state.
+fn state_class(state: &str) -> &'static str {
+    match state {
+        "Voting" => "state-voting",
+        "Stopped" => "state-stopped",
+        _ => "state-waiting",
+    }
+}
+
+/// A routine's details as its form sends them, from what its page shows.
+fn draft_from(routine: &dto::RoutineView) -> dto::RoutineDraft {
+    dto::RoutineDraft {
+        channel_id: routine.channel_id.clone(),
+        title: routine.title.clone(),
+        description: routine.description.clone(),
+        duration_minutes: routine.duration_minutes,
+        start_time: routine.start_time.clone(),
+        poll_weekday: routine.poll_weekday.parse().unwrap_or(6),
+        poll_time: routine.poll_time.clone(),
+        lock_weekday: routine.lock_weekday.parse().unwrap_or(1),
+        lock_time: routine.lock_time.clone(),
+        days: routine.usual.iter().filter(|day| day.on).map(|day| day.n).collect(),
+        event: None,
+    }
+}
+
+/// Sets up the event editors on a routine: a draft event holding the routine's
+/// details, which the page reads and the routine saves from.
+fn event_draft(
+    edit: RoutineEdit,
+    event: &dto::RoutineEvent,
+    channels: &[dto::Channel],
+    clock: format::Clock,
+    saved: bool,
+) -> LocalDraft {
+    let draft = edit.draft.get_untracked();
+    let channel = channels
+        .iter()
+        .find(|channel| channel.id == draft.channel_id)
+        .map(|channel| channel.name.clone())
+        .unwrap_or_default();
+    let local = LocalDraft {
+        event: RwSignal::new(template_event(&draft, event, channel)),
+        reminders: RwSignal::new(event.reminders.clone()),
+        repeat: RwSignal::new(None),
+        options: RwSignal::new(numbered(event.options.clone())),
+        channels: StoredValue::new(channels.to_vec()),
+        clock,
+        dirty: edit.dirty,
+        template: true,
+        sync: saved.then(|| Callback::new(move |_| edit.push())),
+    };
+    edit.local.set_value(Some(local));
+    provide_context(local);
+    local
+}
+
+/// The page a routine and a new one share: its wording and event details as an
+/// event's page has them, with the poll leading the page.
+fn routine_layout(
+    edit: RoutineEdit,
+    local: LocalDraft,
+    channels: Vec<dto::Channel>,
+    roles: Vec<dto::Role>,
+    poll: AnyView,
+) -> impl IntoView {
+    let key = (cache::server_now(), "routine".to_string());
+    let roles = StoredValue::new(roles);
+    let attendance = {
+        let key = key.clone();
+        move || {
+            let options = local.options.get();
+            view! {
+                <SignupPanel server=key.0.clone() event="routine".to_string() signups=unsaved_signups(&options) roles=roles.get_value()/>
+            }
+        }
+    };
+    let notices = {
+        let key = key.clone();
+        move || {
+            let event = local.event.get();
+            let reminders = local.reminders.get();
+            view! {
+                <section>
+                    <div class="section-head"><h2>"Notifications & access"</h2></div>
+                    <div class="panel">
+                        <div class="connection-grid">
+                            <div>
+                                <p class="kicker">"Reminders"</p>
+                                <EventReminders key=key.clone() event=event.clone() reminders/>
+                            </div>
+                            {role_cells(key.clone(), &event, roles.get_value())}
+                        </div>
+                    </div>
+                </section>
+            }
+        }
+    };
+    let details = {
+        let key = key.clone();
+        move || {
+            let event = local.event.get();
+            let clock = local.clock;
+            view! {
+                <p class="kicker">"Color"</p>
+                <EventColor key=key.clone() event=event.clone()/>
+                <p class="kicker">"Multiple responses"</p>
+                <MultipleToggle key=key.clone() event=event.clone()/>
+                <p class="kicker">"Event thread"</p>
+                <ThreadToggle key=key.clone() event=event.clone()/>
+                <p class="kicker">"Signups close"</p>
+                <EventCutoff key=key.clone() event=event.clone() clock=clock/>
+            }
+        }
+    };
+    view! {
+        {edit.error()}
+        <div class="event-layout">
+            <div class="event-main">
+                <RoutineDescription edit/>
+                {poll}
+                {attendance}
+                {notices}
+            </div>
+            <aside class="panel event-facts">
+                <p class="kicker">"Channel"</p>
+                <RoutineChannel edit channels/>
+                {details}
+            </aside>
+        </div>
+    }
+}
+
+/// The routine's title, and where its events happen, as an event's page heads them.
+fn routine_heading(local: LocalDraft, edit: RoutineEdit, lede: Option<&'static str>) -> impl IntoView {
+    let key = (cache::server_now(), "routine".to_string());
+    view! {
+        <p class="kicker">"Routine"</p>
+        <RoutineTitle edit/>
+        {move || view! { <EventLocation key=key.clone() event=local.event.get()/> }}
+        {lede.map(|text| view! { <p class="lede">{text}</p> })}
+    }
+}
+
+/// The weekly cycle a routine runs: when the poll opens, when it locks, and
+/// when the winning day's event starts, then the days each poll offers.
+fn poll_schedule(edit: RoutineEdit) -> impl IntoView {
+    view! {
+        <div class="poll-part">
+            <h3>"Every week"</h3>
+            <ol class="poll-cycle">
+                <li>
+                    <p class="kicker">"Poll opens"</p>
+                    <PollMoment edit locks=false/>
+                </li>
+                <li>
+                    <p class="kicker">"Poll locks"</p>
+                    <PollMoment edit locks=true/>
+                </li>
+                <li>
+                    <p class="kicker">"Event starts"</p>
+                    <RoutineTime edit/>
+                    <p class="poll-cycle-note">"on the day with the most votes"</p>
+                </li>
+            </ol>
+        </div>
+        <div class="poll-part">
+            <h3>"Days on each poll"</h3>
+            <UsualDays edit/>
+        </div>
+    }
+}
+
+/// The poll section's heading, with where the poll stands.
+fn poll_head(state: &'static str, note: String) -> impl IntoView {
+    view! {
+        <div class="section-head">
+            <h2>"Poll"</h2>
+            <p class="poll-state">
+                {(!note.is_empty()).then(|| view! { <span class="meta">{note}</span> })}
+                <span class=format!("badge {}", state_class(state))>{state}</span>
+            </p>
+        </div>
+    }
+}
+
+/// A new routine, laid out as its page will be. Nothing is saved until it is created.
 #[component]
 pub fn NewRoutine() -> impl IntoView {
-    let server = param("server");
-    let data = async move { api::channels(&server).await };
-    load(data, |channels| {
-        let days: Vec<dto::DayCheck> = (0..7)
-            .map(|n| dto::DayCheck {
-                n,
-                name: weekday_name(n).to_string(),
-                on: true,
-                votes: 0,
-            })
-            .collect();
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let channels = cache::listen(cache::channels_scope(), cache::server_key);
+    let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    let settings = cache::listen(cache::settings_scope(), cache::server_key);
+    when(move || (server.get(), channels.get(), roles.get(), settings.get()).ready(), move |(server, channels, roles, settings)| {
+        let draft = dto::RoutineDraft {
+            channel_id: channels.first().map(|channel| channel.id.clone()).unwrap_or_default(),
+            title: String::new(),
+            description: String::new(),
+            duration_minutes: 120,
+            start_time: "19:00".into(),
+            poll_weekday: 6,
+            poll_time: "10:00".into(),
+            lock_weekday: 1,
+            lock_time: "18:00".into(),
+            days: (0..7).collect(),
+            event: None,
+        };
+        let starting = dto::RoutineEvent {
+            color: "#1e3a6e".into(),
+            thread_enabled: settings.event_threads,
+            options: dto::default_signup_options(),
+            reminders: (settings.default_reminder_minutes > 0)
+                .then(|| dto::Reminder {
+                    offset_minutes: settings.default_reminder_minutes,
+                    message: String::new(),
+                    sent: false,
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let edit = RoutineEdit::new(draft, None);
+        let local = event_draft(edit, &starting, &channels, clock_of(&server), false);
+        let problems = RwSignal::new(Vec::<&'static str>::new());
+        let go = client::use_go();
+        let creating = client::action(move |draft: &dto::RoutineDraft| {
+            let draft = draft.clone();
+            let url = format!("/api{}/routines", base());
+            let toasts = client::toast_list();
+            let go = go.clone();
+            async move {
+                match crate::api::send::<dto::Done, _>("POST", &url, Some(&draft)).await {
+                    Ok(done) => {
+                        if let Some(list) = toasts {
+                            client::push_toast(list, "Created the routine.");
+                        }
+                        edit.dirty.set(false);
+                        if let Some(to) = done.location {
+                            go(&to);
+                        }
+                    }
+                    Err(failure) => edit.problem.set(failure.message),
+                }
+            }
+        });
+        let create = move |_| {
+            let draft = edit.full();
+            let mut found = routine_problems(&draft);
+            if local.options.with_untracked(|options| options.is_empty()) {
+                found.push("Add at least one attendance type.");
+            }
+            problems.set(found.clone());
+            if !found.is_empty() {
+                return;
+            }
+            edit.problem.set(String::new());
+            creating.dispatch(draft);
+        };
+        title("New routine");
         view! {
-            {head("New routine")}
-            {routine_form("/api".to_string() + &base() + "/routines", "POST".into(), None, channels, days)}
+            <LeaveGuard dirty=edit.dirty/>
+            <div class="event-top">
+                <div>{routine_heading(local, edit, Some("A weekly poll picks the day, and Marian posts the event."))}</div>
+                <div class="actions post-buttons">
+                    <button type="button" class="primary" disabled=move || creating.pending().get() on:click=create>"Create routine"</button>
+                    {move || {
+                        let list = problems.get();
+                        (!list.is_empty()).then(|| view! {
+                            <ul class="error save-problems" role="alert">
+                                {list.into_iter().map(|problem| view! { <li>{problem}</li> }).collect_view()}
+                            </ul>
+                        })
+                    }}
+                </div>
+            </div>
+            <p class="notice info">"Not saved yet. Nothing goes to Discord until you create it."</p>
+            {routine_layout(edit, local, channels, roles, view! {
+                <section>
+                    <div class="section-head"><h2>"Poll"</h2></div>
+                    <div class="panel poll">{poll_schedule(edit)}</div>
+                </section>
+            }.into_any())}
         }
     })
 }
 
 #[component]
 pub fn RoutinePage() -> impl IntoView {
-    let server = param("server");
-    let id = param("id");
-    let data = async move {
-        let routine = api::routine(&server, &id).await?;
-        let channels = api::channels(&server).await?;
-        Ok((routine, channels))
-    };
-    load(data, |(routine, channels)| {
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let routine = cache::listen(cache::routine_scope(), cache::event_key);
+    let channels = cache::listen(cache::channels_scope(), cache::server_key);
+    let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    // Out here so it outlives the redraw each saved change brings.
+    let editing_days = RwSignal::new(false);
+    when(move || (server.get(), routine.get(), channels.get(), roles.get()).ready(), move |(server, routine, channels, roles)| {
         let base = base();
         let here = format!("{base}/routines/{}", routine.id);
         let api_here = format!("/api{here}");
-        let run = routine.run.clone().map(|run| {
-            let open = run.open;
-            let vote = open.then(|| {
-                let choices = run
-                    .days
-                    .iter()
-                    .filter(|day| day.on)
-                    .map(|day| {
-                        view! {
-                            <ActionButton
-                                method="POST".into()
-                                url=format!("{api_here}/vote")
-                                label=day.name.clone()
-                                class={if day.votes > 0 { "primary".to_string() } else { "ghost".to_string() }}
-                                body=format!("{{\"day\":{}}}", day.n)
-                            />
-                        }
-                    })
-                    .collect_view();
-                view! { <div class="vote-choices">{choices}</div> }
-            });
+        let edit = RoutineEdit::new(draft_from(&routine), Some(api_here.clone()));
+        let local = event_draft(edit, &routine.event, &channels, clock_of(&server), true);
+        let (state, note) = match &routine.run {
+            _ if !routine.active => ("Stopped", String::new()),
+            Some(run) if run.open => ("Voting", format!("Locks {}", run.locks)),
+            Some(run) => ("Waiting", format!("Opens {}", run.opens)),
+            None => ("Waiting", String::new()),
+        };
+        let current = routine.run.clone().filter(|_| routine.active).map(|run| {
+            let heading = if run.open { "This week's votes" } else { "Next poll" };
             view! {
-                <section class="panel">
-                    <h3>{if open { "Days people can pick now" } else { "Days for the next poll" }}</h3>
-                    <JsonForm method="PUT".into() url=format!("{api_here}/days")>
-                        <input type="hidden" name="scope" value="run"/>
-                        <div class="checks">{day_checks(&run.days, open)}</div>
-                        <div class="actions"><button class="primary" type="submit">"Save these days"</button></div>
-                    </JsonForm>
-                    {vote}
-                </section>
+                <div class="poll-part">
+                    <h3>{heading}</h3>
+                    <PollTally run api=api_here.clone() editing=editing_days/>
+                </div>
+            }
+        });
+        let upcoming = routine.upcoming.clone().map(|event| {
+            view! {
+                <div class="poll-part poll-picked">
+                    <h3>"Picked"</h3>
+                    <A href=event.href>{event.when}</A>
+                    <span class="muted">" · "{event.winner}" won the last poll"</span>
+                </div>
             }
         });
         let history = (!routine.history.is_empty()).then(|| {
-            let cards = routine
+            let count = routine.history.len();
+            let rows = routine
                 .history
-                .iter()
-                .map(|row| {
-                    view! {
-                        <a class="card" href=format!("{base}/events/{}", row.event_id)>
-                            {row.winner.clone()}" · "{row.when.clone()}
-                        </a>
-                    }
-                })
+                .clone()
+                .into_iter()
+                .map(|row| view! { <li><A href=row.href>{row.when}</A><span class="muted">" · "{row.winner}</span></li> })
                 .collect_view();
-            view! { <div class="stack">{cards}</div> }
+            view! {
+                <details class="poll-part poll-history">
+                    <summary>{format!("Past polls ({count})")}</summary>
+                    <ul class="history-list">{rows}</ul>
+                </details>
+            }
         });
-        view! {
-            <div class="page-head">
-                <div>
-                    <p class="kicker">
-                        "#"{routine.channel.clone()}
-                        {if routine.active { " · active" } else { " · stopped" }}
-                    </p>
-                    <h1>{routine.title.clone()}</h1>
+        let poll = view! {
+            <section>
+                {poll_head(state, note)}
+                <div class="panel poll">
+                    {current}
+                    {upcoming}
+                    {poll_schedule(edit)}
+                    {history}
                 </div>
-                {routine.active.then(|| view! {
-                    <ActionButton method="POST".into() url=format!("{api_here}/stop") label="Stop".into()
-                        class="danger".into() confirm="Stop this routine?".into()/>
-                })}
+            </section>
+        }
+        .into_any();
+        let stopped = (!routine.active).then(|| view! {
+            <p class="notice info">"This routine is stopped. No more polls go out."</p>
+        });
+        title(routine.title.clone());
+        view! {
+            <div class="event-top">
+                <div>{routine_heading(local, edit, None)}</div>
+                <div class="actions">
+                    {routine.active.then(|| view! {
+                        <ActionButton method="POST" url=format!("{api_here}/stop") label="Stop"
+                            class="danger" confirm="Stop this routine? No more polls go out."/>
+                    })}
+                </div>
             </div>
-            {run}
-            {routine_form(api_here, "PUT".into(), Some(routine.clone()), channels.clone(), routine.usual.clone())}
-            {history}
+            {stopped}
+            {routine_layout(edit, local, channels, roles, poll)}
         }
     })
-}
-
-fn routine_form(
-    url: String,
-    method: String,
-    routine: Option<dto::RoutineView>,
-    channels: Vec<dto::Channel>,
-    usual: Vec<dto::DayCheck>,
-) -> impl IntoView {
-    let selected = routine.as_ref().map(|r| r.channel_id);
-    let options = channels
-        .into_iter()
-        .map(|channel| {
-            view! {
-                <option value=channel.id selected=selected == Some(channel.id)>"#"{channel.name}</option>
-            }
-        })
-        .collect_view();
-    let weekday = |selected: u8| {
-        (0..7)
-            .map(|n| view! { <option value=n selected=n == selected>{weekday_name(n)}</option> })
-            .collect_view()
-    };
-    let title = routine.as_ref().map(|r| r.title.clone()).unwrap_or_default();
-    let description = routine.as_ref().map(|r| r.description.clone()).unwrap_or_default();
-    let poll_weekday = routine.as_ref().and_then(|r| r.poll_weekday.parse().ok()).unwrap_or(6);
-    let lock_weekday = routine.as_ref().and_then(|r| r.lock_weekday.parse().ok()).unwrap_or(1);
-    let poll_time = routine.as_ref().map(|r| r.poll_time.clone()).unwrap_or_else(|| "10:00".into());
-    let lock_time = routine.as_ref().map(|r| r.lock_time.clone()).unwrap_or_else(|| "18:00".into());
-    let start_time = routine.as_ref().map(|r| r.start_time.clone()).unwrap_or_else(|| "19:00".into());
-    let duration = routine.as_ref().map(|r| r.duration_minutes).unwrap_or(120);
-    let legend = if routine.as_ref().and_then(|r| r.run.as_ref()).is_some() {
-        "Days later weeks start from"
-    } else {
-        "Days people can vote for"
-    };
-    view! {
-        <JsonForm method=method.to_string() url class="grid".into()>
-            <label class="field"><span>"Event title"</span><input name="title" required maxlength="120" value=title/></label>
-            <label class="field"><span>"Channel"</span><select name="channel_id" data-kind="int" required>{options}</select></label>
-            <label class="field span-2">
-                <span>"Event description"</span>
-                <textarea name="description" maxlength="2000" rows="4">{description}</textarea>
-                <span class="meta">"Use {date} for the event date."</span>
-            </label>
-            <label class="field"><span>"Poll opens"</span><select name="poll_weekday" data-kind="int">{weekday(poll_weekday)}</select></label>
-            <label class="field"><span>"Poll time"</span><input type="time" name="poll_time" value=poll_time required/></label>
-            <label class="field"><span>"Poll locks"</span><select name="lock_weekday" data-kind="int">{weekday(lock_weekday)}</select></label>
-            <label class="field"><span>"Lock time"</span><input type="time" name="lock_time" value=lock_time required/></label>
-            <label class="field"><span>"Event starts at"</span><input type="time" name="start_time" value=start_time required/></label>
-            <label class="field">
-                <span>"Length in minutes"</span>
-                <input type="number" name="duration_minutes" data-kind="int" min="15" max="1440" value=duration required/>
-            </label>
-            <fieldset class="span-2">
-                <legend>{legend}</legend>
-                <div class="checks">{day_checks(&usual, false)}</div>
-            </fieldset>
-            <div class="actions span-2"><button class="primary" type="submit">"Save routine"</button></div>
-        </JsonForm>
-    }
-}
-
-fn day_checks(days: &[dto::DayCheck], votes: bool) -> impl IntoView {
-    days.iter()
-        .map(|day| {
-            let label = if votes {
-                format!("{} · {}", day.name, day.votes)
-            } else {
-                day.name.clone()
-            };
-            view! {
-                <label>
-                    <input type="checkbox" name="days" data-kind="ints" value=day.n checked=day.on/>
-                    " "<span>{label}</span>
-                </label>
-            }
-        })
-        .collect_view()
 }

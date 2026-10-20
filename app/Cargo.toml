@@ -2,7 +2,7 @@
 name = "marian-app"
 version = "0.6.2"
 edition = "2021"
-description = "Marian's web pages and islands"
+description = "Marian's web pages"
 license = "MIT"
 publish = false
 
@@ -10,9 +10,11 @@ publish = false
 axum = { workspace = true, optional = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+discord-md = "3"
 gloo-net = { version = "0.6", default-features = false, features = ["http", "json"], optional = true }
 js-sys = { version = "0.3", optional = true }
-leptos = { workspace = true, features = ["islands"] }
+leptos = { workspace = true }
+leptos-fetch = { workspace = true }
 leptos_axum = { workspace = true, optional = true }
 leptos_meta = { workspace = true }
 leptos_router = { workspace = true }
@@ -24,9 +26,17 @@ serde_json = { workspace = true }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
+  "BeforeUnloadEvent",
+  "DataTransfer",
   "Document",
+  "DragEvent",
   "Element",
+  "Event",
+  "EventInit",
   "EventSource",
+  "EventTarget",
+  "FocusEvent",
+  "HtmlAnchorElement",
   "HtmlElement",
   "HtmlFormElement",
   "HtmlInputElement",
@@ -34,6 +44,8 @@ web-sys = { version = "0.3", optional = true, features = [
   "HtmlTextAreaElement",
   "Location",
   "MessageEvent",
+  "MouseEvent",
+  "Node",
   "Storage",
   "Window",
 ] }
@@ -52,6 +64,7 @@ ssr = [
   "leptos/ssr",
   "leptos_meta/ssr",
   "leptos_router/ssr",
+  "leptos-fetch/ssr",
   "dep:axum",
   "dep:leptos_axum",
   "dep:marian",

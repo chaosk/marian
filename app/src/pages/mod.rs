@@ -1,7 +1,6 @@
 pub mod channels;
 pub mod commands;
 pub mod event;
-pub mod form;
 pub mod home;
 pub mod lists;
 pub mod misc;

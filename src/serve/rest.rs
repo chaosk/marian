@@ -18,6 +18,7 @@ use crate::store::Connection;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
+        .route("/client-errors", post(super::report::client_error))
         .route("/me", get(me))
         .route("/timezones", get(timezones))
         .route("/servers/{server}", get(server))
@@ -25,15 +26,21 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/settings", get(settings).put(put_settings))
         .route("/servers/{server}/roles", get(roles))
         .route("/servers/{server}/members", get(members))
+        .route("/servers/{server}/members/search", get(search_members))
         .route("/servers/{server}/channels", get(channels).post(create_channel))
         .route("/servers/{server}/events", get(events).post(create_event))
         .route(
             "/servers/{server}/events/{id}",
-            get(event).put(update_event).delete(delete_event),
+            get(event).put(update_event).patch(patch_event).delete(delete_event),
         )
-        .route("/servers/{server}/events/{id}/options", get(event_options))
+        .route("/servers/{server}/events/{id}/publish", post(publish_event))
+        .route("/servers/{server}/events/{id}/schedule", post(schedule_event))
+        .route("/servers/{server}/events/{id}/draft", post(unschedule_event))
+        .route(
+            "/servers/{server}/events/{id}/options",
+            put(put_options),
+        )
         .route("/servers/{server}/events/{id}/reminders", get(event_reminders))
-        .route("/servers/{server}/events/{id}/thread", get(thread))
         .route("/servers/{server}/events/{id}/signups", get(signups))
         .route(
             "/servers/{server}/events/{id}/signups/me/{option}",
@@ -46,7 +53,8 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/events/{id}/archive", post(archive))
         .route("/servers/{server}/events/{id}/duplicate", post(duplicate))
         .route("/servers/{server}/events/{id}/skip", post(skip))
-        .route("/servers/{server}/events/{id}/live", get(live))
+        .route("/servers/{server}/live", get(live_server))
+        .route("/servers/{server}/events/{id}/live", get(live_event))
         .route("/servers/{server}/reminders", get(pending_reminders))
         .route("/servers/{server}/activity", get(activity))
         .route("/servers/{server}/series", get(series_list))
@@ -138,22 +146,34 @@ fn change(
     server: &str,
     body: impl FnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Done> {
-    let outcome = scoped(state, headers, server, body)?;
+    let mut guild_id = 0;
+    let outcome = scoped(state, headers, server, |db, viewer| {
+        guild_id = viewer.guild_id;
+        body(db, viewer)
+    })?;
+    crate::live::changed(guild_id);
     finish(state, outcome)
+}
+
+/// A personal write that other open pages do not need to refetch.
+fn write(
+    state: &AppState,
+    headers: &HeaderMap,
+    server: &str,
+    body: impl FnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
+) -> Reply<dto::Done> {
+    finish(state, scoped(state, headers, server, body)?)
 }
 
 fn finish(state: &AppState, outcome: Outcome) -> Reply<dto::Done> {
     if let Some(event_id) = outcome.sync {
-        crate::live::changed(event_id);
         enqueue(&state.discord, DiscordJob::sync(event_id));
         enqueue(&state.discord, DiscordJob::attend(event_id));
     }
     for job in outcome.jobs {
         enqueue(&state.discord, job);
     }
-    let mut done = outcome.done;
-    done.notice = clip(&done.notice, 700);
-    Ok(Json(done))
+    Ok(Json(outcome.done))
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Reply<dto::Me> {
@@ -194,7 +214,7 @@ async fn patch_membership(
     Path(server): One,
     Json(patch): Json<dto::MembershipPatch>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::patch_membership(db, v, &patch))
+    write(&state, &headers, &server, |db, v| api::patch_membership(db, v, &patch))
 }
 
 async fn settings(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<dto::Settings> {
@@ -218,6 +238,70 @@ async fn members(State(state): S, headers: HeaderMap, Path(server): One) -> Repl
     read(&state, &headers, &server, api::members)
 }
 
+#[derive(Deserialize)]
+struct MemberQuery {
+    #[serde(default)]
+    q: String,
+}
+
+/// Everyone in the Discord server whose name starts with `q`, not just the
+/// people Marian has met. Each one becomes a member here so they can be added.
+async fn search_members(
+    State(state): S,
+    headers: HeaderMap,
+    Path(server): One,
+    Query(query): Query<MemberQuery>,
+) -> Reply<Vec<dto::Member>> {
+    scoped(&state, &headers, &server, |_, _| Ok(()))?;
+    let needle = query.q.trim();
+    if needle.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let found = discord_search(&state, &server, needle).await?;
+    read(&state, &headers, &server, |db, v| api::remember_members(db, v, &found))
+}
+
+/// Asks Discord for up to 25 people in the server whose username or nickname
+/// starts with `needle`. Bots are left out. Pairs are Discord id and name.
+async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<Vec<(String, String)>, Problem> {
+    #[derive(Deserialize)]
+    struct User {
+        id: String,
+        username: String,
+        #[serde(default)]
+        global_name: Option<String>,
+        #[serde(default)]
+        bot: bool,
+    }
+    #[derive(Deserialize)]
+    struct Found {
+        user: User,
+    }
+    let unavailable = || Problem(StatusCode::BAD_GATEWAY, "Discord didn't answer the search. Try again.".into());
+    let request = state
+        .http
+        .get(format!("https://discord.com/api/v10/guilds/{server}/members/search"))
+        .query(&[("query", needle), ("limit", "25")])
+        .header(header::AUTHORIZATION, format!("Bot {}", state.bot_token.trim()));
+    let response = crate::observe::send_traced(request).await.map_err(|err| {
+        tracing::warn!("Discord member search: {err}");
+        unavailable()
+    })?;
+    if !response.status().is_success() {
+        tracing::warn!("Discord member search returned {}", response.status());
+        return Err(unavailable());
+    }
+    let found: Vec<Found> = response.json().await.map_err(|_| unavailable())?;
+    Ok(found
+        .into_iter()
+        .filter(|found| !found.user.bot)
+        .map(|found| {
+            let name = crate::auth::discord_display_name(found.user.global_name.as_deref(), &found.user.username);
+            (found.user.id, name)
+        })
+        .collect())
+}
+
 async fn channels(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::Channel>> {
     read(&state, &headers, &server, api::channels)
 }
@@ -229,11 +313,9 @@ async fn create_channel(
     Json(draft): Json<dto::ChannelDraft>,
 ) -> Reply<dto::Done> {
     let viewer = scoped(&state, &headers, &server, |_, v| Ok(v.clone()))?;
-    let notice = open_channel(&state, &viewer, &draft.name).await?;
-    Ok(Json(dto::Done {
-        notice,
-        location: None,
-    }))
+    open_channel(&state, &viewer, &draft.name).await?;
+    crate::live::changed(viewer.guild_id);
+    Ok(Json(dto::Done { location: None }))
 }
 
 async fn open_channel(state: &AppState, viewer: &Session, name: &str) -> Result<String, Problem> {
@@ -274,16 +356,63 @@ async fn update_event(
     change(&state, &headers, &server, |db, v| api::update_event(db, v, &id, &draft))
 }
 
+/// Runs a change to one event and answers with the event as it now reads.
+fn change_event(
+    state: &AppState,
+    headers: &HeaderMap,
+    server: &str,
+    id: &str,
+    body: impl FnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
+) -> Reply<dto::Event> {
+    let mut guild_id = 0;
+    let (outcome, fresh) = scoped(state, headers, server, |db, v| {
+        guild_id = v.guild_id;
+        let outcome = body(db, v)?;
+        Ok((outcome, api::event(db, v, id)?))
+    })?;
+    crate::live::changed(guild_id);
+    let _ = finish(state, outcome)?;
+    Ok(Json(fresh))
+}
+
+/// Changes details in place.
+async fn patch_event(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(patch): Json<dto::EventPatch>,
+) -> Reply<dto::Event> {
+    change_event(&state, &headers, &server, &id, |db, v| api::patch_event(db, v, &id, &patch))
+}
+
+async fn publish_event(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Event> {
+    change_event(&state, &headers, &server, &id, |db, v| api::publish_event(db, v, &id))
+}
+
+async fn unschedule_event(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Event> {
+    change_event(&state, &headers, &server, &id, |db, v| api::unschedule_event(db, v, &id))
+}
+
+async fn schedule_event(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(when): Json<dto::PostAt>,
+) -> Reply<dto::Event> {
+    change_event(&state, &headers, &server, &id, |db, v| api::schedule_event(db, v, &id, &when))
+}
+
 async fn delete_event(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| api::delete_event(db, v, &id))
 }
 
-async fn event_options(
+async fn put_options(
     State(state): S,
     headers: HeaderMap,
     Path((server, id)): Two,
-) -> Reply<Vec<dto::SignupOption>> {
-    read(&state, &headers, &server, |db, v| api::event_options(db, v, &id))
+    Json(options): Json<Vec<dto::SignupOption>>,
+) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::put_options(db, v, &id, &options))
 }
 
 async fn event_reminders(
@@ -294,9 +423,6 @@ async fn event_reminders(
     read(&state, &headers, &server, |db, v| api::event_reminders(db, v, &id))
 }
 
-async fn thread(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Thread> {
-    read(&state, &headers, &server, |db, v| api::thread(db, v, &id))
-}
 
 async fn signups(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Signups> {
     read(&state, &headers, &server, |db, v| api::signups(db, v, &id))
@@ -305,36 +431,36 @@ async fn signups(State(state): S, headers: HeaderMap, Path((server, id)): Two) -
 async fn join(
     State(state): S,
     headers: HeaderMap,
-    Path((server, id, option)): Path<(String, String, i64)>,
+    Path((server, id, option)): Path<(String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, option, true))
+    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, &option, true))
 }
 
 async fn leave(
     State(state): S,
     headers: HeaderMap,
-    Path((server, id, option)): Path<(String, String, i64)>,
+    Path((server, id, option)): Path<(String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, option, false))
+    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, &option, false))
 }
 
 async fn add_member(
     State(state): S,
     headers: HeaderMap,
-    Path((server, id, member, option)): Path<(String, String, i64, i64)>,
+    Path((server, id, member, option)): Path<(String, String, String, String)>,
 ) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| {
-        api::set_signup(db, v, &id, member, option, true)
+        api::set_signup(db, v, &id, &member, &option, true)
     })
 }
 
 async fn remove_member(
     State(state): S,
     headers: HeaderMap,
-    Path((server, id, member, option)): Path<(String, String, i64, i64)>,
+    Path((server, id, member, option)): Path<(String, String, String, String)>,
 ) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| {
-        api::set_signup(db, v, &id, member, option, false)
+        api::set_signup(db, v, &id, &member, &option, false)
     })
 }
 
@@ -350,21 +476,34 @@ async fn skip(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> R
     change(&state, &headers, &server, |db, v| api::skip_event(db, v, &id))
 }
 
-/// Sends `changed` whenever the event changes, so open pages fetch it again.
-async fn live(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Result<Response, Problem> {
-    let event_id = scoped(&state, &headers, &server, |db, v| api::event_key(db, v, &id))?;
+/// Sends `changed` whenever this server changes, so open pages fetch again.
+async fn live_server(State(state): S, headers: HeaderMap, Path(server): One) -> Result<Response, Problem> {
+    let guild_id = scoped(&state, &headers, &server, |_, viewer| Ok(viewer.guild_id))?;
+    Ok(live_sse(guild_id))
+}
+
+/// Same pulse as the server stream, kept for an event page that opened first.
+async fn live_event(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Result<Response, Problem> {
+    let guild_id = scoped(&state, &headers, &server, |db, v| {
+        api::event_key(db, v, &id)?;
+        Ok(v.guild_id)
+    })?;
+    Ok(live_sse(guild_id))
+}
+
+fn live_sse(guild_id: i64) -> Response {
     use tokio_stream::StreamExt as _;
     let changes = tokio_stream::wrappers::BroadcastStream::new(crate::live::subscribe())
         .filter_map(move |change| match change {
-            Ok(id) if id == event_id => Some(Ok::<_, std::convert::Infallible>(
+            Ok(id) if id == guild_id => Some(Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default().data("changed"),
             )),
             Ok(_) => None,
             Err(_) => Some(Ok(axum::response::sse::Event::default().data("changed"))),
         });
-    Ok(axum::response::sse::Sse::new(changes)
+    axum::response::sse::Sse::new(changes)
         .keep_alive(axum::response::sse::KeepAlive::default())
-        .into_response())
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -382,13 +521,21 @@ async fn pending_reminders(
     read(&state, &headers, &server, |db, v| api::pending_reminders(db, v, limit))
 }
 
+#[derive(Deserialize)]
+struct PageLimit {
+    page: Option<u32>,
+    limit: Option<i64>,
+}
+
 async fn activity(
     State(state): S,
     headers: HeaderMap,
     Path(server): One,
-    Query(query): Query<Limit>,
-) -> Reply<Vec<dto::Activity>> {
-    read(&state, &headers, &server, |db, v| api::activity(db, v, query.limit.unwrap_or(80)))
+    Query(query): Query<PageLimit>,
+) -> Reply<dto::Paged<dto::Activity>> {
+    read(&state, &headers, &server, |db, v| {
+        api::activity(db, v, query.page.unwrap_or(1), query.limit.unwrap_or(25))
+    })
 }
 
 async fn series_list(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::Series>> {
@@ -466,6 +613,7 @@ async fn run_command(
         if let Ok(mut db) = state.db.get() {
             let _ = logic::record_command(&mut db, viewer.guild_id, viewer.membership_id, &line, &reply);
         }
+        crate::live::changed(viewer.guild_id);
         return Ok(Json(dto::CommandReply {
             reply: clip(&reply, 700),
         }));
@@ -479,8 +627,8 @@ async fn run_command(
         let ids = events_to_refresh(&mut db, &line, &reply);
         (reply, ids)
     };
+    crate::live::changed(viewer.guild_id);
     for id in ids {
-        crate::live::changed(id);
         enqueue(&state.discord, DiscordJob::sync(id));
         enqueue(&state.discord, DiscordJob::attend(id));
     }

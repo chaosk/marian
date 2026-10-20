@@ -3,7 +3,7 @@ use chrono_tz::Tz;
 
 use crate::clock;
 
-/// Read a start time the way an organizer would type it in Discord.
+/// Read a start time the way someone would type it in Discord.
 pub fn parse_when(input: &str, now: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
     let text = input.trim().to_lowercase();
     if text.is_empty() {

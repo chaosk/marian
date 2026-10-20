@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::time::{ZoneGroup, ZoneRow};
 
-/// The reply to a change: what to tell the person, and where to go next.
+/// The reply to a change: where to go next, when the change moved the person.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Done {
-    pub notice: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
 }
@@ -38,6 +37,7 @@ pub struct Me {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Counts {
     pub drafts: i64,
+    pub upcoming: i64,
     pub scheduled: i64,
     pub series: i64,
     pub routines: i64,
@@ -66,9 +66,8 @@ pub struct Google {
 /// The signed-in person in one server.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Membership {
-    pub id: i64,
     pub name: String,
-    pub organizer: bool,
+    pub server_manager: bool,
     pub reminders_enabled: bool,
     pub calendar_url: String,
     pub google: Google,
@@ -84,20 +83,20 @@ pub struct MembershipPatch {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Member {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub color: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Role {
-    pub id: i64,
+    pub id: String,
     pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Channel {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub kind: String,
     pub events: i64,
@@ -116,11 +115,21 @@ pub struct Settings {
     pub auto_archive_hours: i64,
     pub post_lead_hours: i64,
     pub digest: String,
-    pub role_event: Option<i64>,
-    pub role_edit: Option<i64>,
-    pub role_delete: Option<i64>,
-    pub role_channel: Option<i64>,
-    pub role_signup: Option<i64>,
+    /// Roles that may create events. Empty lets everyone.
+    #[serde(default)]
+    pub role_event: Vec<String>,
+    /// Roles that may edit any event, besides its creator and server managers.
+    #[serde(default)]
+    pub role_edit: Vec<String>,
+    /// Roles that may delete any event, besides its creator and server managers.
+    #[serde(default)]
+    pub role_delete: Vec<String>,
+    /// Roles that may create channels. Empty follows who may create events.
+    #[serde(default)]
+    pub role_channel: Vec<String>,
+    /// Roles that may change signup options and presets.
+    #[serde(default)]
+    pub role_signup: Vec<String>,
     pub thread_reminders: bool,
     pub auto_archive: bool,
     pub event_threads: bool,
@@ -131,6 +140,9 @@ pub struct Settings {
     pub purge_channels: bool,
     pub temp_roles: bool,
     pub calendar_auto_sync: bool,
+    /// A full option takes more signups onto a waitlist that moves up as spots open.
+    #[serde(default)]
+    pub waitlist: bool,
 }
 
 /// How full one option is.
@@ -209,12 +221,6 @@ pub struct Abilities {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SeriesRef {
-    pub id: String,
-    pub cadence: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: String,
     pub title: String,
@@ -227,16 +233,17 @@ pub struct Event {
     pub post_at: Option<DateTime<Utc>>,
     pub color: String,
     pub image_url: Option<String>,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub channel: String,
-    pub attendee_role_id: Option<i64>,
+    pub attendee_role_id: Option<String>,
     pub mention_everyone: bool,
-    pub mention_role_ids: Vec<i64>,
-    pub restrict_role_ids: Vec<i64>,
+    pub mention_role_ids: Vec<String>,
+    pub restrict_role_ids: Vec<String>,
     pub thread_enabled: bool,
     pub multiple_signups: bool,
     pub signups_closed: bool,
-    pub series: Option<SeriesRef>,
+    /// The series this date belongs to, when it repeats.
+    pub series: Option<Series>,
     pub creator: String,
     pub discord_url: Option<String>,
     pub google_url: Option<String>,
@@ -250,15 +257,13 @@ pub struct Event {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignupOption {
     #[serde(default)]
-    pub id: Option<i64>,
+    pub id: Option<String>,
     pub name: String,
     pub emoji: String,
     #[serde(default)]
     pub capacity: Option<i64>,
     #[serde(default)]
-    pub waitlist: bool,
-    #[serde(default)]
-    pub role_id: Option<i64>,
+    pub role_id: Option<String>,
     #[serde(default)]
     pub reminders: bool,
 }
@@ -281,7 +286,7 @@ pub struct PendingReminder {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Person {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub color: String,
 }
@@ -289,10 +294,11 @@ pub struct Person {
 /// One option's signups, and whether the signed-in person can use it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OptionSignups {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
+    pub role_id: Option<String>,
     pub role: Option<String>,
     pub reminders: bool,
     pub confirmed_count: i64,
@@ -314,19 +320,11 @@ pub struct Signups {
     pub notes: Vec<String>,
     pub show_names: bool,
     pub can_manage: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ThreadNote {
-    pub body: String,
-    pub place: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Thread {
-    pub messages: Vec<ThreadNote>,
-    pub members: Vec<String>,
+    /// The options and responses can still change here: the person can manage
+    /// the event, and it hasn't been archived, skipped, or cancelled.
+    pub editable: bool,
+    /// Responses can change only once the event is posted.
+    pub posted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,7 +359,6 @@ pub fn default_signup_options() -> Vec<SignupOption> {
         name: name.into(),
         emoji: emoji.into(),
         capacity: None,
-        waitlist: false,
         role_id: None,
         reminders,
     })
@@ -376,7 +373,7 @@ pub struct EventDraft {
     pub description: String,
     #[serde(default)]
     pub location: String,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub color: String,
     pub starts_local: NaiveDateTime,
     pub duration_minutes: i64,
@@ -385,7 +382,7 @@ pub struct EventDraft {
     #[serde(default)]
     pub post_local: Option<NaiveDateTime>,
     #[serde(default)]
-    pub attendee_role_id: Option<i64>,
+    pub attendee_role_id: Option<String>,
     #[serde(default)]
     pub thread_enabled: bool,
     #[serde(default)]
@@ -393,9 +390,9 @@ pub struct EventDraft {
     #[serde(default)]
     pub mention_everyone: bool,
     #[serde(default)]
-    pub mention_role_ids: Vec<i64>,
+    pub mention_role_ids: Vec<String>,
     #[serde(default)]
-    pub restrict_role_ids: Vec<i64>,
+    pub restrict_role_ids: Vec<String>,
     #[serde(default)]
     pub options: Vec<SignupOption>,
     #[serde(default)]
@@ -408,40 +405,74 @@ pub struct EventDraft {
     pub apply_series: bool,
 }
 
-/// An event form's starting values. Local times are datetime-local strings.
+/// When Marian posts a draft, set from the event page. The time is in the server's zone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PostAt {
+    pub post_local: NaiveDateTime,
+}
+
+/// When signups close, set from the event page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Cutoff {
+    Never,
+    /// This many minutes before the event starts.
+    Before { minutes: i64 },
+}
+
+/// One or more details changed in place on the event page. Unset fields stay as
+/// they are. `starts_local` is in the server's zone.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct EventSeed {
-    pub title: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub location: String,
-    pub channel_id: i64,
-    pub color: String,
-    pub starts_local: String,
-    pub duration_minutes: i64,
-    #[serde(default)]
-    pub cutoff_local: String,
-    #[serde(default)]
-    pub post_local: String,
-    #[serde(default)]
-    pub attendee_role_id: Option<i64>,
-    #[serde(default)]
-    pub thread_enabled: bool,
-    #[serde(default)]
-    pub multiple_signups: bool,
-    #[serde(default)]
-    pub mention_everyone: bool,
-    #[serde(default)]
-    pub mention_role_ids: Vec<i64>,
-    #[serde(default)]
-    pub restrict_role_ids: Vec<i64>,
-    #[serde(default)]
-    pub options: Vec<SignupOption>,
-    #[serde(default)]
-    pub reminders: Vec<Reminder>,
-    #[serde(default)]
+pub struct EventPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_local: Option<NaiveDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple_signups: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutoff: Option<Cutoff>,
+    /// Empty takes the location away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Starts repeating an event that doesn't yet; a series changes on its own address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<Repeat>,
+    /// Only before the event has a Discord message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_enabled: Option<bool>,
+    /// Copies this date's details to the upcoming dates of its series.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub apply_series: bool,
+    /// The whole list; unset leaves the reminders as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminders: Option<Vec<Reminder>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_everyone: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_role_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrict_role_ids: Option<Vec<String>>,
+    /// Unset leaves the role; `null` takes it away.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub attendee_role_id: Option<Option<String>>,
+}
+
+/// Reads a field that is there, even as `null`, as `Some`; a missing one stays `None`.
+fn present<'de, D, T>(reader: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(reader).map(Some)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -509,6 +540,12 @@ pub struct DayCheck {
     pub name: String,
     pub on: bool,
     pub votes: i64,
+    /// On a poll, the date this day's event would fall on, as "Wed, Oct 21".
+    #[serde(default)]
+    pub date: String,
+    /// On an open poll, who voted for this day. The Discord post lists them too.
+    #[serde(default)]
+    pub voters: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -519,7 +556,7 @@ pub struct RoutineView {
     pub description: String,
     pub active: bool,
     pub channel: String,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub poll_weekday: String,
     pub poll_time: String,
     pub lock_weekday: String,
@@ -530,23 +567,32 @@ pub struct RoutineView {
     pub event_when: String,
     pub duration_minutes: i64,
     pub usual: Vec<DayCheck>,
+    pub event: RoutineEvent,
     pub run: Option<RunView>,
     pub history: Vec<RunHistory>,
+    /// The event the last poll picked, while it is still ahead.
+    #[serde(default)]
+    pub upcoming: Option<RunHistory>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunView {
-    pub id: i64,
     pub open: bool,
     pub status: String,
+    /// Every weekday, in the order their events would fall after the poll locks.
     pub days: Vec<DayCheck>,
+    #[serde(default)]
+    pub opens: String,
+    #[serde(default)]
+    pub locks: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunHistory {
     pub when: String,
     pub winner: String,
-    pub event_id: String,
+    /// The event's page.
+    pub href: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -559,6 +605,9 @@ pub struct RoutineSummary {
     pub poll: String,
     pub event: String,
     pub choices: Vec<PollChoice>,
+    /// The usual days and the time, as "Wed, Thu, Fri at 19:00".
+    #[serde(default)]
+    pub schedule: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -567,9 +616,37 @@ pub struct PollChoice {
     pub votes: i64,
 }
 
+/// What each event a routine posts carries beyond its title, description,
+/// channel, and time: the same details an event has.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutineEvent {
+    #[serde(default)]
+    pub location: String,
+    pub color: String,
+    #[serde(default)]
+    pub thread_enabled: bool,
+    #[serde(default)]
+    pub multiple_signups: bool,
+    #[serde(default)]
+    pub mention_everyone: bool,
+    #[serde(default)]
+    pub attendee_role_id: Option<String>,
+    #[serde(default)]
+    pub mention_role_ids: Vec<String>,
+    #[serde(default)]
+    pub restrict_role_ids: Vec<String>,
+    /// Signups close this long before the event starts; none keeps them open.
+    #[serde(default)]
+    pub cutoff_minutes: Option<i64>,
+    #[serde(default)]
+    pub options: Vec<SignupOption>,
+    #[serde(default)]
+    pub reminders: Vec<Reminder>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoutineDraft {
-    pub channel_id: i64,
+    pub channel_id: String,
     pub title: String,
     #[serde(default)]
     pub description: String,
@@ -581,6 +658,9 @@ pub struct RoutineDraft {
     pub lock_weekday: u8,
     pub lock_time: String,
     pub days: Vec<u8>,
+    /// The rest of the event's details; unset keeps what the routine has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<RoutineEvent>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

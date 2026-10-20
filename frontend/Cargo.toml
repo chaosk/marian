@@ -2,7 +2,7 @@
 name = "marian-frontend"
 version = "0.6.2"
 edition = "2021"
-description = "Hydrates Marian's islands in the browser"
+description = "Hydrates Marian's dashboard in the browser"
 license = "MIT"
 publish = false
 
@@ -11,6 +11,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 console_error_panic_hook = "0.1"
-leptos = { workspace = true, features = ["hydrate", "islands"] }
+js-sys = "0.3"
+leptos = { workspace = true, features = ["hydrate"] }
 marian-app = { workspace = true, features = ["hydrate"] }
+serde_json = { workspace = true }
 wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Document", "Element", "Location", "Navigator", "Window"] }

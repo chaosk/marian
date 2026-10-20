@@ -22,24 +22,24 @@ pub use catalog::{
 pub use discord::{
     attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
     ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
-    event_thread_name, mark_channel_purged, mention_line, remember_discord_message, set_organizer,
+    event_thread_name, mark_channel_purged, mention_line, remember_discord_message, set_server_manager,
     status_label, web_event_url, Attendance, AttendanceWork, ChannelReverse, EventChannelPurge,
 };
-pub use event::save_event;
+pub use event::{save_event, save_options};
 pub use lifecycle::{
     archive_event, delete_event, duplicate_event, end_series, save_series_repeat, skip_event,
 };
 pub use model::{
-    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventInput, OptionInput,
+    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput, OptionInput,
     PresetBody, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
 };
 pub use routine::{
-    cast_run, count_active, create_routine, list_routines, maintain as maintain_routines,
-    remember_routine_message, routine_in_guild, routine_page_data, routine_post, save_routine,
+    cast_run, count_active, create_routine, event_from as routine_event_from, open_run_id, run_by_public, list_routines, maintain as maintain_routines,
+    remember_results_message, remember_routine_message, routine_in_guild, routine_page_data, routine_post, save_routine,
     save_run_days, save_usual_days, stop_routine, DayCheck, PollButton, RoutineEffect, RoutinePost,
     RoutineSummary, RoutineView, RunHistory, RunView,
 };
-pub use signup::{organizer_response, signup};
+pub use signup::{editor_response, signup};
 pub use template::series_template;
 pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
 
@@ -63,7 +63,7 @@ mod tests {
               (2, 1, 'Tank', '#336699');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
             INSERT INTO users (discord_id) VALUES ('u1'), ('u2'), ('u3');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'u1'
             UNION ALL
             SELECT 2, id, 1, 'June', 'june', '#223344', true, false FROM users WHERE discord_id = 'u2'
@@ -83,7 +83,6 @@ mod tests {
                 name: "Yes".into(),
                 emoji: "✅".into(),
                 capacity: None,
-                waitlist: false,
                 role_id: None,
                 reminders_enabled: true,
             },
@@ -92,7 +91,6 @@ mod tests {
                 name: "No".into(),
                 emoji: "❌".into(),
                 capacity: None,
-                waitlist: false,
                 role_id: None,
                 reminders_enabled: false,
             },
@@ -134,13 +132,15 @@ mod tests {
     #[test]
     fn waitlist_promotes_the_next_person() {
         let mut conn = world();
+        let mut settings = store::settings(&mut conn, 1).unwrap();
+        settings.waitlist = true;
+        store::update_settings(&mut conn, &settings).unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
             id: None,
             name: "DPS".into(),
             emoji: "⚔️".into(),
             capacity: Some(1),
-            waitlist: true,
             role_id: None,
             reminders_enabled: true,
         }];
@@ -155,6 +155,149 @@ mod tests {
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].membership_id, 3);
         assert_eq!(signups[0].state, "confirmed");
+    }
+
+    #[test]
+    fn without_the_waitlist_a_full_option_turns_people_away() {
+        let mut conn = world();
+        assert!(!store::settings(&mut conn, 1).unwrap().waitlist, "off by default");
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.options = vec![OptionInput {
+            id: None,
+            name: "DPS".into(),
+            emoji: "⚔️".into(),
+            capacity: Some(1),
+            role_id: None,
+            reminders_enabled: true,
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
+        signup(&mut conn, id, option, 2).unwrap();
+        let err = signup(&mut conn, id, option, 3).unwrap_err().to_string();
+        assert!(err.contains("full"), "{err}");
+        assert_eq!(store::signups_for(&mut conn, &event).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_posted_event_gains_and_reorders_options_without_losing_signups() {
+        let mut conn = world();
+        let event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        let id = save_event(&mut conn, event).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
+        signup(&mut conn, id, options[0].id, 2).unwrap();
+        let keep = |opt: &store::SignupOption| OptionInput {
+            id: Some(opt.id),
+            name: opt.name.clone(),
+            emoji: opt.emoji.clone(),
+            capacity: opt.capacity,
+            role_id: opt.role_id,
+            reminders_enabled: opt.reminders_enabled,
+        };
+        let mut next = vec![keep(&options[1]), keep(&options[0])];
+        next[1].capacity = Some(4);
+        next.push(OptionInput {
+            id: None,
+            name: "Maybe".into(),
+            emoji: String::new(),
+            capacity: None,
+            role_id: None,
+            reminders_enabled: false,
+        });
+        save_options(&mut conn, id, 1, &next).unwrap();
+        let saved = store::options_for(&mut conn, &event).unwrap();
+        let names: Vec<&str> = saved.iter().map(|opt| opt.name.as_str()).collect();
+        assert_eq!(names, ["No", "Yes", "Maybe"]);
+        assert_eq!(saved[1].capacity, Some(4));
+        assert_eq!(saved[2].emoji, "•");
+        let signups = store::signups_for(&mut conn, &event).unwrap();
+        assert_eq!(signups.len(), 1);
+        assert_eq!(signups[0].option_id, options[0].id);
+
+        let dropped = vec![keep(&saved[0]), keep(&saved[1])];
+        let err = save_options(&mut conn, id, 1, &dropped).unwrap_err().to_string();
+        assert!(err.contains("needs to stay"));
+        let err = save_options(&mut conn, id, 3, &next).unwrap_err().to_string();
+        assert!(err.contains("You can edit events you created"));
+    }
+
+    #[test]
+    fn an_archived_post_has_no_buttons() {
+        let mut conn = world();
+        let event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        let id = save_event(&mut conn, event).unwrap();
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
+            .set(schema::channels::discord_id.eq("c1"))
+            .execute(&mut conn)
+            .unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::discord_message_id.eq("m1"))
+            .execute(&mut conn)
+            .unwrap();
+        let view = discord_view(&mut conn, id, "https://marian.test").unwrap().unwrap();
+        assert!(!view.buttons.is_empty());
+        archive_event(&mut conn, id, 1).unwrap();
+        let view = discord_view(&mut conn, id, "https://marian.test").unwrap().unwrap();
+        assert!(view.buttons.is_empty());
+    }
+
+    #[test]
+    fn any_of_several_roles_grants_a_permission() {
+        let mut conn = world();
+        let id = save_event(&mut conn, input("Raid", Utc::now() + Duration::hours(5), SaveAction::Draft)).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let mut settings = store::settings(&mut conn, 1).unwrap();
+        settings.role_edit = vec![2, 1, 2];
+        store::update_settings(&mut conn, &settings).unwrap();
+        let settings = store::settings(&mut conn, 1).unwrap();
+        assert_eq!(settings.role_edit, [1, 2], "saved once each, in order");
+        assert!(settings.role_delete.is_empty());
+
+        let june = store::membership(&mut conn, 2).unwrap().unwrap();
+        let june_roles = store::membership_role_ids(&mut conn, &june).unwrap();
+        assert!(can_edit(&june, &event, &settings, &june_roles), "June holds role 2, the second one listed");
+        let samir = store::membership(&mut conn, 3).unwrap().unwrap();
+        let samir_roles = store::membership_role_ids(&mut conn, &samir).unwrap();
+        assert!(!can_edit(&samir, &event, &settings, &samir_roles));
+        assert!(can_create(&samir, &settings, &samir_roles), "no event roles leaves creating open");
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_clock_time_across_a_daylight_saving_change() {
+        let mut conn = world();
+        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
+            .set(schema::guilds::timezone.eq("Europe/Warsaw"))
+            .execute(&mut conn)
+            .unwrap();
+        // 19:00 in Warsaw on a Friday before the clocks go back on the last Sunday of October.
+        let start = Utc.with_ymd_and_hms(2030, 10, 25, 17, 0, 0).unwrap();
+        let id = save_event(&mut conn, input("Raid", start, SaveAction::Draft)).unwrap();
+        let copy = duplicate_event(&mut conn, id, 1).unwrap();
+        let copy = store::event(&mut conn, copy).unwrap().unwrap();
+        let warsaw: chrono_tz::Tz = "Europe/Warsaw".parse().unwrap();
+        let local = copy.starts_at.with_timezone(&warsaw);
+        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2030-11-01 19:00");
+        assert_eq!(copy.status, "draft");
+    }
+
+    #[test]
+    fn the_default_reminder_can_be_turned_off() {
+        let mut conn = world();
+        let bare = |title: &str| EventInput {
+            reminders: Vec::new(),
+            ..input(title, Utc::now() + Duration::hours(5), SaveAction::Publish)
+        };
+        let id = save_event(&mut conn, bare("On")).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!(store::reminders_for(&mut conn, &event).unwrap().len(), 1, "on by default");
+
+        let mut settings = store::settings(&mut conn, 1).unwrap();
+        settings.default_reminder_minutes = 0;
+        store::update_settings(&mut conn, &settings).unwrap();
+        let id = save_event(&mut conn, bare("Off")).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        assert!(store::reminders_for(&mut conn, &event).unwrap().is_empty());
     }
 
     #[test]

@@ -53,6 +53,11 @@ pub fn weekday_name(day: u8) -> &'static str {
     WEEKDAYS.get(day as usize).copied().unwrap_or("Monday")
 }
 
+/// "Mon" for 0 through "Sun" for 6.
+pub fn weekday_short(day: u8) -> &'static str {
+    &weekday_name(day)[..3]
+}
+
 /// "3/5" for a capped option, "3" for an open one.
 pub fn spots(confirmed: i64, capacity: Option<i64>) -> String {
     match capacity {

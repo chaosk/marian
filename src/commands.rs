@@ -460,13 +460,13 @@ pub fn answer_event_dm(
                 save_draft(conn, discord_user_id, "timezone", &draft)?;
                 return just(timezone_card());
             }
-            let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
-            let tz = clock::zone(&guild.timezone)?;
+    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+    let tz = clock::zone(&guild.timezone)?;
             let stored = if text.eq_ignore_ascii_case("now") {
                 Some(clock::stamp(Utc::now()))
             } else if parse::parse_when(text, Utc::now(), tz).is_some() {
                 Some(text.to_string())
-            } else {
+    } else {
                 None
             };
             let Some(stored) = stored else {
@@ -539,7 +539,7 @@ pub fn answer_event_dm(
                 ));
             }
             draft.options = names
-                .into_iter()
+            .into_iter()
                 .enumerate()
                 .map(|(index, name)| OptionInput {
                     id: None,
@@ -550,7 +550,6 @@ pub fn answer_event_dm(
                         .unwrap_or("•")
                         .into(),
                     capacity: None,
-                    waitlist: false,
                     role_id: None,
                     reminders_enabled: index == 0,
                 })
@@ -1633,7 +1632,7 @@ pub fn set_reminders(
             let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
             Ok(if user.reminders_enabled {
                 format!("{} gets reminders.", user.name)
-            } else {
+    } else {
                 format!("{} is opted out of reminders.", user.name)
             })
         }
@@ -1754,13 +1753,13 @@ pub fn response_options(
         if !needle.is_empty()
             && !opt.name.to_lowercase().contains(&needle)
             && !label.to_lowercase().contains(&needle)
-            && opt.id.to_string() != partial.trim()
+            && opt.public_id.to_string() != partial.trim()
         {
             continue;
         }
         choices.push(Choice {
             label,
-            value: opt.id.to_string(),
+            value: opt.public_id.to_string(),
         });
         if choices.len() == 25 {
             break;
@@ -1780,7 +1779,7 @@ pub fn roster_action(
     let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let event = find_event(conn, actor.guild_id, event_token)?;
     let option = resolve_option(conn, &event, option_token)?;
-    let notice = logic::organizer_response(conn, event.id, actor_id, target_id, option.id, action)?;
+    let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action)?;
     Ok((notice, event.id))
 }
 
@@ -1790,9 +1789,11 @@ fn resolve_option(
     token: &str,
 ) -> Result<store::SignupOption, OpError> {
     let options = store::options_for(conn, event)?;
+    // A pick from the autocomplete list is the option's public id; a typed answer is its name.
     if let Some(opt) = options
         .iter()
-        .find(|opt| opt.name.eq_ignore_ascii_case(token))
+        .find(|opt| opt.public_id.to_string() == token.trim())
+        .or_else(|| options.iter().find(|opt| opt.name.eq_ignore_ascii_case(token)))
     {
         return Ok(opt.clone());
     }
@@ -1867,6 +1868,7 @@ pub enum Setting {
     ThreadReminders(bool),
     ShowAttendees(bool),
     TempRoles(bool),
+    Waitlist(bool),
     Digest(String),
     PostLeadHours(i64),
     Role { which: String, name: String },
@@ -1878,7 +1880,7 @@ pub fn apply_setting(
     membership_id: i64,
     setting: Setting,
 ) -> Result<String, OpError> {
-    require_organizer(conn, membership_id)?;
+    require_server_manager(conn, membership_id)?;
     let mut settings = store::settings(conn, guild_id)?;
     let key = match setting {
         Setting::ReminderInterval(minutes) => {
@@ -1925,6 +1927,10 @@ pub fn apply_setting(
             settings.temp_roles = enabled;
             "temp_roles"
         }
+        Setting::Waitlist(enabled) => {
+            settings.waitlist = enabled;
+            "waitlist"
+        }
         Setting::Digest(value) => {
             if !matches!(value.as_str(), "off" | "daily" | "weekly") {
                 return Err(OpError::message("Digest can be off, daily, or weekly."));
@@ -1937,14 +1943,15 @@ pub fn apply_setting(
             "post_lead"
         }
         Setting::Role { which, name } => {
-            let role_id = if name.eq_ignore_ascii_case("clear") || name.is_empty() {
-                None
+            // One role replaces the list; `clear` empties it. The web settings take several.
+            let role_id: Vec<i64> = if name.eq_ignore_ascii_case("clear") || name.is_empty() {
+                Vec::new()
             } else {
-                Some(
+                vec![
                     store::role_by_name(conn, guild_id, &name)?
                         .ok_or_else(|| OpError::message(format!("No role named {name}.")))?
                         .id,
-                )
+                ]
             };
             match which.as_str() {
                 "event" => settings.role_event = role_id,
@@ -1968,18 +1975,18 @@ fn cmd_settings(
     pos: &[String],
     map: &HashMap<String, String>,
 ) -> Result<String, OpError> {
-    require_organizer(conn, membership_id)?;
+    require_server_manager(conn, membership_id)?;
     let key = map
         .keys()
         .next()
-        .cloned()
+                .cloned()
         .or_else(|| pos.first().cloned())
         .ok_or_else(|| OpError::message("Name a setting."))?;
     let value = map
         .get(&key)
-        .cloned()
-        .or_else(|| pos.get(1).cloned())
-        .unwrap_or_default();
+                .cloned()
+                .or_else(|| pos.get(1).cloned())
+                .unwrap_or_default();
     let extra = pos.get(2).cloned().unwrap_or_default();
     let setting = match key.as_str() {
         "reminder_interval" => Setting::ReminderInterval(
@@ -2001,6 +2008,7 @@ fn cmd_settings(
         "thread_reminders" => Setting::ThreadReminders(on(&value)?),
         "show_attendees" => Setting::ShowAttendees(on(&value)?),
         "temp_roles" => Setting::TempRoles(on(&value)?),
+        "waitlist" => Setting::Waitlist(on(&value)?),
         "digest" => Setting::Digest(value),
         "post_lead" => Setting::PostLeadHours(
             value
@@ -2017,16 +2025,16 @@ fn cmd_settings(
 }
 
 pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
-    let lines: Vec<_> = store::list_library(conn, guild_id)?
-        .into_iter()
-        .map(|opt| format!("{} {}", opt.emoji, opt.name))
-        .collect();
-    if lines.is_empty() {
-        Ok("The option library is empty.".into())
-    } else {
-        Ok(lines.join("\n"))
-    }
-}
+            let lines: Vec<_> = store::list_library(conn, guild_id)?
+                .into_iter()
+                .map(|opt| format!("{} {}", opt.emoji, opt.name))
+                .collect();
+            if lines.is_empty() {
+                Ok("The option library is empty.".into())
+            } else {
+                Ok(lines.join("\n"))
+            }
+        }
 
 pub fn add_library_option(
     conn: &mut Connection,
@@ -2105,31 +2113,30 @@ pub fn add_preset(
     options: &str,
 ) -> Result<String, OpError> {
     let options = options
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| OptionInput {
-            id: None,
-            name: part.to_string(),
-            emoji: "•".into(),
-            capacity: None,
-            waitlist: false,
-            role_id: None,
-            reminders_enabled: true,
-        })
-        .collect();
-    logic::save_preset(
-        conn,
-        guild_id,
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(|part| OptionInput {
+                    id: None,
+                    name: part.to_string(),
+                    emoji: "•".into(),
+                    capacity: None,
+                    role_id: None,
+                    reminders_enabled: true,
+                })
+                .collect();
+            logic::save_preset(
+                conn,
+                guild_id,
         membership_id,
         name,
-        &PresetBody {
-            multiple_signups: false,
-            options,
-        },
-    )?;
-    Ok(format!("Saved the {name} preset."))
-}
+                &PresetBody {
+                    multiple_signups: false,
+                    options,
+                },
+            )?;
+            Ok(format!("Saved the {name} preset."))
+        }
 
 pub fn remove_preset(
     conn: &mut Connection,
@@ -2137,13 +2144,13 @@ pub fn remove_preset(
     membership_id: i64,
     name: &str,
 ) -> Result<String, OpError> {
-    if let Some(preset) = store::list_presets(conn, guild_id)?
-        .into_iter()
+            if let Some(preset) = store::list_presets(conn, guild_id)?
+                .into_iter()
         .find(|preset| preset.name.eq_ignore_ascii_case(name))
-    {
+            {
         logic::delete_preset(conn, preset.id, membership_id)?;
-    }
-    Ok(format!("Removed {name}."))
+            }
+            Ok(format!("Removed {name}."))
 }
 
 fn cmd_presets(
@@ -2156,8 +2163,8 @@ fn cmd_presets(
     let action = pos.first().map(String::as_str).unwrap_or("list");
     match action {
         "add" => {
-            let name = map
-                .get("name")
+    let name = map
+        .get("name")
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the preset."))?;
@@ -2184,8 +2191,8 @@ pub fn channel_request(line: &str) -> Option<String> {
     let (pos, map) = fields(rest);
     Some(
         map.get("name")
-            .cloned()
-            .or_else(|| pos.first().cloned())
+        .cloned()
+        .or_else(|| pos.first().cloned())
             .unwrap_or_default(),
     )
 }
@@ -2251,7 +2258,7 @@ pub fn google_auto_sync(
     crate::google::set_auto_sync(conn, user_id, enabled)?;
     Ok(if enabled {
         "Marian will keep your Google Calendar updated.".into()
-    } else {
+            } else {
         "Automatic Google Calendar updates are paused. /google sync still adds one event.".into()
     })
 }
@@ -2348,7 +2355,6 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
                 name: opt.name,
                 emoji: opt.emoji,
                 capacity: opt.capacity,
-                waitlist: opt.waitlist,
                 role_id: opt.role_id,
                 reminders_enabled: opt.reminders_enabled,
             })
@@ -2374,7 +2380,6 @@ fn yes_no_maybe() -> Vec<OptionInput> {
             name: "Accepted".into(),
             emoji: "✅".into(),
             capacity: None,
-            waitlist: false,
             role_id: None,
             reminders_enabled: true,
         },
@@ -2383,7 +2388,6 @@ fn yes_no_maybe() -> Vec<OptionInput> {
             name: "Declined".into(),
             emoji: "❌".into(),
             capacity: None,
-            waitlist: false,
             role_id: None,
             reminders_enabled: false,
         },
@@ -2392,19 +2396,18 @@ fn yes_no_maybe() -> Vec<OptionInput> {
             name: "Tentative".into(),
             emoji: "❔".into(),
             capacity: None,
-            waitlist: false,
             role_id: None,
             reminders_enabled: false,
         },
     ]
 }
 
-fn require_organizer(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
+fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
     let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
-    if user.organizer {
+    if user.server_manager {
         Ok(())
     } else {
-        Err(OpError::message("Only a server organizer can change that."))
+        Err(OpError::message("Only a server manager can change that."))
     }
 }
 
@@ -2450,6 +2453,76 @@ mod tests {
     }
 
     #[test]
+    fn a_response_picked_from_the_list_names_the_option_by_public_id() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
+            INSERT INTO users (discord_id) VALUES ('nell'), ('june');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell'
+            UNION ALL
+            SELECT 2, id, 1, 'June', 'june', '#223344', true, false FROM users WHERE discord_id = 'june';
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let starts_at = Utc::now() + chrono::Duration::days(2);
+        let id = logic::save_event(
+            &mut conn,
+            logic::EventInput {
+                id: None,
+                guild_id: 1,
+                actor_id: 1,
+                channel_id: 1,
+                title: "Raid".into(),
+                description: String::new(),
+                location: String::new(),
+                starts_at,
+                duration_minutes: 60,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                cutoff_at: None,
+                attendee_role_id: None,
+                thread_enabled: false,
+                multiple_signups: false,
+                mention_everyone: false,
+                mention_role_ids: vec![],
+                restrict_role_ids: vec![],
+                options: ["Tank", "Healer"]
+                    .into_iter()
+                    .map(|name| logic::OptionInput {
+                        id: None,
+                        name: name.into(),
+                        emoji: String::new(),
+                        capacity: None,
+                        role_id: None,
+                        reminders_enabled: true,
+                    })
+                    .collect(),
+                reminders: vec![],
+                repeat: None,
+                action: logic::SaveAction::Publish,
+                post_at: None,
+                apply_series: false,
+            },
+        )
+        .unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let token = event.public_id.to_string();
+        let choices = response_options(&mut conn, 1, &token, "heal").unwrap();
+        assert_eq!(choices.len(), 1);
+        let picked = &choices[0].value;
+        assert_eq!(uuid::Uuid::parse_str(picked).unwrap().get_version_num(), 7, "not a row number");
+        roster_action(&mut conn, 1, &token, 2, picked, "add").unwrap();
+        let healer = store::options_for(&mut conn, &event).unwrap().into_iter().find(|opt| opt.name == "Healer").unwrap();
+        assert!(store::signups_for(&mut conn, &event).unwrap().iter().any(|s| s.option_id == healer.id && s.membership_id == 2));
+        // A typed name still works.
+        roster_action(&mut conn, 1, &token, 2, "tank", "add").unwrap();
+    }
+
+    #[test]
     fn help_points_at_the_guide() {
         assert!(HELP.contains("/event starts an event"));
         assert!(HELP.contains("/help"));
@@ -2466,7 +2539,7 @@ mod tests {
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
             INSERT INTO users (discord_id) VALUES ('nell');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
@@ -2500,7 +2573,7 @@ mod tests {
             INSERT INTO channels (id, guild_id, name, kind, position, discord_id)
               VALUES (1, 1, 'social', 'text', 0, '99'), (2, 1, 'briefing', 'text', 1, '100');
             INSERT INTO users (discord_id) VALUES ('nell');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, organizer)
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )

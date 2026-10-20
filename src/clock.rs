@@ -22,7 +22,7 @@ pub const ZONES: &[&str] = &[
     "UTC",
 ];
 
-pub use marian_types::labels::{cadence_label, weekday_name};
+pub use marian_types::labels::{cadence_label, weekday_name, weekday_short};
 pub use marian_types::time::{
     date_local, datetime_local, format_clock, format_day, format_end, format_long_date,
     format_rel, format_when, human_duration, human_offset, zone_groups, ZoneGroup, ZoneRow,

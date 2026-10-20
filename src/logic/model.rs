@@ -25,7 +25,6 @@ pub struct OptionInput {
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
-    pub waitlist: bool,
     pub role_id: Option<i64>,
     pub reminders_enabled: bool,
 }
@@ -68,10 +67,28 @@ pub struct EventInput {
 pub struct SeriesTemplate {
     pub title: String,
     pub description: String,
+    #[serde(default)]
+    pub location: String,
     pub duration_minutes: i64,
     pub channel_id: i64,
     pub color: String,
     pub image_url: Option<String>,
+    pub thread_enabled: bool,
+    pub multiple_signups: bool,
+    pub mention_everyone: bool,
+    pub attendee_role_id: Option<i64>,
+    pub mention_role_ids: Vec<i64>,
+    pub restrict_role_ids: Vec<i64>,
+    pub cutoff_offset_minutes: Option<i64>,
+    pub options: Vec<OptionInput>,
+    pub reminders: Vec<ReminderInput>,
+}
+
+/// What a routine's events carry beyond their wording and schedule.
+#[derive(Debug, Clone, Default)]
+pub struct EventExtras {
+    pub location: String,
+    pub color: String,
     pub thread_enabled: bool,
     pub multiple_signups: bool,
     pub mention_everyone: bool,
@@ -91,7 +108,8 @@ pub struct PresetBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ButtonRole {
-    Signup(i64),
+    /// A signup option, by its public id.
+    Signup(uuid::Uuid),
     Edit,
     Delete,
 }
@@ -121,6 +139,8 @@ pub struct DiscordField {
 
 #[derive(Debug, Clone)]
 pub struct DiscordView {
+    /// The event's public id, which its buttons carry.
+    pub event: uuid::Uuid,
     pub channel_id: String,
     pub message_id: Option<String>,
     pub title: String,

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::upsert::excluded;
 
-use super::access::{can_create, can_edit};
+use super::access::{can_create, can_edit, holds_any};
 use super::db::{log, must_event, must_membership};
 use super::model::*;
 use crate::error::OpError;
@@ -34,10 +34,11 @@ pub fn create_channel(
     let actor = must_membership(conn, actor_id)?;
     let settings = store::settings(conn, guild_id)?;
     let roles = store::membership_role_ids(conn, &actor)?;
-    let allowed = actor.organizer
-        || match settings.role_channel {
-            Some(role) => roles.contains(&role),
-            None => can_create(&actor, &settings, &roles),
+    let allowed = actor.server_manager
+        || if settings.role_channel.is_empty() {
+            can_create(&actor, &settings, &roles)
+        } else {
+            holds_any(&settings.role_channel, &roles)
         };
     if !allowed {
         return Err(OpError::message("You can't create channels here."));
@@ -126,16 +127,13 @@ pub fn save_preset(
     body: &PresetBody,
 ) -> Result<i64, OpError> {
     let actor = must_membership(conn, actor_id)?;
-    if !actor.organizer && actor.guild_id != guild_id {
+    if !actor.server_manager && actor.guild_id != guild_id {
         return Err(OpError::NotFound);
     }
     let settings = store::settings(conn, guild_id)?;
     let roles = store::membership_role_ids(conn, &actor)?;
-    let allowed = actor.organizer
-        || settings
-            .role_signup
-            .map(|role| roles.contains(&role))
-            .unwrap_or(true)
+    let allowed = actor.server_manager
+        || (settings.role_signup.is_empty() || holds_any(&settings.role_signup, &roles))
             && can_create(&actor, &settings, &roles);
     if !allowed {
         return Err(OpError::message("You can't edit signup presets."));
@@ -175,13 +173,10 @@ pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Re
     if actor.guild_id != preset.guild_id {
         return Err(OpError::NotFound);
     }
-    if !actor.organizer {
+    if !actor.server_manager {
         let settings = store::settings(conn, preset.guild_id)?;
         let roles = store::membership_role_ids(conn, &actor)?;
-        let allowed = settings
-            .role_signup
-            .map(|role| roles.contains(&role))
-            .unwrap_or(false);
+        let allowed = holds_any(&settings.role_signup, &roles);
         if !allowed {
             return Err(OpError::message("You can't remove presets."));
         }
@@ -257,15 +252,16 @@ fn require_option_editor(
     if actor.guild_id != guild_id {
         return Err(OpError::NotFound);
     }
-    if actor.organizer {
+    if actor.server_manager {
         return Ok(());
     }
     let settings = store::settings(conn, guild_id)?;
     let roles = store::membership_role_ids(conn, &actor)?;
-    let allowed = settings
-        .role_signup
-        .map(|role| roles.contains(&role))
-        .unwrap_or_else(|| can_create(&actor, &settings, &roles));
+    let allowed = if settings.role_signup.is_empty() {
+        can_create(&actor, &settings, &roles)
+    } else {
+        holds_any(&settings.role_signup, &roles)
+    };
     if allowed {
         Ok(())
     } else {
@@ -343,7 +339,7 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO users (discord_id) VALUES ('nell');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, organizer)
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true FROM users WHERE discord_id = 'nell';
             ",
         )

@@ -58,7 +58,7 @@ fn signup_tx(
         )));
     }
     let restricts = store::event_role_ids(conn, &event, "restrict")?;
-    if !restricts.is_empty() && !user.organizer {
+    if !restricts.is_empty() && !user.server_manager {
         let roles = store::membership_role_ids(conn, &user)?;
         if !restricts.iter().any(|role| roles.contains(role)) {
             let names = role_names(conn, &restricts)?;
@@ -69,7 +69,7 @@ fn signup_tx(
         }
     }
     if let Some(role_id) = option.role_id {
-        if !user.organizer && !store::membership_has_role(conn, user.id, role_id)? {
+        if !user.server_manager && !store::membership_has_role(conn, user.id, role_id)? {
             let role = must_role(conn, role_id)?;
             return Err(OpError::message(format!(
                 "{} can't take a {} spot. That option is limited to {}.",
@@ -93,7 +93,7 @@ fn signup_tx(
     let state = if let Some(cap) = option.capacity {
         if confirmed < cap {
             "confirmed"
-        } else if option.waitlist {
+        } else if store::settings(conn, event.guild_id)?.waitlist {
             "waitlisted"
         } else {
             return Err(OpError::message(format!("{} is full.", option.name)));
@@ -123,7 +123,7 @@ fn signup_tx(
     Ok(notice)
 }
 
-pub fn organizer_response(
+pub fn editor_response(
     conn: &mut Connection,
     event_id: i64,
     actor_id: i64,

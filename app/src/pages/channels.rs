@@ -1,18 +1,15 @@
 use leptos::prelude::*;
 
 use crate::format::clock_of;
-use crate::islands::JsonForm;
-use crate::{api, base, load, param};
+use crate::widgets::JsonForm;
+use crate::cache::{self, when, Ready};
+use crate::{base, title};
 
 #[component]
 pub fn Channels() -> impl IntoView {
-    let server = param("server");
-    let data = async move {
-        let here = api::server(&server).await?;
-        let channels = api::channels(&server).await?;
-        Ok((here, channels))
-    };
-    load(data, |(server, channels)| {
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let channels = cache::listen(cache::channels_scope(), cache::server_key);
+    when(move || (server.get(), channels.get()).ready(), move |(server, channels)| {
         let clock = clock_of(&server);
         let table = (!channels.is_empty()).then(|| {
             let rows = channels
@@ -44,6 +41,7 @@ pub fn Channels() -> impl IntoView {
                 </div>
             }
         });
+        title("Channels");
         view! {
             <div class="page-head">
                 <div>
@@ -52,7 +50,7 @@ pub fn Channels() -> impl IntoView {
                 </div>
             </div>
             {table}
-            <JsonForm method="POST".into() url=format!("/api{}/channels", base()) class="panel channel-create".into()>
+            <JsonForm method="POST" url=format!("/api{}/channels", base()) class="panel channel-create" done="Created the channel.">
                 <label class="field">"Name "<input name="name" placeholder="race-night" required/></label>
                 <button class="primary" type="submit">"Create event channel"</button>
             </JsonForm>

@@ -1,9 +1,7 @@
 use leptos::prelude::*;
-use leptos_meta::Title;
-
-use crate::islands::Flash;
+use crate::widgets::Flash;
 use crate::shell::Brand;
-use crate::{api, query, redirect, status};
+use crate::{api, query, redirect, status, title, A};
 
 const GUIDE: &str = include_str!("../guide.html");
 
@@ -23,14 +21,15 @@ pub fn Front() -> impl IntoView {
             } else {
                 format!("/auth/discord?next={}", api::encode(&next))
             };
+            title("");
             view! {
-                <Title text="Marian"/>
                 <div class="gate">
                     <main class="gate-card">
                         <Brand/>
-                        <Flash notice/>
+                        <Flash/>
                         <h1>"Events for your server."</h1>
                         <p class="lede">"The only human-made thing in here is the logo."</p>
+                        {(!notice.is_empty()).then(|| view! { <p class="notice">{notice.clone()}</p> })}
                         {(!ready).then(|| view! { <p class="notice">"Sign-in is not configured yet."</p> })}
                         {(ready || !invite.is_empty()).then(move || view! {
                             <div class="gate-actions">
@@ -48,8 +47,8 @@ pub fn Front() -> impl IntoView {
 
 #[component]
 pub fn Help() -> impl IntoView {
+    title("Commands");
     view! {
-        <Title text="Commands · Marian"/>
         <div class="doc">
             <main>
                 <Brand/>
@@ -60,7 +59,7 @@ pub fn Help() -> impl IntoView {
                     " is the one that starts a conversation."
                 </p>
                 <article class="guide" inner_html=GUIDE></article>
-                <p class="legal"><a href="/">"Back to the schedule"</a></p>
+                <p class="legal"><A href="/">"Back to the schedule"</A></p>
             </main>
         </div>
     }
@@ -69,11 +68,11 @@ pub fn Help() -> impl IntoView {
 #[component]
 pub fn NotFound() -> impl IntoView {
     status(404);
+    title("Missing");
     view! {
-        <Title text="Missing · Marian"/>
         <section class="empty">
             <h1>"That page isn't here."</h1>
-            <p><a href="/">"Back to the schedule"</a></p>
+            <p><A href="/">"Back to the schedule"</A></p>
         </section>
     }
 }

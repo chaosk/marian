@@ -1,4 +1,4 @@
-//! Tells open event pages that an event changed, so they fetch it again.
+//! Tells open dashboard pages that a server changed, so they fetch it again.
 
 use std::sync::OnceLock;
 
@@ -9,8 +9,8 @@ fn bus() -> &'static broadcast::Sender<i64> {
     BUS.get_or_init(|| broadcast::channel(256).0)
 }
 
-pub fn changed(event_id: i64) {
-    let _ = bus().send(event_id);
+pub fn changed(guild_id: i64) {
+    let _ = bus().send(guild_id);
 }
 
 pub fn subscribe() -> broadcast::Receiver<i64> {

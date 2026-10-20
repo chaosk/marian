@@ -1,18 +1,32 @@
-//! Each page and island asks for the resources it needs. On the server that reads
+//! Each page asks for the resources it needs. On the server that reads
 //! Marian directly; in the browser it calls the REST API.
 
 use marian_types as dto;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     pub status: u16,
     pub message: String,
 }
 
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// A read that failed is an error a view can return, so an `ErrorBoundary`
+/// around the page shows it.
+impl std::error::Error for Failure {}
+
 impl Failure {
     pub fn missing(&self) -> bool {
         self.status == 404
+    }
+
+    pub fn unreachable(&self) -> bool {
+        self.status == 0
     }
 }
 
@@ -92,6 +106,55 @@ pub(crate) mod remote {
         }
     }
 
+    const READ_TRIES: u32 = 4;
+
+    pub async fn read<T: DeserializeOwned>(url: &str) -> Result<T, Failure> {
+        let mut last = offline();
+        for attempt in 0..READ_TRIES {
+            match call::<T, ()>("GET", url, None).await {
+                Ok(value) => {
+                    crate::client::note_reached();
+                    return Ok(value);
+                }
+                Err(failure) if failure.unreachable() && attempt + 1 < READ_TRIES => {
+                    crate::client::set_waiting(true);
+                    last = failure;
+                    pause(400 << attempt).await;
+                }
+                Err(failure) => {
+                    if failure.unreachable() {
+                        crate::client::say_offline(&failure.message);
+                    } else {
+                        crate::client::set_waiting(false);
+                    }
+                    return Err(failure);
+                }
+            }
+        }
+        crate::client::say_offline(&last.message);
+        Err(last)
+    }
+
+    async fn pause(ms: i32) {
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::prelude::Closure;
+            use wasm_bindgen::JsCast;
+            let promise = js_sys::Promise::new(&mut |resolve, _| {
+                let cb = Closure::once_into_js(move || {
+                    let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+                });
+                let _ = leptos::prelude::window()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ms);
+            });
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = ms;
+        }
+    }
+
     pub async fn call<T: DeserializeOwned, B: Serialize>(
         method: &str,
         url: &str,
@@ -158,14 +221,15 @@ pub fn front(next: &str) -> Front {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Site {
     pub invite_url: String,
     pub oauth_ready: bool,
     pub mark: String,
 }
 
-/// How this Marian is set up. Server rendering only.
+/// How this Marian is set up. The shell writes this into the document so
+/// hydrate builds the same tree the server sent.
 pub fn site() -> Site {
     #[cfg(feature = "ssr")]
     if let Some(web) = leptos::prelude::use_context::<marian::api::Web>() {
@@ -175,10 +239,52 @@ pub fn site() -> Site {
             mark: marian::assets::mark().to_string(),
         };
     }
+    #[cfg(feature = "hydrate")]
+    {
+        return site_from_document();
+    }
+    #[allow(unreachable_code)]
     Site::default()
 }
 
-/// The notice a sign-in or sign-out left, cleared once read. Server rendering only.
+/// The trace this page was rendered in, for the browser's error reports.
+pub fn page_trace() -> Option<String> {
+    #[cfg(feature = "ssr")]
+    {
+        use leptos::prelude::use_context;
+        return use_context::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<marian::api::PageTrace>().cloned())
+            .map(|trace| trace.0);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// JSON for the `<script id="marian-site">` the shell ships to the browser.
+pub fn site_json() -> String {
+    serde_json::to_string(&site())
+        .unwrap_or_else(|_| "{}".into())
+        .replace('<', "\\u003c")
+}
+
+#[cfg(feature = "hydrate")]
+fn site_from_document() -> Site {
+    thread_local! {
+        static CACHED: std::cell::OnceCell<Site> = const { std::cell::OnceCell::new() };
+    }
+    CACHED.with(|cell| {
+        cell.get_or_init(|| {
+            leptos::prelude::document()
+                .get_element_by_id("marian-site")
+                .and_then(|el| el.text_content())
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default()
+        })
+        .clone()
+    })
+}
+
+/// The notice a sign-in or sign-out left, cleared once read.
 pub fn take_notice() -> String {
     #[cfg(feature = "ssr")]
     if let Some((_, parts)) = local::web() {
@@ -194,7 +300,36 @@ pub fn take_notice() -> String {
             return marian::api::percent_decode(&raw);
         }
     }
+    #[cfg(feature = "hydrate")]
+    {
+        notice_from_document()
+    }
+    #[cfg(not(feature = "hydrate"))]
     String::new()
+}
+
+/// JSON for the `<script id="marian-notice">` the shell ships to the browser.
+pub fn notice_json() -> String {
+    serde_json::to_string(&take_notice())
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace('<', "\\u003c")
+}
+
+#[cfg(feature = "hydrate")]
+fn notice_from_document() -> String {
+    thread_local! {
+        static CACHED: std::cell::OnceCell<String> = const { std::cell::OnceCell::new() };
+    }
+    CACHED.with(|cell| {
+        cell.get_or_init(|| {
+            leptos::prelude::document()
+                .get_element_by_id("marian-notice")
+                .and_then(|el| el.text_content())
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default()
+        })
+        .clone()
+    })
 }
 
 /// Marian's own call on the server; the REST resource at `$url` in the browser.
@@ -207,7 +342,7 @@ macro_rules! resource {
         #[cfg(not(feature = "ssr"))]
         {
             let url = format!("/api/servers/{}{}", $server, $url);
-            send_wrapper::SendWrapper::new(remote::call::<_, ()>("GET", &url, None)).await
+            send_wrapper::SendWrapper::new(remote::read::<_>(&url)).await
         }
     }};
 }
@@ -219,7 +354,7 @@ pub async fn me() -> Result<dto::Me, Failure> {
     }
     #[cfg(not(feature = "ssr"))]
     {
-        send_wrapper::SendWrapper::new(remote::call::<_, ()>("GET", "/api/me", None)).await
+        send_wrapper::SendWrapper::new(remote::read::<_>("/api/me")).await
     }
 }
 
@@ -243,7 +378,7 @@ pub async fn timezones(selected: &str) -> Result<Vec<dto::ZoneGroup>, Failure> {
     #[cfg(not(feature = "ssr"))]
     {
         let url = format!("/api/timezones?selected={}", encode(selected));
-        send_wrapper::SendWrapper::new(remote::call::<_, ()>("GET", &url, None)).await
+        send_wrapper::SendWrapper::new(remote::read::<_>(&url)).await
     }
 }
 
@@ -269,21 +404,12 @@ pub async fn event(server: &str, id: &str) -> Result<dto::Event, Failure> {
     resource!(server, format!("/events/{id}"), |db, v| marian::api::event(db, v, id))
 }
 
-pub async fn event_options(server: &str, id: &str) -> Result<Vec<dto::SignupOption>, Failure> {
-    resource!(server, format!("/events/{id}/options"), |db, v| {
-        marian::api::event_options(db, v, id)
-    })
-}
-
 pub async fn event_reminders(server: &str, id: &str) -> Result<Vec<dto::Reminder>, Failure> {
     resource!(server, format!("/events/{id}/reminders"), |db, v| {
         marian::api::event_reminders(db, v, id)
     })
 }
 
-pub async fn thread(server: &str, id: &str) -> Result<dto::Thread, Failure> {
-    resource!(server, format!("/events/{id}/thread"), |db, v| marian::api::thread(db, v, id))
-}
 
 pub async fn signups(server: &str, id: &str) -> Result<dto::Signups, Failure> {
     resource!(server, format!("/events/{id}/signups"), |db, v| marian::api::signups(db, v, id))
@@ -295,10 +421,12 @@ pub async fn pending_reminders(server: &str, limit: usize) -> Result<Vec<dto::Pe
     })
 }
 
-pub async fn activity(server: &str, limit: i64) -> Result<Vec<dto::Activity>, Failure> {
-    resource!(server, format!("/activity?limit={limit}"), |db, v| {
-        marian::api::activity(db, v, limit)
-    })
+pub async fn activity(server: &str, page: u32, limit: u32) -> Result<dto::Paged<dto::Activity>, Failure> {
+    resource!(
+        server,
+        format!("/activity?page={page}&limit={limit}"),
+        |db, v| { marian::api::activity(db, v, page, i64::from(limit)) }
+    )
 }
 
 pub async fn series_list(server: &str) -> Result<Vec<dto::Series>, Failure> {
@@ -333,7 +461,7 @@ pub async fn routine(server: &str, id: &str) -> Result<dto::RoutineView, Failure
     resource!(server, format!("/routines/{id}"), |db, v| marian::api::routine(db, v, id))
 }
 
-/// A change from an island. It only runs in the browser.
+/// A change from the browser. It only runs there.
 pub async fn send<T: for<'de> Deserialize<'de>, B: Serialize>(
     method: &str,
     url: &str,

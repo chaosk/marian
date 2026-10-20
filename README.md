@@ -14,14 +14,14 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
 
 `docker compose` starts Postgres 17 and publishes it on `127.0.0.1:5432` (user `marian`, password `marian`, database `marian`). Set `DATABASE_URL` to that connection string. Marian listens on `0.0.0.0:8080`. An empty database stays empty until the bot joins a Discord server.
 
-The dashboard is a Leptos app: pages render on the server, and islands (signups, forms, settings) run in the browser. `cargo-leptos` builds both sides and serves the wasm and CSS from `target/site`:
+The dashboard is a Leptos app: pages render on the server and hydrate in the browser. `cargo-leptos` builds both sides and serves the wasm and CSS from `target/site`:
 
 ```sh
 cargo install cargo-leptos --locked
 cargo leptos watch
 ```
 
-`cargo leptos watch` rebuilds the pages and islands on save, and listens on `127.0.0.1:8080`. A release build is `cargo leptos build --release`. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A musl image passes `--bin-target-triple x86_64-unknown-linux-musl --bin-features static-libpq`.
+`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A musl image passes `--bin-target-triple x86_64-unknown-linux-musl --bin-features static-libpq`.
 
 Pages ask `/api` for the resources they need. Event pages hold a live connection at `/api/servers/<id>/events/<event>/live` and refresh when a signup changes in Discord. `cargo test --workspace --exclude marian-frontend` runs the server and page tests. `cargo test -p marian-app --features ssr` covers the pages as the server renders them.
 

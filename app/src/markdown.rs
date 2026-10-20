@@ -1,301 +1,100 @@
 //! Discord's text formatting, as HTML safe to drop into a page.
+//!
+//! [`discord_md::parse`](https://docs.rs/discord-md/latest/discord_md/) owns the
+//! Discord markers. This walks that AST and escapes the text.
+
+use discord_md::ast::{MarkdownElement, MarkdownElementCollection};
+use discord_md::parse;
 
 pub fn render(src: &str) -> String {
-    let lines: Vec<&str> = src.split('\n').collect();
-    let mut doc = Doc::default();
-    let mut i = 0;
-    let mut fence: Option<String> = None;
-    while i < lines.len() {
-        let line = lines[i];
-        if let Some(code) = fence.as_mut() {
-            if line.trim() == "```" {
-                doc.flush();
-                doc.html.push_str("<pre><code>");
-                doc.html.push_str(&escape(code));
-                doc.html.push_str("</code></pre>");
-                fence = None;
-            } else {
-                if !code.is_empty() {
-                    code.push('\n');
-                }
-                code.push_str(line);
+    let mut html = String::new();
+    blocks(&mut html, parse(src).content());
+    html
+}
+
+fn blocks(html: &mut String, elements: &MarkdownElementCollection) {
+    let mut inline = String::new();
+    for element in elements.get() {
+        match element {
+            MarkdownElement::MultiLineCode(code) => {
+                flush_inline(html, &mut inline);
+                html.push_str("<pre><code>");
+                html.push_str(&escape(code.content().trim_matches('\n')));
+                html.push_str("</code></pre>");
             }
-            i += 1;
-            continue;
-        }
-        if is_fence_open(line) {
-            fence = Some(String::new());
-            i += 1;
-            continue;
-        }
-        if let Some(code) = one_line_fence(line) {
-            doc.flush();
-            doc.html.push_str("<pre><code>");
-            doc.html.push_str(&escape(code));
-            doc.html.push_str("</code></pre>");
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(">>>") {
-            doc.flush();
-            let mut quoted = Vec::new();
-            let first = rest.trim_start();
-            if !first.is_empty() {
-                quoted.push(inline(first));
+            MarkdownElement::BlockQuote(quote) => {
+                flush_inline(html, &mut inline);
+                html.push_str("<blockquote>");
+                blocks(html, quote.content());
+                html.push_str("</blockquote>");
             }
-            i += 1;
-            while i < lines.len() {
-                quoted.push(inline(lines[i]));
-                i += 1;
-            }
-            push_quote(&mut doc.html, &quoted);
-            break;
-        }
-        if line.trim().is_empty() {
-            doc.flush();
-            i += 1;
-            continue;
-        }
-        if let Some((level, text)) = heading(line) {
-            doc.flush();
-            doc.html
-                .push_str(&format!("<h{level}>{}</h{level}>", inline(text)));
-            i += 1;
-            continue;
-        }
-        if let Some(text) = quote_line(line) {
-            doc.flush_para();
-            if !matches!(doc.block, Block::Quote(_)) {
-                doc.flush_block();
-                doc.block = Block::Quote(Vec::new());
-            }
-            if let Block::Quote(lines) = &mut doc.block {
-                lines.push(inline(text));
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(text) = bullet(line) {
-            doc.flush_para();
-            if !matches!(doc.block, Block::Ul(_)) {
-                doc.flush_block();
-                doc.block = Block::Ul(Vec::new());
-            }
-            if let Block::Ul(items) = &mut doc.block {
-                items.push(inline(text));
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(text) = numbered(line) {
-            doc.flush_para();
-            if !matches!(doc.block, Block::Ol(_)) {
-                doc.flush_block();
-                doc.block = Block::Ol(Vec::new());
-            }
-            if let Block::Ol(items) = &mut doc.block {
-                items.push(inline(text));
-            }
-            i += 1;
-            continue;
-        }
-        doc.flush_block();
-        doc.para.push(inline(line));
-        i += 1;
-    }
-    if let Some(code) = fence {
-        doc.flush();
-        doc.html.push_str("<pre><code>");
-        doc.html.push_str(&escape(&code));
-        doc.html.push_str("</code></pre>");
-    }
-    doc.flush();
-    doc.html
-}
-
-#[derive(Default)]
-struct Doc {
-    html: String,
-    para: Vec<String>,
-    block: Block,
-}
-
-#[derive(Default)]
-enum Block {
-    #[default]
-    None,
-    Quote(Vec<String>),
-    Ul(Vec<String>),
-    Ol(Vec<String>),
-}
-
-impl Doc {
-    fn flush(&mut self) {
-        self.flush_para();
-        self.flush_block();
-    }
-
-    fn flush_para(&mut self) {
-        if self.para.is_empty() {
-            return;
-        }
-        self.html.push_str("<p>");
-        self.html.push_str(&self.para.join("<br>"));
-        self.html.push_str("</p>");
-        self.para.clear();
-    }
-
-    fn flush_block(&mut self) {
-        match std::mem::take(&mut self.block) {
-            Block::None => {}
-            Block::Quote(lines) => push_quote(&mut self.html, &lines),
-            Block::Ul(items) => push_list(&mut self.html, "ul", &items),
-            Block::Ol(items) => push_list(&mut self.html, "ol", &items),
+            other => inline.push_str(&span(other)),
         }
     }
+    flush_inline(html, &mut inline);
 }
 
-fn push_quote(html: &mut String, lines: &[String]) {
-    html.push_str("<blockquote><p>");
-    html.push_str(&lines.join("<br>"));
-    html.push_str("</p></blockquote>");
-}
-
-fn push_list(html: &mut String, tag: &str, items: &[String]) {
-    html.push('<');
-    html.push_str(tag);
-    html.push('>');
-    for item in items {
-        html.push_str("<li>");
-        html.push_str(item);
-        html.push_str("</li>");
-    }
-    html.push_str("</");
-    html.push_str(tag);
-    html.push('>');
-}
-
-fn is_fence_open(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("```") else {
-        return false;
-    };
-    rest.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '_')
-}
-
-fn one_line_fence(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("```")?;
-    let code = rest.strip_suffix("```")?;
-    if code.is_empty() || code.contains("```") {
-        None
-    } else {
-        Some(code)
-    }
-}
-
-fn heading(line: &str) -> Option<(u8, &str)> {
-    let hashes = line.chars().take_while(|c| *c == '#').count();
-    if !(1..=3).contains(&hashes) {
-        return None;
-    }
-    let rest = line.get(hashes..)?;
-    let text = rest.strip_prefix(' ')?;
-    Some((hashes as u8, text))
-}
-
-fn quote_line(line: &str) -> Option<&str> {
-    if line.starts_with(">>>") {
-        return None;
-    }
-    let rest = line.strip_prefix('>')?;
-    Some(rest.strip_prefix(' ').unwrap_or(rest))
-}
-
-fn bullet(line: &str) -> Option<&str> {
-    line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
-}
-
-fn numbered(line: &str) -> Option<&str> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    if bytes.first()?.is_ascii_digit() {
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
+fn span(element: &MarkdownElement) -> String {
+    match element {
+        MarkdownElement::Plain(text) => plain(text.content()),
+        MarkdownElement::ItalicsStar(inner) => wrap("em", inner.content()),
+        MarkdownElement::ItalicsUnderscore(inner) => wrap("em", inner.content()),
+        MarkdownElement::Bold(inner) => wrap("strong", inner.content()),
+        MarkdownElement::Underline(inner) => wrap("u", inner.content()),
+        MarkdownElement::Strikethrough(inner) => wrap("s", inner.content()),
+        MarkdownElement::Spoiler(inner) => {
+            format!(
+                "<span class=\"spoiler\">{}</span>",
+                spans(inner.content())
+            )
         }
-    } else {
-        return None;
-    }
-    if bytes.get(i) == Some(&b'.') && bytes.get(i + 1) == Some(&b' ') {
-        Some(&line[i + 2..])
-    } else {
-        None
+        MarkdownElement::OneLineCode(code) => format!("<code>{}</code>", escape(code.content())),
+        MarkdownElement::MultiLineCode(_) | MarkdownElement::BlockQuote(_) => String::new(),
     }
 }
 
-fn inline(src: &str) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    inline_chars(&chars)
+fn wrap(tag: &str, content: &MarkdownElementCollection) -> String {
+    format!("<{tag}>{}</{tag}>", spans(content))
 }
 
-fn inline_chars(chars: &[char]) -> String {
+fn spans(elements: &MarkdownElementCollection) -> String {
+    elements.get().iter().map(span).collect()
+}
+
+fn plain(text: &str) -> String {
     let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\\' && chars.get(i + 1).is_some_and(|c| is_marker(*c)) {
-            out.push_str(&escape_char(chars[i + 1]));
-            i += 2;
-            continue;
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&escape_keep_nl(&rest[..open]));
+        match take_link(&rest[open..]) {
+            Some((html, used)) => {
+                out.push_str(&html);
+                rest = &rest[open + used..];
+            }
+            None => {
+                out.push('[');
+                rest = &rest[open + 1..];
+            }
         }
-        if let Some((html, used)) = take_code(&chars[i..]) {
-            out.push_str(&html);
-            i += used;
-            continue;
-        }
-        if let Some((html, used)) = take_link(&chars[i..]) {
-            out.push_str(&html);
-            i += used;
-            continue;
-        }
-        if let Some((html, used)) = take_wrapped(&chars[i..], i == 0 || !is_word(chars[i - 1])) {
-            out.push_str(&html);
-            i += used;
-            continue;
-        }
-        out.push_str(&escape_char(chars[i]));
-        i += 1;
     }
+    out.push_str(&escape_keep_nl(rest));
     out
 }
 
-fn take_code(chars: &[char]) -> Option<(String, usize)> {
-    if chars.first() != Some(&'`') || chars.get(1) == Some(&'`') {
-        return None;
-    }
-    let end = chars.iter().skip(1).position(|c| *c == '`')? + 1;
-    if end == 1 {
-        return None;
-    }
-    let content: String = chars[1..end].iter().collect();
-    Some((format!("<code>{}</code>", escape(&content)), end + 1))
-}
-
-fn take_link(chars: &[char]) -> Option<(String, usize)> {
-    if chars.first() != Some(&'[') {
-        return None;
-    }
-    let label_end = chars.iter().skip(1).position(|c| *c == ']')? + 1;
-    if label_end == 1 || chars.get(label_end + 1) != Some(&'(') {
+fn take_link(src: &str) -> Option<(String, usize)> {
+    let label_end = src.find(']')?;
+    if label_end <= 1 || !src[label_end + 1..].starts_with('(') {
         return None;
     }
     let url_start = label_end + 2;
-    let url_end = chars.iter().skip(url_start).position(|c| *c == ')')? + url_start;
-    let url: String = chars[url_start..url_end].iter().collect();
-    if !safe_url(&url) {
+    let url_end = src[url_start..].find(')')? + url_start;
+    let url = &src[url_start..url_end];
+    if !safe_url(url) {
         return None;
     }
-    let label = inline_chars(&chars[1..label_end]);
+    let label = plain(&src[1..label_end]);
     Some((
-        format!("<a href=\"{}\">{label}</a>", escape(&url)),
+        format!("<a href=\"{}\">{label}</a>", escape(url)),
         url_end + 1,
     ))
 }
@@ -307,71 +106,120 @@ fn safe_url(url: &str) -> bool {
             .all(|c| !c.is_whitespace() && c != '"' && c != '<' && c != '>')
 }
 
-fn take_wrapped(chars: &[char], underscore_ok: bool) -> Option<(String, usize)> {
-    let patterns: &[(&str, &str, bool)] = &[
-        ("***", "<strong><em>", false),
-        ("**", "<strong>", false),
-        ("__", "<u>", true),
-        ("~~", "<s>", false),
-        ("||", "<span class=\"spoiler\">", false),
-        ("*", "<em>", false),
-        ("_", "<em>", true),
-    ];
-    for (delim, open, needs_edge) in patterns {
-        let marker: Vec<char> = delim.chars().collect();
-        if !chars.starts_with(&marker) {
-            continue;
-        }
-        if *needs_edge && !underscore_ok {
-            continue;
-        }
-        let close = find_close(chars, marker.len(), &marker, *needs_edge)?;
-        if close == marker.len() {
-            continue;
-        }
-        let inner = inline_chars(&chars[marker.len()..close]);
-        let close_tag = match *delim {
-            "***" => "</em></strong>",
-            "**" => "</strong>",
-            "__" => "</u>",
-            "~~" => "</s>",
-            "||" => "</span>",
-            "*" | "_" => "</em>",
-            _ => "",
-        };
-        return Some((format!("{open}{inner}{close_tag}"), close + marker.len()));
+fn flush_inline(html: &mut String, inline: &mut String) {
+    if inline.is_empty() {
+        return;
     }
-    None
-}
-
-fn find_close(chars: &[char], start: usize, delim: &[char], needs_edge: bool) -> Option<usize> {
-    let mut i = start;
-    while i + delim.len() <= chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            i += 2;
+    let text = std::mem::take(inline);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut para: Vec<&str> = Vec::new();
+    let mut ul: Vec<&str> = Vec::new();
+    let mut ol: Vec<&str> = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            flush_para(html, &mut para);
+            flush_list(html, "ul", &mut ul);
+            flush_list(html, "ol", &mut ol);
             continue;
         }
-        if chars[i..].starts_with(delim) {
-            let after = i + delim.len();
-            if !needs_edge || after == chars.len() || !is_word(chars[after]) {
-                return Some(i);
-            }
+        if let Some((level, title)) = heading(line) {
+            flush_para(html, &mut para);
+            flush_list(html, "ul", &mut ul);
+            flush_list(html, "ol", &mut ol);
+            html.push_str(&format!("<h{level}>{title}</h{level}>"));
+            continue;
         }
-        i += 1;
+        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            flush_para(html, &mut para);
+            flush_list(html, "ol", &mut ol);
+            ul.push(item);
+            continue;
+        }
+        if let Some(item) = numbered(line) {
+            flush_para(html, &mut para);
+            flush_list(html, "ul", &mut ul);
+            ol.push(item);
+            continue;
+        }
+        if let Some(quoted) = quote_line(line) {
+            flush_para(html, &mut para);
+            flush_list(html, "ul", &mut ul);
+            flush_list(html, "ol", &mut ol);
+            html.push_str("<blockquote><p>");
+            html.push_str(quoted);
+            html.push_str("</p></blockquote>");
+            continue;
+        }
+        flush_list(html, "ul", &mut ul);
+        flush_list(html, "ol", &mut ol);
+        para.push(line);
     }
-    None
+    flush_para(html, &mut para);
+    flush_list(html, "ul", &mut ul);
+    flush_list(html, "ol", &mut ol);
 }
 
-fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if !(1..=3).contains(&hashes) {
+        return None;
+    }
+    let rest = line.get(hashes..)?;
+    Some((hashes as u8, rest.strip_prefix(' ')?))
 }
 
-fn is_marker(c: char) -> bool {
-    matches!(c, '\\' | '*' | '_' | '~' | '|' | '`' | '[' | ']')
+fn numbered(line: &str) -> Option<&str> {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    line.get(digits..)?.strip_prefix(". ")
+}
+
+fn quote_line(line: &str) -> Option<&str> {
+    if line.starts_with(">>>") {
+        return None;
+    }
+    let rest = line.strip_prefix("&gt;").or_else(|| line.strip_prefix('>'))?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
+fn flush_para(html: &mut String, para: &mut Vec<&str>) {
+    if para.is_empty() {
+        return;
+    }
+    html.push_str("<p>");
+    html.push_str(&para.join("<br>"));
+    html.push_str("</p>");
+    para.clear();
+}
+
+fn flush_list(html: &mut String, tag: &str, items: &mut Vec<&str>) {
+    if items.is_empty() {
+        return;
+    }
+    html.push('<');
+    html.push_str(tag);
+    html.push('>');
+    for item in items.iter() {
+        html.push_str("<li>");
+        html.push_str(item);
+        html.push_str("</li>");
+    }
+    html.push_str("</");
+    html.push_str(tag);
+    html.push('>');
+    items.clear();
+}
+
+fn escape_keep_nl(src: &str) -> String {
+    src.chars()
+        .map(|c| if c == '\n' { c.to_string() } else { escape_char(c) })
+        .collect()
 }
 
 fn escape(src: &str) -> String {
-    src.chars().map(|c| escape_char(c)).collect()
+    src.chars().map(escape_char).collect()
 }
 
 fn escape_char(c: char) -> String {

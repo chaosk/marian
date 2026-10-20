@@ -74,6 +74,12 @@ mod tests {
         let (from, to) = week_of(&clock, now);
         assert_eq!(from, Utc.with_ymd_and_hms(2026, 10, 11, 22, 0, 0).unwrap());
         assert_eq!(to, Utc.with_ymd_and_hms(2026, 10, 18, 22, 0, 0).unwrap());
+        let later = Utc.with_ymd_and_hms(2026, 10, 22, 9, 13, 0).unwrap();
+        assert!(later >= to);
+        let utc = Clock::new("UTC", true);
+        let (from, to) = week_of(&utc, now);
+        assert!(from <= now && now < to);
+        assert!(later >= to);
     }
 
     #[test]
@@ -94,6 +100,14 @@ mod tests {
             per_page: 25,
         };
         assert_eq!(window(&page), "26–40 of 40");
+        let first = dto::Paged {
+            items: vec![(), ()],
+            total: 2,
+            page: 1,
+            pages: 1,
+            per_page: 25,
+        };
+        assert_eq!(window(&first), "1–2 of 2");
         assert_eq!(time_line(&clock_utc(), Utc.with_ymd_and_hms(2026, 1, 1, 19, 0, 0).unwrap(), 120), "19:00 – 21:00 (2 hours)");
     }
 

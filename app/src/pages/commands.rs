@@ -1,15 +1,14 @@
 use leptos::prelude::*;
 
-use crate::islands::CommandDesk;
-use crate::{api, head, load, param};
+use crate::widgets::CommandDesk;
+use crate::cache::{self, ask};
+use crate::{head, param};
 
 const GUIDE: &str = include_str!("../guide.html");
 
 #[component]
 pub fn Commands() -> impl IntoView {
-    let server = param("server");
-    let data = async move { api::commands(&server).await };
-    load(data, |log| {
+    ask(cache::commands_scope(), cache::server_key, |log| {
         view! {
             {head("Command desk")}
             <div class="split">

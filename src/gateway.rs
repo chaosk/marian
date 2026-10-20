@@ -365,20 +365,48 @@ async fn handle_button(
     component
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
-    match action {
-        ButtonAction::Edit { event_id } => edit_from_button(ctx, component, data, event_id).await,
-        ButtonAction::Delete { event_id } => ask_delete(ctx, component, data, event_id).await,
-        ButtonAction::ConfirmDelete { event_id } => {
-            delete_from_button(ctx, component, data, event_id).await
+    // The button names rows by public id; the handlers below work on row keys.
+    let found = {
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+        let event_key = |conn: &mut store::Connection, event: uuid::Uuid| -> Result<Option<i64>, crate::error::OpError> {
+            Ok(store::event_by_public(conn, &event.to_string())?.map(|event| event.id))
+        };
+        match action {
+            ButtonAction::Edit { event } => event_key(&mut conn, event)?.map(Found::Edit),
+            ButtonAction::Delete { event } => event_key(&mut conn, event)?.map(Found::Delete),
+            ButtonAction::ConfirmDelete { event } => event_key(&mut conn, event)?.map(Found::ConfirmDelete),
+            ButtonAction::Signup { event, option } => match event_key(&mut conn, event)? {
+                Some(event_id) => crate::ids::public::option_id(&mut conn, event_id, &option.to_string())
+                    .ok()
+                    .map(|option_id| Found::Signup(event_id, option_id)),
+                None => None,
+            },
+            ButtonAction::Routine { run, day } => {
+                logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Routine(run_id, day))
+            }
         }
-        ButtonAction::Signup {
-            event_id,
-            option_id,
-        } => signup_from_button(ctx, component, data, event_id, option_id).await,
-        ButtonAction::Routine { run_id, day } => {
-            routine_from_button(ctx, component, data, run_id, day).await
+    };
+    let Some(found) = found else {
+        return followup(ctx, component, "That isn't here any more.").await;
+    };
+    match found {
+        Found::Edit(event_id) => edit_from_button(ctx, component, data, event_id).await,
+        Found::Delete(event_id) => ask_delete(ctx, component, data, event_id).await,
+        Found::ConfirmDelete(event_id) => delete_from_button(ctx, component, data, event_id).await,
+        Found::Signup(event_id, option_id) => {
+            signup_from_button(ctx, component, data, event_id, option_id).await
         }
+        Found::Routine(run_id, day) => routine_from_button(ctx, component, data, run_id, day).await,
     }
+}
+
+/// A button's action with its rows found.
+enum Found {
+    Edit(i64),
+    Delete(i64),
+    ConfirmDelete(i64),
+    Signup(i64, i64),
+    Routine(i64, u8),
 }
 
 async fn routine_from_button(
@@ -492,11 +520,14 @@ async fn ask_delete(
                     Some(server.as_str()).filter(|id| !id.is_empty()),
                     &event.public_id,
                 );
-                Ok(Some(logic::delete_confirm_body(
-                    &event.title,
-                    event.starts_at,
-                    url.as_deref(),
-                    event.status == "posted",
+                Ok(Some((
+                    logic::delete_confirm_body(
+                        &event.title,
+                        event.starts_at,
+                        url.as_deref(),
+                        event.status == "posted",
+                    ),
+                    event.public_id,
                 )))
             }
         }
@@ -506,11 +537,12 @@ async fn ask_delete(
         Ok(None) => return Ok(()),
         Err(text) => return followup(ctx, component, &text).await,
     };
+    let (body, event) = body;
     let embed = serenity::CreateEmbed::new()
         .title("Delete event")
         .description(clip(&body, 4000))
         .color(serenity::Colour::new(0xF1C40F));
-    let delete = serenity::CreateButton::new(format!("marian:{event_id}:confirm-delete"))
+    let delete = serenity::CreateButton::new(format!("marian:{event}:confirm-delete"))
         .style(serenity::ButtonStyle::Danger)
         .label("Delete");
     component
@@ -665,7 +697,7 @@ fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
     let user = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
     if let Some(manage) = click.manage {
-        logic::set_organizer(conn, user.id, manage)?;
+        logic::set_server_manager(conn, user.id, manage)?;
     }
     if let Some(roles) = &click.roles {
         sync_roles(conn, guild.id, user.id, roles)?;
@@ -728,19 +760,23 @@ async fn followup(
     Ok(())
 }
 
+/// What a button asks for, with public ids as the button carried them.
+#[derive(Debug, PartialEq)]
 enum ButtonAction {
-    Signup { event_id: i64, option_id: i64 },
-    Edit { event_id: i64 },
-    Delete { event_id: i64 },
-    ConfirmDelete { event_id: i64 },
-    Routine { run_id: i64, day: u8 },
+    Signup { event: uuid::Uuid, option: uuid::Uuid },
+    Edit { event: uuid::Uuid },
+    Delete { event: uuid::Uuid },
+    ConfirmDelete { event: uuid::Uuid },
+    Routine { run: uuid::Uuid, day: u8 },
 }
 
-fn action_button(event_id: i64, button: &logic::DiscordButton) -> serenity::CreateButton {
+/// A button on an event's post. Its id names the event, and the option, by
+/// public id: anyone can read a button's id in Discord.
+fn action_button(event: uuid::Uuid, button: &logic::DiscordButton) -> serenity::CreateButton {
     let custom_id = match button.role {
-        logic::ButtonRole::Signup(option_id) => format!("marian:{event_id}:{option_id}"),
-        logic::ButtonRole::Edit => format!("marian:{event_id}:edit"),
-        logic::ButtonRole::Delete => format!("marian:{event_id}:delete"),
+        logic::ButtonRole::Signup(option) => format!("marian:{event}:{option}"),
+        logic::ButtonRole::Edit => format!("marian:{event}:edit"),
+        logic::ButtonRole::Delete => format!("marian:{event}:delete"),
     };
     let style = match button.tone {
         logic::ButtonTone::Secondary => serenity::ButtonStyle::Secondary,
@@ -762,6 +798,8 @@ fn action_button(event_id: i64, button: &logic::DiscordButton) -> serenity::Crea
     built
 }
 
+/// Reads a button's id. A button from before ids were public carries row
+/// numbers, which no longer parse, so it does nothing.
 fn parse_button(custom_id: &str) -> Option<ButtonAction> {
     let mut parts = custom_id.split(':');
     if parts.next() != Some("marian") {
@@ -769,18 +807,18 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
     }
     let head = parts.next()?;
     if head == "w" {
-        let run_id = parts.next()?.parse().ok()?;
+        let run = uuid::Uuid::parse_str(parts.next()?).ok()?;
         let day = parts.next()?.parse().ok()?;
-        return Some(ButtonAction::Routine { run_id, day });
+        return Some(ButtonAction::Routine { run, day });
     }
-    let event_id = head.parse().ok()?;
+    let event = uuid::Uuid::parse_str(head).ok()?;
     match parts.next()? {
-        "edit" => Some(ButtonAction::Edit { event_id }),
-        "delete" => Some(ButtonAction::Delete { event_id }),
-        "confirm-delete" => Some(ButtonAction::ConfirmDelete { event_id }),
+        "edit" => Some(ButtonAction::Edit { event }),
+        "delete" => Some(ButtonAction::Delete { event }),
+        "confirm-delete" => Some(ButtonAction::ConfirmDelete { event }),
         option => Some(ButtonAction::Signup {
-            event_id,
-            option_id: option.parse().ok()?,
+            event,
+            option: uuid::Uuid::parse_str(option).ok()?,
         }),
     }
 }
@@ -791,7 +829,11 @@ async fn push_sync(
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
-    crate::live::changed(event_id);
+    if let Ok(mut conn) = db.get() {
+        if let Ok(Some(event)) = store::event(&mut conn, event_id) {
+            crate::live::changed(event.guild_id);
+        }
+    }
     post_event(db, http, public_url, event_id, true).await
 }
 
@@ -833,7 +875,7 @@ async fn post_event(
     let mut rows = Vec::new();
     let mut buttons = Vec::new();
     for button in &view.buttons {
-        buttons.push(action_button(event_id, button));
+        buttons.push(action_button(view.event, button));
         if buttons.len() == 5 {
             rows.push(serenity::CreateActionRow::Buttons(std::mem::take(
                 &mut buttons,
@@ -988,6 +1030,26 @@ async fn push_routine(
             clip(&field.value, 1024),
             field.inline,
         );
+    }
+    // A locked poll's post is now the event; its results go in a reply to it,
+    // posted once and edited after.
+    if post.results {
+        if let Some(reply) = post.message_id.as_deref().and_then(|id| id.parse().ok()) {
+            let edited = channel_id
+                .edit_message(&http, serenity::MessageId::new(reply), serenity::EditMessage::new().embed(embed.clone()))
+                .await;
+            if edited.is_ok() {
+                return Ok(());
+            }
+        }
+        let mut message = serenity::CreateMessage::new().embed(embed);
+        if let Some(parent) = post.reply_to.as_deref().and_then(|id| id.parse().ok()) {
+            message = message.reference_message((channel_id, serenity::MessageId::new(parent)));
+        }
+        let message = channel_id.send_message(&http, message).await?;
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        logic::remember_results_message(&mut conn, run_id, &message.id.get().to_string())?;
+        return Ok(());
     }
     let sent = upsert_message(
         &http,
@@ -1420,7 +1482,7 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
     let user = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
     if let Some(manage) = manage {
-        logic::set_organizer(&mut conn, user.id, manage)?;
+        logic::set_server_manager(&mut conn, user.id, manage)?;
     }
     if let Some(roles) = &roles {
         sync_roles(&mut conn, guild.id, user.id, roles)?;
@@ -1888,6 +1950,7 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         "settings_thread_reminders",
         "settings_show_attendees",
         "settings_temp_roles",
+        "settings_waitlist",
         "settings_digest",
         "settings_post_lead",
         "settings_role"
@@ -2087,6 +2150,24 @@ async fn settings_temp_roles(
         ctx,
         "/settings temp_roles",
         commands::Setting::TempRoles(enabled),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    rename = "waitlist",
+    description_localized("en-US", "Let full options take a waitlist")
+)]
+async fn settings_waitlist(
+    ctx: Context<'_>,
+    #[description = "Sign people up to a waitlist when an option is full"] enabled: bool,
+) -> Result<(), Error> {
+    setting(
+        ctx,
+        "/settings waitlist",
+        commands::Setting::Waitlist(enabled),
     )
     .await
 }
@@ -2601,7 +2682,31 @@ async fn help(ctx: Context<'_>) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dm_blocked, embed_parts, presence_line};
+    use super::{dm_blocked, embed_parts, parse_button, presence_line, ButtonAction};
+
+    #[test]
+    fn a_button_names_its_rows_by_public_id() {
+        let event = uuid::Uuid::now_v7();
+        let option = uuid::Uuid::now_v7();
+        assert_eq!(
+            parse_button(&format!("marian:{event}:{option}")),
+            Some(ButtonAction::Signup { event, option })
+        );
+        assert_eq!(parse_button(&format!("marian:{event}:edit")), Some(ButtonAction::Edit { event }));
+        assert_eq!(
+            parse_button(&format!("marian:{event}:confirm-delete")),
+            Some(ButtonAction::ConfirmDelete { event })
+        );
+        assert_eq!(
+            parse_button(&format!("marian:w:{option}:3")),
+            Some(ButtonAction::Routine { run: option, day: 3 })
+        );
+        // Buttons posted before carry row numbers. They do nothing now.
+        assert_eq!(parse_button("marian:12:34"), None);
+        assert_eq!(parse_button("marian:12:edit"), None);
+        assert_eq!(parse_button("marian:w:5:3"), None);
+        assert!(format!("marian:{event}:{option}").len() <= 100, "Discord's limit on a button id");
+    }
     use crate::commands::DmReply;
 
     #[test]

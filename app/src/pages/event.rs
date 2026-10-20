@@ -1,127 +1,382 @@
 use leptos::prelude::*;
+use marian_types as dto;
 
-use crate::format::{self, clock_of, color_name, spots, status_label};
-use crate::islands::{ActionButton, SignupPanel};
-use crate::{api, base, border, load, md, param};
+use crate::format::{self, clock_of, spots, status_label};
+use crate::widgets::{
+    numbered, unsaved_signups, ActionButton, LeaveGuard, ApplyToSeries, EventAttendeeRole, EventChannel, EventColor, EventCutoff,
+    EventDescription, EventLocation, EventMentions, EventReminders, EventRepeat, EventRestrictions, EventTitle, EventWhen,
+    LocalDraft, MultipleToggle, PostButtons, SignupPanel, ThreadToggle,
+};
+use crate::cache::{self, show, when, Ready};
+use crate::{base, border, title, A};
+
+/// What differs between a saved event's page and a new one. The layout around
+/// these is the same, so a new event looks the way it will once saved.
+struct Slots {
+    actions: AnyView,
+    series_note: Option<AnyView>,
+    attendance: AnyView,
+    reminders: AnyView,
+    roles: AnyView,
+    embed: AnyView,
+    channel: AnyView,
+    status: AnyView,
+}
+
+fn layout(key: (String, String), event: &dto::Event, clock: format::Clock, slots: Slots) -> impl IntoView {
+    let image = event.image_url.clone();
+    view! {
+        <div class="event-top">
+            <div>
+                <EventTitle key=key.clone() event=event.clone()/>
+                <EventWhen key=key.clone() event=event.clone() clock=clock/>
+                <EventLocation key=key.clone() event=event.clone()/>
+            </div>
+            <div class="actions">{slots.actions}</div>
+        </div>
+        {slots.series_note}
+        {image.map(|url| view! { <img class="event-banner" src=url alt=""/> })}
+        <div class="event-layout">
+            <div class="event-main">
+                <EventDescription key=key.clone() event=event.clone()/>
+                {slots.attendance}
+                <section>
+                    <div class="section-head"><h2>"Notifications & access"</h2></div>
+                    <div class="panel">
+                        <div class="connection-grid">
+                            <div>
+                                <p class="kicker">"Reminders"</p>
+                                {slots.reminders}
+                            </div>
+                            {slots.roles}
+                        </div>
+                    </div>
+                </section>
+                <section>
+                    <h2>"Discord message"</h2>
+                    {slots.embed}
+                </section>
+            </div>
+            <aside class="panel event-facts">
+                <p class="kicker">"Created by"</p>
+                <p>{event.creator.clone()}</p>
+                <p class="kicker">"Channel"</p>
+                {slots.channel}
+                <p class="kicker">"Color"</p>
+                <EventColor key=key.clone() event=event.clone()/>
+                <p class="kicker">"Multiple responses"</p>
+                <MultipleToggle key=key.clone() event=event.clone()/>
+                <p class="kicker">"Event thread"</p>
+                <ThreadToggle key=key.clone() event=event.clone()/>
+                <p class="kicker">"Signups close"</p>
+                <EventCutoff key=key.clone() event=event.clone() clock=clock/>
+                <p class="kicker">"Repeats"</p>
+                <EventRepeat key=key.clone() event=event.clone() clock=clock/>
+                <p class="kicker">"Status"</p>
+                {slots.status}
+            </aside>
+        </div>
+    }
+}
+
+fn localize_note(server: &dto::Server) -> &'static str {
+    if server.localize_time {
+        "Members see this time in their own zone on Discord."
+    } else {
+        "Times stay in the server zone."
+    }
+}
 
 #[component]
 pub fn EventPage() -> impl IntoView {
-    let server_id = param("server");
-    let id = param("id");
-    let data = async move {
-        let server = api::server(&server_id).await?;
-        let event = api::event(&server_id, &id).await?;
-        let signups = api::signups(&server_id, &id).await?;
-        let reminders = api::event_reminders(&server_id, &id).await?;
-        let thread = api::thread(&server_id, &id).await?;
-        let roles = api::roles(&server_id).await?;
-        let members = if signups.can_manage {
-            api::members(&server_id).await?
-        } else {
-            Vec::new()
-        };
-        Ok((server, event, signups, reminders, thread, roles, members))
-    };
-    load(data, |(server, event, signups, reminders, thread, roles, members)| {
-        let clock = clock_of(&server);
-        let now = format::now();
-        let base = base();
-        let here = format!("{base}/events/{}", event.id);
-        let api_here = format!("/api{here}");
-        let name_of = |id: i64| {
-            roles
-                .iter()
-                .find(|role| role.id == id)
-                .map(|role| role.name.clone())
-        };
-        let mentions = {
-            let mut names = Vec::new();
-            if event.mention_everyone {
-                names.push("@everyone".to_string());
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let event = cache::listen(cache::event_scope(), cache::event_key);
+    let signups = cache::listen(cache::signups_scope(), cache::event_key);
+    let members = cache::listen(cache::members_scope(), cache::server_key);
+    let reminders = cache::listen(cache::reminders_scope(), cache::event_key);
+    let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    let channels = cache::listen(cache::channels_scope(), cache::server_key);
+    when(
+        move || (server.get(), event.get()).ready(),
+        move |(server, event)| {
+            let clock = clock_of(&server);
+            let now = format::now();
+            let here = format!("{}/events/{}", base(), event.id);
+            let api_here = format!("/api{here}");
+            let localize = localize_note(&server);
+            let key = (cache::server_now(), event.id.clone());
+            let series_note = event.series.as_ref().and_then(|series| {
+                (series.cadence != "once").then(|| {
+                    let href = format!("{}/recurring/{}", base(), series.id);
+                    view! {
+                        <p class="notice info">
+                            "This is one date in a series. Changes here apply to this date only. "
+                            <A href=href>"See all dates."</A>" "
+                            <ApplyToSeries key=key.clone() event=event.clone()/>
+                        </p>
+                    }
+                    .into_any()
+                })
+            });
+            let can = event.can.clone();
+            title(event.title.clone());
+            let actions = view! {
+                <PostButtons key=key.clone() event=event.clone() clock=clock/>
+                {can.archive.then(|| view! {
+                    <ActionButton method="POST" url=format!("{api_here}/archive") label="Archive" class="ghost"/>
+                })}
+                <ActionButton method="POST" url=format!("{api_here}/duplicate") label="Duplicate" class="ghost"
+                    done=format!("Made a draft copy for {}, one week later.", clock.when(week_later(&clock, event.starts_at)))/>
+                {can.skip.then(|| view! {
+                    <ActionButton method="POST" url=format!("{api_here}/skip") label="Skip this date" class="ghost"/>
+                })}
+                {can.delete.then(|| view! {
+                    <ActionButton method="DELETE" url=api_here.clone() label="Delete" class="danger" confirm="Remove this event?"/>
+                })}
             }
-            names.extend(event.mention_role_ids.iter().filter_map(|id| name_of(*id)));
-            names
-        };
-        let restrictions: Vec<String> = event
-            .restrict_role_ids
-            .iter()
-            .filter_map(|id| name_of(*id))
-            .collect();
-        let attendee = event.attendee_role_id.and_then(name_of).unwrap_or_default();
-        let close = if event.signups_closed {
-            "Closed".to_string()
-        } else {
-            event
-                .cutoff_at
-                .map(|dt| clock.when(dt))
-                .unwrap_or_else(|| "Never".into())
-        };
-        let series_note = event.series.as_ref().and_then(|series| {
-            (series.cadence != "once").then(|| {
-                let href = format!("{base}/recurring/{}", series.id);
-                view! {
-                    <p class="notice">
-                        "This is one date in a series. Moving this start time leaves the other dates where they are. "
-                        <a href=href>"Change the repeat on the series."</a>
-                    </p>
-                }
-            })
-        });
-        let localize = if server.localize_time {
-            "Members see this time in their own zone on Discord."
-        } else {
-            "Times stay in the server zone."
-        };
-        let calendar = if event.google_synced {
-            view! { "On your Google Calendar" }.into_any()
-        } else if event.calendar_synced {
-            view! { "On your calendar feed" }.into_any()
-        } else {
-            event
-                .google_url
-                .clone()
-                .map(|url| view! { <a href=url>"Add to Google Calendar"</a> }.into_any())
-                .unwrap_or_else(|| view! { <span class="muted">"No calendar link"</span> }.into_any())
-        };
-        let reminder_rows = if reminders.is_empty() {
-            view! { <p class="muted">"No reminders"</p> }.into_any()
-        } else {
-            reminders
-                .iter()
-                .map(|rem| {
-                    let message = rem.message.clone();
-                    view! {
-                        <p>
-                            {format::reminder_offset(rem.offset_minutes)}
-                            <br/><span class="muted">{if rem.sent { "Sent" } else { "Waiting" }}</span>
-                        </p>
-                        {(!message.is_empty()).then(|| md(&message))}
-                    }
+            .into_any();
+            let status = view! {
+                <p>{status_label(&event.status)}</p>
+                {(event.status == "scheduled").then(|| event.post_at).flatten().map(|at| view! {
+                    <p class="muted">"Posts "{clock.when(at)}</p>
+                })}
+            }
+            .into_any();
+            let slots = Slots {
+                actions,
+                series_note,
+                attendance: signups_cell(signups, members, roles).into_any(),
+                reminders: reminders_cell(key.clone(), event.clone(), reminders).into_any(),
+                roles: roles_cell(key.clone(), event.clone(), roles).into_any(),
+                embed: embed_cell(signups, event.clone(), clock, here, api_here, localize, now).into_any(),
+                channel: channel_cell(key.clone(), event.clone(), channels).into_any(),
+                status,
+            };
+            layout(key, &event, clock, slots)
+        },
+    )
+}
+
+/// A new event, laid out as its page will be. Nothing is saved until Save as
+/// draft, Schedule post, or Post now; until then every change stays here.
+#[component]
+pub fn NewEvent() -> impl IntoView {
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let start = cache::listen(cache::new_event_scope(), || (cache::server_key(), crate::query("preset")));
+    let settings = cache::listen(cache::settings_scope(), cache::server_key);
+    let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    when(
+        move || (server.get(), start.get(), settings.get(), roles.get()).ready(),
+        move |(server, (channels, options), settings, roles)| {
+            use chrono::TimeZone;
+            let clock = clock_of(&server);
+            let now = format::now();
+            // Tomorrow evening in the server's zone, a likely time to start from.
+            let tomorrow = clock.day(now) + chrono::Duration::days(1);
+            let starts_at = tomorrow
+                .and_hms_opt(19, 0, 0)
+                .and_then(|at| clock.tz.from_local_datetime(&at).earliest())
+                .map(|at| at.with_timezone(&chrono::Utc))
+                .unwrap_or(now + chrono::Duration::days(1));
+            let first = channels.first();
+            let event = dto::Event {
+                id: "new".into(),
+                title: String::new(),
+                description: String::new(),
+                location: String::new(),
+                status: "draft".into(),
+                starts_at,
+                duration_minutes: 60,
+                cutoff_at: None,
+                post_at: None,
+                color: "#1e3a6e".into(),
+                image_url: None,
+                channel_id: first.map(|channel| channel.id.clone()).unwrap_or_default(),
+                channel: first.map(|channel| channel.name.clone()).unwrap_or_default(),
+                attendee_role_id: None,
+                mention_everyone: false,
+                mention_role_ids: Vec::new(),
+                restrict_role_ids: Vec::new(),
+                thread_enabled: settings.event_threads,
+                multiple_signups: false,
+                signups_closed: false,
+                series: None,
+                creator: "You".into(),
+                discord_url: None,
+                google_url: None,
+                calendar_url: None,
+                calendar_synced: false,
+                google_synced: false,
+                can: dto::Abilities {
+                    edit: true,
+                    ..Default::default()
+                },
+            };
+            let reminders: Vec<dto::Reminder> = (settings.default_reminder_minutes > 0)
+                .then(|| dto::Reminder {
+                    offset_minutes: settings.default_reminder_minutes,
+                    message: String::new(),
+                    sent: false,
                 })
-                .collect_view()
-                .into_any()
-        };
-        let thread_block = (!thread.members.is_empty() || !thread.messages.is_empty()).then(|| {
-            let names = thread.members.join(", ");
-            let notes = thread
-                .messages
-                .iter()
-                .map(|note| {
-                    view! {
-                        <p>
-                            {note.body.clone()}
-                            <br/>
-                            <span class="muted">{note.place.clone()}" · "{format::format_rel(note.created_at, now)}</span>
-                        </p>
+                .into_iter()
+                .collect();
+            let draft = LocalDraft {
+                event: RwSignal::new(event),
+                reminders: RwSignal::new(reminders),
+                repeat: RwSignal::new(None),
+                options: RwSignal::new(numbered(options)),
+                channels: StoredValue::new(channels.clone()),
+                clock,
+                dirty: RwSignal::new(false),
+                template: false,
+                sync: None,
+            };
+            provide_context(draft);
+            let localize = localize_note(&server);
+            let channels = StoredValue::new(channels);
+            let roles = StoredValue::new(roles);
+            title("New event".to_string());
+            let page = move || {
+                let event = draft.event.get();
+                let options = draft.options.get();
+                let reminders = draft.reminders.get();
+                let key = (cache::server_now(), "new".to_string());
+                let signups = unsaved_signups(&options);
+                let slots = Slots {
+                    actions: view! { <PostButtons key=key.clone() event=event.clone() clock=clock/> }.into_any(),
+                    series_note: Some(view! {
+                        <p class="notice info">"Not saved yet. Nothing goes to Discord until you save or post it."</p>
                     }
-                })
-                .collect_view();
+                    .into_any()),
+                    attendance: view! {
+                        <SignupPanel server=key.0.clone() event="new".to_string() signups=signups.clone() roles=roles.get_value()/>
+                    }
+                    .into_any(),
+                    reminders: view! { <EventReminders key=key.clone() event=event.clone() reminders/> }.into_any(),
+                    roles: role_cells(key.clone(), &event, roles.get_value()).into_any(),
+                    embed: embed_view(&signups, &event, clock, String::new(), String::new(), localize, now).into_any(),
+                    channel: view! { <EventChannel key=key.clone() event=event.clone() channels=channels.get_value()/> }.into_any(),
+                    status: view! { <p>"Not saved yet"</p> }.into_any(),
+                };
+                layout(key, &event, clock, slots)
+            };
             view! {
-                <p class="kicker">"Thread"</p>
-                {(!names.is_empty()).then(|| view! { <p class="muted">{names}</p> })}
-                {notes}
+                <LeaveGuard dirty=draft.dirty/>
+                {page}
             }
-        });
+        },
+    )
+}
+
+fn signups_cell(
+    signups: Resource<Result<dto::Signups, crate::api::Failure>>,
+    members: Resource<Result<Vec<dto::Member>, crate::api::Failure>>,
+    roles: Resource<Result<Vec<dto::Role>, crate::api::Failure>>,
+) -> impl IntoView {
+    when(
+        move || (signups.get(), members.get(), roles.get()).ready(),
+        |(signups, members, roles)| {
+            view! {
+                <SignupPanel
+                    server=cache::server_now()
+                    event=cache::event_now()
+                    signups=signups.clone()
+                    members=if signups.editable { members } else { Vec::new() }
+                    roles=roles
+                />
+            }
+        },
+    )
+}
+
+fn channel_cell(
+    key: (String, String),
+    event: dto::Event,
+    channels: Resource<Result<Vec<dto::Channel>, crate::api::Failure>>,
+) -> impl IntoView {
+    show(channels, move |channels| {
+        view! { <EventChannel key=key.clone() event=event.clone() channels/> }
+    })
+}
+
+fn reminders_cell(
+    key: (String, String),
+    event: dto::Event,
+    reminders: Resource<Result<Vec<dto::Reminder>, crate::api::Failure>>,
+) -> impl IntoView {
+    show(reminders, move |reminders| {
+        view! { <EventReminders key=key.clone() event=event.clone() reminders/> }
+    })
+}
+
+fn roles_cell(
+    key: (String, String),
+    event: dto::Event,
+    roles: Resource<Result<Vec<dto::Role>, crate::api::Failure>>,
+) -> impl IntoView {
+    show(roles, move |roles| role_cells(key.clone(), &event, roles))
+}
+
+pub(crate) fn role_cells(key: (String, String), event: &dto::Event, roles: Vec<dto::Role>) -> impl IntoView {
+    view! {
+        <div>
+            <p class="kicker">"Mentions"</p>
+            <EventMentions key=key.clone() event=event.clone() roles=roles.clone()/>
+        </div>
+        <div>
+            <p class="kicker">"Attendee role"</p>
+            <EventAttendeeRole key=key.clone() event=event.clone() roles=roles.clone()/>
+        </div>
+        <div>
+            <p class="kicker">"Restrictions"</p>
+            <EventRestrictions key=key event=event.clone() roles/>
+        </div>
+    }
+}
+
+/// The same time on the clock a week on, as a duplicate is made.
+fn week_later(clock: &format::Clock, start: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    let local = start.with_timezone(&clock.tz).naive_local() + chrono::Duration::days(7);
+    clock
+        .tz
+        .from_local_datetime(&local)
+        .earliest()
+        .map(|next| next.with_timezone(&chrono::Utc))
+        .unwrap_or(start + chrono::Duration::days(7))
+}
+
+fn embed_cell(
+    signups: Resource<Result<dto::Signups, crate::api::Failure>>,
+    event: dto::Event,
+    clock: format::Clock,
+    here: String,
+    api_here: String,
+    localize: &'static str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> impl IntoView {
+    show(signups, move |signups| embed_view(&signups, &event, clock, here.clone(), api_here.clone(), localize, now))
+}
+
+/// The Discord post as it reads. `here` is empty for an event not saved yet.
+fn embed_view(
+    signups: &dto::Signups,
+    event: &dto::Event,
+    clock: format::Clock,
+    here: String,
+    api_here: String,
+    localize: &'static str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> impl IntoView {
+    let event = event.clone();
+    let description = event.description.clone();
+    let location = event.location.clone();
+    let image = event.image_url.clone();
+    let color = event.color.clone();
+    let can = event.can.clone();
+    // A finished event's post has no buttons, as on Discord.
+    let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
+    {
         let fields = signups
             .options
             .iter()
@@ -161,135 +416,47 @@ pub fn EventPage() -> impl IntoView {
                 view! { <button class="d-btn" type="button" disabled>{opt.emoji.clone()}</button> }
             })
             .collect_view();
-        let description = event.description.clone();
-        let location = event.location.clone();
-        let image = event.image_url.clone();
-        let color = event.color.clone();
-        let can = event.can.clone();
         view! {
-            <div class="event-top">
-                <div>
-                    <h1>{event.title.clone()}</h1>
-                    <p class="event-date">{format::format_long_date(clock.day(event.starts_at))}</p>
-                    <p class="event-time">{format::time_line(&clock, event.starts_at, event.duration_minutes)}</p>
-                    {(!location.is_empty()).then(|| view! { <p class="event-place">"📍 "{location.clone()}</p> })}
+            <div class="discord">
+                <div class="embed" style=border(&color)>
+                    <h3>{event.title.clone()}</h3>
+                    {(!description.is_empty()).then(|| view! { <div class="d-desc md" inner_html=crate::markdown::render(&description)></div> })}
+                    {(!location.is_empty()).then(|| view! {
+                        <p class="d-kicker">"Location"</p>
+                        <p class="d-desc">"📍 "{location.clone()}</p>
+                    })}
+                    <p class="d-kicker">"Time"</p>
+                    <p class="d-desc">{clock.when(event.starts_at)}" - "{clock.end(event.starts_at, event.duration_minutes)}</p>
+                    <p class="d-links">
+                        {event.calendar_url.clone().map(|url| view! { <a href=url>"+"</a> })}
+                        {(!here.is_empty()).then(|| view! { " · "<A href=here.clone()>"View on web"</A> })}
+                    </p>
+                    <p class="d-desc">"🕐 "{format::format_rel(event.starts_at, now)}</p>
+                    {(event.status != "posted").then(|| view! { <p class="d-desc"><em>{status_label(&event.status)}</em></p> })}
+                    <div class="d-fields">{fields}</div>
+                    {image.as_ref().map(|url| view! { <img class="d-image" src=url.clone() alt=""/> })}
+                    <p class="d-foot">"Created by "{event.creator.clone()}</p>
                 </div>
-                <div class="actions">
-                    {can.edit.then(|| view! { <a class="ghost" href=format!("{here}/edit")>"Edit"</a> })}
-                    {can.archive.then(|| view! {
-                        <ActionButton method="POST".into() url=format!("{api_here}/archive") label="Archive".into() class="ghost".into()/>
-                    })}
-                    <ActionButton method="POST".into() url=format!("{api_here}/duplicate") label="Duplicate".into() class="ghost".into()/>
-                    {can.skip.then(|| view! {
-                        <ActionButton method="POST".into() url=format!("{api_here}/skip") label="Skip this date".into() class="ghost".into()/>
-                    })}
-                    {can.delete.then(|| view! {
-                        <ActionButton method="DELETE".into() url=api_here.clone() label="Delete".into() class="danger".into() confirm="Remove this event?".into()/>
-                    })}
-                </div>
-            </div>
-            {series_note}
-            {image.as_ref().map(|url| view! { <img class="event-banner" src=url.clone() alt=""/> })}
-            <div class="event-layout">
-                <div class="event-main">
-                    <section class="event-desc" style=border(&color)>
-                        {if description.is_empty() {
-                            view! { <p class="muted">"No description"</p> }.into_any()
+                {(!finished).then(|| view! {
+                    <div class="btn-row">
+                        {buttons}
+                        {if can.edit && !here.is_empty() {
+                            view! { <A href=here.clone() attr:class="d-btn primary">"Edit"</A> }.into_any()
                         } else {
-                            md(&description).into_any()
+                            view! { <button class="d-btn primary" type="button" disabled>"Edit"</button> }.into_any()
                         }}
-                    </section>
-                    <SignupPanel server=param("server") event=event.id.clone() signups members/>
-                    <section class="panel">
-                        <h2>"Channel"</h2>
-                        <div class="connection-head">
-                            <p>"#"{event.channel.clone()}</p>
-                            {event.discord_url.clone().map(|url| view! { <a class="ghost" href=url>"Open in Discord"</a> })}
-                        </div>
-                        <p class="meta">{calendar}</p>
-                        <div class="connection-grid">
-                            <div>
-                                <p class="kicker">"Reminders"</p>
-                                {reminder_rows}
-                                {(!attendee.is_empty()).then(|| view! {
-                                    <p class="muted">"Confirmed people on a reminding option get "{attendee.clone()}"."</p>
-                                })}
-                            </div>
-                            <div><p class="kicker">"Mentions"</p>{names(&mentions, "No mentions")}</div>
-                            <div>
-                                <p class="kicker">"Attendee role"</p>
-                                {if attendee.is_empty() {
-                                    view! { <p class="muted">"No attendee role"</p> }.into_any()
-                                } else {
-                                    view! { <p>{attendee.clone()}</p> }.into_any()
-                                }}
-                            </div>
-                            <div><p class="kicker">"Restrictions"</p>{names(&restrictions, "No restrictions")}</div>
-                        </div>
-                        {thread_block}
-                    </section>
-                    <section>
-                        <h2>"Discord message"</h2>
-                        <div class="discord">
-                            <div class="embed" style=border(&color)>
-                                <h3>{event.title.clone()}</h3>
-                                {(!description.is_empty()).then(|| view! { <div class="d-desc md" inner_html=crate::markdown::render(&description)></div> })}
-                                {(!location.is_empty()).then(|| view! {
-                                    <p class="d-kicker">"Location"</p>
-                                    <p class="d-desc">"📍 "{location.clone()}</p>
-                                })}
-                                <p class="d-kicker">"Time"</p>
-                                <p class="d-desc">{clock.when(event.starts_at)}" - "{clock.end(event.starts_at, event.duration_minutes)}</p>
-                                <p class="d-links">
-                                    {event.calendar_url.clone().map(|url| view! { <a href=url>"+"</a> })}
-                                    {(!here.is_empty()).then(|| view! { " · "<a href=here.clone()>"View on web"</a> })}
-                                </p>
-                                <p class="d-desc">"🕐 "{format::format_rel(event.starts_at, now)}</p>
-                                {(event.status != "posted").then(|| view! { <p class="d-desc"><em>{status_label(&event.status)}</em></p> })}
-                                <div class="d-fields">{fields}</div>
-                                {image.as_ref().map(|url| view! { <img class="d-image" src=url.clone() alt=""/> })}
-                                <p class="d-foot">"Created by "{event.creator.clone()}</p>
-                            </div>
-                            <div class="btn-row">
-                                {buttons}
-                                {if can.edit {
-                                    view! { <a class="d-btn primary" href=format!("{here}/edit")>"Edit"</a> }.into_any()
-                                } else {
-                                    view! { <button class="d-btn primary" type="button" disabled>"Edit"</button> }.into_any()
-                                }}
-                                {if can.delete {
-                                    view! {
-                                        <ActionButton method="DELETE".into() url=api_here.clone() label="Delete".into() class="d-btn danger".into() confirm="Remove this event?".into()/>
-                                    }
-                                    .into_any()
-                                } else {
-                                    view! { <button class="d-btn danger" type="button" disabled>"Delete"</button> }.into_any()
-                                }}
-                            </div>
-                            <p class="why">"Times as they read on this site. "{localize}</p>
-                        </div>
-                    </section>
-                </div>
-                <aside class="panel event-facts">
-                    <p class="kicker">"Organizer"</p>
-                    <p>{event.creator}</p>
-                    <p class="kicker">"Color"</p>
-                    <p><i class="dot" style=format!("background: {color}")></i>" "{color_name(&color)}</p>
-                    <p class="kicker">"Multiple responses"</p>
-                    <p>{if event.multiple_signups { "Yes" } else { "No" }}</p>
-                    <p class="kicker">"Signups close"</p>
-                    <p>{close}</p>
-                    <p class="kicker">"Status"</p>
-                    <p>{status_label(&event.status)}</p>
-                </aside>
+                        {if can.delete && !api_here.is_empty() {
+                            view! {
+                                <ActionButton method="DELETE" url=api_here.clone() label="Delete" class="d-btn danger" confirm="Remove this event?"/>
+                            }
+                            .into_any()
+                        } else {
+                            view! { <button class="d-btn danger" type="button" disabled>"Delete"</button> }.into_any()
+                        }}
+                    </div>
+                })}
+                <p class="why">"Times as they read on this site. "{localize}</p>
             </div>
         }
-    })
-}
-
-fn names(items: &[String], empty: &'static str) -> impl IntoView {
-    if items.is_empty() {
-        return view! { <p class="muted">{empty}</p> }.into_any();
     }
-    items.iter().map(|name| view! { <p>{name.clone()}</p> }).collect_view().into_any()
 }
