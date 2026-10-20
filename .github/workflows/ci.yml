@@ -175,7 +175,7 @@ jobs:
           outputs: type=image,push=true,oci-mediatypes=false
           build-args: MARIAN_VERSION=${{ steps.image.outputs.version }}
           tags: ${{ steps.image.outputs.tags }}
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         if: startsWith(github.ref, 'refs/tags/')
       - name: Publish chart
         if: startsWith(github.ref, 'refs/tags/')
