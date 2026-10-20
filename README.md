@@ -21,7 +21,7 @@ cargo install cargo-leptos --locked
 cargo leptos watch
 ```
 
-`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A musl image sets `LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl` and passes `--bin-features static-libpq`.
+`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). The wasm, script, and stylesheet carry their content hash in the file name, and browsers keep them for a year; the build writes the names to `hash.txt` beside the binary, which a deployment keeps next to it and turns on with `LEPTOS_HASH_FILES=true`. The image does both. A musl image sets `LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl` and passes `--bin-features static-libpq`.
 
 Pages ask `/api` for the resources they need. Event pages hold a live connection at `/api/servers/<id>/events/<event>/live` and refresh when a signup changes in Discord. `cargo test --workspace --exclude marian-frontend` runs the server and page tests. `cargo test -p marian-app --features ssr` covers the pages as the server renders them.
 

@@ -297,6 +297,15 @@ async fn mark_page_trace(mut request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// A file name with cargo-leptos's content hash in it, as `marian.<hash>.wasm`:
+/// 22 characters of URL-safe base64.
+fn hashed_name(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or("");
+    name.split('.').any(|part| {
+        part.len() == 22 && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    })
+}
+
 fn quiet_path(path: &str) -> bool {
     path == "/healthz"
         || path == "/readyz"
@@ -316,14 +325,26 @@ pub fn site_files(dir: impl AsRef<std::path::Path>) -> tower_http::services::Ser
         .precompressed_gzip()
 }
 
-/// The script and its wasm keep fixed names across builds, so a browser that
-/// guesses one is still fresh can pair it with the other from a newer build and
-/// fail to start. Making it ask each time keeps the pair together. A file that
-/// hasn't changed since the browser's copy is answered with 304 here, in case
-/// whatever served it didn't look at `If-Modified-Since`.
+/// Site files with their content hash in the name never change, so browsers
+/// keep them for a year without asking. A build without hashed names keeps
+/// fixed names, and a browser that guesses one is still fresh could pair the
+/// script with a newer wasm and fail to start, so those are asked about each
+/// time. A file that hasn't changed since the browser's copy is answered with
+/// 304 here, in case whatever served it didn't look at `If-Modified-Since`.
 async fn revalidate_site(request: Request, next: Next) -> Response {
-    if !request.uri().path().starts_with("/pkg/") {
+    let path = request.uri().path();
+    if !path.starts_with("/pkg/") {
         return next.run(request).await;
+    }
+    if hashed_name(path) {
+        let mut response = next.run(request).await;
+        if response.status() == StatusCode::OK {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+        }
+        return response;
     }
     let since = request.headers().get(header::IF_MODIFIED_SINCE).cloned();
     let mut response = next.run(request).await;
@@ -1558,6 +1579,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hashed_site_files_are_told_apart() {
+        assert!(hashed_name("/pkg/marian.iucsWZX9RG8HB2_vQoyuAw.wasm"));
+        assert!(hashed_name("/pkg/marian.p8RBG6uYGacG1M0EJS3XOg.js"));
+        assert!(hashed_name("/pkg/marian.kcWcuR9ygyaOXPYiW0cpOw.css"));
+        assert!(!hashed_name("/pkg/marian.wasm"));
+        assert!(!hashed_name("/pkg/marian_bg.wasm"));
+    }
+
     #[tokio::test]
     async fn site_files_go_out_precompressed_when_the_browser_takes_it() {
         let dir = std::env::temp_dir().join(format!("marian-pkg-{}", uuid::Uuid::now_v7()));
@@ -1620,6 +1650,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+
+        // A file with its content hash in the name is kept for good, compressed copy and all.
+        std::fs::write(dir.join("marian.iucsWZX9RG8HB2_vQoyuAw.wasm"), &plain).unwrap();
+        std::fs::write(dir.join("marian.iucsWZX9RG8HB2_vQoyuAw.wasm.br"), b"brotli bytes").unwrap();
+        let hashed = client
+            .get(format!("http://{addr}/pkg/marian.iucsWZX9RG8HB2_vQoyuAw.wasm"))
+            .header(header::ACCEPT_ENCODING, "br")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hashed.headers().get(header::CACHE_CONTROL).unwrap(), "public, max-age=31536000, immutable");
+        assert_eq!(hashed.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

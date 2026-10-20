@@ -47,6 +47,8 @@ pub fn ServerShell() -> impl IntoView {
             title.set(String::new());
         }
     });
+    let new_build = RwSignal::new(false);
+    provide_context(crate::widgets::NewBuild(new_build));
     view! {
         <a class="skip" href="#content">"Skip to content"</a>
         <div class="app">
@@ -70,6 +72,14 @@ pub fn ServerShell() -> impl IntoView {
                 </div>
             </aside>
             <main class="main" id="content">
+                {move || new_build.get().then(|| view! {
+                    <div class="update-banner" role="status">
+                        <span>"Marian has been updated. Refresh to use the new version."</span>
+                        <button type="button" class="primary"
+                            on:click=|_| { let _ = leptos::prelude::window().location().reload(); }>"Refresh"</button>
+                        <button type="button" class="ghost" on:click=move |_| new_build.set(false)>"Later"</button>
+                    </div>
+                })}
                 <Flash/>
                 {move || view! { <Live server=server_id.get()/> }}
                 <div class="page">

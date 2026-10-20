@@ -23,6 +23,7 @@ ENV MARIAN_VERSION=$MARIAN_VERSION
 # cargo-leptos takes the server's target from LEPTOS_BIN_TARGET_TRIPLE; it has no flag for it.
 RUN LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl cargo leptos build --release --precompress --bin-features static-libpq \
     && cp target/x86_64-unknown-linux-musl/release/marian /marian \
+    && cp target/x86_64-unknown-linux-musl/release/hash.txt /hash.txt \
     && file /marian | grep -Eq "statically linked|static-pie linked"
 
 FROM debian:bookworm-slim AS certs
@@ -35,12 +36,15 @@ ARG MARIAN_VERSION
 LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /marian /marian
+# Leptos reads the hashed file names from beside the binary.
+COPY --from=build /hash.txt /hash.txt
 COPY --from=build /src/target/site /site
 USER 65532:65532
 ENV PORT=8080 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     LEPTOS_SITE_ROOT=/site \
     LEPTOS_SITE_PKG_DIR=pkg \
-    LEPTOS_OUTPUT_NAME=marian
+    LEPTOS_OUTPUT_NAME=marian \
+    LEPTOS_HASH_FILES=true
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

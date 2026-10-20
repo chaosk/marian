@@ -226,6 +226,9 @@ pub struct Site {
     pub invite_url: String,
     pub oauth_ready: bool,
     pub mark: String,
+    /// The frontend build this page was served with, to compare with the server's.
+    #[serde(default)]
+    pub build: String,
 }
 
 /// How this Marian is set up. The shell writes this into the document so
@@ -237,6 +240,7 @@ pub fn site() -> Site {
             invite_url: web.invite_url,
             oauth_ready: web.oauth_ready,
             mark: marian::assets::mark().to_string(),
+            build: marian::assets::frontend_build().to_string(),
         };
     }
     #[cfg(feature = "hydrate")]

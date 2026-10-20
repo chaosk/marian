@@ -104,11 +104,15 @@ jobs:
           wait "$front"
           wait "$server"
           cp target/x86_64-unknown-linux-musl/release/marian marian
+          # The wasm build writes the hashed file names beside the binary.
+          cp target/x86_64-unknown-linux-musl/release/hash.txt hash.txt
           file marian | grep -Eq "statically linked|static-pie linked"
       - uses: actions/upload-artifact@v7
         with:
           name: marian
-          path: marian
+          path: |
+            marian
+            hash.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
