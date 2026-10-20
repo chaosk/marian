@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "marian"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1947,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "marian-app"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "marian-frontend"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "marian-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "leptos",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "marian-types"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "chrono-tz",
