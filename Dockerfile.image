@@ -10,12 +10,15 @@ ARG MARIAN_VERSION
 LABEL org.opencontainers.image.version="${MARIAN_VERSION}"
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY marian /marian
+# Leptos reads the hashed file names from beside the binary.
+COPY hash.txt /hash.txt
 COPY site /site
 USER 65532:65532
 ENV PORT=8080 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     LEPTOS_SITE_ROOT=/site \
     LEPTOS_SITE_PKG_DIR=pkg \
-    LEPTOS_OUTPUT_NAME=marian
+    LEPTOS_OUTPUT_NAME=marian \
+    LEPTOS_HASH_FILES=true
 EXPOSE 8080
 ENTRYPOINT ["/marian"]

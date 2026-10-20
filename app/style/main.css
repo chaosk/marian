@@ -227,24 +227,28 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-weight: 700;
 }
 .account-menu .account-note { margin: 0 8px 6px; color: var(--muted); font-size: 12px; }
-.account-menu .account-sync {
+.account-menu .switcher-menu form.account-google {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  padding: 4px 8px 8px;
-  color: #243044;
-  font-size: 13px;
+  align-items: baseline;
+  gap: 6px;
+  margin: -4px 8px 4px;
+  color: var(--muted);
+  font-size: 12px;
 }
-.account-menu .account-sync label { display: flex; align-items: flex-start; gap: 8px; }
-.account-menu .account-sync input { width: auto; margin: 0.15em 0 0; }
-.account-menu .account-sync button {
+.account-menu .account-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu .switcher-menu button.account-link,
+.account-menu .switcher-menu button.account-link:hover:not(:disabled) {
   width: auto;
-  align-self: flex-start;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 4px 12px;
+  flex: none;
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
 }
+.account-menu .switcher-menu button.account-link:hover:not(:disabled) { color: #243044; }
 .sidebar button, .ghost, .primary, .danger {
   border-radius: 999px;
   padding: 8px 14px;
@@ -1275,3 +1279,23 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
   height: 2.5rem;
   box-sizing: border-box;
 }
+
+/* A newer frontend is out: ask for a refresh from the corner, above the page. */
+.update-banner {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  max-width: min(360px, calc(100vw - 40px));
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 12px;
+  background: #fffdf7;
+  box-shadow: 0 10px 30px rgba(28, 25, 21, 0.16);
+}
+.update-banner span { flex: 1 1 100%; }

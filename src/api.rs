@@ -1576,11 +1576,6 @@ pub fn stop_routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> 
     Ok(Outcome::ok())
 }
 
-/// Looks up the event id an SSE stream follows.
-pub fn event_key(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<i64, OpError> {
-    Ok(event_here(conn, viewer, public_id)?.id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

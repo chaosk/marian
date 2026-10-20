@@ -19,7 +19,15 @@ pub use routine::{
 };
 pub use signups::{numbered, unsaved_signups, SignupPanel};
 
-/// Listens for a change on this server and reloads the page data.
+/// A newer frontend than the one this page runs is being served.
+#[derive(Clone, Copy)]
+// Only the browser listens for builds; the server just provides the flag.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+pub struct NewBuild(pub RwSignal<bool>);
+
+/// Listens for a change on this server and reloads the page data. The server
+/// also names its frontend build when the stream opens, which after a deploy is
+/// the reconnect to the new process; a different build raises `NewBuild`.
 #[component]
 pub fn Live(server: String) -> impl IntoView {
     #[cfg(feature = "hydrate")]
@@ -28,12 +36,24 @@ pub fn Live(server: String) -> impl IntoView {
         use wasm_bindgen::JsCast;
         let url = format!("/api/servers/{server}/live");
         let here = server.clone();
+        let new_build = use_context::<NewBuild>().map(|build| build.0);
         if let Ok(source) = web_sys::EventSource::new(&url) {
             let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |_| {
                 crate::cache::refresh(&here);
             });
             source.set_onmessage(Some(on_change.as_ref().unchecked_ref()));
             on_change.forget();
+            let on_build = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+                let served = event.data().as_string().unwrap_or_default();
+                let mine = api::site().build;
+                if !served.is_empty() && !mine.is_empty() && served != mine {
+                    if let Some(flag) = new_build {
+                        flag.try_set(true);
+                    }
+                }
+            });
+            let _ = source.add_event_listener_with_callback("build", on_build.as_ref().unchecked_ref());
+            on_build.forget();
             on_cleanup(move || source.close());
         }
     });
@@ -501,25 +521,23 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
     let google = membership.google.clone();
     let connect = format!("/auth/google?next={base}");
     let google = if google.connected {
-        let note = if google.email.is_empty() {
-            "Connected.".to_string()
-        } else {
-            format!("Connected as {}.", google.email)
-        };
+        // One row like Reminders: the switch keeps the calendar updated. The
+        // account and a way out sit underneath on one small line.
+        let account = if google.email.is_empty() { "Connected".to_string() } else { google.email.clone() };
         view! {
-            <p class="account-label">"Google Calendar"</p>
-            <p class="account-note">{note}</p>
-            <label class="account-sync">
-                <input type="checkbox" prop:checked=move || auto_sync.get()
-                    on:change=move |ev| patch(dto::MembershipPatch {
-                        google_auto_sync: Some(event_target_checked(&ev)),
-                        ..Default::default()
-                    })/>
-                " Keep your Google Calendar updated"
-            </label>
-            <form method="post" action="/auth/google/disconnect">
+            <button type="button" class="reminder-toggle" title="Keep your Google Calendar updated"
+                aria-pressed=move || if auto_sync.get() { "true" } else { "false" }
+                on:click=move |_| patch(dto::MembershipPatch {
+                    google_auto_sync: Some(!auto_sync.get_untracked()),
+                    ..Default::default()
+                })>
+                <span>"Google Calendar"</span>
+                <span class=move || if auto_sync.get() { "toggle on" } else { "toggle" } aria-hidden="true"><span></span></span>
+            </button>
+            <form class="account-google" method="post" action="/auth/google/disconnect">
+                <span class="account-email" title=account.clone()>{account.clone()}</span>
                 <input type="hidden" name="next" value=base.clone()/>
-                <button type="submit">"Disconnect"</button>
+                <button type="submit" class="account-link">"Disconnect"</button>
             </form>
         }
         .into_any()

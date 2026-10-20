@@ -3,7 +3,7 @@
 #![recursion_limit = "256"]
 
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, Link, Meta, MetaTags, Stylesheet, Title};
+use leptos_meta::{provide_meta_context, HashedStylesheet, Link, Meta, MetaTags, Title};
 use leptos_router::components::{ParentRoute, Route, Router, Routes};
 use leptos_router::hooks::{use_params_map, use_query_map};
 use leptos_router::path;
@@ -35,6 +35,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <script id="marian-site" type="application/json" inner_html=site_json></script>
                 <script id="marian-notice" type="application/json" inner_html=notice_json></script>
                 <AutoReload options=options.clone()/>
+                <HashedStylesheet options=options.clone() id="marian"/>
                 <HydrationScripts options/>
                 <MetaTags/>
             </head>
@@ -86,7 +87,6 @@ pub fn App() -> impl IntoView {
         <Meta name="description" content="Events for your Discord server."/>
         <Link rel="icon" href="/favicon.svg" type_="image/svg+xml"/>
         <Link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;1,9..144,520&family=Source+Sans+3:wght@400;600;700&display=swap"/>
-        <Stylesheet id="marian" href="/pkg/marian.css"/>
         <Router>
             <Routes fallback=pages::misc::NotFound>
                 <Route path=path!("/") view=pages::misc::Front/>

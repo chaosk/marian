@@ -54,7 +54,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/events/{id}/duplicate", post(duplicate))
         .route("/servers/{server}/events/{id}/skip", post(skip))
         .route("/servers/{server}/live", get(live_server))
-        .route("/servers/{server}/events/{id}/live", get(live_event))
         .route("/servers/{server}/reminders", get(pending_reminders))
         .route("/servers/{server}/activity", get(activity))
         .route("/servers/{server}/series", get(series_list))
@@ -482,17 +481,14 @@ async fn live_server(State(state): S, headers: HeaderMap, Path(server): One) -> 
     Ok(live_sse(guild_id))
 }
 
-/// Same pulse as the server stream, kept for an event page that opened first.
-async fn live_event(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Result<Response, Problem> {
-    let guild_id = scoped(&state, &headers, &server, |db, v| {
-        api::event_key(db, v, &id)?;
-        Ok(v.guild_id)
-    })?;
-    Ok(live_sse(guild_id))
-}
-
 fn live_sse(guild_id: i64) -> Response {
     use tokio_stream::StreamExt as _;
+    // The frontend this process serves, first on every connection. A page left
+    // open across a deploy reconnects to the new process and learns it from here.
+    let build = crate::assets::frontend_build();
+    let first = (!build.is_empty()).then(|| {
+        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().event("build").data(build))
+    });
     let changes = tokio_stream::wrappers::BroadcastStream::new(crate::live::subscribe())
         .filter_map(move |change| match change {
             Ok(id) if id == guild_id => Some(Ok::<_, std::convert::Infallible>(
@@ -501,7 +497,7 @@ fn live_sse(guild_id: i64) -> Response {
             Ok(_) => None,
             Err(_) => Some(Ok(axum::response::sse::Event::default().data("changed"))),
         });
-    axum::response::sse::Sse::new(changes)
+    axum::response::sse::Sse::new(tokio_stream::iter(first).chain(changes))
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
 }

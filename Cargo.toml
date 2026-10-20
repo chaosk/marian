@@ -84,3 +84,6 @@ bin-exe-name = "marian"
 bin-features = []
 lib-features = []
 lib-profile-release = "wasm-release"
+# The wasm, script, and stylesheet get their content hash in the file name, so
+# browsers keep them for good and a page always loads the files it was built with.
+hash-files = true

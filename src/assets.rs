@@ -86,6 +86,59 @@ fn file(path: &str, body: &'static [u8], content_type: &'static str, immutable: 
     }
 }
 
+/// Which frontend this process serves, read once at start. Every pod of one
+/// release gets the same value, and a release that leaves the frontend alone
+/// keeps it, so an open page is told to refresh only when what it runs has
+/// changed. With hashed file names it is the hash list cargo-leptos leaves
+/// beside the binary, the one Leptos reads to name the files; otherwise a hash
+/// of the files in the site's `pkg` directory. Empty when neither is there,
+/// which turns the notice off.
+pub fn frontend_build() -> &'static str {
+    static BUILD: OnceLock<String> = OnceLock::new();
+    BUILD.get_or_init(|| {
+        let var = |name: &str, default: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| default.to_string())
+        };
+        if var("LEPTOS_HASH_FILES", "false") == "true" {
+            let list = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join(var("LEPTOS_HASH_FILE_NAME", "hash.txt"))))
+                .and_then(|path| std::fs::read_to_string(path).ok());
+            return list.map(|list| build_from_hash_list(&list)).unwrap_or_default();
+        }
+        let dir = std::path::Path::new(&var("LEPTOS_SITE_ROOT", "target/site")).join(var("LEPTOS_SITE_PKG_DIR", "pkg"));
+        let name = var("LEPTOS_OUTPUT_NAME", "marian");
+        frontend_build_in(&dir, &name)
+    })
+}
+
+/// The build in a hash list: its `js`, `wasm`, and `css` lines, in that order.
+fn build_from_hash_list(list: &str) -> String {
+    let mut parts: Vec<(String, String)> = list
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(kind, hash)| (kind.trim().to_string(), hash.trim().to_string()))
+        .filter(|(kind, hash)| matches!(kind.as_str(), "js" | "wasm" | "css") && !hash.is_empty())
+        .collect();
+    parts.sort();
+    parts.into_iter().map(|(kind, hash)| format!("{kind}:{hash}")).collect::<Vec<_>>().join(",")
+}
+
+fn frontend_build_in(dir: &std::path::Path, name: &str) -> String {
+    let mut bytes = Vec::new();
+    for file in [format!("{name}.wasm"), format!("{name}.js"), format!("{name}.css")] {
+        match std::fs::read(dir.join(&file)) {
+            Ok(body) => bytes.extend(body),
+            Err(_) if file.ends_with(".css") => {}
+            Err(_) => return String::new(),
+        }
+    }
+    fingerprint(&bytes)
+}
+
 fn fingerprint(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in bytes {
@@ -129,6 +182,34 @@ fn write_headers(headers: &mut HeaderMap, file: &File) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hash_list_names_the_build() {
+        let list = "js: p8RBG6uYGacG1M0EJS3XOg\nwasm: iucsWZX9RG8HB2_vQoyuAw\ncss: kcWcuR9ygyaOXPYiW0cpOw\n";
+        let build = build_from_hash_list(list);
+        assert_eq!(build, "css:kcWcuR9ygyaOXPYiW0cpOw,js:p8RBG6uYGacG1M0EJS3XOg,wasm:iucsWZX9RG8HB2_vQoyuAw");
+        let reordered = "css: kcWcuR9ygyaOXPYiW0cpOw\njs: p8RBG6uYGacG1M0EJS3XOg\nwasm: iucsWZX9RG8HB2_vQoyuAw";
+        assert_eq!(build_from_hash_list(reordered), build, "order in the file doesn't matter");
+        assert_eq!(build_from_hash_list(""), "");
+    }
+
+    #[test]
+    fn the_frontend_build_follows_the_files_a_page_loads() {
+        let dir = std::env::temp_dir().join(format!("marian-build-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(frontend_build_in(&dir, "marian"), "", "no files, no notice");
+        std::fs::write(dir.join("marian.wasm"), b"wasm").unwrap();
+        std::fs::write(dir.join("marian.js"), b"js").unwrap();
+        std::fs::write(dir.join("marian.css"), b"css").unwrap();
+        let first = frontend_build_in(&dir, "marian");
+        assert_eq!(first.len(), 16);
+        assert_eq!(frontend_build_in(&dir, "marian"), first, "the same files are the same build on every pod");
+        std::fs::write(dir.join("marian.css"), b"css, changed").unwrap();
+        assert_ne!(frontend_build_in(&dir, "marian"), first, "a new stylesheet is a new build");
+        std::fs::remove_file(dir.join("marian.wasm")).unwrap();
+        assert_eq!(frontend_build_in(&dir, "marian"), "", "without the wasm there is nothing to compare");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_fingerprinted_file_is_immutable_and_revalidates() {
