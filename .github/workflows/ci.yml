@@ -122,7 +122,8 @@ jobs:
     needs: [test, binary]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Write, so a tag can publish its GitHub release.
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v7
@@ -197,3 +198,16 @@ jobs:
           helm package deploy/marian --version "$version" --app-version "$version"
           owner="${GITHUB_REPOSITORY%%/*}"
           helm push "marian-${version}.tgz" "oci://ghcr.io/${owner,,}/charts"
+      # The release the repository page lists, with the tag's commit message as
+      # its notes and the binary and chart attached.
+      - name: GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cp marian "marian-${version}-x86_64-linux-musl"
+          git log -1 --format=%B "$GITHUB_SHA" | grep -v '^Co-Authored-By:' > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --latest \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            "marian-${version}-x86_64-linux-musl" "marian-${version}.tgz"
