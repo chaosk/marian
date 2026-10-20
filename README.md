@@ -89,7 +89,7 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
 
 ## Install on Kubernetes
 
-The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces.
+The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces. A tag also publishes the chart and a GitHub release, with the tag's commit message as its notes and the static binary and chart attached.
 
 ```sh
 docker build --build-arg MARIAN_VERSION=0.6.2 -t ghcr.io/you/marian:0.6.2 .
