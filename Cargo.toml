@@ -59,8 +59,14 @@ uuid = { version = "1.28.0", features = ["v7", "serde"] }
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["trace", "testing"] }
 
+# Line tables are enough for file and line in panics and backtraces, and full
+# debug info for every dependency, host and wasm, is most of what fills target/.
 [profile.dev]
 split-debuginfo = "off"
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.wasm-release]
 inherits = "release"

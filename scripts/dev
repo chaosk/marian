@@ -1,0 +1,16 @@
+#!/bin/sh
+# Runs `cargo leptos watch`, first emptying target/ when it has grown past
+# MARIAN_TARGET_LIMIT_GB (default 20). Cargo never removes what it no longer
+# uses: a toolchain or dependency bump, or a build with other flags, leaves the
+# old artifacts beside the new ones.
+set -eu
+cd "$(dirname "$0")/.."
+limit=${MARIAN_TARGET_LIMIT_GB:-20}
+if [ -d target ]; then
+  size=$(du -sk target | cut -f1)
+  if [ "$size" -gt $((limit * 1024 * 1024)) ]; then
+    echo "target/ is $((size / 1024 / 1024)) GB, over ${limit} GB; starting from a clean build." >&2
+    cargo clean
+  fi
+fi
+exec cargo leptos watch "$@"
