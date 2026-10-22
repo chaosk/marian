@@ -34,8 +34,9 @@ where
     client().resource(scope, key)
 }
 
-/// Marks every cached read for this server stale. Live updates and in-page
-/// changes call this instead of refetching each page's private bundle.
+/// Marks every cached read stale. In-page changes, and live updates that
+/// can't say what changed, call this instead of refetching each page's
+/// private bundle. Only reads on screen refetch; the rest wait to be shown.
 pub fn refresh(server: &str) {
     if server.is_empty() {
         return;
@@ -48,7 +49,37 @@ pub fn refresh(server: &str) {
 /// `refresh` with a client captured earlier, for work that outlives its view.
 pub fn refresh_in(client: QueryClient, server: &str) {
     if !server.is_empty() {
-        client.invalidate_query(server_scope(), &server.to_string());
+        client.invalidate_all_queries();
+    }
+}
+
+/// Marks stale only what a live update says changed on this server.
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
+    let here = server.to_string();
+    let lists = |client: QueryClient| {
+        client.invalidate_queries_with_predicate(events_scope(), |(s, _)| *s == here);
+        client.invalidate_queries_with_predicate(activity_scope(), |(s, _, _)| *s == here);
+        client.invalidate_query(routines_scope(), &here);
+        client.invalidate_queries_with_predicate(routine_scope(), |(s, _)| *s == here);
+    };
+    match change {
+        dto::Change::Signups { event } => {
+            client.invalidate_query(signups_scope(), &(here.clone(), event.clone()));
+            lists(client);
+        }
+        dto::Change::Event { event } => {
+            let key = (here.clone(), event.clone());
+            client.invalidate_query(event_scope(), &key);
+            client.invalidate_query(signups_scope(), &key);
+            client.invalidate_query(reminders_scope(), &key);
+            lists(client);
+            client.invalidate_query(server_scope(), &here);
+            client.invalidate_query(pending_reminders_scope(), &here);
+            client.invalidate_query(series_list_scope(), &here);
+            client.invalidate_queries_with_predicate(series_scope(), |(s, _)| *s == here);
+        }
+        dto::Change::Server => refresh_in(client, server),
     }
 }
 
@@ -336,8 +367,9 @@ where
     }
 }
 
-fn link_server(id: &str) -> [String; 2] {
-    ["s".into(), id.to_string()]
+/// The server's own read is a leaf, so its counts refetch without everything under the server.
+fn link_server(id: &str) -> [String; 3] {
+    ["s".into(), id.to_string(), "info".into()]
 }
 
 fn link_event(key: &(String, String)) -> [String; 4] {
