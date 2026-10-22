@@ -219,6 +219,7 @@ async fn on_event(
                 (replies, posts)
             };
             for event_id in &posts {
+                tell_pages(&data.db, *event_id, false);
                 if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, *event_id).await
                 {
                     tracing::warn!("could not post event {event_id} in the channel: {err}");
@@ -453,6 +454,7 @@ async fn signup_from_button(
     if let Err(err) = signed {
         return followup(ctx, component, &err.to_string()).await;
     }
+    tell_pages(&data.db, event_id, true);
     if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
         tracing::warn!("could not refresh the Discord post: {err}");
     }
@@ -580,7 +582,10 @@ async fn delete_from_button(
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
                 match logic::delete_event(&mut conn, event_id, membership_id) {
-                    Ok(notice) => Ok(Some((plan, channel_discord, message_id, notice))),
+                    Ok(notice) => {
+                        crate::live::event(event.guild_id, event.public_id);
+                        Ok(Some((plan, channel_discord, message_id, notice)))
+                    }
                     Err(err) => Err(err.to_string()),
                 }
             }
@@ -829,12 +834,20 @@ async fn push_sync(
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
-    if let Ok(mut conn) = db.get() {
-        if let Ok(Some(event)) = store::event(&mut conn, event_id) {
-            crate::live::changed(event.guild_id);
+    post_event(db, http, public_url, event_id, true).await
+}
+
+/// Tells open pages about a change made from Discord to one event: to who is
+/// signed up, or to the event itself.
+fn tell_pages(db: &store::Db, event_id: i64, signups: bool) {
+    let Ok(mut conn) = db.get() else { return };
+    if let Ok(Some(event)) = store::event(&mut conn, event_id) {
+        if signups {
+            crate::live::signups(event.guild_id, event.public_id);
+        } else {
+            crate::live::event(event.guild_id, event.public_id);
         }
     }
-    post_event(db, http, public_url, event_id, true).await
 }
 
 async fn post_event(
@@ -1685,6 +1698,7 @@ async fn deliver(
         let _ = logic::record_command(&mut conn, actor.guild_id, actor.membership_id, label, &text);
         crate::serve::events_to_refresh(&mut conn, label, &text)
     };
+    crate::live::server(actor.guild_id);
     for event_id in refresh {
         if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
             tracing::warn!("could not refresh event {event_id}: {err}");
@@ -1907,6 +1921,7 @@ async fn run_response(
     };
     match outcome {
         Ok((reply, event_id)) => {
+            tell_pages(&data.db, event_id, true);
             if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
                 tracing::warn!("could not refresh event {event_id}: {err}");
             }

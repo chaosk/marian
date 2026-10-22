@@ -116,6 +116,9 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
                         for job in report.jobs {
                             enqueue(&discord, job);
                         }
+                        for guild_id in report.guilds {
+                            crate::live::server(guild_id);
+                        }
                     }
                     Err(err) => tracing::warn!("tick failed: {err}"),
                 }

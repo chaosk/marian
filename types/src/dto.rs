@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::time::{ZoneGroup, ZoneRow};
 
+/// What changed on a server, sent to its open pages so they fetch only that.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    /// Someone joined or left an event.
+    Signups { event: String },
+    /// An event's details, options, reminders, or status, or the event came or went.
+    Event { event: String },
+    /// Anything else: settings, presets, the library, series, routines, channels.
+    Server,
+}
+
 /// The reply to a change: where to go next, when the change moved the person.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Done {

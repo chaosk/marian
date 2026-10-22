@@ -141,7 +141,8 @@ fn read<T>(
     scoped(state, headers, server, body).map(Json)
 }
 
-/// Runs a change, then hands its Discord work to the gateway.
+/// Runs a change, then hands its Discord work to the gateway. Open pages hear
+/// about the event the change touched, or about the whole server.
 fn change(
     state: &AppState,
     headers: &HeaderMap,
@@ -149,11 +150,39 @@ fn change(
     body: impl FnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Done> {
     let mut guild_id = 0;
+    let (outcome, event) = scoped(state, headers, server, |db, viewer| {
+        guild_id = viewer.guild_id;
+        let outcome = body(db, viewer)?;
+        let event = outcome
+            .sync
+            .and_then(|id| crate::store::event(db, id).ok().flatten())
+            .map(|event| event.public_id);
+        Ok((outcome, event))
+    })?;
+    match event {
+        Some(event) => crate::live::event(guild_id, event),
+        None => crate::live::server(guild_id),
+    }
+    finish(state, outcome)
+}
+
+/// A change to who is signed up for one event.
+fn change_signups(
+    state: &AppState,
+    headers: &HeaderMap,
+    server: &str,
+    event: &str,
+    body: impl FnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
+) -> Reply<dto::Done> {
+    let mut guild_id = 0;
     let outcome = scoped(state, headers, server, |db, viewer| {
         guild_id = viewer.guild_id;
         body(db, viewer)
     })?;
-    crate::live::changed(guild_id);
+    match uuid::Uuid::parse_str(event) {
+        Ok(event) => crate::live::signups(guild_id, event),
+        Err(_) => crate::live::server(guild_id),
+    }
     finish(state, outcome)
 }
 
@@ -316,7 +345,7 @@ async fn create_channel(
 ) -> Reply<dto::Done> {
     let viewer = scoped(&state, &headers, &server, |_, v| Ok(v.clone()))?;
     open_channel(&state, &viewer, &draft.name).await?;
-    crate::live::changed(viewer.guild_id);
+    crate::live::server(viewer.guild_id);
     Ok(Json(dto::Done { location: None }))
 }
 
@@ -372,7 +401,10 @@ fn change_event(
         let outcome = body(db, v)?;
         Ok((outcome, api::event(db, v, id)?))
     })?;
-    crate::live::changed(guild_id);
+    match uuid::Uuid::parse_str(&fresh.id) {
+        Ok(event) => crate::live::event(guild_id, event),
+        Err(_) => crate::live::server(guild_id),
+    }
     let _ = finish(state, outcome)?;
     Ok(Json(fresh))
 }
@@ -435,7 +467,7 @@ async fn join(
     headers: HeaderMap,
     Path((server, id, option)): Path<(String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, &option, true))
+    change_signups(&state, &headers, &server, &id, |db, v| api::set_my_signup(db, v, &id, &option, true))
 }
 
 async fn leave(
@@ -443,7 +475,7 @@ async fn leave(
     headers: HeaderMap,
     Path((server, id, option)): Path<(String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::set_my_signup(db, v, &id, &option, false))
+    change_signups(&state, &headers, &server, &id, |db, v| api::set_my_signup(db, v, &id, &option, false))
 }
 
 async fn add_member(
@@ -451,7 +483,7 @@ async fn add_member(
     headers: HeaderMap,
     Path((server, id, member, option)): Path<(String, String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| {
+    change_signups(&state, &headers, &server, &id, |db, v| {
         api::set_signup(db, v, &id, &member, &option, true)
     })
 }
@@ -461,7 +493,7 @@ async fn remove_member(
     headers: HeaderMap,
     Path((server, id, member, option)): Path<(String, String, String, String)>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| {
+    change_signups(&state, &headers, &server, &id, |db, v| {
         api::set_signup(db, v, &id, &member, &option, false)
     })
 }
@@ -493,12 +525,12 @@ fn live_sse(guild_id: i64) -> Response {
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().event("build").data(build))
     });
     let changes = tokio_stream::wrappers::BroadcastStream::new(crate::live::subscribe())
-        .filter_map(move |change| match change {
-            Ok(id) if id == guild_id => Some(Ok::<_, std::convert::Infallible>(
-                axum::response::sse::Event::default().data("changed"),
+        .filter_map(move |news| match news {
+            Ok(news) if news.guild_id == guild_id => Some(Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(&*news.body),
             )),
             Ok(_) => None,
-            Err(_) => Some(Ok(axum::response::sse::Event::default().data("changed"))),
+            Err(_) => Some(Ok(axum::response::sse::Event::default().data(crate::live::everything()))),
         });
     axum::response::sse::Sse::new(tokio_stream::iter(first).chain(changes))
         .keep_alive(axum::response::sse::KeepAlive::default())
@@ -617,7 +649,7 @@ async fn add_library(
         guild_id = viewer.guild_id;
         api::add_library(db, viewer, &draft)
     })?;
-    crate::live::changed(guild_id);
+    crate::live::server(guild_id);
     Ok(Json(made))
 }
 
@@ -654,7 +686,7 @@ async fn run_command(
         if let Ok(mut db) = state.db.get() {
             let _ = logic::record_command(&mut db, viewer.guild_id, viewer.membership_id, &line, &reply);
         }
-        crate::live::changed(viewer.guild_id);
+        crate::live::server(viewer.guild_id);
         return Ok(Json(dto::CommandReply {
             reply: clip(&reply, 700),
         }));
@@ -668,7 +700,7 @@ async fn run_command(
         let ids = events_to_refresh(&mut db, &line, &reply);
         (reply, ids)
     };
-    crate::live::changed(viewer.guild_id);
+    crate::live::server(viewer.guild_id);
     for id in ids {
         enqueue(&state.discord, DiscordJob::sync(id));
         enqueue(&state.discord, DiscordJob::attend(id));

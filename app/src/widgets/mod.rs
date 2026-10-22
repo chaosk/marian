@@ -25,8 +25,8 @@ pub use signups::{numbered, unsaved_signups, SignupPanel};
 #[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
 pub struct NewBuild(pub RwSignal<bool>);
 
-/// Listens for a change on this server and reloads the page data. The server
-/// also names its frontend build when the stream opens, which after a deploy is
+/// Listens for changes on this server and refetches what each one names. The
+/// server also names its frontend build when the stream opens, which after a deploy is
 /// the reconnect to the new process; a different build raises `NewBuild`.
 #[component]
 pub fn Live(server: String) -> impl IntoView {
@@ -34,6 +34,7 @@ pub fn Live(server: String) -> impl IntoView {
     Effect::new(move |_| {
         let stream = std::rc::Rc::new(LiveStream {
             server: server.clone(),
+            client: crate::cache::client(),
             new_build: use_context::<NewBuild>().map(|build| build.0),
             source: Default::default(),
             opened: Default::default(),
@@ -55,6 +56,7 @@ pub fn Live(server: String) -> impl IntoView {
 #[cfg(feature = "hydrate")]
 struct LiveStream {
     server: String,
+    client: leptos_fetch::QueryClient,
     new_build: Option<RwSignal<bool>>,
     source: std::cell::RefCell<Option<web_sys::EventSource>>,
     opened: std::cell::Cell<bool>,
@@ -73,9 +75,15 @@ impl LiveStream {
         let Ok(source) = web_sys::EventSource::new(&api::path::live(&self.server)) else {
             return;
         };
-        let here = self.server.clone();
-        let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |_| {
-            crate::cache::refresh(&here);
+        let (here, client) = (self.server.clone(), self.client);
+        // A message this page can't read, from a newer or older server, refetches everything.
+        let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            let change = event
+                .data()
+                .as_string()
+                .and_then(|text| serde_json::from_str::<dto::Change>(&text).ok())
+                .unwrap_or(dto::Change::Server);
+            crate::cache::apply_change(client, &here, &change);
         });
         source.set_onmessage(Some(on_change.as_ref().unchecked_ref()));
         on_change.forget();
@@ -97,7 +105,7 @@ impl LiveStream {
             if let Some(this) = this.upgrade() {
                 this.failures.set(0);
                 if this.opened.replace(true) {
-                    crate::cache::refresh(&this.server);
+                    crate::cache::refresh_in(this.client, &this.server);
                 }
             }
         });
