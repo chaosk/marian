@@ -204,8 +204,9 @@ jobs:
           helm package deploy/marian --version "$version" --app-version "$version"
           owner="${GITHUB_REPOSITORY%%/*}"
           helm push "marian-${version}.tgz" "oci://ghcr.io/${owner,,}/charts"
-      # The release the repository page lists, with the tag's commit message as
-      # its notes and the binary and chart attached.
+      # The release the repository page lists, with the tag's commit description
+      # (no subject, no Co-authored-by lines) as its notes and the binary and
+      # chart attached.
       - name: GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -213,7 +214,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           cp marian "marian-${version}-x86_64-linux-musl"
-          git log -1 --format=%B "$GITHUB_SHA" | grep -v '^Co-Authored-By:' > notes.md
+          git log -1 --format=%b "$GITHUB_SHA" | grep -iv '^co-authored-by:' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --latest \
             --title "$GITHUB_REF_NAME" --notes-file notes.md \
             "marian-${version}-x86_64-linux-musl" "marian-${version}.tgz"
