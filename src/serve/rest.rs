@@ -60,8 +60,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/series/{id}", get(series).patch(patch_series))
         .route("/servers/{server}/series/{id}/end", post(end_series))
         .route("/servers/{server}/presets", get(presets).post(create_preset))
-        .route("/servers/{server}/presets/{id}", get(preset).delete(delete_preset))
+        .route("/servers/{server}/presets/{id}", get(preset).put(update_preset).delete(delete_preset))
+        .route("/servers/{server}/presets/{id}/default", post(default_preset))
         .route("/servers/{server}/library", get(library).post(add_library))
+        .route("/servers/{server}/library/{id}", axum::routing::patch(update_library).delete(delete_library))
+        .route("/servers/{server}/events/{id}/preset", post(apply_preset))
         .route("/servers/{server}/commands", get(command_log).post(run_command))
         .route("/servers/{server}/routines", get(routines).post(create_routine))
         .route("/servers/{server}/routines/{id}", get(routine).put(update_routine))
@@ -572,21 +575,63 @@ async fn create_preset(
     change(&state, &headers, &server, |db, v| api::create_preset(db, v, &draft))
 }
 
+async fn update_preset(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(draft): Json<dto::PresetDraft>,
+) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::update_preset(db, v, &id, &draft))
+}
+
+async fn default_preset(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::default_preset(db, v, &id))
+}
+
 async fn delete_preset(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| api::delete_preset(db, v, &id))
+}
+
+async fn apply_preset(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(body): Json<dto::ApplyPreset>,
+) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::apply_preset(db, v, &id, &body))
 }
 
 async fn library(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::LibraryItem>> {
     read(&state, &headers, &server, api::library)
 }
 
+/// Answers with the new type, so a page can put it to use at once.
 async fn add_library(
     State(state): S,
     headers: HeaderMap,
     Path(server): One,
-    Json(item): Json<dto::LibraryItem>,
+    Json(draft): Json<dto::TypeDraft>,
+) -> Reply<dto::LibraryItem> {
+    let mut guild_id = 0;
+    let made = scoped(&state, &headers, &server, |db, viewer| {
+        guild_id = viewer.guild_id;
+        api::add_library(db, viewer, &draft)
+    })?;
+    crate::live::changed(guild_id);
+    Ok(Json(made))
+}
+
+async fn update_library(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(draft): Json<dto::TypeDraft>,
 ) -> Reply<dto::Done> {
-    change(&state, &headers, &server, |db, v| api::add_library(db, v, &item))
+    change(&state, &headers, &server, |db, v| api::update_library(db, v, &id, &draft))
+}
+
+async fn delete_library(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::delete_library(db, v, &id))
 }
 
 async fn command_log(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::CommandLog>> {

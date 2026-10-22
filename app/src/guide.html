@@ -1,5 +1,5 @@
 <h2><code>/event</code></h2>
-<p>Starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats. You finish it there, or change the signup options and the other details first. Signup options start as Accepted, Declined, and Tentative.</p>
+<p>Starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats. You finish it there, or change the signup options and the other details first. Signup options start from the server’s default preset, Accepted, Declined, and Tentative unless it has been changed.</p>
 
 <h2><code>/edit</code></h2>
 <p>Changes one event. You pick the event, then any of the title, the description, the start time, the length in minutes, and the channel. A start can look like “tomorrow at 7pm”, “friday 9am”, “oct 20 at 8:00pm”, or “in 2 hours”.</p>
@@ -14,10 +14,10 @@
 <p>Changes one server setting. A server manager picks the setting. Each one has its own fields: the default reminder, a 24-hour clock, archiving, event threads, names on the Discord post, a temporary attendee role, the waitlist, the digest (off, daily, or weekly), how early a series date is posted, and which role may create, edit, delete, manage channels, or manage signup options.</p>
 
 <h2><code>/signup_options</code></h2>
-<p>Lists the option library, saves a name and an emoji, or removes a name.</p>
+<p>Lists the server’s attendance types, adds one with a name and an emoji, or removes one nothing uses. A new type counts as attending unless you say otherwise. Renaming and the attending switch are on the Presets page.</p>
 
 <h2><code>/signup_presets</code></h2>
-<p>Lists signup presets, saves one from option names separated by commas, or removes one. Presets can also be edited on the website.</p>
+<p>Lists presets, saves one from type names separated by commas (a name the library doesn’t have is added to it), or removes one. The Presets page also sets capacities, role limits, and the default preset.</p>
 
 <h2><code>/channel</code></h2>
 <p>Creates an event channel in Discord. You give the name. An event channel is a Discord channel Marian keeps for events. With purge on, posting or deleting an event removes other messages, and pinned messages stay. Other Discord channels arrive from the server as text channels.</p>

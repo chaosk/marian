@@ -93,7 +93,7 @@ pub fn SeriesPage() -> impl IntoView {
     when(move || (server.get(), series.get(), events.get()).ready(), move |(server, series, events)| {
         let clock = clock_of(&server);
         let base = base();
-        let api_here = format!("/api{base}/series/{}", series.id);
+        let server_id = cache::server_now();
         let length = match (series.max_occurrences, series.end_on) {
             (Some(count), _) => format!("{count} dates"),
             (None, Some(end)) => format!("until {}", format::format_day(clock.day(end))),
@@ -160,13 +160,13 @@ pub fn SeriesPage() -> impl IntoView {
                 </div>
                 {series.active.then(|| view! {
                     <div class="actions">
-                        <ActionButton method="POST" url=format!("{api_here}/end") label="End series"
+                        <ActionButton method="POST" url=crate::api::path::series_end(&server_id, &series.id) label="End series"
                             class="danger" confirm="End the series? Dates that haven't gone out are skipped."/>
                     </div>
                 })}
             </div>
             <div class="series-page">
-                {series.active.then(|| view! { <RepeatCard series=series.clone() clock api=api_here.clone()/> })}
+                {series.active.then(|| view! { <RepeatCard series=series.clone() clock/> })}
                 <section class="panel settings-group">
                     <h2>"Dates"</h2>
                     {dates}
@@ -178,7 +178,7 @@ pub fn SeriesPage() -> impl IntoView {
 
 /// How often a series repeats and when it stops, saved together.
 #[component]
-fn RepeatCard(series: dto::Series, clock: format::Clock, api: String) -> impl IntoView {
+fn RepeatCard(series: dto::Series, clock: format::Clock) -> impl IntoView {
     let cadence = RwSignal::new(series.cadence.clone());
     let ends = RwSignal::new(
         match (series.max_occurrences, series.end_on) {
@@ -197,8 +197,8 @@ fn RepeatCard(series: dto::Series, clock: format::Clock, api: String) -> impl In
     );
     let problem = RwSignal::new(String::new());
 
-    let api = StoredValue::new(api);
     let server = cache::server_now();
+    let api = StoredValue::new(crate::api::path::series(&server, &series.id));
     let saving = client::action(move |repeat: &dto::Repeat| {
         let repeat = repeat.clone();
         let url = api.get_value();

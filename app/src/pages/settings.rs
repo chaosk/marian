@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 
 use crate::widgets::{JsonForm, RolePicker, ZonePicker};
-use crate::cache::{self, ask, when, Ready};
-use crate::{base, head};
+use crate::cache::{self, ask, Ready};
+use crate::head;
 
 /// A switch: its field name, title, and what it does.
 type Toggle = (&'static str, &'static str, &'static str);
@@ -49,28 +49,9 @@ pub fn Settings() -> impl IntoView {
         }
     });
     // The first full answer stays, so a save that refetches settings doesn't
-    // remount the form under the person using it. Once held, this stops reading
-    // the resources, so later answers don't change it.
-    type Loaded = (
-        marian_types::Membership,
-        marian_types::Settings,
-        Vec<marian_types::Role>,
-        Vec<marian_types::ZoneGroup>,
-    );
-    let held = Memo::new(move |before: Option<&Option<Loaded>>| {
-        if let Some(Some(data)) = before {
-            return Some(data.clone());
-        }
-        match (membership.get(), settings.get(), roles.get(), zones.get()).ready() {
-            Some(Ok(data)) => Some(data),
-            _ => None,
-        }
-    });
-    when(
-        move || match held.get() {
-            Some(data) => Some(Ok(data)),
-            None => (membership.get(), settings.get(), roles.get(), zones.get()).ready(),
-        },
+    // remount the form under the person using it.
+    cache::when_once(
+        move || (membership.get(), settings.get(), roles.get(), zones.get()).ready(),
         |(membership, settings, roles, zones)| settings_form(membership, settings, roles, zones),
     )
 }
@@ -152,7 +133,7 @@ fn settings_form(
     view! {
         {head("Settings")}
         {(!server_manager).then(|| view! { <p class="notice info">"Only people who can manage this Discord server can change these."</p> })}
-        <JsonForm method="PUT" url=format!("/api{}/settings", base()) class="settings-page" autosave=server_manager>
+        <JsonForm method="PUT" url=crate::api::path::settings(&cache::server_now()) class="settings-page" autosave=server_manager>
             <section class="panel settings-group">
                 <h2>"Time"</h2>
                 <div class="setting-row zone-row">

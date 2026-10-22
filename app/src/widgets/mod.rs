@@ -34,7 +34,7 @@ pub fn Live(server: String) -> impl IntoView {
     Effect::new(move |_| {
         use wasm_bindgen::closure::Closure;
         use wasm_bindgen::JsCast;
-        let url = format!("/api/servers/{server}/live");
+        let url = api::path::live(&server);
         let here = server.clone();
         let new_build = use_context::<NewBuild>().map(|build| build.0);
         if let Ok(source) = web_sys::EventSource::new(&url) {
@@ -92,7 +92,7 @@ pub fn CommandDesk(server: String, log: Vec<dto::CommandLog>) -> impl IntoView {
     let rows = RwSignal::new(log);
     let line = RwSignal::new(String::new());
     let problem = RwSignal::new(String::new());
-    let url = StoredValue::new(format!("/api/servers/{server}/commands"));
+    let url = StoredValue::new(api::path::commands(&server));
     let run = client::action(move |text: &String| {
         let text = text.clone();
         let url = url.get_value();
@@ -481,12 +481,8 @@ fn membership_said(change: &dto::MembershipPatch) -> String {
 /// The signed-in person's menu: reminders, Google Calendar, the feed, and sign out.
 #[component]
 pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
-    let url = StoredValue::new(format!("/api{base}/me"));
-    let server = StoredValue::new(
-        base.strip_prefix("/servers/")
-            .unwrap_or(base.as_str())
-            .to_string(),
-    );
+    let url = StoredValue::new(api::path::membership(&crate::cache::server_now()));
+    let server = StoredValue::new(crate::cache::server_now());
     let reminders = RwSignal::new(membership.reminders_enabled);
     let auto_sync = RwSignal::new(membership.google.auto_sync);
     let problem = RwSignal::new(String::new());
@@ -738,6 +734,142 @@ pub fn RolePicker(
                             }
                         }/>
                     <div class="combo-list" role="listbox" aria-multiselectable="true" aria-label=label>{rows}</div>
+                </div>
+            })}
+        </div>
+    }
+}
+
+/// One choice from a searchable list: a button naming the current pick that
+/// opens a list with a search box, as the time zone and role pickers do. `none`
+/// adds a first row that clears the choice, like "Anyone".
+#[component]
+pub fn Choice(
+    /// The choices, as value and label.
+    #[prop(into)]
+    options: Signal<Vec<(String, String)>>,
+    #[prop(into)] chosen: Signal<Option<String>>,
+    /// What the button says while nothing is chosen.
+    #[prop(into)]
+    placeholder: String,
+    #[prop(optional, into)] none: Option<String>,
+    /// What the list is for, read out with the button.
+    #[prop(into)]
+    label: String,
+    on_pick: Callback<Option<String>>,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let needle = RwSignal::new(String::new());
+    let root = NodeRef::<leptos::html::Div>::new();
+    let search = NodeRef::<leptos::html::Input>::new();
+    let list = NodeRef::<leptos::html::Div>::new();
+    let placeholder = StoredValue::new(placeholder);
+    let none = StoredValue::new(none);
+    let label = StoredValue::new(label);
+    Effect::new(move |_| {
+        if let Some(input) = search.get() {
+            let _ = input.focus();
+            reveal_chosen(list);
+        }
+    });
+    let face = move || {
+        let now = chosen.get();
+        now.as_ref()
+            .and_then(|value| options.with(|list| list.iter().find(|(id, _)| id == value).map(|(_, name)| name.clone())))
+            .or_else(|| none.get_value().filter(|_| now.is_none()))
+            .unwrap_or_else(|| placeholder.get_value())
+    };
+    let close = move || {
+        open.set(false);
+        needle.set(String::new());
+    };
+    let pick = move |value: Option<String>| {
+        close();
+        on_pick.run(value);
+    };
+    let shown = move || {
+        let needle = needle.get().trim().to_lowercase();
+        options.with(|list| {
+            list.iter()
+                .filter(|(_, name)| needle.is_empty() || name.to_lowercase().contains(&needle))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let rows = move || {
+        let now = chosen.get();
+        let clear = none.get_value().filter(|_| needle.with(|text| text.trim().is_empty())).map(|name| {
+            let on = now.is_none();
+            view! {
+                <button type="button" role="option" class=if on { "combo-option on" } else { "combo-option" }
+                    aria-selected=if on { "true" } else { "false" }
+                    on:click=move |_| pick(None)>
+                    <span>{name}</span>
+                </button>
+            }
+        });
+        let items = shown();
+        let empty = items.is_empty() && clear.is_none();
+        let items = items
+            .into_iter()
+            .map(|(value, name)| {
+                let on = now.as_ref() == Some(&value);
+                view! {
+                    <button type="button" role="option" class=if on { "combo-option on" } else { "combo-option" }
+                        aria-selected=if on { "true" } else { "false" }
+                        on:click=move |_| pick(Some(value.clone()))>
+                        <span>{name}</span>
+                        {on.then(|| view! {
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                        })}
+                    </button>
+                }
+            })
+            .collect_view();
+        view! {
+            {clear}
+            {items}
+            {empty.then(|| view! { <p class="pick-empty">"Nothing matches."</p> })}
+        }
+    };
+    view! {
+        <div class="combo" node_ref=root
+            on:focusout=move |ev| {
+                if open.get_untracked() && focus_left(&ev, root) {
+                    close();
+                }
+            }
+            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                if ev.key() == "Escape" && open.get_untracked() {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    close();
+                }
+            }>
+            <button type="button" class="combo-trigger" aria-haspopup="listbox"
+                aria-label=move || label.get_value()
+                aria-expanded=move || if open.get() { "true" } else { "false" }
+                on:click=move |_| if open.get_untracked() { close() } else { open.set(true) }>
+                <span class=move || if chosen.with(Option::is_none) && none.with_value(Option::is_none) { "muted" } else { "" }>{face}</span>
+                <span class="switcher-chevron" aria-hidden="true"></span>
+            </button>
+            {move || open.get().then(|| view! {
+                <div class="combo-panel" on:mousedown=|ev| ev.prevent_default()>
+                    <input node_ref=search type="search" placeholder="Search"
+                        aria-label=move || label.get_value() autocomplete="off"
+                        on:mousedown=|ev| ev.stop_propagation()
+                        prop:value=move || needle.get()
+                        on:input=move |ev| needle.set(event_target_value(&ev))
+                        on:change=|ev| ev.stop_propagation()
+                        on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                            if ev.key() == "Enter" {
+                                ev.prevent_default();
+                                if let Some((value, _)) = shown().into_iter().next() {
+                                    pick(Some(value));
+                                }
+                            }
+                        }/>
+                    <div class="combo-list" role="listbox" node_ref=list aria-label=move || label.get_value()>{rows}</div>
                 </div>
             })}
         </div>

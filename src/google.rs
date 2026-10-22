@@ -1232,9 +1232,11 @@ mod tests {
               ('01900000-0000-7000-8000-000000000001', 1, 1, 'Nell hosts', 'Bring dice.', '2026-10-14T18:00:00Z', 90, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000002', 1, 1, 'June hosts accepted', '', '2026-10-15T18:00:00Z', 60, 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000003', 1, 1, 'June hosts declined', '', '2026-10-16T18:00:00Z', 60, 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
-            INSERT INTO signup_options (id, event_id, name, emoji, reminders_enabled, position) VALUES
-              (1, 2, 'Accepted', '✅', true, 0),
-              (2, 3, 'Declined', '❌', false, 0);
+            INSERT INTO option_library (guild_id, name, emoji, attending) VALUES
+              (1, 'Accepted', '✅', true), (1, 'Declined', '❌', false) ON CONFLICT DO NOTHING;
+            INSERT INTO signup_options (id, event_id, type_id, position) VALUES
+              (1, 2, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Accepted'), 0),
+              (2, 3, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Declined'), 0);
             INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
               (2, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (3, 2, 1, 'confirmed', '2026-10-13T00:00:00Z');

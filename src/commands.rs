@@ -10,7 +10,7 @@ use diesel::upsert::excluded;
 use crate::clock;
 use crate::error::OpError;
 use crate::logic::{
-    self, EventInput, OptionInput, PresetBody, ReminderInput, RepeatSpec, SaveAction,
+    self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction,
 };
 use crate::parse::{self, tokenize};
 use crate::schema;
@@ -538,22 +538,14 @@ pub fn answer_event_dm(
                     "Send the option names, separated by commas.",
                 ));
             }
-            draft.options = names
-            .into_iter()
-                .enumerate()
-                .map(|(index, name)| OptionInput {
-                    id: None,
-                    name: name.to_string(),
-                    emoji: ["✅", "❌", "❔", "•"]
-                        .get(index)
-                        .copied()
-                        .unwrap_or("•")
-                        .into(),
-                    capacity: None,
-                    role_id: None,
-                    reminders_enabled: index == 0,
-                })
-                .collect();
+            // Each name is a type from the library, added there if it is new.
+            let mut types = Vec::new();
+            for (index, name) in names.into_iter().enumerate() {
+                let emoji = ["✅", "❌", "❔"].get(index).copied().unwrap_or("•");
+                let type_id = logic::ensure_type(conn, guild_id, name, emoji, index == 0)?;
+                types.push(draft_type(conn, type_id)?);
+            }
+            draft.types = types;
             save_draft(conn, discord_user_id, "finish", &draft)?;
             just(finish_card(&draft))
         }
@@ -563,10 +555,11 @@ pub fn answer_event_dm(
             let Some(preset) = choice.and_then(|n| presets.get(n - 1)) else {
                 return just(preset_card(&presets));
             };
-            if let Ok(body) = serde_json::from_value::<PresetBody>(preset.body.clone()) {
-                draft.multiple = body.multiple_signups;
-                draft.options = body.options;
-            }
+            draft.multiple = preset.multiple_signups;
+            draft.types = logic::preset_types(conn, preset.id)?
+                .into_iter()
+                .map(|opt| draft_type(conn, opt.type_id))
+                .collect::<Result<_, _>>()?;
             save_draft(conn, discord_user_id, "finish", &draft)?;
             just(finish_card(&draft))
         }
@@ -659,8 +652,9 @@ struct EventPrompt {
 struct EventDraft {
     #[serde(default)]
     description: String,
+    /// The attendance types picked so far; empty means the server's default preset.
     #[serde(default)]
-    options: Vec<OptionInput>,
+    types: Vec<DraftType>,
     #[serde(default)]
     multiple: bool,
     #[serde(default)]
@@ -693,7 +687,7 @@ impl Default for EventDraft {
     fn default() -> Self {
         Self {
             description: String::new(),
-            options: Vec::new(),
+            types: Vec::new(),
             multiple: false,
             duration_minutes: 0,
             repeat: None,
@@ -773,13 +767,25 @@ fn repeat_card() -> DmReply {
     )
 }
 
+/// An attendance type in a DM draft, with its name for the summary.
+#[derive(Clone, Serialize, Deserialize)]
+struct DraftType {
+    type_id: i64,
+    name: String,
+}
+
+fn draft_type(conn: &mut Connection, type_id: i64) -> Result<DraftType, OpError> {
+    let kind = store::library_type(conn, type_id)?.ok_or(OpError::NotFound)?;
+    Ok(DraftType { type_id, name: kind.name })
+}
+
 fn finish_card(draft: &EventDraft) -> DmReply {
     let mut notes = Vec::new();
-    if !draft.options.is_empty() {
+    if !draft.types.is_empty() {
         let names = draft
-            .options
+            .types
             .iter()
-            .map(|opt| opt.name.as_str())
+            .map(|kind| kind.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         notes.push(format!("Signup options: {names}."));
@@ -1067,7 +1073,7 @@ fn answer_signup(
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     match text {
         "1" => {
-            draft.options.clear();
+            draft.types.clear();
             draft.multiple = false;
             save_draft(conn, discord_user_id, "finish", draft)?;
             just(finish_card(draft))
@@ -1264,10 +1270,10 @@ fn finish_event(
         end_on: None,
         max_occurrences: None,
     });
-    let options = if draft.options.is_empty() {
-        yes_no_maybe()
+    let (options, multiple) = if draft.types.is_empty() {
+        logic::starting_options(conn, guild_id)?
     } else {
-        draft.options.clone()
+        (draft.types.iter().map(|kind| OptionInput::of_type(kind.type_id)).collect(), draft.multiple)
     };
     let duration = if draft.duration_minutes == 0 {
         60
@@ -1292,7 +1298,7 @@ fn finish_event(
             cutoff_at,
             attendee_role_id: draft.attendee_role_id,
             thread_enabled,
-            multiple_signups: draft.multiple,
+            multiple_signups: multiple,
             mention_everyone: draft.mention_everyone,
             mention_role_ids: draft.mention_role_ids.clone(),
             restrict_role_ids: draft.restrict_role_ids.clone(),
@@ -2036,30 +2042,57 @@ pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpEr
             }
         }
 
+/// Adds a type to the library, or gives an existing one a new emoji.
 pub fn add_library_option(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     name: &str,
     emoji: &str,
+    attending: bool,
 ) -> Result<String, OpError> {
-    let emoji = if emoji.trim().is_empty() {
-        "•"
-    } else {
-        emoji
-    };
-    logic::library_add(conn, guild_id, membership_id, name, emoji)?;
-    Ok(format!("Saved {emoji} {name} in the option library."))
+    let emoji = if emoji.trim().is_empty() { "•" } else { emoji.trim() };
+    match store::library_type_named(conn, guild_id, name)? {
+        Some(existing) => {
+            logic::update_type(
+                conn,
+                existing.id,
+                membership_id,
+                &logic::TypeInput {
+                    name: existing.name.clone(),
+                    emoji: emoji.to_string(),
+                    attending: existing.attending,
+                },
+            )?;
+            Ok(format!("{emoji} {} is in the library.", existing.name))
+        }
+        None => {
+            let made = logic::add_type(
+                conn,
+                guild_id,
+                membership_id,
+                &logic::TypeInput {
+                    name: name.to_string(),
+                    emoji: emoji.to_string(),
+                    attending,
+                },
+            )?;
+            Ok(format!("Saved {} {} in the library.", made.emoji, made.name))
+        }
+    }
 }
 
+/// Takes a type out of the library, unless something still uses it.
 pub fn remove_library_option(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     name: &str,
 ) -> Result<String, OpError> {
-    logic::library_remove(conn, guild_id, membership_id, name)?;
-    Ok(format!("Removed {name} from the library."))
+    let kind = store::library_type_named(conn, guild_id, name)?
+        .ok_or_else(|| OpError::message(format!("The library has no {}.", name.trim())))?;
+    logic::delete_type(conn, kind.id, membership_id)?;
+    Ok(format!("Removed {} from the library.", kind.name))
 }
 
 fn cmd_signup_options(
@@ -2079,7 +2112,9 @@ fn cmd_signup_options(
                 .or_else(|| pos.get(1).cloned())
                 .ok_or_else(|| OpError::message("Name the option."))?;
             let emoji = map.get("emoji").cloned().unwrap_or_else(|| "•".into());
-            add_library_option(conn, guild_id, membership_id, &name, &emoji)
+            // A new type counts as attending unless told otherwise.
+            let attending = !matches!(map.get("attending").map(|value| value.trim().to_lowercase()).as_deref(), Some("no" | "false"));
+            add_library_option(conn, guild_id, membership_id, &name, &emoji, attending)
         }
         "remove" => {
             let name = map
@@ -2105,6 +2140,8 @@ pub fn preset_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpErr
     }
 }
 
+/// A preset from type names, comma separated. A name the library doesn't have
+/// yet is added to it.
 pub fn add_preset(
     conn: &mut Connection,
     guild_id: i64,
@@ -2112,31 +2149,23 @@ pub fn add_preset(
     name: &str,
     options: &str,
 ) -> Result<String, OpError> {
-    let options = options
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(|part| OptionInput {
-                    id: None,
-                    name: part.to_string(),
-                    emoji: "•".into(),
-                    capacity: None,
-                    role_id: None,
-                    reminders_enabled: true,
-                })
-                .collect();
-            logic::save_preset(
-                conn,
-                guild_id,
+    let mut types = Vec::new();
+    for part in options.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        types.push(OptionInput::of_type(logic::ensure_type(conn, guild_id, part, "•", true)?));
+    }
+    logic::save_preset(
+        conn,
+        guild_id,
         membership_id,
-        name,
-                &PresetBody {
-                    multiple_signups: false,
-                    options,
-                },
-            )?;
-            Ok(format!("Saved the {name} preset."))
-        }
+        None,
+        &logic::PresetInput {
+            name: name.to_string(),
+            multiple_signups: false,
+            options: types,
+        },
+    )?;
+    Ok(format!("Saved the {} preset.", name.trim()))
+}
 
 pub fn remove_preset(
     conn: &mut Connection,
@@ -2352,11 +2381,9 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
             .into_iter()
             .map(|opt| OptionInput {
                 id: Some(opt.id),
-                name: opt.name,
-                emoji: opt.emoji,
+                type_id: opt.type_id,
                 capacity: opt.capacity,
                 role_id: opt.role_id,
-                reminders_enabled: opt.reminders_enabled,
             })
             .collect(),
         reminders: reminders
@@ -2371,35 +2398,6 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
         post_at: event.post_at,
         apply_series: false,
     })
-}
-
-fn yes_no_maybe() -> Vec<OptionInput> {
-    vec![
-        OptionInput {
-            id: None,
-            name: "Accepted".into(),
-            emoji: "✅".into(),
-            capacity: None,
-            role_id: None,
-            reminders_enabled: true,
-        },
-        OptionInput {
-            id: None,
-            name: "Declined".into(),
-            emoji: "❌".into(),
-            capacity: None,
-            role_id: None,
-            reminders_enabled: false,
-        },
-        OptionInput {
-            id: None,
-            name: "Tentative".into(),
-            emoji: "❔".into(),
-            capacity: None,
-            role_id: None,
-            reminders_enabled: false,
-        },
-    ]
 }
 
 fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
@@ -2469,6 +2467,10 @@ mod tests {
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
         let starts_at = Utc::now() + chrono::Duration::days(2);
+        let kinds: Vec<_> = ["Tank", "Healer"]
+            .into_iter()
+            .map(|name| logic::test_option(&mut conn, 1, name, "", true))
+            .collect();
         let id = logic::save_event(
             &mut conn,
             logic::EventInput {
@@ -2490,17 +2492,7 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![],
                 restrict_role_ids: vec![],
-                options: ["Tank", "Healer"]
-                    .into_iter()
-                    .map(|name| logic::OptionInput {
-                        id: None,
-                        name: name.into(),
-                        emoji: String::new(),
-                        capacity: None,
-                        role_id: None,
-                        reminders_enabled: true,
-                    })
-                    .collect(),
+                options: kinds,
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Publish,

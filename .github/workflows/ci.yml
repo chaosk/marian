@@ -94,6 +94,8 @@ jobs:
           CC_x86_64_unknown_linux_musl: /usr/local/bin/musl-cc
           # cargo-leptos takes the server's target from here; it has no flag for it.
           LEPTOS_BIN_TARGET_TRIPLE: x86_64-unknown-linux-musl
+          # Hashed file names, which the image serves as immutable.
+          LEPTOS_HASH_FILES: "true"
         # The wasm and the server build in separate target directories, so they
         # run side by side instead of one after the other.
         run: |

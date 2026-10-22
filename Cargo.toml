@@ -84,6 +84,7 @@ bin-exe-name = "marian"
 bin-features = []
 lib-features = []
 lib-profile-release = "wasm-release"
-# The wasm, script, and stylesheet get their content hash in the file name, so
-# browsers keep them for good and a page always loads the files it was built with.
-hash-files = true
+# Release builds put each file's content hash in its name (LEPTOS_HASH_FILES=true
+# in CI and the Dockerfile), so browsers keep them for good. Not set here:
+# `cargo leptos watch` writes plain names but would still tell the server to use
+# hashed ones, and the server would serve whatever an older build left behind.

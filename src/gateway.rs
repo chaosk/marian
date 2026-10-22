@@ -2273,6 +2273,7 @@ async fn signup_options_add(
     ctx: Context<'_>,
     #[description = "Option name"] name: String,
     #[description = "Emoji shown with the name"] emoji: Option<String>,
+    #[description = "People on it get reminders and the attendee role (default yes)"] attending: Option<bool>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
@@ -2282,7 +2283,14 @@ async fn signup_options_add(
     let emoji = emoji.unwrap_or_else(|| "•".into());
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::add_library_option(&mut conn, actor.guild_id, actor.membership_id, &name, &emoji)
+        commands::add_library_option(
+            &mut conn,
+            actor.guild_id,
+            actor.membership_id,
+            &name,
+            &emoji,
+            attending.unwrap_or(true),
+        )
     };
     deliver(ctx, &actor, "/signup_options add", outcome).await
 }

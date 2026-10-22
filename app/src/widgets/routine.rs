@@ -454,12 +454,12 @@ pub fn tally(rows: Vec<TallyRow>) -> impl IntoView {
 /// `editing` belongs to the page: a saved change reloads the routine and draws
 /// this again, and the days stay open for the next change.
 #[component]
-pub fn PollTally(run: dto::RunView, api: String, editing: RwSignal<bool>) -> impl IntoView {
+pub fn PollTally(run: dto::RunView, routine: String, editing: RwSignal<bool>) -> impl IntoView {
     let days = RwSignal::new(run.days.iter().filter(|day| day.on).map(|day| day.n).collect::<Vec<u8>>());
     let order = StoredValue::new(run.days.clone());
     let problem = RwSignal::new(String::new());
-    let url = StoredValue::new(format!("{api}/days"));
     let server = cache::server_now();
+    let url = StoredValue::new(api::path::routine_days(&server, &routine));
     // Sends the poll's days; if the server says no, the days go back to `before`.
     let saving = client::action(move |(next, before): &(Vec<u8>, Vec<u8>)| {
         let body = dto::RoutineDays {

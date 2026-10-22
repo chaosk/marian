@@ -165,13 +165,17 @@ pub fn create_routine(
         let public_id = crate::ids::routine_id();
         let extras = match extras {
             Some(extras) => clean_extras(tx, guild_id, &extras)?,
-            None => EventExtras {
-                color: "#1e3a6e".into(),
-                thread_enabled: settings.event_threads,
-                options: default_options(),
-                reminders: default_reminder(),
-                ..Default::default()
-            },
+            None => {
+                let (options, multiple_signups) = super::library::starting_options(tx, guild_id)?;
+                EventExtras {
+                    color: "#1e3a6e".into(),
+                    thread_enabled: settings.event_threads,
+                    multiple_signups,
+                    options,
+                    reminders: default_reminder(),
+                    ..Default::default()
+                }
+            }
         };
         let template_id = template::insert(tx, &with_extras(guild_id, channel_id, &title, &description, duration_minutes, extras))?;
         let prompt = format!("Next event: {title}");
@@ -1144,13 +1148,15 @@ pub fn event_dto(conn: &mut Connection, extras: EventExtras) -> Result<marian_ty
         .options
         .into_iter()
         .map(|opt| {
+            let kind = store::library_type(conn, opt.type_id)?.ok_or(OpError::NotFound)?;
             Ok(marian_types::SignupOption {
                 id: None,
-                role_id: public::role(conn, opt.role_id)?,
-                name: opt.name,
-                emoji: opt.emoji,
+                type_id: kind.public_id.to_string(),
+                name: kind.name,
+                emoji: kind.emoji,
+                attending: kind.attending,
                 capacity: opt.capacity,
-                reminders: opt.reminders_enabled,
+                role_id: public::role(conn, opt.role_id)?,
             })
         })
         .collect::<Result<_, OpError>>()?;
@@ -1189,13 +1195,13 @@ pub fn event_from(
         .options
         .iter()
         .map(|opt| {
+            let kind = store::library_type_by_public(conn, guild_id, &opt.type_id)?
+                .ok_or_else(|| OpError::message("That attendance type isn't in this server's library."))?;
             Ok(OptionInput {
                 id: None,
-                name: opt.name.clone(),
-                emoji: opt.emoji.clone(),
+                type_id: kind.id,
                 capacity: opt.capacity,
                 role_id: public::role_id(conn, guild_id, opt.role_id.as_deref())?,
-                reminders_enabled: opt.reminders,
             })
         })
         .collect::<Result<_, OpError>>()?;
@@ -1238,25 +1244,6 @@ pub fn routine_extras(conn: &mut Connection, routine_id: i64) -> Result<EventExt
         options: template.options,
         reminders: template.reminders,
     })
-}
-
-fn default_options() -> Vec<OptionInput> {
-    vec![
-        option("Accepted", "✅", true),
-        option("Declined", "❌", false),
-        option("Tentative", "❔", false),
-    ]
-}
-
-fn option(name: &str, emoji: &str, reminders: bool) -> OptionInput {
-    OptionInput {
-        id: None,
-        name: name.into(),
-        emoji: emoji.into(),
-        capacity: None,
-        role_id: None,
-        reminders_enabled: reminders,
-    }
 }
 
 fn default_reminder() -> Vec<ReminderInput> {
@@ -1529,6 +1516,8 @@ mod tests {
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'play', 'text', 0);
+            INSERT INTO option_library (id, guild_id, name, emoji, attending) VALUES
+              (301, 1, 'Playing', '🎲', true), (302, 1, 'Watching', '👀', false);
             INSERT INTO users (discord_id) VALUES ('nell'), ('june');
             INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell'
@@ -1566,7 +1555,7 @@ mod tests {
                 location: "The cellar".into(),
                 color: "#2f6b4f".into(),
                 multiple_signups: true,
-                options: vec![option("Playing", "🎲", true), option("Watching", "👀", false)],
+                options: vec![OptionInput::of_type(301), OptionInput::of_type(302)],
                 reminders: vec![ReminderInput {
                     offset_minutes: 60,
                     message: "Snacks".into(),

@@ -57,6 +57,7 @@ struct SettingsRow {
     post_lead_hours: i64,
     digest: String,
     waitlist: bool,
+    default_preset_id: Option<i64>,
 }
 
 /// A server's settings. Each `role_*` list names the roles that may do one
@@ -85,6 +86,8 @@ pub struct Settings {
     pub digest: String,
     /// A full option takes more signups onto a waitlist that moves up as spots open.
     pub waitlist: bool,
+    /// The preset a new event starts with.
+    pub default_preset_id: Option<i64>,
 }
 
 /// The permission names stored with each role, and the matching settings field.
@@ -129,6 +132,7 @@ impl Settings {
             post_lead_hours: self.post_lead_hours,
             digest: self.digest.clone(),
             waitlist: self.waitlist,
+            default_preset_id: self.default_preset_id,
         }
     }
 }
@@ -157,6 +161,7 @@ impl From<SettingsRow> for Settings {
             post_lead_hours: row.post_lead_hours,
             digest: row.digest,
             waitlist: row.waitlist,
+            default_preset_id: row.default_preset_id,
         }
     }
 }
@@ -279,7 +284,6 @@ pub(crate) struct StoredTemplate {
     pub(crate) mention_everyone: bool,
     pub(crate) attendee_role_id: Option<i64>,
     pub(crate) cutoff_offset_minutes: Option<i64>,
-    pub(crate) options_json: serde_json::Value,
     pub(crate) reminders_json: serde_json::Value,
     pub(crate) mention_role_ids: Vec<i64>,
     pub(crate) restrict_role_ids: Vec<i64>,
@@ -354,18 +358,35 @@ pub struct RoutineRun {
     pub results_message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
+/// An event's signup option as stored: which library type it is, and what this
+/// event sets for it.
+#[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::signup_options)]
-#[diesel(belongs_to(Event))]
-#[diesel(treat_none_as_null = true)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
+struct SignupOptionRow {
+    id: i64,
+    event_id: i64,
+    capacity: Option<i64>,
+    role_id: Option<i64>,
+    position: i64,
+    public_id: uuid::Uuid,
+    type_id: i64,
+}
+
+/// An event's signup option, with its type's name, emoji, and attending read
+/// from the server's library. Renaming the type renames it here too.
+#[derive(Debug, Clone)]
 pub struct SignupOption {
     pub id: i64,
     pub event_id: i64,
+    /// The library type.
+    pub type_id: i64,
+    pub type_public_id: uuid::Uuid,
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
     pub role_id: Option<i64>,
+    /// Whether the type counts as attending: reminders and the attendee role.
     pub reminders_enabled: bool,
     pub position: i64,
     /// The id the API shows. The sequential `id` never leaves the server.
@@ -424,7 +445,7 @@ pub struct Preset {
     pub public_id: Uuid,
     pub guild_id: i64,
     pub name: String,
-    pub body: serde_json::Value,
+    pub multiple_signups: bool,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -437,6 +458,10 @@ pub struct LibraryOption {
     pub guild_id: i64,
     pub name: String,
     pub emoji: String,
+    /// The id the API shows. The sequential `id` never leaves the server.
+    pub public_id: Uuid,
+    /// People on this type count as attending: reminders and the attendee role.
+    pub attending: bool,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -553,7 +578,6 @@ model_query!(MembershipQuery, Membership);
 model_query!(EventQuery, Event);
 model_query!(SeriesQuery, Series);
 model_query!(RoutineRunQuery, RoutineRun);
-model_query!(SignupOptionQuery, SignupOption);
 model_query!(SignupQuery, Signup);
 model_query!(ReminderQuery, Reminder);
 model_query!(ActivityQuery, Activity);
@@ -704,36 +728,6 @@ impl RoutineRun {
     pub fn for_routine(routine_id: i64) -> _ {
         let runs: RoutineRunQuery = RoutineRun::query();
         runs.filter(schema::routine_runs::routine_id.eq(routine_id))
-    }
-}
-
-impl SignupOption {
-    #[diesel::dsl::auto_type(no_type_alias)]
-    pub fn by_id(id: i64) -> _ {
-        let options: SignupOptionQuery = SignupOption::query();
-        options.filter(schema::signup_options::id.eq(id))
-    }
-
-    #[diesel::dsl::auto_type(no_type_alias)]
-    pub fn for_event(event_id: i64) -> _ {
-        let options: SignupOptionQuery = SignupOption::query();
-        options
-            .filter(schema::signup_options::event_id.eq(event_id))
-            .order((
-                schema::signup_options::position.asc(),
-                schema::signup_options::id.asc(),
-            ))
-    }
-
-    #[diesel::dsl::auto_type(no_type_alias)]
-    pub fn for_events(event_ids: &[i64]) -> _ {
-        let options: SignupOptionQuery = SignupOption::query();
-        options
-            .filter(schema::signup_options::event_id.eq_any(event_ids))
-            .order((
-                schema::signup_options::position.asc(),
-                schema::signup_options::id.asc(),
-            ))
     }
 }
 
@@ -1138,6 +1132,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         post_lead_hours: 48,
         digest: "off".into(),
         waitlist: false,
+        default_preset_id: None,
     }
 }
 
@@ -1147,11 +1142,173 @@ struct NewSettings {
     guild_id: i64,
 }
 
+/// A new server's settings, and the attendance it starts with: Accepted,
+/// Declined, and Tentative in the library, and a Standard preset listing them
+/// as the default.
 pub fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     diesel::insert_into(schema::settings::table)
         .values(&NewSettings { guild_id })
         .execute(conn)?;
+    seed_attendance(conn, guild_id)
+}
+
+/// The types every server starts with: name, emoji, and whether they count as attending.
+pub const STARTING_TYPES: [(&str, &str, bool); 3] = [
+    ("Accepted", "✅", true),
+    ("Declined", "❌", false),
+    ("Tentative", "❔", false),
+];
+
+/// Puts the starting types in the library and, when the server has no default
+/// preset, makes a Standard one with them. What is already there stays.
+pub fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+    let mut types = Vec::new();
+    for (name, emoji, attending) in STARTING_TYPES {
+        types.push(insert_type(conn, guild_id, name, emoji, attending)?);
+    }
+    if settings(conn, guild_id)?.default_preset_id.is_some() {
+        return Ok(());
+    }
+    let preset_id: i64 = diesel::insert_into(schema::presets::table)
+        .values((
+            schema::presets::public_id.eq(crate::ids::preset_id()),
+            schema::presets::guild_id.eq(guild_id),
+            schema::presets::name.eq("Standard"),
+            schema::presets::multiple_signups.eq(false),
+        ))
+        .returning(schema::presets::id)
+        .get_result(conn)?;
+    let rows: Vec<_> = types
+        .iter()
+        .enumerate()
+        .map(|(position, type_id)| {
+            (
+                schema::preset_options::preset_id.eq(preset_id),
+                schema::preset_options::type_id.eq(*type_id),
+                schema::preset_options::position.eq(position as i64),
+            )
+        })
+        .collect();
+    diesel::insert_into(schema::preset_options::table).values(&rows).execute(conn)?;
+    set_default_preset(conn, guild_id, Some(preset_id))
+}
+
+/// The library type with this name (any case), made if missing.
+pub fn insert_type(conn: &mut Connection, guild_id: i64, name: &str, emoji: &str, attending: bool) -> Result<i64, OpError> {
+    if let Some(found) = library_type_named(conn, guild_id, name)? {
+        return Ok(found.id);
+    }
+    Ok(diesel::insert_into(schema::option_library::table)
+        .values((
+            schema::option_library::guild_id.eq(guild_id),
+            schema::option_library::name.eq(name),
+            schema::option_library::emoji.eq(emoji),
+            schema::option_library::attending.eq(attending),
+        ))
+        .returning(schema::option_library::id)
+        .get_result(conn)?)
+}
+
+pub fn set_default_preset(conn: &mut Connection, guild_id: i64, preset_id: Option<i64>) -> Result<(), OpError> {
+    diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(guild_id)))
+        .set(schema::settings::default_preset_id.eq(preset_id))
+        .execute(conn)?;
     Ok(())
+}
+
+pub fn library_type(conn: &mut Connection, id: i64) -> Result<Option<LibraryOption>, OpError> {
+    Ok(LibraryOption::query()
+        .filter(schema::option_library::id.eq(id))
+        .first(conn)
+        .optional()?)
+}
+
+pub fn library_type_named(conn: &mut Connection, guild_id: i64, name: &str) -> Result<Option<LibraryOption>, OpError> {
+    Ok(LibraryOption::query()
+        .filter(schema::option_library::guild_id.eq(guild_id))
+        .filter(schema::lower(schema::option_library::name).eq(name.trim().to_lowercase()))
+        .first(conn)
+        .optional()?)
+}
+
+pub fn library_type_by_public(conn: &mut Connection, guild_id: i64, public_id: &str) -> Result<Option<LibraryOption>, OpError> {
+    let Ok(public_id) = Uuid::parse_str(public_id.trim()) else {
+        return Ok(None);
+    };
+    Ok(LibraryOption::query()
+        .filter(schema::option_library::guild_id.eq(guild_id))
+        .filter(schema::option_library::public_id.eq(public_id))
+        .first(conn)
+        .optional()?)
+}
+
+/// Where a library type is used: events still open, presets, and series or routine templates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeUsage {
+    pub events: i64,
+    pub presets: i64,
+    pub templates: i64,
+}
+
+impl TypeUsage {
+    pub fn total(&self) -> i64 {
+        self.events + self.presets + self.templates
+    }
+
+    /// "3 events and 1 preset", for a refusal.
+    pub fn describe(&self) -> String {
+        let part = |count: i64, one: &str, many: &str| match count {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {many}")),
+        };
+        let parts: Vec<String> = [
+            part(self.events, "event", "events"),
+            part(self.presets, "preset", "presets"),
+            part(self.templates, "series or routine", "series and routines"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        match parts.as_slice() {
+            [] => "nothing".into(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+}
+
+/// Every library type of a server that is in use, and where.
+pub fn type_usage(conn: &mut Connection, guild_id: i64) -> Result<std::collections::HashMap<i64, TypeUsage>, OpError> {
+    let mut usage: std::collections::HashMap<i64, TypeUsage> = std::collections::HashMap::new();
+    let events: Vec<(i64, i64)> = schema::signup_options::table
+        .inner_join(schema::events::table)
+        .filter(schema::events::guild_id.eq(guild_id))
+        .group_by(schema::signup_options::type_id)
+        .select((schema::signup_options::type_id, diesel::dsl::count_star()))
+        .load(conn)?;
+    for (type_id, count) in events {
+        usage.entry(type_id).or_default().events = count;
+    }
+    let presets: Vec<(i64, i64)> = schema::preset_options::table
+        .inner_join(schema::presets::table)
+        .filter(schema::presets::guild_id.eq(guild_id))
+        .group_by(schema::preset_options::type_id)
+        .select((schema::preset_options::type_id, diesel::dsl::count_star()))
+        .load(conn)?;
+    for (type_id, count) in presets {
+        usage.entry(type_id).or_default().presets = count;
+    }
+    let templates: Vec<(i64, i64)> = schema::template_options::table
+        .inner_join(schema::event_templates::table)
+        .filter(schema::event_templates::guild_id.eq(guild_id))
+        .group_by(schema::template_options::type_id)
+        .select((schema::template_options::type_id, diesel::dsl::count_star()))
+        .load(conn)?;
+    for (type_id, count) in templates {
+        usage.entry(type_id).or_default().templates = count;
+    }
+    Ok(usage)
 }
 
 pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpError> {
@@ -1451,7 +1608,50 @@ pub fn series_by_public(conn: &mut Connection, public_id: &str) -> Result<Option
 }
 
 pub fn options_for(conn: &mut Connection, event: &Event) -> Result<Vec<SignupOption>, OpError> {
-    Ok(SignupOption::for_event(event.id).load(conn)?)
+    load_options(conn, OptionsOf::Events(&[event.id]))
+}
+
+enum OptionsOf<'a> {
+    Events(&'a [i64]),
+    One(i64),
+}
+
+/// Options with their library type, in each event's order.
+fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOption>, OpError> {
+    let mut query = schema::signup_options::table
+        .inner_join(schema::option_library::table)
+        .select((
+            SignupOptionRow::as_select(),
+            (
+                schema::option_library::name,
+                schema::option_library::emoji,
+                schema::option_library::attending,
+                schema::option_library::public_id,
+            ),
+        ))
+        .order((schema::signup_options::position.asc(), schema::signup_options::id.asc()))
+        .into_boxed();
+    query = match of {
+        OptionsOf::Events(ids) => query.filter(schema::signup_options::event_id.eq_any(ids)),
+        OptionsOf::One(id) => query.filter(schema::signup_options::id.eq(id)),
+    };
+    let rows: Vec<(SignupOptionRow, (String, String, bool, Uuid))> = query.load(conn)?;
+    Ok(rows
+        .into_iter()
+        .map(|(row, (name, emoji, attending, type_public_id))| SignupOption {
+            id: row.id,
+            event_id: row.event_id,
+            type_id: row.type_id,
+            type_public_id,
+            name,
+            emoji,
+            capacity: row.capacity,
+            role_id: row.role_id,
+            reminders_enabled: attending,
+            position: row.position,
+            public_id: row.public_id,
+        })
+        .collect())
 }
 
 pub fn options_by_event(
@@ -1462,12 +1662,15 @@ pub fn options_by_event(
         return Ok(Vec::new());
     }
     let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
-    let rows = SignupOption::for_events(&ids).load(conn)?;
-    Ok(rows.grouped_by(events))
+    let rows = load_options(conn, OptionsOf::Events(&ids))?;
+    Ok(events
+        .iter()
+        .map(|event| rows.iter().filter(|opt| opt.event_id == event.id).cloned().collect())
+        .collect())
 }
 
 pub fn option(conn: &mut Connection, id: i64) -> Result<Option<SignupOption>, OpError> {
-    Ok(SignupOption::by_id(id).first(conn).optional()?)
+    Ok(load_options(conn, OptionsOf::One(id))?.into_iter().next())
 }
 
 pub fn signups_for(conn: &mut Connection, event: &Event) -> Result<Vec<Signup>, OpError> {
@@ -2001,6 +2204,7 @@ mod tests {
                 "20261019130000".to_string(),
                 "20261019150000".to_string(),
                 "20261019170000".to_string(),
+                "20261021090000".to_string(),
             ]
         );
     }

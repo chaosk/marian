@@ -46,7 +46,9 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         return Ok(Attendance::Idle);
     };
     let Some(message_id) = event.discord_message_id.clone() else {
-        return Ok(Attendance::Waiting);
+        // A posted event's message is on its way, so wait for it. One that
+        // isn't posted (a draft, or a scheduled post) has no roles to give yet.
+        return Ok(if event.status == "posted" { Attendance::Waiting } else { Attendance::Idle });
     };
     let settings = store::settings(conn, event.guild_id)?;
     let manage_thread = event.thread_enabled && settings.auto_join_threads;
@@ -671,6 +673,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_posted_event_waits_for_its_post() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, discord_id) VALUES (1, 1, 'events', 'text', '100');
+            INSERT INTO events (
+              id, public_id, guild_id, channel_id, title, starts_at, duration_minutes,
+              status, created_at, updated_at, discord_message_id
+            ) VALUES
+              (1, '01900000-0000-7000-8000-000000000041', 1, 1, 'Draft', '2026-10-14T18:00:00Z', 60, 'draft', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL),
+              (2, '01900000-0000-7000-8000-000000000042', 1, 1, 'Later', '2026-10-14T18:00:00Z', 60, 'scheduled', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL),
+              (3, '01900000-0000-7000-8000-000000000043', 1, 1, 'Going out', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL),
+              (4, '01900000-0000-7000-8000-000000000044', 1, 1, 'Out', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '55');
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        assert!(matches!(attendance(&mut conn, 1).unwrap(), Attendance::Idle), "a draft has nothing to give");
+        assert!(matches!(attendance(&mut conn, 2).unwrap(), Attendance::Idle), "nor does a scheduled post");
+        assert!(matches!(attendance(&mut conn, 3).unwrap(), Attendance::Waiting), "a posted event waits for its message");
+        assert!(matches!(attendance(&mut conn, 4).unwrap(), Attendance::Ready(_)));
+    }
+
+    #[test]
     fn the_channel_card_lists_names_in_columns() {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
@@ -689,9 +716,11 @@ mod tests {
               '01900000-0000-7000-8000-000000000010', 1, 1, 'Shore cleanup', 'Bring gloves',
               '2026-10-14T18:00:00Z', 60, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'
             );
-            INSERT INTO signup_options (id, event_id, name, emoji, position) VALUES
-              (1, 1, 'Accepted', '✅', 0),
-              (2, 1, 'Declined', '❌', 1);
+            INSERT INTO option_library (guild_id, name, emoji, attending) VALUES
+              (1, 'Accepted', '✅', true), (1, 'Declined', '❌', false) ON CONFLICT DO NOTHING;
+            INSERT INTO signup_options (id, event_id, type_id, position) VALUES
+              (1, 1, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Accepted'), 0),
+              (2, 1, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Declined'), 1);
             INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
               (1, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (1, 1, 2, 'confirmed', '2026-10-13T00:00:00Z'),

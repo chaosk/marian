@@ -1299,3 +1299,56 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
   box-shadow: 0 10px 30px rgba(28, 25, 21, 0.16);
 }
 .update-banner span { flex: 1 1 100%; }
+
+/* Attendance: picking a type from the library, and switching presets. */
+.type-picker .pick-list { border-top: 0; padding: 0; max-height: 220px; }
+.pick-create .pick-name { color: var(--blue); }
+.attend-new-name { align-self: center; font-weight: 650; }
+.attend-edit-note { margin: -6px 0 0; color: var(--muted); font-size: 13px; }
+.attend-edit .attend-name { margin: 0; }
+.preset-chooser { margin-left: auto; }
+.preset-button { padding: 4px 12px; font-size: 14px; }
+.preset-popover { left: auto; right: 0; padding: 8px; gap: 2px; }
+.preset-popover .pick-row { flex-direction: column; align-items: flex-start; gap: 0; }
+.preset-popover .pick-note { white-space: normal; font-size: 13px; }
+
+/* The presets page: preset cards, their editor, and the library. */
+.preset-list, .library-list { max-width: 760px; margin-bottom: 28px; }
+.preset-card .actions { margin-top: 12px; }
+.type-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.type-chip { padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fffdf7; font-size: 14px; }
+.preset-form { display: flex; flex-direction: column; gap: 12px; }
+.preset-form .kicker { margin: 4px 0 0; }
+.preset-types { display: flex; flex-direction: column; gap: 6px; }
+.preset-type {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) 8rem 12rem 2rem;
+  align-items: center;
+  gap: 10px;
+  border-radius: 10px;
+}
+.preset-types-head { color: var(--muted); font-size: 13px; font-weight: 600; }
+.preset-type.dragging { opacity: 0.5; }
+.preset-type .drag-handle { position: static; }
+.preset-type-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-add .combo-trigger { width: 100%; }
+/* A header button hidden while its form is open still holds its space, so nothing shifts. */
+.keep-space { visibility: hidden; }
+.library-rows { display: flex; flex-direction: column; padding: 4px 16px; }
+.library-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 14rem) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+.library-row + .library-row, .library-form + .library-row, .library-row + .library-form { border-top: 1px solid var(--line); }
+.library-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-use { font-size: 13px; }
+.library-tools { display: flex; gap: 6px; justify-content: flex-end; }
+.library-form { display: flex; flex-direction: column; gap: 10px; padding: 12px 0; max-width: 420px; }
+@media (max-width: 720px) {
+  .preset-type { grid-template-columns: 1.5rem minmax(0, 1fr) 6rem; }
+  .preset-type > :nth-child(4), .preset-type > :nth-child(5) { grid-column: 2 / -1; }
+  .library-row { grid-template-columns: 1fr auto; }
+}

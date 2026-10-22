@@ -302,6 +302,40 @@ where
     }
 }
 
+/// `when` for a page that starts from server data and then holds someone's
+/// unsaved work: it renders from the first complete read and lets later
+/// refreshes pass by. Without it, any change elsewhere on the server would
+/// redraw the page and lose that work.
+pub fn when_once<T, V>(
+    gather: impl Fn() -> Option<Result<T, Failure>> + Send + Sync + 'static,
+    render: impl Fn(T) -> V + Send + Sync + 'static,
+) -> impl IntoView
+where
+    T: Clone + PartialEq + Send + Sync + 'static,
+    V: IntoView + 'static,
+{
+    let gather = std::sync::Arc::new(gather);
+    let render = std::sync::Arc::new(render);
+    view! {
+        <Transition fallback=loading>
+            <ErrorBoundary fallback=failed>
+                {
+                    // Made inside the Transition, so its resource reads count
+                    // toward it. Once ready, the memo stops reading them, and so
+                    // stops hearing their refreshes.
+                    let gather = std::sync::Arc::clone(&gather);
+                    let render = std::sync::Arc::clone(&render);
+                    let kept = Memo::new(move |previous: Option<&Option<Result<T, Failure>>>| match previous {
+                        Some(Some(Ok(value))) => Some(Ok(value.clone())),
+                        _ => gather(),
+                    });
+                    move || kept.get().map(|result| result.map(|value| render(value).into_any()))
+                }
+            </ErrorBoundary>
+        </Transition>
+    }
+}
+
 fn link_server(id: &str) -> [String; 2] {
     ["s".into(), id.to_string()]
 }
@@ -494,18 +528,22 @@ async fn get_timezones(selected: String) -> Result<Vec<dto::ZoneGroup>, Failure>
     api::timezones(&selected).await
 }
 
-pub fn new_event_scope() -> QueryScope<(String, String), Result<(Vec<dto::Channel>, Vec<dto::SignupOption>), Failure>>
+/// What a new event starts from: the server's channels, and the preset named in
+/// the address or, without one, the server's default.
+pub fn new_event_scope() -> QueryScope<(String, String), Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>>
 {
     QueryScope::new(get_new_event).with_invalidation_link(|(s, _)| ["s".into(), s.clone(), "form".into()])
 }
 
-async fn get_new_event((server, preset): (String, String)) -> Result<(Vec<dto::Channel>, Vec<dto::SignupOption>), Failure>
+async fn get_new_event((server, preset): (String, String)) -> Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>
 {
     let channels = api::channels(&server).await?;
-    let options = if preset.is_empty() {
-        dto::default_signup_options()
-    } else {
-        api::preset(&server, &preset).await?.options
-    };
-    Ok((channels, options))
+    let presets = api::presets(&server).await?;
+    let chosen = presets
+        .iter()
+        .find(|shown| !preset.is_empty() && shown.id == preset)
+        .or_else(|| presets.iter().find(|shown| shown.default))
+        .or_else(|| presets.first())
+        .cloned();
+    Ok((channels, chosen))
 }

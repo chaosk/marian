@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wasm_bindgen::{JsCast, JsValue};
 
-const REPORT_URL: &str = "/api/client-errors";
 /// Where the console wrapper leaves the last error it saw.
 const LAST_ERROR: &str = "__marianLastError";
 
@@ -88,6 +87,8 @@ fn report(info: &PanicHookInfo, detail: String) {
     options.set_type("application/json");
     let parts = js_sys::Array::of1(&JsValue::from_str(&body));
     if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(parts.unchecked_ref(), &options) {
-        let _ = window.navigator().send_beacon_with_opt_blob(REPORT_URL, Some(&blob));
+        let _ = window
+            .navigator()
+            .send_beacon_with_opt_blob(&marian_app::api::path::client_errors(), Some(&blob));
     }
 }

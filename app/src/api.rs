@@ -336,6 +336,187 @@ fn notice_from_document() -> String {
     })
 }
 
+/// Where each API resource lives. A page or widget asks here for the path of
+/// what it reads or changes, and never builds one from its own address: a
+/// page's address and the API's are separate and change on their own.
+pub mod path {
+    use super::{encode, query_string};
+    use marian_types as dto;
+
+    fn on(server: &str) -> String {
+        format!("/api/servers/{server}")
+    }
+
+    pub fn me() -> String {
+        "/api/me".into()
+    }
+
+    pub fn timezones(selected: &str) -> String {
+        format!("/api/timezones?selected={}", encode(selected))
+    }
+
+    pub fn client_errors() -> String {
+        "/api/client-errors".into()
+    }
+
+    pub fn server(server: &str) -> String {
+        on(server)
+    }
+
+    /// The viewer's membership in the server.
+    pub fn membership(server: &str) -> String {
+        format!("{}/me", on(server))
+    }
+
+    pub fn settings(server: &str) -> String {
+        format!("{}/settings", on(server))
+    }
+
+    pub fn roles(server: &str) -> String {
+        format!("{}/roles", on(server))
+    }
+
+    pub fn members(server: &str) -> String {
+        format!("{}/members", on(server))
+    }
+
+    pub fn member_search(server: &str, text: &str) -> String {
+        format!("{}/members/search?q={}", on(server), encode(text))
+    }
+
+    pub fn channels(server: &str) -> String {
+        format!("{}/channels", on(server))
+    }
+
+    pub fn live(server: &str) -> String {
+        format!("{}/live", on(server))
+    }
+
+    pub fn events(server: &str) -> String {
+        format!("{}/events", on(server))
+    }
+
+    pub fn events_where(server: &str, query: &dto::EventQuery) -> String {
+        format!("{}{}", events(server), query_string(query))
+    }
+
+    pub fn event(server: &str, event: &str) -> String {
+        format!("{}/{event}", events(server))
+    }
+
+    pub fn event_reminders(server: &str, event: &str) -> String {
+        format!("{}/reminders", self::event(server, event))
+    }
+
+    pub fn event_signups(server: &str, event: &str) -> String {
+        format!("{}/signups", self::event(server, event))
+    }
+
+    /// Someone else's response on an option, which an editor sets or clears.
+    pub fn member_signup(server: &str, event: &str, member: &str, option: &str) -> String {
+        format!("{}/{member}/{option}", event_signups(server, event))
+    }
+
+    pub fn event_options(server: &str, event: &str) -> String {
+        format!("{}/options", self::event(server, event))
+    }
+
+    pub fn event_preset(server: &str, event: &str) -> String {
+        format!("{}/preset", self::event(server, event))
+    }
+
+    pub fn event_publish(server: &str, event: &str) -> String {
+        format!("{}/publish", self::event(server, event))
+    }
+
+    pub fn event_schedule(server: &str, event: &str) -> String {
+        format!("{}/schedule", self::event(server, event))
+    }
+
+    /// Takes a scheduled event back to a draft.
+    pub fn event_draft(server: &str, event: &str) -> String {
+        format!("{}/draft", self::event(server, event))
+    }
+
+    pub fn event_archive(server: &str, event: &str) -> String {
+        format!("{}/archive", self::event(server, event))
+    }
+
+    pub fn event_duplicate(server: &str, event: &str) -> String {
+        format!("{}/duplicate", self::event(server, event))
+    }
+
+    pub fn event_skip(server: &str, event: &str) -> String {
+        format!("{}/skip", self::event(server, event))
+    }
+
+    pub fn pending_reminders(server: &str, limit: usize) -> String {
+        format!("{}/reminders?limit={limit}", on(server))
+    }
+
+    pub fn activity(server: &str, page: u32, limit: u32) -> String {
+        format!("{}/activity?page={page}&limit={limit}", on(server))
+    }
+
+    pub fn series_list(server: &str) -> String {
+        format!("{}/series", on(server))
+    }
+
+    pub fn series(server: &str, series: &str) -> String {
+        format!("{}/{series}", series_list(server))
+    }
+
+    pub fn series_end(server: &str, series: &str) -> String {
+        format!("{}/end", self::series(server, series))
+    }
+
+    pub fn presets(server: &str) -> String {
+        format!("{}/presets", on(server))
+    }
+
+    pub fn preset(server: &str, preset: &str) -> String {
+        format!("{}/{preset}", presets(server))
+    }
+
+    /// Makes a preset the one new events start with.
+    pub fn preset_default(server: &str, preset: &str) -> String {
+        format!("{}/default", self::preset(server, preset))
+    }
+
+    pub fn library(server: &str) -> String {
+        format!("{}/library", on(server))
+    }
+
+    pub fn library_type(server: &str, kind: &str) -> String {
+        format!("{}/{kind}", library(server))
+    }
+
+    pub fn commands(server: &str) -> String {
+        format!("{}/commands", on(server))
+    }
+
+    pub fn routines(server: &str) -> String {
+        format!("{}/routines", on(server))
+    }
+
+    pub fn routine(server: &str, routine: &str) -> String {
+        format!("{}/{routine}", routines(server))
+    }
+
+    /// The days a routine's polls offer: the usual ones, or this poll's.
+    pub fn routine_days(server: &str, routine: &str) -> String {
+        format!("{}/days", self::routine(server, routine))
+    }
+
+    pub fn routine_vote(server: &str, routine: &str) -> String {
+        format!("{}/vote", self::routine(server, routine))
+    }
+
+    pub fn routine_stop(server: &str, routine: &str) -> String {
+        format!("{}/stop", self::routine(server, routine))
+    }
+}
+
 /// Marian's own call on the server; the REST resource at `$url` in the browser.
 macro_rules! resource {
     ($server:expr, $url:expr, $body:expr) => {{
@@ -345,8 +526,8 @@ macro_rules! resource {
         }
         #[cfg(not(feature = "ssr"))]
         {
-            let url = format!("/api/servers/{}{}", $server, $url);
-            send_wrapper::SendWrapper::new(remote::read::<_>(&url)).await
+            let _ = $server;
+            send_wrapper::SendWrapper::new(remote::read::<_>(&$url)).await
         }
     }};
 }
@@ -358,20 +539,20 @@ pub async fn me() -> Result<dto::Me, Failure> {
     }
     #[cfg(not(feature = "ssr"))]
     {
-        send_wrapper::SendWrapper::new(remote::read::<_>("/api/me")).await
+        send_wrapper::SendWrapper::new(remote::read::<_>(&path::me())).await
     }
 }
 
 pub async fn server(server: &str) -> Result<dto::Server, Failure> {
-    resource!(server, "", marian::api::server)
+    resource!(server, path::server(server), marian::api::server)
 }
 
 pub async fn membership(server: &str) -> Result<dto::Membership, Failure> {
-    resource!(server, "/me", marian::api::membership)
+    resource!(server, path::membership(server), marian::api::membership)
 }
 
 pub async fn settings(server: &str) -> Result<dto::Settings, Failure> {
-    resource!(server, "/settings", marian::api::settings)
+    resource!(server, path::settings(server), marian::api::settings)
 }
 
 pub async fn timezones(selected: &str) -> Result<Vec<dto::ZoneGroup>, Failure> {
@@ -381,46 +562,45 @@ pub async fn timezones(selected: &str) -> Result<Vec<dto::ZoneGroup>, Failure> {
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let url = format!("/api/timezones?selected={}", encode(selected));
-        send_wrapper::SendWrapper::new(remote::read::<_>(&url)).await
+        send_wrapper::SendWrapper::new(remote::read::<_>(&path::timezones(selected))).await
     }
 }
 
 pub async fn roles(server: &str) -> Result<Vec<dto::Role>, Failure> {
-    resource!(server, "/roles", marian::api::roles)
+    resource!(server, path::roles(server), marian::api::roles)
 }
 
 pub async fn members(server: &str) -> Result<Vec<dto::Member>, Failure> {
-    resource!(server, "/members", marian::api::members)
+    resource!(server, path::members(server), marian::api::members)
 }
 
 pub async fn channels(server: &str) -> Result<Vec<dto::Channel>, Failure> {
-    resource!(server, "/channels", marian::api::channels)
+    resource!(server, path::channels(server), marian::api::channels)
 }
 
 pub async fn events(server: &str, query: &dto::EventQuery) -> Result<dto::Paged<dto::EventSummary>, Failure> {
-    resource!(server, format!("/events{}", query_string(query)), |db, v| {
+    resource!(server, path::events_where(server, query), |db, v| {
         marian::api::events(db, v, query)
     })
 }
 
 pub async fn event(server: &str, id: &str) -> Result<dto::Event, Failure> {
-    resource!(server, format!("/events/{id}"), |db, v| marian::api::event(db, v, id))
+    resource!(server, path::event(server, id), |db, v| marian::api::event(db, v, id))
 }
 
 pub async fn event_reminders(server: &str, id: &str) -> Result<Vec<dto::Reminder>, Failure> {
-    resource!(server, format!("/events/{id}/reminders"), |db, v| {
+    resource!(server, path::event_reminders(server, id), |db, v| {
         marian::api::event_reminders(db, v, id)
     })
 }
 
 
 pub async fn signups(server: &str, id: &str) -> Result<dto::Signups, Failure> {
-    resource!(server, format!("/events/{id}/signups"), |db, v| marian::api::signups(db, v, id))
+    resource!(server, path::event_signups(server, id), |db, v| marian::api::signups(db, v, id))
 }
 
 pub async fn pending_reminders(server: &str, limit: usize) -> Result<Vec<dto::PendingReminder>, Failure> {
-    resource!(server, format!("/reminders?limit={limit}"), |db, v| {
+    resource!(server, path::pending_reminders(server, limit), |db, v| {
         marian::api::pending_reminders(db, v, limit)
     })
 }
@@ -428,41 +608,41 @@ pub async fn pending_reminders(server: &str, limit: usize) -> Result<Vec<dto::Pe
 pub async fn activity(server: &str, page: u32, limit: u32) -> Result<dto::Paged<dto::Activity>, Failure> {
     resource!(
         server,
-        format!("/activity?page={page}&limit={limit}"),
+        path::activity(server, page, limit),
         |db, v| { marian::api::activity(db, v, page, i64::from(limit)) }
     )
 }
 
 pub async fn series_list(server: &str) -> Result<Vec<dto::Series>, Failure> {
-    resource!(server, "/series", marian::api::series_list)
+    resource!(server, path::series_list(server), marian::api::series_list)
 }
 
 pub async fn series(server: &str, id: &str) -> Result<dto::Series, Failure> {
-    resource!(server, format!("/series/{id}"), |db, v| marian::api::series(db, v, id))
+    resource!(server, path::series(server, id), |db, v| marian::api::series(db, v, id))
 }
 
 pub async fn presets(server: &str) -> Result<Vec<dto::Preset>, Failure> {
-    resource!(server, "/presets", marian::api::presets)
+    resource!(server, path::presets(server), marian::api::presets)
 }
 
 pub async fn preset(server: &str, id: &str) -> Result<dto::Preset, Failure> {
-    resource!(server, format!("/presets/{id}"), |db, v| marian::api::preset(db, v, id))
+    resource!(server, path::preset(server, id), |db, v| marian::api::preset(db, v, id))
 }
 
 pub async fn library(server: &str) -> Result<Vec<dto::LibraryItem>, Failure> {
-    resource!(server, "/library", marian::api::library)
+    resource!(server, path::library(server), marian::api::library)
 }
 
 pub async fn commands(server: &str) -> Result<Vec<dto::CommandLog>, Failure> {
-    resource!(server, "/commands", marian::api::commands)
+    resource!(server, path::commands(server), marian::api::commands)
 }
 
 pub async fn routines(server: &str) -> Result<Vec<dto::RoutineSummary>, Failure> {
-    resource!(server, "/routines", marian::api::routines)
+    resource!(server, path::routines(server), marian::api::routines)
 }
 
 pub async fn routine(server: &str, id: &str) -> Result<dto::RoutineView, Failure> {
-    resource!(server, format!("/routines/{id}"), |db, v| marian::api::routine(db, v, id))
+    resource!(server, path::routine(server, id), |db, v| marian::api::routine(db, v, id))
 }
 
 /// A change from the browser. It only runs there.
