@@ -32,33 +32,110 @@ pub struct NewBuild(pub RwSignal<bool>);
 pub fn Live(server: String) -> impl IntoView {
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
-        use wasm_bindgen::closure::Closure;
-        use wasm_bindgen::JsCast;
-        let url = api::path::live(&server);
-        let here = server.clone();
-        let new_build = use_context::<NewBuild>().map(|build| build.0);
-        if let Ok(source) = web_sys::EventSource::new(&url) {
-            let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |_| {
-                crate::cache::refresh(&here);
-            });
-            source.set_onmessage(Some(on_change.as_ref().unchecked_ref()));
-            on_change.forget();
-            let on_build = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-                let served = event.data().as_string().unwrap_or_default();
-                let mine = api::site().build;
-                if !served.is_empty() && !mine.is_empty() && served != mine {
-                    if let Some(flag) = new_build {
-                        flag.try_set(true);
-                    }
-                }
-            });
-            let _ = source.add_event_listener_with_callback("build", on_build.as_ref().unchecked_ref());
-            on_build.forget();
-            on_cleanup(move || source.close());
-        }
+        let stream = std::rc::Rc::new(LiveStream {
+            server: server.clone(),
+            new_build: use_context::<NewBuild>().map(|build| build.0),
+            source: Default::default(),
+            opened: Default::default(),
+            failures: Default::default(),
+            stopped: Default::default(),
+        });
+        stream.open();
+        let stream = send_wrapper::SendWrapper::new(stream);
+        on_cleanup(move || stream.take().stop());
     });
     #[cfg(not(feature = "hydrate"))]
     let _ = server;
+}
+
+/// One server's live stream. The browser retries a dropped stream by itself
+/// but gives up for good when a retry gets an error status, which is what the
+/// ingress answers while a deploy has no pod up. Then this opens it again,
+/// waiting longer after each failure, up to half a minute.
+#[cfg(feature = "hydrate")]
+struct LiveStream {
+    server: String,
+    new_build: Option<RwSignal<bool>>,
+    source: std::cell::RefCell<Option<web_sys::EventSource>>,
+    opened: std::cell::Cell<bool>,
+    failures: std::cell::Cell<u32>,
+    stopped: std::cell::Cell<bool>,
+}
+
+#[cfg(feature = "hydrate")]
+impl LiveStream {
+    fn open(self: &std::rc::Rc<Self>) {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+        if self.stopped.get() {
+            return;
+        }
+        let Ok(source) = web_sys::EventSource::new(&api::path::live(&self.server)) else {
+            return;
+        };
+        let here = self.server.clone();
+        let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |_| {
+            crate::cache::refresh(&here);
+        });
+        source.set_onmessage(Some(on_change.as_ref().unchecked_ref()));
+        on_change.forget();
+        let new_build = self.new_build;
+        let on_build = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            let served = event.data().as_string().unwrap_or_default();
+            let mine = api::site().build;
+            if !served.is_empty() && !mine.is_empty() && served != mine {
+                if let Some(flag) = new_build {
+                    flag.try_set(true);
+                }
+            }
+        });
+        let _ = source.add_event_listener_with_callback("build", on_build.as_ref().unchecked_ref());
+        on_build.forget();
+        // Changes made while the stream was down were never announced.
+        let this = std::rc::Rc::downgrade(self);
+        let on_open = Closure::<dyn FnMut()>::new(move || {
+            if let Some(this) = this.upgrade() {
+                this.failures.set(0);
+                if this.opened.replace(true) {
+                    crate::cache::refresh(&this.server);
+                }
+            }
+        });
+        source.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+        on_open.forget();
+        let this = std::rc::Rc::downgrade(self);
+        let on_error = Closure::<dyn FnMut()>::new(move || {
+            let Some(this) = this.upgrade() else { return };
+            let closed = this
+                .source
+                .borrow()
+                .as_ref()
+                .is_some_and(|source| source.ready_state() == web_sys::EventSource::CLOSED);
+            if closed && !this.stopped.get() {
+                this.source.borrow_mut().take();
+                let failures = this.failures.get();
+                this.failures.set(failures + 1);
+                let wait = (1000 << failures.min(5)).min(30_000);
+                let again = std::rc::Rc::downgrade(&this);
+                let reopen = Closure::once_into_js(move || {
+                    if let Some(again) = again.upgrade() {
+                        again.open();
+                    }
+                });
+                let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(reopen.unchecked_ref(), wait);
+            }
+        });
+        source.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        on_error.forget();
+        *self.source.borrow_mut() = Some(source);
+    }
+
+    fn stop(&self) {
+        self.stopped.set(true);
+        if let Some(source) = self.source.borrow_mut().take() {
+            source.close();
+        }
+    }
 }
 
 /// A search box that keeps its query in the address bar.
