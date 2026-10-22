@@ -28,10 +28,14 @@ pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpE
     let mut report = TickReport {
         notes: Vec::new(),
         jobs: Vec::new(),
+        guilds: Vec::new(),
     };
     let guilds = store::list_guilds(conn)?;
     for guild in guilds {
         let piece = store::with_tx(conn, |tx| tick_guild(tx, guild.id, now))?;
+        if !piece.notes.is_empty() || !piece.jobs.is_empty() {
+            report.guilds.push(guild.id);
+        }
         report.notes.extend(piece.notes);
         report.jobs.extend(piece.jobs);
     }
@@ -46,6 +50,7 @@ fn tick_guild(
     let mut report = TickReport {
         notes: Vec::new(),
         jobs: Vec::new(),
+        guilds: Vec::new(),
     };
     let settings = store::settings(conn, guild_id)?;
     let guild = must_guild(conn, guild_id)?;

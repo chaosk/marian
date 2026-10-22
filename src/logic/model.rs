@@ -181,6 +181,8 @@ pub struct DiscordView {
 pub struct TickReport {
     pub notes: Vec<String>,
     pub jobs: Vec<DiscordJob>,
+    /// Servers this pass changed something on.
+    pub guilds: Vec<i64>,
 }
 
 pub struct CleanInput {
