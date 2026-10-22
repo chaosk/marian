@@ -3,7 +3,7 @@ replicaCount: 1
 
 image:
   repository: marian
-  tag: "0.7.1"
+  tag: "0.7.2"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
