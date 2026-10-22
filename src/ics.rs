@@ -29,9 +29,14 @@ pub(crate) fn events_for_person(
                 .and(signups::state.eq("confirmed"))),
         )
         .left_join(
-            signup_options::table.on(signup_options::id
-                .eq(signups::option_id)
-                .and(signup_options::reminders_enabled.eq(true))),
+            // Only a type that counts as attending puts the event in someone's calendar.
+            signup_options::table.on(signup_options::id.eq(signups::option_id).and(
+                signup_options::type_id.eq_any(
+                    crate::schema::option_library::table
+                        .filter(crate::schema::option_library::attending.eq(true))
+                        .select(crate::schema::option_library::id),
+                ),
+            )),
         )
         .filter(memberships::user_id.eq(user_id))
         .filter(events::status.eq_any(["posted", "scheduled", "archived"]))
@@ -136,9 +141,11 @@ mod tests {
               ('01900000-0000-7000-8000-000000000001', 1, 1, 'Nell hosts', '2026-10-14T18:00:00Z', 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000002', 1, 1, 'June hosts accepted', '2026-10-15T18:00:00Z', 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'),
               ('01900000-0000-7000-8000-000000000003', 1, 1, 'June hosts declined', '2026-10-16T18:00:00Z', 'posted', 2, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
-            INSERT INTO signup_options (id, event_id, name, emoji, reminders_enabled, position) VALUES
-              (1, 2, 'Accepted', '✅', true, 0),
-              (2, 3, 'Declined', '❌', false, 0);
+            INSERT INTO option_library (guild_id, name, emoji, attending) VALUES
+              (1, 'Accepted', '✅', true), (1, 'Declined', '❌', false) ON CONFLICT DO NOTHING;
+            INSERT INTO signup_options (id, event_id, type_id, position) VALUES
+              (1, 2, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Accepted'), 0),
+              (2, 3, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Declined'), 0);
             INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
               (2, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
               (3, 2, 1, 'confirmed', '2026-10-13T00:00:00Z');

@@ -5,6 +5,7 @@ mod catalog;
 mod db;
 mod discord;
 mod event;
+mod library;
 mod lifecycle;
 mod model;
 mod routine;
@@ -15,9 +16,12 @@ mod tick;
 
 pub use access::{can_create, can_delete, can_edit};
 pub use catalog::{
-    bind_channel_discord, create_channel, delete_preset, discard_channel, library_add,
-    library_remove, manual_calendar_sync, record_command, save_preset, set_user_reminders,
-    slug_channel,
+    bind_channel_discord, create_channel, discard_channel, manual_calendar_sync, record_command,
+    set_user_reminders, slug_channel,
+};
+pub use library::{
+    add_type, apply_preset, delete_preset, delete_type, ensure_type, preset_types, presets, save_preset,
+    set_default_preset, starting_options, update_type,
 };
 pub use discord::{
     attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
@@ -30,8 +34,8 @@ pub use lifecycle::{
     archive_event, delete_event, duplicate_event, end_series, save_series_repeat, skip_event,
 };
 pub use model::{
-    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput, OptionInput,
-    PresetBody, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
+    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput, OptionInput, TypeInput,
+    PresetInput, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
 };
 pub use routine::{
     cast_run, count_active, create_routine, event_from as routine_event_from, open_run_id, run_by_public, list_routines, maintain as maintain_routines,
@@ -42,6 +46,18 @@ pub use routine::{
 pub use signup::{editor_response, signup};
 pub use template::series_template;
 pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
+
+/// An option of the named type, put in the server's library if it isn't there.
+#[cfg(test)]
+pub(crate) fn test_option(
+    conn: &mut crate::store::Connection,
+    guild_id: i64,
+    name: &str,
+    emoji: &str,
+    attending: bool,
+) -> OptionInput {
+    OptionInput::of_type(library::ensure_type(conn, guild_id, name, emoji, attending).unwrap())
+}
 
 #[cfg(test)]
 mod tests {
@@ -62,6 +78,11 @@ mod tests {
               (1, 1, 'Officer', '#888888'),
               (2, 1, 'Tank', '#336699');
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
+            INSERT INTO option_library (id, guild_id, name, emoji, attending) VALUES
+              (101, 1, 'Yes', '✅', true),
+              (102, 1, 'No', '❌', false),
+              (103, 1, 'DPS', '⚔️', true),
+              (104, 1, 'Maybe', '•', false);
             INSERT INTO users (discord_id) VALUES ('u1'), ('u2'), ('u3');
             INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'u1'
@@ -76,25 +97,14 @@ mod tests {
         conn
     }
 
+    // Library types the test server has: Yes, No, DPS, and Maybe.
+    const YES: i64 = 101;
+    const NO: i64 = 102;
+    const DPS: i64 = 103;
+    const MAYBE: i64 = 104;
+
     fn yes_no() -> Vec<OptionInput> {
-        vec![
-            OptionInput {
-                id: None,
-                name: "Yes".into(),
-                emoji: "✅".into(),
-                capacity: None,
-                role_id: None,
-                reminders_enabled: true,
-            },
-            OptionInput {
-                id: None,
-                name: "No".into(),
-                emoji: "❌".into(),
-                capacity: None,
-                role_id: None,
-                reminders_enabled: false,
-            },
-        ]
+        vec![OptionInput::of_type(YES), OptionInput::of_type(NO)]
     }
 
     fn input(title: &str, start: DateTime<Utc>, action: SaveAction) -> EventInput {
@@ -137,12 +147,8 @@ mod tests {
         store::update_settings(&mut conn, &settings).unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
-            id: None,
-            name: "DPS".into(),
-            emoji: "⚔️".into(),
             capacity: Some(1),
-            role_id: None,
-            reminders_enabled: true,
+            ..OptionInput::of_type(DPS)
         }];
         let id = save_event(&mut conn, event).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
@@ -163,12 +169,8 @@ mod tests {
         assert!(!store::settings(&mut conn, 1).unwrap().waitlist, "off by default");
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
-            id: None,
-            name: "DPS".into(),
-            emoji: "⚔️".into(),
             capacity: Some(1),
-            role_id: None,
-            reminders_enabled: true,
+            ..OptionInput::of_type(DPS)
         }];
         let id = save_event(&mut conn, event).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
@@ -180,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn a_posted_event_gains_and_reorders_options_without_losing_signups() {
+    fn a_posted_event_gains_reorders_and_drops_options() {
         let mut conn = world();
         let event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         let id = save_event(&mut conn, event).unwrap();
@@ -189,22 +191,13 @@ mod tests {
         signup(&mut conn, id, options[0].id, 2).unwrap();
         let keep = |opt: &store::SignupOption| OptionInput {
             id: Some(opt.id),
-            name: opt.name.clone(),
-            emoji: opt.emoji.clone(),
+            type_id: opt.type_id,
             capacity: opt.capacity,
             role_id: opt.role_id,
-            reminders_enabled: opt.reminders_enabled,
         };
         let mut next = vec![keep(&options[1]), keep(&options[0])];
         next[1].capacity = Some(4);
-        next.push(OptionInput {
-            id: None,
-            name: "Maybe".into(),
-            emoji: String::new(),
-            capacity: None,
-            role_id: None,
-            reminders_enabled: false,
-        });
+        next.push(OptionInput::of_type(MAYBE));
         save_options(&mut conn, id, 1, &next).unwrap();
         let saved = store::options_for(&mut conn, &event).unwrap();
         let names: Vec<&str> = saved.iter().map(|opt| opt.name.as_str()).collect();
@@ -215,9 +208,12 @@ mod tests {
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[0].id);
 
-        let dropped = vec![keep(&saved[0]), keep(&saved[1])];
-        let err = save_options(&mut conn, id, 1, &dropped).unwrap_err().to_string();
-        assert!(err.contains("needs to stay"));
+        // A posted event can lose a type too; the responses on it go with it.
+        let dropped = vec![keep(&saved[0]), keep(&saved[2])];
+        save_options(&mut conn, id, 1, &dropped).unwrap();
+        let names: Vec<String> = store::options_for(&mut conn, &event).unwrap().into_iter().map(|opt| opt.name).collect();
+        assert_eq!(names, ["No", "Maybe"]);
+        assert!(store::signups_for(&mut conn, &event).unwrap().is_empty(), "Yes went, and June's response with it");
         let err = save_options(&mut conn, id, 3, &next).unwrap_err().to_string();
         assert!(err.contains("You can edit events you created"));
     }

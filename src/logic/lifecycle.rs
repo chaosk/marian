@@ -122,11 +122,9 @@ pub fn duplicate_event(
             .into_iter()
             .map(|opt| OptionInput {
                 id: None,
-                name: opt.name,
-                emoji: opt.emoji,
+                type_id: opt.type_id,
                 capacity: opt.capacity,
                 role_id: opt.role_id,
-                reminders_enabled: opt.reminders_enabled,
             })
             .collect(),
         reminders: reminders

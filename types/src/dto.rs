@@ -256,16 +256,23 @@ pub struct Event {
 /// A signup option as stored, and as the event form sends it back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignupOption {
+    /// The event's option, which keeps its responses. None for a new one.
     #[serde(default)]
     pub id: Option<String>,
+    /// The attendance type from the server's library.
+    pub type_id: String,
+    /// The type's name, emoji, and attending, shown with it. The library sets
+    /// them; a request that sends them is not heard.
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub emoji: String,
+    #[serde(default)]
+    pub attending: bool,
     #[serde(default)]
     pub capacity: Option<i64>,
     #[serde(default)]
     pub role_id: Option<String>,
-    #[serde(default)]
-    pub reminders: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -295,12 +302,14 @@ pub struct Person {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OptionSignups {
     pub id: String,
+    /// The attendance type from the server's library.
+    pub type_id: String,
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
     pub role_id: Option<String>,
     pub role: Option<String>,
-    pub reminders: bool,
+    pub attending: bool,
     pub confirmed_count: i64,
     pub waiting_count: i64,
     /// Names, when the server shows them to this person.
@@ -344,25 +353,6 @@ pub struct Repeat {
     pub count: Option<i64>,
     #[serde(default)]
     pub until: Option<NaiveDate>,
-}
-
-/// Accepted, Declined, and Tentative, the options a new event starts with.
-pub fn default_signup_options() -> Vec<SignupOption> {
-    [
-        ("Accepted", "✅", true),
-        ("Declined", "❌", false),
-        ("Tentative", "❔", false),
-    ]
-    .into_iter()
-    .map(|(name, emoji, reminders)| SignupOption {
-        id: None,
-        name: name.into(),
-        emoji: emoji.into(),
-        capacity: None,
-        role_id: None,
-        reminders,
-    })
-    .collect()
 }
 
 /// An event as the form sends it. Local times are in the server's zone.
@@ -492,6 +482,9 @@ pub struct Preset {
     pub id: String,
     pub name: String,
     pub multiple_signups: bool,
+    /// The preset a new event starts with.
+    #[serde(default)]
+    pub default: bool,
     pub options: Vec<SignupOption>,
 }
 
@@ -500,14 +493,36 @@ pub struct PresetDraft {
     pub name: String,
     #[serde(default)]
     pub multiple_signups: bool,
-    /// Option names; known names take their emoji from the library.
-    pub options: Vec<String>,
+    /// Types from the library, in order, with their capacity and role limit.
+    pub options: Vec<SignupOption>,
+}
+
+/// Gives an event a preset's attendance.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApplyPreset {
+    pub preset: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LibraryItem {
+    pub id: String,
     pub name: String,
     pub emoji: String,
+    /// People on this type count as attending: reminders and the attendee role.
+    pub attending: bool,
+    /// Where it is used, as "3 events and 1 preset"; empty when unused.
+    #[serde(default)]
+    pub used_by: String,
+}
+
+/// A library type as someone sets it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TypeDraft {
+    pub name: String,
+    #[serde(default)]
+    pub emoji: String,
+    #[serde(default)]
+    pub attending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

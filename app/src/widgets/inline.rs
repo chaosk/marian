@@ -246,7 +246,7 @@ impl Sender {
         }
         let request = Request {
             method: "PATCH",
-            url: format!("/api/servers/{server}/events/{event}"),
+            url: api::path::event(&server, &event),
             body: serde_json::to_value(&patch).ok(),
             answers_event: true,
             said: None,
@@ -255,11 +255,11 @@ impl Sender {
         self.dispatch(request, done, undo);
     }
 
-    /// Asks the server to post or schedule the event: `action` is the last part
-    /// of the address. The answer is the event as it now reads.
+    /// Asks the server to post or schedule the event, or take it back to a
+    /// draft, at the path `route` names. The answer is the event as it now reads.
     fn go(
         self,
-        action: &'static str,
+        route: fn(&str, &str) -> String,
         body: Option<serde_json::Value>,
         said: &'static str,
         done: impl FnOnce() + Send + Sync + 'static,
@@ -267,7 +267,7 @@ impl Sender {
         let (server, event) = self.key.get_value();
         let request = Request {
             method: "POST",
-            url: format!("/api/servers/{server}/events/{event}/{action}"),
+            url: route(&server, &event),
             body,
             answers_event: true,
             said: Some(said),
@@ -485,14 +485,14 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     };
     let post_now = move |_| {
         open.set(false);
-        sender.go("publish", None, "Posted to Discord.", || ());
+        sender.go(api::path::event_publish, None, "Posted to Discord.", || ());
     };
     let schedule = move || {
         let Some(local) = parse_local(&when.get_untracked()) else {
             return sender.fail("Pick a date and time to post.");
         };
         let body = dto::PostAt { post_local: local };
-        sender.go("schedule", serde_json::to_value(body).ok(), "Scheduled.", move || open.set(false));
+        sender.go(api::path::event_schedule, serde_json::to_value(body).ok(), "Scheduled.", move || open.set(false));
     };
     view! {
         <div class="inline-anchor post-buttons">
@@ -503,7 +503,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
             </button>
             {(event.status != "draft").then(|| view! {
                 <button type="button" class="ghost" disabled=move || sender.busy().get()
-                    on:click=move |_| sender.go("draft", None, "Back to a draft. It won't post on its own.", || ())>
+                    on:click=move |_| sender.go(api::path::event_draft, None, "Back to a draft. It won't post on its own.", || ())>
                     "Back to draft"
                 </button>
             })}
@@ -630,7 +630,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
             ),
             Some(id) => sender.series(
                 "PATCH",
-                format!("/api{}/series/{id}", crate::base()),
+                api::path::series(&cache::server_now(), &id),
                 serde_json::to_value(&repeat).ok(),
                 "Saved the repeat.",
                 move || open.set(false),
@@ -645,7 +645,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
         stopping.set(false);
         sender.series(
             "POST",
-            format!("/api{}/series/{id}/end", crate::base()),
+            api::path::series_end(&cache::server_now(), &id),
             None,
             "Stopped repeating. Upcoming dates were skipped.",
             move || open.set(false),
@@ -918,7 +918,7 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
     let saving = client::action(move |(body, said): &(dto::EventDraft, &'static str)| {
         let (body, said) = (body.clone(), *said);
         let (server, _) = sender.key.get_value();
-        let url = format!("/api/servers/{server}/events");
+        let url = api::path::events(&server);
         let toasts = client::toast_list();
         let go = go.clone();
         async move {

@@ -32,6 +32,7 @@ diesel::table! {
         post_lead_hours -> BigInt,
         digest -> Text,
         waitlist -> Bool,
+        default_preset_id -> Nullable<BigInt>,
     }
 }
 
@@ -110,7 +111,6 @@ diesel::table! {
         mention_everyone -> Bool,
         attendee_role_id -> Nullable<BigInt>,
         cutoff_offset_minutes -> Nullable<BigInt>,
-        options_json -> Jsonb,
         reminders_json -> Jsonb,
         mention_role_ids -> Array<BigInt>,
         restrict_role_ids -> Array<BigInt>,
@@ -181,13 +181,11 @@ diesel::table! {
     signup_options (id) {
         id -> BigInt,
         event_id -> BigInt,
-        name -> Text,
-        emoji -> Text,
         capacity -> Nullable<BigInt>,
         role_id -> Nullable<BigInt>,
-        reminders_enabled -> Bool,
         position -> BigInt,
         public_id -> Uuid,
+        type_id -> BigInt,
     }
 }
 
@@ -259,7 +257,7 @@ diesel::table! {
         public_id -> Uuid,
         guild_id -> BigInt,
         name -> Text,
-        body -> Jsonb,
+        multiple_signups -> Bool,
     }
 }
 
@@ -269,6 +267,8 @@ diesel::table! {
         guild_id -> BigInt,
         name -> Text,
         emoji -> Text,
+        public_id -> Uuid,
+        attending -> Bool,
     }
 }
 
@@ -413,6 +413,28 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    preset_options (id) {
+        id -> BigInt,
+        preset_id -> BigInt,
+        type_id -> BigInt,
+        position -> BigInt,
+        capacity -> Nullable<BigInt>,
+        role_id -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    template_options (id) {
+        id -> BigInt,
+        template_id -> BigInt,
+        type_id -> BigInt,
+        position -> BigInt,
+        capacity -> Nullable<BigInt>,
+        role_id -> Nullable<BigInt>,
+    }
+}
+
 diesel::joinable!(settings -> guilds (guild_id));
 diesel::joinable!(roles -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
@@ -435,6 +457,11 @@ diesel::joinable!(events -> memberships (created_by));
 diesel::joinable!(event_roles -> events (event_id));
 diesel::joinable!(event_roles -> roles (role_id));
 diesel::joinable!(signup_options -> events (event_id));
+diesel::joinable!(signup_options -> option_library (type_id));
+diesel::joinable!(preset_options -> presets (preset_id));
+diesel::joinable!(preset_options -> option_library (type_id));
+diesel::joinable!(template_options -> event_templates (template_id));
+diesel::joinable!(template_options -> option_library (type_id));
 diesel::joinable!(signups -> events (event_id));
 diesel::joinable!(signups -> signup_options (option_id));
 diesel::joinable!(signups -> memberships (membership_id));
@@ -482,6 +509,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     guilds,
     meta,
     option_library,
+    preset_options,
     presets,
     reminders,
     role_grants,
@@ -493,6 +521,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     settings,
     signup_options,
     signups,
+    template_options,
     thread_members,
     thread_messages,
     threads,

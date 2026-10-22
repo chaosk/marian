@@ -97,12 +97,13 @@ pub fn unsaved_signups(options: &[dto::SignupOption]) -> dto::Signups {
             .iter()
             .map(|opt| dto::OptionSignups {
                 id: opt.id.clone().unwrap_or_default(),
+                type_id: opt.type_id.clone(),
                 name: opt.name.clone(),
                 emoji: opt.emoji.clone(),
                 capacity: opt.capacity,
                 role_id: opt.role_id.clone(),
                 role: None,
-                reminders: opt.reminders,
+                attending: opt.attending,
                 confirmed_count: 0,
                 waiting_count: 0,
                 confirmed: Vec::new(),
@@ -128,14 +129,8 @@ fn apply_sent(now: &mut dto::Signups, list: &[dto::SignupOption]) {
         let Some(sent) = list.iter().find(|sent| sent.id.as_ref() == Some(&opt.id)) else {
             continue;
         };
-        opt.name = sent.name.trim().to_string();
-        opt.emoji = match sent.emoji.trim() {
-            "" => "•".to_string(),
-            emoji => emoji.to_string(),
-        };
         opt.capacity = sent.capacity;
         opt.role_id = sent.role_id.clone();
-        opt.reminders = sent.reminders;
     }
     now.options
         .sort_by_key(|opt| list.iter().position(|sent| sent.id.as_ref() == Some(&opt.id)));
@@ -144,12 +139,31 @@ fn apply_sent(now: &mut dto::Signups, list: &[dto::SignupOption]) {
 fn wire(opt: &dto::OptionSignups) -> dto::SignupOption {
     dto::SignupOption {
         id: Some(opt.id.clone()),
+        type_id: opt.type_id.clone(),
         name: opt.name.clone(),
         emoji: opt.emoji.clone(),
+        attending: opt.attending,
         capacity: opt.capacity,
         role_id: opt.role_id.clone(),
-        reminders: opt.reminders,
     }
+}
+
+/// A library type as a new option on the event.
+fn from_library(item: &dto::LibraryItem) -> dto::SignupOption {
+    dto::SignupOption {
+        id: None,
+        type_id: item.id.clone(),
+        name: item.name.clone(),
+        emoji: item.emoji.clone(),
+        attending: item.attending,
+        capacity: None,
+        role_id: None,
+    }
+}
+
+/// "1 response goes" or "3 responses go", for a confirm that says what goes.
+fn responses_go(count: i64) -> String {
+    if count == 1 { "1 response goes".into() } else { format!("{count} responses go") }
 }
 
 /// Moves option `from` to where option `to` is. False when nothing moved.
@@ -185,7 +199,7 @@ pub fn SignupPanel(
     let saving = client::action(move |(list, undo): &(Vec<dto::SignupOption>, Option<Vec<String>>)| {
         let (list, undo) = (list.clone(), undo.clone());
         let (server, event) = ids.get_value();
-        let url = format!("/api/servers/{server}/events/{event}/options");
+        let url = api::path::event_options(&server, &event);
         let key = (server.clone(), event);
         let queries = cache::client();
         async move {
@@ -242,19 +256,21 @@ pub fn SignupPanel(
         let room = panel.state.with(|now| now.options.len() < MAX_OPTIONS);
         (manage() && room && panel.editing.get() != Edit::New).then(|| {
             view! {
-                <button type="button" class="icon-btn" title="Add an option" aria-label="Add an option"
+                <button type="button" class="icon-btn" title="Add an attendance type" aria-label="Add an attendance type"
                     on:click=move |_| panel.editing.set(Edit::New)>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
                 </button>
             }
         })
     };
+    let presets = move || manage().then(|| view! { <PresetChooser panel/> });
 
     view! {
         <section>
             <div class="section-head attend-section-head">
                 <h2>"Attendance"</h2>
                 {add}
+                {presets}
             </div>
             {move || {
                 let text = panel.problem.get();
@@ -268,7 +284,7 @@ pub fn SignupPanel(
                     children=move |id| view! { <OptionCard panel id/> }
                 />
                 {move || (panel.editing.get() == Edit::New).then(|| view! {
-                    <article class="attend-card editing">{edit_form(panel, None)}</article>
+                    <article class="attend-card editing"><TypePicker panel/></article>
                 })}
             </div>
         </section>
@@ -366,7 +382,9 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
         >
             {move || {
                 if panel.editing.get() == Edit::Old(id.get_value()) {
-                    return edit_form(panel, opt.get_untracked()).into_any();
+                    if let Some(opt) = opt.get_untracked() {
+                        return edit_form(panel, opt).into_any();
+                    }
                 }
                 let tools = manage().then(|| view! {
                     <button type="button" class="drag-handle" title="Drag to reorder" aria-label="Move this option"
@@ -439,32 +457,25 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
     }
 }
 
-/// The edit face of a card. `None` is a new option.
-fn edit_form(panel: Panel, opt: Option<dto::OptionSignups>) -> impl IntoView {
-    let id = StoredValue::new(opt.as_ref().map(|opt| opt.id.clone()));
-    let base = opt.as_ref().map(wire);
-    let emoji = RwSignal::new(opt.as_ref().map(|opt| opt.emoji.clone()).unwrap_or_default());
-    let name = RwSignal::new(opt.as_ref().map(|opt| opt.name.clone()).unwrap_or_default());
-    let capacity = RwSignal::new(
-        opt.as_ref()
-            .and_then(|opt| opt.capacity)
-            .map(|n| n.to_string())
-            .unwrap_or_default(),
-    );
-    let attending = RwSignal::new(opt.as_ref().is_none_or(|opt| opt.reminders));
-    let limit = RwSignal::new(base.as_ref().and_then(|base| base.role_id.clone()));
-    // Before posting nobody has picked an option yet, so one can go.
-    let removable = id.with_value(Option::is_some) && panel.state.with_untracked(|now| !now.posted && now.options.len() > 1);
+/// The edit face of a card: what this event sets for the type. Its name, emoji,
+/// and attending belong to the library, on the Presets page.
+fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
+    let id = StoredValue::new(opt.id.clone());
+    let capacity = RwSignal::new(opt.capacity.map(|n| n.to_string()).unwrap_or_default());
+    let limit = RwSignal::new(opt.role_id.clone());
+    let removable = panel.state.with_untracked(|now| now.options.len() > 1);
+    let held = opt.confirmed_count + opt.waiting_count;
+    let question = if held > 0 {
+        format!("Remove {}? {} with it.", opt.name, responses_go(held))
+    } else {
+        format!("Remove {}?", opt.name)
+    };
+    let base = crate::base();
     let cancel = move || {
         panel.problem.set(String::new());
         panel.editing.set(Edit::Off);
     };
     let save = move || {
-        let title = name.get_untracked().trim().to_string();
-        if title.is_empty() {
-            panel.problem.set("Give the option a name.".into());
-            return;
-        }
         let text = capacity.get_untracked();
         let cap = match text.trim() {
             "" => None,
@@ -479,26 +490,16 @@ fn edit_form(panel: Panel, opt: Option<dto::OptionSignups>) -> impl IntoView {
             },
         };
         let id = id.get_value();
-        let next = dto::SignupOption {
-            id: id.clone(),
-            name: title,
-            emoji: emoji.get_untracked().trim().to_string(),
-            capacity: cap,
-            role_id: limit.get_untracked(),
-            reminders: attending.get_untracked(),
-        };
         let mut list = panel.wire();
-        match list.iter_mut().find(|opt| opt.id.is_some() && opt.id == id) {
-            Some(slot) => *slot = next,
-            None => list.push(next),
+        if let Some(slot) = list.iter_mut().find(|opt| opt.id.as_ref() == Some(&id)) {
+            slot.capacity = cap;
+            slot.role_id = limit.get_untracked();
         }
         panel.save(list, None);
     };
     let asking = RwSignal::new(false);
     let remove = move || {
-        let Some(id) = id.get_value() else {
-            return;
-        };
+        let id = id.get_value();
         let list: Vec<dto::SignupOption> = panel.wire().into_iter().filter(|opt| opt.id.as_ref() != Some(&id)).collect();
         panel.state.update(|now| now.options.retain(|opt| opt.id != id));
         panel.save(list, None);
@@ -520,15 +521,14 @@ fn edit_form(panel: Panel, opt: Option<dto::OptionSignups>) -> impl IntoView {
                     cancel();
                 }
             }>
-            <div class="attend-edit-name">
-                <input class="emoji-input" maxlength="8" aria-label="Emoji" placeholder="🙂"
-                    prop:value=move || emoji.get() on:input=move |ev| emoji.set(event_target_value(&ev))/>
-                <input node_ref=input maxlength="40" aria-label="Option name" placeholder="Name"
-                    prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev))/>
-            </div>
+            <p class="attend-name">{opt.emoji.clone()}" "<strong>{opt.name.clone()}</strong></p>
+            <p class="attend-edit-note">
+                {if opt.attending { "Counts as attending. " } else { "" }}
+                "Rename it in the "<crate::A href=format!("{base}/presets")>"library"</crate::A>"."
+            </p>
             <label class="attend-edit-row">
                 <span>"Capacity"</span>
-                <input type="number" min="1" max="500" inputmode="numeric" placeholder="Unlimited"
+                <input node_ref=input type="number" min="1" max="500" inputmode="numeric" placeholder="Unlimited"
                     prop:value=move || capacity.get() on:input=move |ev| capacity.set(event_target_value(&ev))/>
             </label>
             <label class="attend-edit-row">
@@ -543,25 +543,10 @@ fn edit_form(panel: Panel, opt: Option<dto::OptionSignups>) -> impl IntoView {
                     })}
                 </select>
             </label>
-            <div class="attend-edit-row">
-                <span title="People on an attending option get reminders and the attendee role.">"Attending"</span>
-                <button type="button" role="switch" class=move || if attending.get() { "switch on" } else { "switch" }
-                    aria-label="Attending"
-                    aria-checked=move || if attending.get() { "true" } else { "false" }
-                    on:click=move |_| attending.update(|on| *on = !*on)>
-                    <span></span>
-                </button>
-            </div>
             {move || if asking.get() {
-                let title = name.get_untracked();
-                let question = if title.trim().is_empty() {
-                    "Remove this option?".to_string()
-                } else {
-                    format!("Remove {}?", title.trim())
-                };
                 view! {
                     <div class="attend-edit-actions">
-                        <super::InlineConfirm question yes="Remove"
+                        <super::InlineConfirm question=question.clone() yes="Remove"
                             on_yes=Callback::new(move |_| remove())
                             on_no=Callback::new(move |_| asking.set(false))/>
                     </div>
@@ -580,6 +565,268 @@ fn edit_form(panel: Panel, opt: Option<dto::OptionSignups>) -> impl IntoView {
                 .into_any()
             }}
         </form>
+    }
+}
+
+/// Adds a type to the event: one from the library, found by name, or a new one
+/// made in the library on the spot.
+#[component]
+fn TypePicker(panel: Panel) -> impl IntoView {
+    let library = cache::listen(cache::library_scope(), cache::server_key);
+    let needle = RwSignal::new(String::new());
+    let making = RwSignal::new(false);
+    let emoji = RwSignal::new(String::new());
+    let attending = RwSignal::new(true);
+    let input = NodeRef::<leptos::html::Input>::new();
+    Effect::new(move |_| {
+        if let Some(field) = input.get() {
+            let _ = field.focus();
+        }
+    });
+    let close = move || {
+        panel.problem.set(String::new());
+        panel.editing.set(Edit::Off);
+    };
+    let add = move |item: dto::LibraryItem| {
+        let mut list = panel.wire();
+        list.push(from_library(&item));
+        panel.save(list, None);
+    };
+    let (server, event) = panel.ids.get_value();
+    let local = panel.local;
+    // Making a type tells open pages the server changed, which can redraw this
+    // panel before the answer comes back. So the list goes along with the
+    // request, and the new type joins it without the panel: in the page's draft,
+    // or saved straight to the event.
+    let create = client::action(move |(draft, list): &(dto::TypeDraft, Vec<dto::SignupOption>)| {
+        let (draft, mut list) = (draft.clone(), list.clone());
+        let library_url = api::path::library(&server);
+        let options_url = api::path::event_options(&server, &event);
+        let queries = cache::client();
+        let server = server.clone();
+        async move {
+            let made = match api::send::<dto::LibraryItem, _>("POST", &library_url, Some(&draft)).await {
+                Ok(made) => made,
+                Err(failure) => {
+                    panel.problem.try_set(failure.message);
+                    return;
+                }
+            };
+            list.push(from_library(&made));
+            match local {
+                Some(local) => {
+                    local.options.try_set(numbered(list));
+                    local.changed();
+                }
+                None => {
+                    if let Err(failure) = api::send::<dto::Done, _>("PUT", &options_url, Some(&list)).await {
+                        panel.problem.try_set(failure.message);
+                    }
+                }
+            }
+            panel.editing.try_set(Edit::Off);
+            cache::refresh_in(queries, &server);
+        }
+    });
+    let make = move || {
+        create.dispatch((
+            dto::TypeDraft {
+                name: needle.get_untracked().trim().to_string(),
+                emoji: emoji.get_untracked(),
+                attending: attending.get_untracked(),
+            },
+            panel.wire(),
+        ));
+    };
+    let rows = move || {
+        let on_event: Vec<String> = panel.state.with(|now| now.options.iter().map(|opt| opt.type_id.clone()).collect());
+        let text = needle.get().trim().to_lowercase();
+        let Some(Ok(items)) = library.get() else {
+            return view! { <p class="pick-empty">"Loading the library…"</p> }.into_any();
+        };
+        let exact = items.iter().any(|item| item.name.to_lowercase() == text);
+        let shown: Vec<dto::LibraryItem> = items
+            .into_iter()
+            .filter(|item| !on_event.contains(&item.id))
+            .filter(|item| text.is_empty() || item.name.to_lowercase().contains(&text))
+            .collect();
+        let list = shown
+            .into_iter()
+            .map(|item| {
+                let label = format!("{} {}", item.emoji, item.name);
+                let attending = item.attending;
+                view! {
+                    <button type="button" class="pick-row" on:click=move |_| add(item.clone())>
+                        <span class="pick-name">{label}</span>
+                        {attending.then(|| view! { <span class="pick-note">"attending"</span> })}
+                    </button>
+                }
+            })
+            .collect_view();
+        let offer = (!text.is_empty() && !exact).then(|| {
+            let name = needle.get_untracked().trim().to_string();
+            view! {
+                <button type="button" class="pick-row pick-create" on:click=move |_| making.set(true)>
+                    <span class="pick-name">{format!("Create “{name}”")}</span>
+                    <span class="pick-note">"adds it to the library"</span>
+                </button>
+            }
+        });
+        view! { {list}{offer} }.into_any()
+    };
+    view! {
+        <form class="attend-edit type-picker"
+            on:submit=move |ev| {
+                ev.prevent_default();
+                if making.get_untracked() { make(); }
+            }
+            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                if ev.key() == "Escape" {
+                    ev.stop_propagation();
+                    close();
+                }
+            }>
+            <input node_ref=input type="search" placeholder="Find or create a type" aria-label="Attendance type"
+                autocomplete="off"
+                prop:value=move || needle.get()
+                on:input=move |ev| { needle.set(event_target_value(&ev)); making.set(false); }/>
+            {move || if making.get() {
+                view! {
+                    <div class="attend-edit-name">
+                        <input class="emoji-input" maxlength="8" aria-label="Emoji" placeholder="🙂"
+                            prop:value=move || emoji.get() on:input=move |ev| emoji.set(event_target_value(&ev))/>
+                        <span class="attend-new-name">{move || needle.get().trim().to_string()}</span>
+                    </div>
+                    <div class="attend-edit-row">
+                        <span title="People on an attending type get reminders and the attendee role.">"Attending"</span>
+                        <button type="button" role="switch" class=move || if attending.get() { "switch on" } else { "switch" }
+                            aria-label="Attending"
+                            aria-checked=move || if attending.get() { "true" } else { "false" }
+                            on:click=move |_| attending.update(|on| *on = !*on)>
+                            <span></span>
+                        </button>
+                    </div>
+                    <div class="attend-edit-actions">
+                        <button type="submit" class="primary" disabled=move || create.pending().get()>"Create and add"</button>
+                        <button type="button" class="ghost" on:click=move |_| making.set(false)>"Back"</button>
+                    </div>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <div class="pick-list" role="listbox" aria-label="Attendance types">{rows}</div>
+                    <div class="attend-edit-actions">
+                        <button type="button" class="ghost" on:click=move |_| close()>"Cancel"</button>
+                    </div>
+                }
+                .into_any()
+            }}
+        </form>
+    }
+}
+
+/// Swaps the event's types for a preset's. Types in both keep their responses;
+/// when responses would go, it says how many first.
+#[component]
+fn PresetChooser(panel: Panel) -> impl IntoView {
+    let presets = cache::listen(cache::presets_scope(), cache::server_key);
+    let open = RwSignal::new(false);
+    let asking = RwSignal::new(None::<(dto::Preset, String)>);
+    let root = NodeRef::<leptos::html::Div>::new();
+    let (server, event) = panel.ids.get_value();
+    let applying = client::action(move |preset: &dto::Preset| {
+        let url = api::path::event_preset(&server, &event);
+        let body = dto::ApplyPreset { preset: preset.id.clone() };
+        let queries = cache::client();
+        let server = server.clone();
+        async move {
+            match api::send::<dto::Done, _>("POST", &url, Some(&body)).await {
+                Ok(_) => panel.problem.try_set(String::new()),
+                Err(failure) => panel.problem.try_set(failure.message),
+            };
+            cache::refresh_in(queries, &server);
+        }
+    });
+    let apply = move |preset: dto::Preset| {
+        open.set(false);
+        asking.set(None);
+        panel.editing.set(Edit::Off);
+        match panel.local {
+            Some(local) => {
+                local.options.set(numbered(preset.options.clone()));
+                local.event.update(|event| event.multiple_signups = preset.multiple_signups);
+                local.changed();
+            }
+            None => {
+                applying.dispatch(preset);
+            }
+        }
+    };
+    // Responses on types the preset doesn't have, which would go with them.
+    let choose = move |preset: dto::Preset| {
+        let dropped: Vec<(String, i64)> = panel.state.with_untracked(|now| {
+            now.options
+                .iter()
+                .filter(|opt| !preset.options.iter().any(|kept| kept.type_id == opt.type_id))
+                .map(|opt| (opt.name.clone(), opt.confirmed_count + opt.waiting_count))
+                .filter(|(_, held)| *held > 0)
+                .collect()
+        });
+        if dropped.is_empty() {
+            apply(preset);
+        } else {
+            let held: i64 = dropped.iter().map(|(_, held)| held).sum();
+            let names: Vec<String> = dropped.into_iter().map(|(name, _)| name).collect();
+            let question = format!("Use {}? {} from {}.", preset.name, responses_go(held), names.join(", "));
+            asking.set(Some((preset, question)));
+        }
+    };
+    view! {
+        <div class="inline-anchor preset-chooser" node_ref=root
+            on:focusout=move |ev| {
+                if open.get_untracked() && asking.get_untracked().is_none() && super::focus_left(&ev, root) {
+                    open.set(false);
+                }
+            }>
+            <button type="button" class="ghost preset-button" aria-haspopup="listbox"
+                aria-expanded=move || if open.get() { "true" } else { "false" }
+                disabled=move || applying.pending().get()
+                on:click=move |_| { asking.set(None); open.update(|on| *on = !*on); }>
+                "Change preset"
+            </button>
+            {move || open.get().then(|| view! {
+                <div class="popover preset-popover" on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                    if ev.key() == "Escape" { ev.stop_propagation(); open.set(false); asking.set(None); }
+                }>
+                    {move || match asking.get() {
+                        Some((preset, question)) => view! {
+                            <super::InlineConfirm question yes="Use it"
+                                on_yes=Callback::new(move |_| apply(preset.clone()))
+                                on_no=Callback::new(move |_| asking.set(None))/>
+                        }
+                        .into_any(),
+                        None => match presets.get() {
+                            Some(Ok(list)) => list
+                                .into_iter()
+                                .map(|preset| {
+                                    let names = preset.options.iter().map(|opt| opt.name.clone()).collect::<Vec<_>>().join(", ");
+                                    let label = preset.name.clone();
+                                    let default = preset.default;
+                                    view! {
+                                        <button type="button" class="pick-row" on:click=move |_| choose(preset.clone())>
+                                            <span class="pick-name">{label}{default.then_some(" · default")}</span>
+                                            <span class="pick-note">{names}</span>
+                                        </button>
+                                    }
+                                })
+                                .collect_view()
+                                .into_any(),
+                            _ => view! { <p class="pick-empty">"Loading presets…"</p> }.into_any(),
+                        },
+                    }}
+                </div>
+            })}
+        </div>
     }
 }
 
@@ -669,7 +916,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
             }
             searching.set(true);
             let known = Arc::clone(&known);
-            let url = format!("/api/servers/{server}/members/search?q={}", api::encode(text.trim()));
+            let url = api::path::member_search(&server, text.trim());
             // Waits for a pause in typing; a newer search makes this one moot.
             client::later(250, move || {
                 if asked.try_get_value() != Some(turn) {
@@ -742,7 +989,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
                     .map(|id| ("PUT", id.clone()))
                     .chain(drops.iter().map(|id| ("DELETE", id.clone())));
                 for (method, member) in changes {
-                    let url = format!("/api/servers/{server}/events/{event}/signups/{member}/{option}");
+                    let url = api::path::member_signup(&server, &event, &member, &option);
                     if let Err(failure) = api::send::<dto::Done, ()>(method, &url, None).await {
                         failed = Some(failure.message);
                     }
@@ -851,12 +1098,13 @@ mod tests {
     fn option(id: &str) -> dto::OptionSignups {
         dto::OptionSignups {
             id: id.to_string(),
+            type_id: format!("type-{id}"),
             name: format!("Option {id}"),
             emoji: String::new(),
             capacity: None,
             role_id: None,
             role: None,
-            reminders: true,
+            attending: true,
             confirmed_count: 0,
             waiting_count: 0,
             confirmed: Vec::new(),
@@ -887,11 +1135,12 @@ mod tests {
     fn unsaved_options_get_temporary_ids_that_do_not_clash() {
         let named = |id: Option<&str>| dto::SignupOption {
             id: id.map(str::to_string),
+            type_id: "type".into(),
             name: "x".into(),
             emoji: String::new(),
+            attending: true,
             capacity: None,
             role_id: None,
-            reminders: true,
         };
         let list = numbered(vec![named(None), named(Some("new-1")), named(None)]);
         let ids: Vec<_> = list.iter().map(|opt| opt.id.clone().unwrap()).collect();

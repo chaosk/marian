@@ -1,4 +1,6 @@
 use leptos::prelude::*;
+
+use crate::api::path;
 use marian_types as dto;
 
 use crate::format::{self, clock_of, spots, status_label};
@@ -102,7 +104,8 @@ pub fn EventPage() -> impl IntoView {
             let clock = clock_of(&server);
             let now = format::now();
             let here = format!("{}/events/{}", base(), event.id);
-            let api_here = format!("/api{here}");
+            let server_id = cache::server_now();
+            let at = |make: fn(&str, &str) -> String| make(&server_id, &event.id);
             let localize = localize_note(&server);
             let key = (cache::server_now(), event.id.clone());
             let series_note = event.series.as_ref().and_then(|series| {
@@ -123,15 +126,15 @@ pub fn EventPage() -> impl IntoView {
             let actions = view! {
                 <PostButtons key=key.clone() event=event.clone() clock=clock/>
                 {can.archive.then(|| view! {
-                    <ActionButton method="POST" url=format!("{api_here}/archive") label="Archive" class="ghost"/>
+                    <ActionButton method="POST" url=at(path::event_archive) label="Archive" class="ghost"/>
                 })}
-                <ActionButton method="POST" url=format!("{api_here}/duplicate") label="Duplicate" class="ghost"
+                <ActionButton method="POST" url=at(path::event_duplicate) label="Duplicate" class="ghost"
                     done=format!("Made a draft copy for {}, one week later.", clock.when(week_later(&clock, event.starts_at)))/>
                 {can.skip.then(|| view! {
-                    <ActionButton method="POST" url=format!("{api_here}/skip") label="Skip this date" class="ghost"/>
+                    <ActionButton method="POST" url=at(path::event_skip) label="Skip this date" class="ghost"/>
                 })}
                 {can.delete.then(|| view! {
-                    <ActionButton method="DELETE" url=api_here.clone() label="Delete" class="danger" confirm="Remove this event?"/>
+                    <ActionButton method="DELETE" url=at(path::event) label="Delete" class="danger" confirm="Remove this event?"/>
                 })}
             }
             .into_any();
@@ -148,7 +151,7 @@ pub fn EventPage() -> impl IntoView {
                 attendance: signups_cell(signups, members, roles).into_any(),
                 reminders: reminders_cell(key.clone(), event.clone(), reminders).into_any(),
                 roles: roles_cell(key.clone(), event.clone(), roles).into_any(),
-                embed: embed_cell(signups, event.clone(), clock, here, api_here, localize, now).into_any(),
+                embed: embed_cell(signups, event.clone(), clock, here, at(path::event), localize, now).into_any(),
                 channel: channel_cell(key.clone(), event.clone(), channels).into_any(),
                 status,
             };
@@ -165,9 +168,13 @@ pub fn NewEvent() -> impl IntoView {
     let start = cache::listen(cache::new_event_scope(), || (cache::server_key(), crate::query("preset")));
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
-    when(
+    // The draft lives in this page, so a refresh must not redraw it.
+    cache::when_once(
         move || (server.get(), start.get(), settings.get(), roles.get()).ready(),
-        move |(server, (channels, options), settings, roles)| {
+        move |(server, (channels, preset), settings, roles)| {
+            let (options, multiple_signups) = preset
+                .map(|preset| (preset.options, preset.multiple_signups))
+                .unwrap_or_default();
             use chrono::TimeZone;
             let clock = clock_of(&server);
             let now = format::now();
@@ -198,7 +205,7 @@ pub fn NewEvent() -> impl IntoView {
                 mention_role_ids: Vec::new(),
                 restrict_role_ids: Vec::new(),
                 thread_enabled: settings.event_threads,
-                multiple_signups: false,
+                multiple_signups,
                 signups_closed: false,
                 series: None,
                 creator: "You".into(),
@@ -351,20 +358,21 @@ fn embed_cell(
     event: dto::Event,
     clock: format::Clock,
     here: String,
-    api_here: String,
+    delete_at: String,
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
-    show(signups, move |signups| embed_view(&signups, &event, clock, here.clone(), api_here.clone(), localize, now))
+    show(signups, move |signups| embed_view(&signups, &event, clock, here.clone(), delete_at.clone(), localize, now))
 }
 
-/// The Discord post as it reads. `here` is empty for an event not saved yet.
+/// The Discord post as it reads. `here` (the event's page) and `delete_at`
+/// (its API path) are empty for an event not saved yet.
 fn embed_view(
     signups: &dto::Signups,
     event: &dto::Event,
     clock: format::Clock,
     here: String,
-    api_here: String,
+    delete_at: String,
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
@@ -445,9 +453,9 @@ fn embed_view(
                         } else {
                             view! { <button class="d-btn primary" type="button" disabled>"Edit"</button> }.into_any()
                         }}
-                        {if can.delete && !api_here.is_empty() {
+                        {if can.delete && !delete_at.is_empty() {
                             view! {
-                                <ActionButton method="DELETE" url=api_here.clone() label="Delete" class="d-btn danger" confirm="Remove this event?"/>
+                                <ActionButton method="DELETE" url=delete_at.clone() label="Delete" class="d-btn danger" confirm="Remove this event?"/>
                             }
                             .into_any()
                         } else {

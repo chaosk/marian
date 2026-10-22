@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::format::clock_of;
 use crate::widgets::JsonForm;
 use crate::cache::{self, when, Ready};
-use crate::{base, title};
+use crate::title;
 
 #[component]
 pub fn Channels() -> impl IntoView {
@@ -50,7 +50,7 @@ pub fn Channels() -> impl IntoView {
                 </div>
             </div>
             {table}
-            <JsonForm method="POST" url=format!("/api{}/channels", base()) class="panel channel-create" done="Created the channel.">
+            <JsonForm method="POST" url=crate::api::path::channels(&cache::server_now()) class="panel channel-create" done="Created the channel.">
                 <label class="field">"Name "<input name="name" placeholder="race-night" required/></label>
                 <button class="primary" type="submit">"Create event channel"</button>
             </JsonForm>

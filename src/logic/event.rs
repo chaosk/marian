@@ -5,6 +5,7 @@ use diesel::prelude::*;
 
 use super::access::{can_create, can_edit};
 use super::db::{log, must_channel, must_event, must_role, must_membership};
+use super::library::clean_types;
 use super::model::*;
 use super::series::{apply_series_template, ensure_series, link_new_series, mark_posted};
 use super::signup::{fill_all, sync_access};
@@ -19,11 +20,13 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
     store::with_tx(conn, |tx| {
         let id = if let Some(existing) = &clean.existing {
             update_event_row(tx, existing.id, &input, &clean, now)?;
+            sync_options(tx, existing.id, &clean.options)?;
             if existing.status == "posted" {
-                update_options_in_place(tx, existing.id, &clean.options)?;
                 replace_reminders(tx, existing, &clean.reminders)?;
             } else {
-                replace_children(tx, existing.id, &clean.options, &clean.reminders)?;
+                diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(existing.id)))
+                    .execute(tx)?;
+                insert_reminders(tx, existing.id, &clean.reminders, &[])?;
             }
             replace_roles(tx, existing.id, &input)?;
             existing.id
@@ -169,21 +172,9 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
     }
 
-    let options = clean_options(conn, input.guild_id, &input.options)?;
+    let options = clean_types(conn, input.guild_id, &input.options)?;
     if let Some(existing) = &existing {
-        if existing.status == "posted" {
-            let current = store::options_for(conn, existing)?;
-            let ids: HashSet<i64> = current.iter().map(|opt| opt.id).collect();
-            let same = options.len() == current.len()
-                && options
-                    .iter()
-                    .all(|opt| opt.id.map(|id| ids.contains(&id)).unwrap_or(false));
-            if !same {
-                return Err(OpError::message(
-                    "Signup options can't be added or removed after the event is posted. You can still rename them and change capacity.",
-                ));
-            }
-        }
+        known_options(conn, existing, &options)?;
     }
 
     let mut reminders = clean_reminders(&input.reminders)?;
@@ -252,77 +243,27 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     })
 }
 
-/// Checks a list of options, dropping the unnamed ones.
-fn clean_options(
-    conn: &mut Connection,
-    guild_id: i64,
-    input: &[OptionInput],
-) -> Result<Vec<OptionInput>, OpError> {
-    let mut options = Vec::new();
-    for opt in input {
-        let name = opt.name.trim().to_string();
-        if name.is_empty() {
-            continue;
+/// An option that names an id has to be one of this event's.
+fn known_options(conn: &mut Connection, event: &store::Event, options: &[OptionInput]) -> Result<(), OpError> {
+    let current: HashSet<i64> = store::options_for(conn, event)?.iter().map(|opt| opt.id).collect();
+    let mut seen = HashSet::new();
+    for id in options.iter().filter_map(|opt| opt.id) {
+        if !current.contains(&id) || !seen.insert(id) {
+            return Err(OpError::NotFound);
         }
-        if name.chars().count() > 40 {
-            return Err(OpError::message(
-                "Signup option names stay under 40 characters.",
-            ));
-        }
-        let emoji = {
-            let raw = opt.emoji.trim();
-            let raw = if raw.is_empty() { "•" } else { raw };
-            if raw.chars().count() > 8 {
-                return Err(OpError::message("Keep each option emoji short."));
-            }
-            raw.to_string()
-        };
-        if let Some(cap) = opt.capacity {
-            if cap < 1 || cap > 500 {
-                return Err(OpError::message(
-                    "Capacity has to be at least 1, or left open.",
-                ));
-            }
-        }
-        if let Some(role_id) = opt.role_id {
-            let role = must_role(conn, role_id)?;
-            if role.guild_id != guild_id {
-                return Err(OpError::message(
-                    "An option is limited to a role from another server.",
-                ));
-            }
-        }
-        options.push(OptionInput {
-            id: opt.id,
-            name,
-            emoji,
-            capacity: opt.capacity,
-            role_id: opt.role_id,
-            reminders_enabled: opt.reminders_enabled,
-        });
     }
-    if options.is_empty() {
-        return Err(OpError::message("Add at least one signup option."));
-    }
-    if options.len() > 8 {
-        return Err(OpError::message(
-            "An event can have up to 8 signup options.",
-        ));
-    }
-    Ok(options)
+    Ok(())
 }
 
-/// Changes an event's options in their new order. Options with an id are updated,
-/// options without one are added, and none are taken away, so signups stay put.
+/// Changes an event's options in their new order. Options with an id are
+/// updated and keep their responses, options without one are added, and options
+/// left out go, with any responses on them.
 pub fn save_options(
     conn: &mut Connection,
     event_id: i64,
     actor_id: i64,
     input: &[OptionInput],
 ) -> Result<(), OpError> {
-    if input.iter().any(|opt| opt.name.trim().is_empty()) {
-        return Err(OpError::message("Give each option a name."));
-    }
     store::with_tx(conn, |tx| {
         let event = must_event(tx, event_id)?;
         let actor = must_membership(tx, actor_id)?;
@@ -338,65 +279,9 @@ pub fn save_options(
                 "That date is already closed. Duplicate it if you need another one.",
             ));
         }
-        let options = clean_options(tx, event.guild_id, input)?;
-        let current: HashSet<i64> = store::options_for(tx, &event)?
-            .iter()
-            .map(|opt| opt.id)
-            .collect();
-        let kept: HashSet<i64> = options.iter().filter_map(|opt| opt.id).collect();
-        if kept.iter().any(|id| !current.contains(id)) {
-            return Err(OpError::NotFound);
-        }
-        if options.iter().filter(|opt| opt.id.is_some()).count() != kept.len() {
-            return Err(OpError::NotFound);
-        }
-        let removed: Vec<i64> = current.difference(&kept).copied().collect();
-        if !removed.is_empty() {
-            // Once posted, people may have picked an option, so options only come and go before.
-            if event.status == "posted" {
-                return Err(OpError::message("Every option this event has needs to stay."));
-            }
-            diesel::delete(
-                schema::signup_options::table
-                    .filter(schema::signup_options::event_id.eq(event.id))
-                    .filter(schema::signup_options::id.eq_any(&removed)),
-            )
-            .execute(tx)?;
-        }
-        for (index, opt) in options.iter().enumerate() {
-            let position = index as i64;
-            match opt.id {
-                Some(id) => {
-                    diesel::update(
-                        schema::signup_options::table
-                            .filter(schema::signup_options::id.eq(id))
-                            .filter(schema::signup_options::event_id.eq(event.id)),
-                    )
-                    .set((
-                        schema::signup_options::name.eq(&opt.name),
-                        schema::signup_options::emoji.eq(&opt.emoji),
-                        schema::signup_options::capacity.eq(opt.capacity),
-                        schema::signup_options::role_id.eq(opt.role_id),
-                        schema::signup_options::reminders_enabled.eq(opt.reminders_enabled),
-                        schema::signup_options::position.eq(position),
-                    ))
-                    .execute(tx)?;
-                }
-                None => {
-                    diesel::insert_into(schema::signup_options::table)
-                        .values(&NewSignupOption {
-                            event_id: event.id,
-                            name: &opt.name,
-                            emoji: &opt.emoji,
-                            capacity: opt.capacity,
-                            role_id: opt.role_id,
-                            reminders_enabled: opt.reminders_enabled,
-                            position,
-                        })
-                        .execute(tx)?;
-                }
-            }
-        }
+        let options = clean_types(tx, event.guild_id, input)?;
+        known_options(tx, &event, &options)?;
+        sync_options(tx, event.id, &options)?;
         if event.status == "posted" {
             fill_all(tx, &event)?;
             sync_access(tx, event.id)?;
@@ -455,7 +340,7 @@ pub(super) fn clean_extras(conn: &mut Connection, guild_id: i64, extras: &EventE
     if extras.cutoff_offset_minutes.is_some_and(|mins| mins < 0) {
         return Err(OpError::message("Signups have to close before the event starts."));
     }
-    let options = clean_options(conn, guild_id, &extras.options)?
+    let options = clean_types(conn, guild_id, &extras.options)?
         .into_iter()
         .map(|opt| OptionInput { id: None, ..opt })
         .collect();
@@ -593,45 +478,57 @@ pub(super) fn replace_children(
     options: &[OptionInput],
     reminders: &[ReminderInput],
 ) -> Result<(), OpError> {
-    diesel::delete(schema::signups::table.filter(schema::signups::event_id.eq(event_id)))
-        .execute(conn)?;
-    diesel::delete(
-        schema::signup_options::table.filter(schema::signup_options::event_id.eq(event_id)),
-    )
-    .execute(conn)?;
+    sync_options(conn, event_id, options)?;
     diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(event_id)))
         .execute(conn)?;
-    insert_options(conn, event_id, options)?;
     insert_reminders(conn, event_id, reminders, &[])?;
     Ok(())
 }
 
-fn update_options_in_place(
-    conn: &mut Connection,
-    event_id: i64,
-    options: &[OptionInput],
-) -> Result<(), OpError> {
+/// Makes an event's options these, in this order. An option with an id stays,
+/// with its responses, and takes the new type, capacity, role, and place; one
+/// without is added; options left out go, and their responses with them.
+pub(super) fn sync_options(conn: &mut Connection, event_id: i64, options: &[OptionInput]) -> Result<(), OpError> {
+    let kept: Vec<i64> = options.iter().filter_map(|opt| opt.id).collect();
+    diesel::delete(
+        schema::signup_options::table
+            .filter(schema::signup_options::event_id.eq(event_id))
+            .filter(schema::signup_options::id.ne_all(&kept)),
+    )
+    .execute(conn)?;
     for (index, opt) in options.iter().enumerate() {
-        let Some(id) = opt.id else {
-            return Err(OpError::message("A posted option is missing its id."));
-        };
-        diesel::update(
-            schema::signup_options::table
-                .filter(schema::signup_options::id.eq(id))
-                .filter(schema::signup_options::event_id.eq(event_id)),
-        )
-        .set((
-            schema::signup_options::name.eq(&opt.name),
-            schema::signup_options::emoji.eq(&opt.emoji),
-            schema::signup_options::capacity.eq(opt.capacity),
-            schema::signup_options::role_id.eq(opt.role_id),
-            schema::signup_options::reminders_enabled.eq(opt.reminders_enabled),
-            schema::signup_options::position.eq(index as i64),
-        ))
-        .execute(conn)?;
+        let position = index as i64;
+        match opt.id {
+            Some(id) => {
+                diesel::update(
+                    schema::signup_options::table
+                        .filter(schema::signup_options::id.eq(id))
+                        .filter(schema::signup_options::event_id.eq(event_id)),
+                )
+                .set((
+                    schema::signup_options::type_id.eq(opt.type_id),
+                    schema::signup_options::capacity.eq(opt.capacity),
+                    schema::signup_options::role_id.eq(opt.role_id),
+                    schema::signup_options::position.eq(position),
+                ))
+                .execute(conn)?;
+            }
+            None => {
+                diesel::insert_into(schema::signup_options::table)
+                    .values((
+                        schema::signup_options::event_id.eq(event_id),
+                        schema::signup_options::type_id.eq(opt.type_id),
+                        schema::signup_options::capacity.eq(opt.capacity),
+                        schema::signup_options::role_id.eq(opt.role_id),
+                        schema::signup_options::position.eq(position),
+                    ))
+                    .execute(conn)?;
+            }
+        }
     }
     Ok(())
 }
+
 
 fn replace_reminders(
     conn: &mut Connection,
@@ -645,45 +542,7 @@ fn replace_reminders(
     Ok(())
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = schema::signup_options)]
-#[diesel(treat_none_as_default_value = false)]
-struct NewSignupOption<'a> {
-    event_id: i64,
-    name: &'a str,
-    emoji: &'a str,
-    capacity: Option<i64>,
-    role_id: Option<i64>,
-    reminders_enabled: bool,
-    position: i64,
-}
 
-fn insert_options(
-    conn: &mut Connection,
-    event_id: i64,
-    options: &[OptionInput],
-) -> Result<(), OpError> {
-    let rows: Vec<_> = options
-        .iter()
-        .enumerate()
-        .map(|(index, opt)| NewSignupOption {
-            event_id,
-            name: &opt.name,
-            emoji: &opt.emoji,
-            capacity: opt.capacity,
-            role_id: opt.role_id,
-            reminders_enabled: opt.reminders_enabled,
-            position: index as i64,
-        })
-        .collect();
-    if rows.is_empty() {
-        return Ok(());
-    }
-    diesel::insert_into(schema::signup_options::table)
-        .values(&rows)
-        .execute(conn)?;
-    Ok(())
-}
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::reminders)]

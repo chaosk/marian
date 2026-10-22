@@ -19,14 +19,44 @@ pub struct RepeatSpec {
     pub max_occurrences: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One attendance type on an event, preset, or template: a type from the
+/// server's library, with this use's capacity and role limit. Name, emoji, and
+/// attending come from the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionInput {
+    /// An event's existing option, which keeps its responses.
     pub id: Option<i64>,
-    pub name: String,
-    pub emoji: String,
+    /// The library type.
+    pub type_id: i64,
     pub capacity: Option<i64>,
     pub role_id: Option<i64>,
-    pub reminders_enabled: bool,
+}
+
+impl OptionInput {
+    pub fn of_type(type_id: i64) -> Self {
+        Self {
+            id: None,
+            type_id,
+            capacity: None,
+            role_id: None,
+        }
+    }
+}
+
+/// A library type as someone sets it.
+#[derive(Debug, Clone)]
+pub struct TypeInput {
+    pub name: String,
+    pub emoji: String,
+    pub attending: bool,
+}
+
+/// A preset as someone sets it.
+#[derive(Debug, Clone)]
+pub struct PresetInput {
+    pub name: String,
+    pub multiple_signups: bool,
+    pub options: Vec<OptionInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,11 +93,10 @@ pub struct EventInput {
     pub apply_series: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SeriesTemplate {
     pub title: String,
     pub description: String,
-    #[serde(default)]
     pub location: String,
     pub duration_minutes: i64,
     pub channel_id: i64,
@@ -98,12 +127,6 @@ pub struct EventExtras {
     pub cutoff_offset_minutes: Option<i64>,
     pub options: Vec<OptionInput>,
     pub reminders: Vec<ReminderInput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PresetBody {
-    pub multiple_signups: bool,
-    pub options: Vec<OptionInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

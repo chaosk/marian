@@ -14,7 +14,7 @@ use crate::error::OpError;
 use crate::ics;
 use crate::ids;
 use crate::jobs::DiscordJob;
-use crate::logic::{self, EventInput, OptionInput, PresetBody, ReminderInput, RepeatSpec};
+use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec};
 use crate::store::{self, Connection};
 
 pub use crate::observe::PageTrace;
@@ -688,12 +688,13 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
             let role = opt.role_id.and_then(|id| role_rows.iter().find(|r| r.id == id));
             dto::OptionSignups {
                 id: opt.public_id.to_string(),
+                type_id: opt.type_public_id.to_string(),
                 name: opt.name.clone(),
                 emoji: opt.emoji.clone(),
                 capacity: opt.capacity,
                 role_id: role.map(|r| r.public_id.to_string()),
                 role: role.map(|r| r.name.clone()),
-                reminders: opt.reminders_enabled,
+                attending: opt.reminders_enabled,
                 confirmed_count: confirmed as i64,
                 waiting_count: signups
                     .iter()
@@ -1117,11 +1118,9 @@ fn save_stored(
         .into_iter()
         .map(|opt| OptionInput {
             id: Some(opt.id),
-            name: opt.name,
-            emoji: opt.emoji,
+            type_id: opt.type_id,
             capacity: opt.capacity,
             role_id: opt.role_id,
-            reminders_enabled: opt.reminders_enabled,
         })
         .collect();
     let reminders = match &patch.reminders {
@@ -1295,7 +1294,8 @@ pub fn end_series(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Re
 }
 
 /// Options from a request, with their public ids turned into keys. An id that
-/// isn't one of this event's options counts as a new option.
+/// isn't one of this event's options counts as a new option; a type has to be
+/// in this server's library.
 fn option_inputs(
     conn: &mut Connection,
     guild_id: i64,
@@ -1306,118 +1306,182 @@ fn option_inputs(
         Some(event_id) => ids::public::option_ids(conn, event_id)?,
         None => Default::default(),
     };
+    let types: HashMap<String, i64> = store::list_library(conn, guild_id)?
+        .into_iter()
+        .map(|kind| (kind.public_id.to_string(), kind.id))
+        .collect();
     options
         .iter()
         .map(|opt| {
+            let type_id = *types
+                .get(opt.type_id.trim())
+                .ok_or_else(|| OpError::message("That attendance type isn't in this server's library."))?;
             Ok(OptionInput {
                 id: opt.id.as_ref().and_then(|id| known.get(id).copied()),
-                name: opt.name.clone(),
-                emoji: opt.emoji.clone(),
+                type_id,
                 capacity: opt.capacity,
                 role_id: ids::public::role_id(conn, guild_id, opt.role_id.as_deref())?,
-                reminders_enabled: opt.reminders,
             })
         })
         .collect()
 }
 
-fn option_dto(conn: &mut Connection, opt: OptionInput) -> Result<dto::SignupOption, OpError> {
+/// A preset's or template's type as the page shows it: the library type's name,
+/// emoji, and attending, with this use's capacity and role.
+fn option_dto(
+    conn: &mut Connection,
+    library: &HashMap<i64, store::LibraryOption>,
+    opt: &OptionInput,
+) -> Result<dto::SignupOption, OpError> {
+    let kind = library.get(&opt.type_id).ok_or(OpError::NotFound)?;
     Ok(dto::SignupOption {
         id: None,
-        role_id: ids::public::role(conn, opt.role_id)?,
-        name: opt.name,
-        emoji: opt.emoji,
+        type_id: kind.public_id.to_string(),
+        name: kind.name.clone(),
+        emoji: kind.emoji.clone(),
+        attending: kind.attending,
         capacity: opt.capacity,
-        reminders: opt.reminders_enabled,
+        role_id: ids::public::role(conn, opt.role_id)?,
     })
 }
 
-fn preset_dto(conn: &mut Connection, preset: store::Preset) -> Result<dto::Preset, OpError> {
-    let body = serde_json::from_value::<PresetBody>(preset.body).unwrap_or(PresetBody {
-        multiple_signups: false,
-        options: Vec::new(),
-    });
-    Ok(dto::Preset {
-        id: preset.public_id.to_string(),
-        name: preset.name,
-        multiple_signups: body.multiple_signups,
-        options: body
-            .options
-            .into_iter()
-            .map(|opt| option_dto(conn, opt))
-            .collect::<Result<_, _>>()?,
-    })
+fn library_by_id(conn: &mut Connection, guild_id: i64) -> Result<HashMap<i64, store::LibraryOption>, OpError> {
+    Ok(store::list_library(conn, guild_id)?
+        .into_iter()
+        .map(|kind| (kind.id, kind))
+        .collect())
 }
 
 pub fn presets(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Preset>, OpError> {
-    store::list_presets(conn, viewer.guild_id)?
+    let library = library_by_id(conn, viewer.guild_id)?;
+    logic::presets(conn, viewer.guild_id)?
         .into_iter()
-        .map(|preset| preset_dto(conn, preset))
+        .map(|(preset, types, default)| {
+            Ok(dto::Preset {
+                id: preset.public_id.to_string(),
+                name: preset.name,
+                multiple_signups: preset.multiple_signups,
+                default,
+                options: types
+                    .iter()
+                    .map(|opt| option_dto(conn, &library, opt))
+                    .collect::<Result<_, OpError>>()?,
+            })
+        })
         .collect()
 }
 
 pub fn preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Preset, OpError> {
-    let preset = store::preset_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if preset.guild_id != viewer.guild_id {
-        return Err(OpError::NotFound);
-    }
-    preset_dto(conn, preset)
+    let preset = preset_here(conn, viewer, public_id)?;
+    presets(conn, viewer)?
+        .into_iter()
+        .find(|shown| shown.id == preset.public_id.to_string())
+        .ok_or(OpError::NotFound)
 }
 
-/// The options a new event starts with.
-pub fn default_options() -> Vec<dto::SignupOption> {
-    dto::default_signup_options()
+fn preset_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Preset, OpError> {
+    store::preset_by_public(conn, public_id)?
+        .filter(|preset| preset.guild_id == viewer.guild_id)
+        .ok_or(OpError::NotFound)
+}
+
+fn preset_input(conn: &mut Connection, viewer: &Viewer, draft: &dto::PresetDraft) -> Result<logic::PresetInput, OpError> {
+    Ok(logic::PresetInput {
+        name: draft.name.clone(),
+        multiple_signups: draft.multiple_signups,
+        options: option_inputs(conn, viewer.guild_id, None, &draft.options)?,
+    })
 }
 
 pub fn create_preset(conn: &mut Connection, viewer: &Viewer, draft: &dto::PresetDraft) -> Result<Outcome, OpError> {
-    let library = store::list_library(conn, viewer.guild_id)?;
-    let options = draft
-        .options
-        .iter()
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .map(|name| OptionInput {
-            id: None,
-            name: name.to_string(),
-            emoji: library
-                .iter()
-                .find(|row| row.name.eq_ignore_ascii_case(name))
-                .map(|row| row.emoji.clone())
-                .unwrap_or_else(|| "•".into()),
-            capacity: None,
-            role_id: None,
-            reminders_enabled: true,
-        })
-        .collect();
-    let body = PresetBody {
-        multiple_signups: draft.multiple_signups,
-        options,
-    };
-    logic::save_preset(conn, viewer.guild_id, viewer.membership_id, &draft.name, &body)?;
+    let input = preset_input(conn, viewer, draft)?;
+    logic::save_preset(conn, viewer.guild_id, viewer.membership_id, None, &input)?;
+    Ok(Outcome::ok())
+}
+
+pub fn update_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str, draft: &dto::PresetDraft) -> Result<Outcome, OpError> {
+    let preset = preset_here(conn, viewer, public_id)?;
+    let input = preset_input(conn, viewer, draft)?;
+    logic::save_preset(conn, viewer.guild_id, viewer.membership_id, Some(preset.id), &input)?;
+    Ok(Outcome::ok())
+}
+
+pub fn default_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+    let preset = preset_here(conn, viewer, public_id)?;
+    logic::set_default_preset(conn, preset.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
 pub fn delete_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
-    let preset = store::preset_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if preset.guild_id != viewer.guild_id {
-        return Err(OpError::NotFound);
-    }
+    let preset = preset_here(conn, viewer, public_id)?;
     logic::delete_preset(conn, preset.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
+/// Gives an event a preset's attendance; responses on types it keeps stay.
+pub fn apply_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str, body: &dto::ApplyPreset) -> Result<Outcome, OpError> {
+    let event = event_here(conn, viewer, public_id)?;
+    let preset = preset_here(conn, viewer, &body.preset)?;
+    logic::apply_preset(conn, event.id, viewer.membership_id, preset.id)?;
+    Ok(Outcome::ok().synced(event.id))
+}
+
 pub fn library(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::LibraryItem>, OpError> {
+    let usage = store::type_usage(conn, viewer.guild_id)?;
     Ok(store::list_library(conn, viewer.guild_id)?
         .into_iter()
         .map(|item| dto::LibraryItem {
+            used_by: usage
+                .get(&item.id)
+                .filter(|used| used.total() > 0)
+                .map(|used| used.describe())
+                .unwrap_or_default(),
+            id: item.public_id.to_string(),
             name: item.name,
             emoji: item.emoji,
+            attending: item.attending,
         })
         .collect())
 }
 
-pub fn add_library(conn: &mut Connection, viewer: &Viewer, item: &dto::LibraryItem) -> Result<Outcome, OpError> {
-    logic::library_add(conn, viewer.guild_id, viewer.membership_id, &item.name, &item.emoji)?;
+fn type_input(draft: &dto::TypeDraft) -> logic::TypeInput {
+    logic::TypeInput {
+        name: draft.name.clone(),
+        emoji: draft.emoji.clone(),
+        attending: draft.attending,
+    }
+}
+
+/// Adds a type to the library and returns it, so a page can use it at once.
+pub fn add_library(conn: &mut Connection, viewer: &Viewer, draft: &dto::TypeDraft) -> Result<dto::LibraryItem, OpError> {
+    let made = logic::add_type(conn, viewer.guild_id, viewer.membership_id, &type_input(draft))?;
+    Ok(dto::LibraryItem {
+        id: made.public_id.to_string(),
+        name: made.name,
+        emoji: made.emoji,
+        attending: made.attending,
+        used_by: String::new(),
+    })
+}
+
+fn type_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::LibraryOption, OpError> {
+    store::library_type_by_public(conn, viewer.guild_id, public_id)?.ok_or(OpError::NotFound)
+}
+
+/// Renames a type, or changes its emoji or attending, everywhere it is used.
+/// Posted events that use it are refreshed on Discord.
+pub fn update_library(conn: &mut Connection, viewer: &Viewer, public_id: &str, draft: &dto::TypeDraft) -> Result<Outcome, OpError> {
+    let kind = type_here(conn, viewer, public_id)?;
+    let posted = logic::update_type(conn, kind.id, viewer.membership_id, &type_input(draft))?;
+    Ok(Outcome {
+        jobs: posted.into_iter().map(DiscordJob::sync).collect(),
+        ..Outcome::ok()
+    })
+}
+
+pub fn delete_library(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+    let kind = type_here(conn, viewer, public_id)?;
+    logic::delete_type(conn, kind.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
@@ -1582,6 +1646,11 @@ mod tests {
     use diesel::connection::SimpleConnection;
     use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
 
+    // Library types the test server has.
+    const YES: i64 = 201;
+    const TANK: i64 = 202;
+    const MAYBE: i64 = 203;
+
     fn world() -> (Connection, Viewer) {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
@@ -1591,6 +1660,8 @@ mod tests {
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (2, 1, 'elsewhere', 'text', 1);
             INSERT INTO roles (id, guild_id, name, color) VALUES (1, 1, 'Raider', '#888888');
+            INSERT INTO option_library (id, guild_id, name, emoji, attending) VALUES
+              (201, 1, 'Yes', '✅', true), (202, 1, 'Tank', '🛡', true), (203, 1, 'Maybe', '•', false);
             INSERT INTO users (discord_id) VALUES ('u1'), ('u2');
             INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'u1'
@@ -1667,14 +1738,7 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![1],
                 restrict_role_ids: vec![1],
-                options: vec![OptionInput {
-                    id: None,
-                    name: "Tank".into(),
-                    emoji: "🛡".into(),
-                    capacity: Some(2),
-                    role_id: Some(1),
-                    reminders_enabled: true,
-                }],
+                options: vec![OptionInput { capacity: Some(2), role_id: Some(1), ..OptionInput::of_type(TANK) }],
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Publish,
@@ -1739,7 +1803,9 @@ mod tests {
     #[test]
     fn a_patch_changes_only_what_it_names_and_keeps_the_event_posted() {
         let (mut conn, viewer) = world();
-        let starts_at = Utc::now() + Duration::days(3);
+        // A fixed date clear of any clock change: moving the start by local hours
+        // across one would land in a repeated or missing hour.
+        let starts_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2030, 6, 12, 16, 0, 0).unwrap();
         let id = logic::save_event(
             &mut conn,
             EventInput {
@@ -1761,14 +1827,7 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![],
                 restrict_role_ids: vec![],
-                options: vec![OptionInput {
-                    id: None,
-                    name: "Yes".into(),
-                    emoji: "✅".into(),
-                    capacity: None,
-                    role_id: None,
-                    reminders_enabled: true,
-                }],
+                options: vec![OptionInput::of_type(YES)],
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Publish,
@@ -1834,7 +1893,8 @@ mod tests {
             &viewer,
             &public,
             &dto::EventPatch {
-                cutoff: Some(dto::Cutoff::Before { minutes: 10 * 24 * 60 }),
+                // A day before now, wherever the start is.
+                cutoff: Some(dto::Cutoff::Before { minutes: (moved - Utc::now()).num_minutes() + 24 * 60 }),
                 ..Default::default()
             },
         )
@@ -1951,14 +2011,7 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![],
                 restrict_role_ids: vec![],
-                options: vec![OptionInput {
-                    id: None,
-                    name: "Yes".into(),
-                    emoji: "✅".into(),
-                    capacity: None,
-                    role_id: None,
-                    reminders_enabled: true,
-                }],
+                options: vec![OptionInput::of_type(YES)],
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Draft,
@@ -1987,8 +2040,8 @@ mod tests {
         // Before posting, an option can go.
         let mut options = store::options_for(&mut conn, &event).unwrap();
         assert_eq!(options.len(), 1);
-        let extra = OptionInput { id: None, name: "Maybe".into(), emoji: String::new(), capacity: None, role_id: None, reminders_enabled: false };
-        let keep = OptionInput { id: Some(options[0].id), name: options[0].name.clone(), emoji: options[0].emoji.clone(), capacity: None, role_id: None, reminders_enabled: true };
+        let extra = OptionInput::of_type(MAYBE);
+        let keep = OptionInput { id: Some(options[0].id), ..OptionInput::of_type(options[0].type_id) };
         logic::save_options(&mut conn, id, 1, &[keep.clone(), extra]).unwrap();
         options = store::options_for(&mut conn, &event).unwrap();
         assert_eq!(options.len(), 2);
@@ -2032,14 +2085,7 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![],
                 restrict_role_ids: vec![],
-                options: vec![OptionInput {
-                    id: None,
-                    name: "Yes".into(),
-                    emoji: "✅".into(),
-                    capacity: None,
-                    role_id: None,
-                    reminders_enabled: true,
-                }],
+                options: vec![OptionInput::of_type(YES)],
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Publish,

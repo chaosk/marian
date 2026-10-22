@@ -56,7 +56,6 @@ struct NewTemplate<'a> {
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
     cutoff_offset_minutes: Option<i64>,
-    options_json: serde_json::Value,
     reminders_json: serde_json::Value,
     mention_role_ids: &'a [i64],
     restrict_role_ids: &'a [i64],
@@ -79,7 +78,6 @@ pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, Op
             mention_everyone: template.mention_everyone,
             attendee_role_id: template.attendee_role_id,
             cutoff_offset_minutes: template.cutoff_offset_minutes,
-            options_json: to_json(&template.options),
             reminders_json: to_json(&template.reminders),
             mention_role_ids: &template.mention_role_ids,
             restrict_role_ids: &template.restrict_role_ids,
@@ -87,7 +85,42 @@ pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, Op
         })
         .returning(schema::event_templates::id)
         .get_result(conn)?;
+    write_types(conn, id, &template.options)?;
     Ok(id)
+}
+
+/// A template's attendance types, in order, replacing what it had.
+fn write_types(conn: &mut Connection, template_id: i64, options: &[OptionInput]) -> Result<(), OpError> {
+    diesel::delete(schema::template_options::table.filter(schema::template_options::template_id.eq(template_id)))
+        .execute(conn)?;
+    let rows: Vec<_> = options
+        .iter()
+        .enumerate()
+        .map(|(position, opt)| {
+            (
+                schema::template_options::template_id.eq(template_id),
+                schema::template_options::type_id.eq(opt.type_id),
+                schema::template_options::position.eq(position as i64),
+                schema::template_options::capacity.eq(opt.capacity),
+                schema::template_options::role_id.eq(opt.role_id),
+            )
+        })
+        .collect();
+    diesel::insert_into(schema::template_options::table).values(&rows).execute(conn)?;
+    Ok(())
+}
+
+fn read_types(conn: &mut Connection, template_id: i64) -> Result<Vec<OptionInput>, OpError> {
+    let rows: Vec<super::library::ListedType> = schema::template_options::table
+        .filter(schema::template_options::template_id.eq(template_id))
+        .order(schema::template_options::position.asc())
+        .select((
+            schema::template_options::type_id,
+            schema::template_options::capacity,
+            schema::template_options::role_id,
+        ))
+        .load(conn)?;
+    Ok(rows.into_iter().map(super::library::listed).collect())
 }
 
 pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Result<(), OpError> {
@@ -105,12 +138,12 @@ pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Resul
             schema::event_templates::mention_everyone.eq(template.mention_everyone),
             schema::event_templates::attendee_role_id.eq(template.attendee_role_id),
             schema::event_templates::cutoff_offset_minutes.eq(template.cutoff_offset_minutes),
-            schema::event_templates::options_json.eq(to_json(&template.options)),
             schema::event_templates::reminders_json.eq(to_json(&template.reminders)),
             schema::event_templates::mention_role_ids.eq(&template.mention_role_ids),
             schema::event_templates::restrict_role_ids.eq(&template.restrict_role_ids),
         ))
         .execute(conn)?;
+    write_types(conn, id, &template.options)?;
     Ok(())
 }
 
@@ -153,7 +186,7 @@ pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
         mention_everyone: row.mention_everyone,
         attendee_role_id: row.attendee_role_id,
         cutoff_offset_minutes: row.cutoff_offset_minutes,
-        options: serde_json::from_value(row.options_json).unwrap_or_default(),
+        options: read_types(conn, row.id)?,
         reminders: serde_json::from_value(row.reminders_json).unwrap_or_default(),
         mention_role_ids: row.mention_role_ids,
         restrict_role_ids: row.restrict_role_ids,

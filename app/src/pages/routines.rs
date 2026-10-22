@@ -267,7 +267,11 @@ pub fn NewRoutine() -> impl IntoView {
     let channels = cache::listen(cache::channels_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
-    when(move || (server.get(), channels.get(), roles.get(), settings.get()).ready(), move |(server, channels, roles, settings)| {
+    let presets = cache::listen(cache::presets_scope(), cache::server_key);
+    // The draft lives in this page, so a refresh must not redraw it.
+    cache::when_once(move || (server.get(), channels.get(), roles.get(), settings.get(), presets.get()).ready(), move |(server, channels, roles, settings, presets)| {
+        // The server's default preset, as a new event would start.
+        let preset = presets.iter().find(|preset| preset.default).or_else(|| presets.first()).cloned();
         let draft = dto::RoutineDraft {
             channel_id: channels.first().map(|channel| channel.id.clone()).unwrap_or_default(),
             title: String::new(),
@@ -284,7 +288,8 @@ pub fn NewRoutine() -> impl IntoView {
         let starting = dto::RoutineEvent {
             color: "#1e3a6e".into(),
             thread_enabled: settings.event_threads,
-            options: dto::default_signup_options(),
+            multiple_signups: preset.as_ref().is_some_and(|preset| preset.multiple_signups),
+            options: preset.map(|preset| preset.options).unwrap_or_default(),
             reminders: (settings.default_reminder_minutes > 0)
                 .then(|| dto::Reminder {
                     offset_minutes: settings.default_reminder_minutes,
@@ -301,7 +306,7 @@ pub fn NewRoutine() -> impl IntoView {
         let go = client::use_go();
         let creating = client::action(move |draft: &dto::RoutineDraft| {
             let draft = draft.clone();
-            let url = format!("/api{}/routines", base());
+            let url = crate::api::path::routines(&cache::server_now());
             let toasts = client::toast_list();
             let go = go.clone();
             async move {
@@ -369,10 +374,8 @@ pub fn RoutinePage() -> impl IntoView {
     // Out here so it outlives the redraw each saved change brings.
     let editing_days = RwSignal::new(false);
     when(move || (server.get(), routine.get(), channels.get(), roles.get()).ready(), move |(server, routine, channels, roles)| {
-        let base = base();
-        let here = format!("{base}/routines/{}", routine.id);
-        let api_here = format!("/api{here}");
-        let edit = RoutineEdit::new(draft_from(&routine), Some(api_here.clone()));
+        let server_id = cache::server_now();
+        let edit = RoutineEdit::new(draft_from(&routine), Some(crate::api::path::routine(&server_id, &routine.id)));
         let local = event_draft(edit, &routine.event, &channels, clock_of(&server), true);
         let (state, note) = match &routine.run {
             _ if !routine.active => ("Stopped", String::new()),
@@ -385,7 +388,7 @@ pub fn RoutinePage() -> impl IntoView {
             view! {
                 <div class="poll-part">
                     <h3>{heading}</h3>
-                    <PollTally run api=api_here.clone() editing=editing_days/>
+                    <PollTally run routine=routine.id.clone() editing=editing_days/>
                 </div>
             }
         });
@@ -434,7 +437,7 @@ pub fn RoutinePage() -> impl IntoView {
                 <div>{routine_heading(local, edit, None)}</div>
                 <div class="actions">
                     {routine.active.then(|| view! {
-                        <ActionButton method="POST" url=format!("{api_here}/stop") label="Stop"
+                        <ActionButton method="POST" url=crate::api::path::routine_stop(&server_id, &routine.id) label="Stop"
                             class="danger" confirm="Stop this routine? No more polls go out."/>
                     })}
                 </div>
