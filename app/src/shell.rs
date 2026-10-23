@@ -6,13 +6,14 @@ use crate::widgets::{AccountMenu, Flash, Live};
 use crate::cache::{self, when, Ready};
 use crate::{api, A};
 
-/// The sidebar: a path under the server, its label, and whether it sits under Events.
+/// The sidebar: a path under the server, its label, and whether it sits under
+/// Events. Upcoming, Drafts, and Scheduled are filters on the Events page.
 const NAV: &[(&str, &str, bool)] = &[
     ("", "Schedule", false),
     ("/events", "Events", false),
-    ("/upcoming", "Upcoming", true),
-    ("/drafts", "Drafts", true),
-    ("/scheduled", "Scheduled", true),
+    ("upcoming", "Upcoming", true),
+    ("drafts", "Drafts", true),
+    ("scheduled", "Scheduled", true),
     ("/recurring", "Recurring", false),
     ("/routines", "Routines", false),
     ("/archive", "Archive", false),
@@ -133,28 +134,66 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
 
 #[component]
 fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
+    use crate::pages::lists::Filters;
     let pathname = use_location().pathname;
+    let query = leptos_router::hooks::use_query_map();
+    let events_href = format!("{base}/events");
+    let shortcut = |path: &str| match path {
+        "upcoming" => Some(Filters::upcoming()),
+        "drafts" => Some(Filters::drafts()),
+        "scheduled" => Some(Filters::scheduled()),
+        _ => None,
+    };
+    // The shortcut the Events page shows right now, if it shows one.
+    let showing = Memo::new({
+        let events_href = events_href.clone();
+        move |_| {
+            if pathname.get() != events_href {
+                return None;
+            }
+            query.with(|map| {
+                let filters = Filters::read(map);
+                let searched = map.get("q").is_some_and(|q| !q.is_empty());
+                ["upcoming", "drafts", "scheduled"]
+                    .into_iter()
+                    .find(|path| !searched && shortcut(path).as_ref() == Some(&filters))
+            })
+        }
+    });
     let links = NAV
         .iter()
         .map(|(path, label, sub)| {
-            let href = format!("{base}{path}");
+            let filters = shortcut(path);
+            let href = match &filters {
+                Some(filters) => format!("{events_href}{}", filters.link("", 1)),
+                None => format!("{base}{path}"),
+            };
             let nested = format!("{href}/");
             let here_href = href.clone();
             let schedule = path.is_empty();
+            let events = *path == "/events";
             let count = match *path {
-                "/upcoming" => Some(counts.upcoming),
-                "/drafts" => Some(counts.drafts),
-                "/scheduled" => Some(counts.scheduled),
+                "upcoming" => Some(counts.upcoming),
+                "drafts" => Some(counts.drafts),
+                "scheduled" => Some(counts.scheduled),
                 "/recurring" => Some(counts.series),
                 "/routines" => Some(counts.routines),
                 _ => None,
             };
             let sub = *sub;
+            let path = *path;
             view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
-                    // Schedule is the server's front page; every event page sits under Events.
-                    let on = here == here_href || (!schedule && here.starts_with(&nested));
+                    // Schedule is the server's front page; every event page sits under Events,
+                    // unless the Events page is showing one of the shortcuts below it.
+                    let on = if filters.is_some() {
+                        showing.get() == Some(path)
+                    } else if events {
+                        (here == here_href || here.starts_with(&nested)) && showing.get().is_none()
+                    } else {
+                        here == here_href || (!schedule && here.starts_with(&nested))
+                    };
                     match (on, sub) {
                         (true, true) => "nav-sub active",
                         (false, true) => "nav-sub",

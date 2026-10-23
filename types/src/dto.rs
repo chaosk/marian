@@ -197,10 +197,31 @@ pub enum EventView {
     All,
 }
 
+/// Whether an event has ended yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventWhen {
+    /// Hasn't ended: coming up or happening now.
+    Upcoming,
+    /// Has ended. Listed newest first.
+    Past,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventQuery {
     #[serde(default)]
     pub view: EventView,
+    /// Only events with these statuses, comma-separated (`draft,scheduled`).
+    /// Empty leaves it to `view`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<EventWhen>,
+    /// The first and last day, in the server's zone, an event may start on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_day: Option<NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_day: Option<NaiveDate>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub q: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
