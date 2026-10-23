@@ -940,13 +940,35 @@ pub fn activity(
     page: u32,
     limit: i64,
 ) -> Result<dto::Paged<dto::Activity>, OpError> {
+    activity_of(conn, viewer, None, page, limit)
+}
+
+/// What happened to one event, newest first.
+pub fn event_activity(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    id: &str,
+    page: u32,
+    limit: i64,
+) -> Result<dto::Paged<dto::Activity>, OpError> {
+    let event = event_here(conn, viewer, id)?;
+    activity_of(conn, viewer, Some(event.id), page, limit)
+}
+
+fn activity_of(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    event_id: Option<i64>,
+    page: u32,
+    limit: i64,
+) -> Result<dto::Paged<dto::Activity>, OpError> {
     let per_page = limit.clamp(1, 200) as u32;
-    let total = store::count_activity(conn, viewer.guild_id)? as usize;
+    let total = store::count_activity(conn, viewer.guild_id, event_id)? as usize;
     let pages = (total as u32).div_ceil(per_page).max(1);
     let page = page.clamp(1, pages);
     let offset = i64::from((page - 1) * per_page);
     let mut items = Vec::new();
-    for item in store::list_activity(conn, viewer.guild_id, i64::from(per_page), offset)? {
+    for item in store::list_activity(conn, viewer.guild_id, event_id, i64::from(per_page), offset)? {
         let event_id = match item.event_id {
             Some(id) => store::event(conn, id)?.map(|event| event.public_id.to_string()),
             None => None,
@@ -1832,6 +1854,38 @@ mod tests {
             .to_string();
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, &their_member), Err(OpError::NotFound)));
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, "9"), Err(OpError::NotFound)), "a row key is not an id here");
+    }
+
+    #[test]
+    fn an_event_lists_only_its_own_activity_newest_first() {
+        let (mut conn, viewer) = world();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (2, 'Other', 'UTC', '98');
+            INSERT INTO events (id, public_id, guild_id, channel_id, title, starts_at, status, created_at, updated_at)
+            VALUES (11, marian_uuid_v7(), 1, 1, 'Raid', now(), 'draft', now(), now()),
+                   (12, marian_uuid_v7(), 1, 1, 'Quiz', now(), 'draft', now(), now()),
+                   (13, marian_uuid_v7(), 2, 1, 'Theirs', now(), 'draft', now(), now());
+            INSERT INTO activity (guild_id, event_id, body, created_at) VALUES
+              (1, 11, 'Nell created Raid', now() - interval '3 minutes'),
+              (1, 12, 'Nell created Quiz', now() - interval '2 minutes'),
+              (1, NULL, 'Settings changed', now() - interval '90 seconds'),
+              (1, 11, 'June signed up for Raid', now() - interval '1 minute');
+            ",
+        )
+        .unwrap();
+        let public = |conn: &mut Connection, id: i64| store::event(conn, id).unwrap().unwrap().public_id.to_string();
+        let raid = public(&mut conn, 11);
+        let bodies: Vec<String> = event_activity(&mut conn, &viewer, &raid, 1, 25)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.body)
+            .collect();
+        assert_eq!(bodies, ["June signed up for Raid", "Nell created Raid"]);
+        assert_eq!(activity(&mut conn, &viewer, 1, 25).unwrap().total, 4, "the server's log keeps everything");
+        let theirs = public(&mut conn, 13);
+        assert!(matches!(event_activity(&mut conn, &viewer, &theirs, 1, 25), Err(OpError::NotFound)));
     }
 
     #[test]

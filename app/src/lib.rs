@@ -96,6 +96,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("events") view=pages::lists::AllEvents/>
                     <Route path=path!("events/new") view=pages::event::NewEvent/>
                     <Route path=path!("events/:id") view=pages::event::EventPage/>
+                    <Route path=path!("events/:id/activity") view=pages::lists::EventActivity/>
                     <Route path=path!("upcoming") view=pages::lists::Upcoming/>
                     <Route path=path!("drafts") view=pages::lists::Drafts/>
                     <Route path=path!("scheduled") view=pages::lists::Scheduled/>

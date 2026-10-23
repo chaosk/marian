@@ -500,36 +500,69 @@ pub fn ActivityLog() -> impl IntoView {
         (cache::server_key(), page, 25)
     });
     show(rows, |rows| {
-        let now = format::now();
-        let base = base();
-        let body = if rows.items.is_empty() {
-            view! { <section class="empty"><h2>"The log is empty."</h2><p>"Signups and posts will show up here."</p></section> }.into_any()
-        } else {
-            let items = rows
-                .items
-                .iter()
-                .cloned()
-                .map(|row| {
-                    let href = row
-                        .event_id
-                        .map(|id| format!("{base}/events/{id}"))
-                        .unwrap_or_else(|| format!("{base}/activity"));
-                    view! {
-                        <li>
-                            <A href=href>{row.body}</A>
-                            <time>{format::format_rel(row.created_at, now)}</time>
-                        </li>
-                    }
-                })
-                .collect_view();
-            view! {
-                <ul class="log-list">{items}</ul>
-                {pager(&rows, "")}
-            }
-            .into_any()
-        };
+        let body = activity_list(rows, true, "Signups and posts will show up here.");
         view! { {head("Activity")} {body} }
     })
+}
+
+/// What happened to one event, newest first.
+#[component]
+pub fn EventActivity() -> impl IntoView {
+    let event = cache::listen(cache::event_scope(), cache::event_key);
+    let rows = cache::listen(cache::event_activity_scope(), || {
+        let (server, id) = cache::event_key();
+        let page = leptos_router::hooks::use_query_map()
+            .with(|map| map.get("page").and_then(|value| value.parse().ok()))
+            .unwrap_or(1);
+        (server, id, page)
+    });
+    when(move || (event.get(), rows.get()).ready(), move |(event, rows)| {
+        let href = format!("{}/events/{}", base(), event.id);
+        title(&format!("Activity · {}", event.title));
+        let body = activity_list(rows, false, "Signups, edits, and posts for this event will show up here.");
+        view! {
+            <div class="page-head">
+                <div>
+                    <h1>"Activity"</h1>
+                    <p class="lede">"For "<A href=href>{event.title.clone()}</A></p>
+                </div>
+            </div>
+            {body}
+        }
+    })
+}
+
+/// A page of activity. On the server's log each line opens its event; an
+/// event's own log has nowhere else to send it.
+fn activity_list(rows: dto::Paged<dto::Activity>, linked: bool, empty_note: &'static str) -> AnyView {
+    if rows.items.is_empty() {
+        return view! { <section class="empty"><h2>"The log is empty."</h2><p>{empty_note}</p></section> }.into_any();
+    }
+    let now = format::now();
+    let base = base();
+    let items = rows
+        .items
+        .iter()
+        .cloned()
+        .map(|row| {
+            let line = match row.event_id.filter(|_| linked) {
+                Some(id) => view! { <A href=format!("{base}/events/{id}")>{row.body}</A> }.into_any(),
+                None if linked => view! { <A href=format!("{base}/activity")>{row.body}</A> }.into_any(),
+                None => view! { <span>{row.body}</span> }.into_any(),
+            };
+            view! {
+                <li>
+                    {line}
+                    <time>{format::format_rel(row.created_at, now)}</time>
+                </li>
+            }
+        })
+        .collect_view();
+    view! {
+        <ul class="log-list">{items}</ul>
+        {pager(&rows, "")}
+    }
+    .into_any()
 }
 
 fn pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView {

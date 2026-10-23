@@ -458,6 +458,10 @@ pub mod path {
         format!("{}/activity?page={page}&limit={limit}", on(server))
     }
 
+    pub fn event_activity(server: &str, event: &str, page: u32, limit: u32) -> String {
+        format!("{}/activity?page={page}&limit={limit}", self::event(server, event))
+    }
+
     pub fn series_list(server: &str) -> String {
         format!("{}/series", on(server))
     }
@@ -610,6 +614,14 @@ pub async fn activity(server: &str, page: u32, limit: u32) -> Result<dto::Paged<
         server,
         path::activity(server, page, limit),
         |db, v| { marian::api::activity(db, v, page, i64::from(limit)) }
+    )
+}
+
+pub async fn event_activity(server: &str, event: &str, page: u32, limit: u32) -> Result<dto::Paged<dto::Activity>, Failure> {
+    resource!(
+        server,
+        path::event_activity(server, event, page, limit),
+        |db, v| { marian::api::event_activity(db, v, event, page, i64::from(limit)) }
     )
 }
 
