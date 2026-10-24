@@ -21,7 +21,7 @@ const POST_TOGGLES: &[Toggle] = &[
 const THREAD_TOGGLES: &[Toggle] = &[
     ("event_threads", "Threads on new events", "A new event opens a Discord thread."),
     ("thread_reminders", "Reminders in the thread", "Reminders post in the event thread instead of the channel."),
-    ("auto_join_threads", "Pull attendees into the thread", "People on an attending option join the thread, and leave it when they leave the option."),
+    ("auto_join_threads", "Pull attendees into the thread", "Off, reminders mention attendees in the thread, which brings them in. On, Marian also adds people on an attending option right away and removes them when they leave it."),
 ];
 
 /// A permission: its field, title, note, and what choosing no role means.

@@ -330,6 +330,11 @@ mod tests {
     #[test]
     fn marking_attendance_is_what_discord_hears() {
         let mut conn = world();
+        // This server asks Marian to pull attendees into the thread.
+        diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))
+            .set(schema::settings::auto_join_threads.eq(true))
+            .execute(&mut conn)
+            .unwrap();
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
             .set(schema::guilds::discord_id.eq("g1"))
             .execute(&mut conn)
@@ -367,6 +372,45 @@ mod tests {
         assert!(work.thread_add.is_empty());
         assert_eq!(work.thread_remove, vec!["u2".to_string()]);
         assert_eq!(work.role_remove, vec!["u2".to_string()]);
+    }
+
+    #[test]
+    fn by_default_a_signup_leaves_the_thread_to_reminders() {
+        let mut conn = world();
+        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
+            .set(schema::guilds::discord_id.eq("g1"))
+            .execute(&mut conn)
+            .unwrap();
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
+            .set(schema::channels::discord_id.eq("c1"))
+            .execute(&mut conn)
+            .unwrap();
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.thread_enabled = true;
+        let id = save_event(&mut conn, event).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::discord_message_id.eq("m1"))
+            .execute(&mut conn)
+            .unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
+        signup(&mut conn, id, options[0].id, 2).unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+            panic!("expected a Discord attendance plan");
+        };
+        assert!(work.thread_add.is_empty(), "nobody is pulled in");
+        assert!(work.open_thread, "the thread itself still opens");
+        let logged: Vec<String> = schema::activity::table
+            .filter(schema::activity::event_id.eq(id))
+            .select(schema::activity::body)
+            .load(&mut conn)
+            .unwrap();
+        assert!(!logged.iter().any(|line| line.contains("thread")), "{logged:?}");
+        store::set_thread_discord_id(&mut conn, id, "Raid", "t1").unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+            panic!("expected a Discord attendance plan");
+        };
+        assert!(!work.open_thread, "a thread Marian remembers is not opened again");
     }
 
     #[test]

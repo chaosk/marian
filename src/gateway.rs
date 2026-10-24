@@ -1152,7 +1152,8 @@ async fn push_attendance(
             logic::Attendance::Ready(work) => work,
         }
     };
-    if work.thread_add.is_empty()
+    if !work.open_thread
+        && work.thread_add.is_empty()
         && work.thread_remove.is_empty()
         && work.role_add.is_empty()
         && work.role_remove.is_empty()
@@ -1164,14 +1165,30 @@ async fn push_attendance(
         .map_err(|_| "http lock")?
         .clone()
         .ok_or("Discord is not connected")?;
+    // A posted event with a thread gets one, whoever is in it. Reminders bring
+    // people in by mentioning them; adding them here is for servers that ask.
+    // A thread Discord won't open is no reason to hold back attendee roles.
+    let opened = match work.open_thread {
+        true => match open_thread(db, &http, event_id, &work).await {
+            Ok(id) => Some(id),
+            Err(err) => {
+                tracing::warn!("could not open the thread for event {event_id}: {err}");
+                None
+            }
+        },
+        false => None,
+    };
     if !work.thread_add.is_empty() || !work.thread_remove.is_empty() {
-        if work.thread_discord_id.is_none() && work.thread_add.is_empty() {
+        if work.thread_discord_id.is_none() && opened.is_none() && work.thread_add.is_empty() {
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             for membership_id in &work.thread_remove {
                 store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
             }
         } else {
-            let thread_id = open_thread(db, &http, event_id, &work).await?;
+            let thread_id = match opened {
+                Some(id) => id,
+                None => open_thread(db, &http, event_id, &work).await?,
+            };
             for membership_id in &work.thread_add {
                 join_thread(&http, thread_id, membership_id).await?;
                 let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
@@ -1257,7 +1274,7 @@ async fn thread_on_message(
         .create_thread_from_message(
             http,
             message_id,
-            serenity::CreateThread::new(name)
+            serenity::CreateThread::new(name.clone())
                 .kind(serenity::ChannelType::PublicThread)
                 .auto_archive_duration(serenity::AutoArchiveDuration::OneWeek),
         )
@@ -1270,7 +1287,7 @@ async fn thread_on_message(
         },
     };
     let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-    store::set_thread_discord_id(&mut conn, event_id, &thread_id.to_string())?;
+    store::set_thread_discord_id(&mut conn, event_id, &name, &thread_id.to_string())?;
     Ok(thread_id)
 }
 
