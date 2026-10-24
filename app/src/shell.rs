@@ -26,13 +26,17 @@ const NAV: &[(&str, &str, bool)] = &[
 
 /// The logo and name, linking to the server in the address. Away from a
 /// server, it links to the one this browser opened last, once the page has
-/// read that, and to the front page before then.
+/// read that, and to the front page before then. `front` always links to the
+/// front page, for a server that can't be opened.
 #[component]
-pub fn Brand() -> impl IntoView {
+pub fn Brand(#[prop(optional)] front: bool) -> impl IntoView {
     let params = use_params_map();
     let remembered = RwSignal::new(None::<String>);
     Effect::new(move |_| remembered.set(crate::client::last_server()));
     let href = move || {
+        if front {
+            return "/".to_string();
+        }
         params
             .with(|params| params.get("server"))
             .filter(|id| !id.is_empty())
@@ -70,6 +74,57 @@ pub fn ServerShell() -> impl IntoView {
             crate::client::remember_server(&server.id);
         }
     });
+    view! {
+        <Transition fallback=|| ()>
+            {move || {
+                // A server that isn't there, or isn't theirs, gets one page of its own
+                // instead of a sidebar and panels that each say so.
+                let gone = Memo::new(move |_| matches!(server.get(), Some(Err(failure)) if !failure.unreachable()));
+                view! {
+                    <Show when=move || !gone.get() fallback=move || server.get().and_then(Result::err).map(server_gone)>
+                        {shell(me, server, membership, server_id, server_title, new_build)}
+                    </Show>
+                }
+            }}
+        </Transition>
+    }
+}
+
+/// A full page for a server that can't be opened, with the way back to the front page.
+fn server_gone(failure: crate::api::Failure) -> impl IntoView {
+    let missing = failure.missing();
+    crate::status(if missing { 404 } else { 403 });
+    crate::title(if missing { "Missing" } else { "Not yours" });
+    let (heading, note) = if missing {
+        ("That server isn't here.", "Marian isn't in it, or it never was.")
+    } else {
+        ("That server isn't one you can open.", "Sign in from a server you're in, or pick another one.")
+    };
+    view! {
+        <div class="gate">
+            <main class="gate-card">
+                <Brand front=true/>
+                <h1>{heading}</h1>
+                <p class="lede">{note}</p>
+                <div class="gate-actions">
+                    <A href="/" attr:class="primary">"Back to your servers"</A>
+                </div>
+            </main>
+        </div>
+    }
+}
+
+type Read<T> = Resource<Result<T, crate::api::Failure>>;
+
+/// The sidebar, notices, and page of a server that opened.
+fn shell(
+    me: Read<marian_types::Me>,
+    server: Read<marian_types::Server>,
+    membership: Read<marian_types::Membership>,
+    server_id: Memo<String>,
+    server_title: Option<RwSignal<String>>,
+    new_build: RwSignal<bool>,
+) -> impl IntoView {
     view! {
         <a class="skip" href="#content">"Skip to content"</a>
         <div class="app">
