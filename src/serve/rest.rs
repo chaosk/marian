@@ -126,10 +126,7 @@ fn scoped<T>(
     let Some(mut viewer) = read_session(&mut db, headers) else {
         return Err(Problem(StatusCode::UNAUTHORIZED, "Sign in with Discord.".into()));
     };
-    api::bind_server(&mut db, &mut viewer, server).map_err(|err| match err {
-        OpError::Message(text) => Problem(StatusCode::FORBIDDEN, text),
-        other => other.into(),
-    })?;
+    api::bind_server(&mut db, &mut viewer, server)?;
     Ok(body(&mut db, &viewer)?)
 }
 

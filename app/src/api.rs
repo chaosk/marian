@@ -46,8 +46,9 @@ pub(crate) mod local {
                 status: 404,
                 message: "That isn't here.".into(),
             },
+            // The same status the REST API gives it.
             OpError::Message(message) => Failure {
-                status: 403,
+                status: 422,
                 message,
             },
             OpError::Db(_) => Failure {

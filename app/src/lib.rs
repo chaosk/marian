@@ -139,7 +139,7 @@ fn base() -> String {
 pub(crate) fn failed(failure: Failure) -> impl IntoView {
     status(failure.status);
     if failure.missing() {
-        return pages::misc::NotFound().into_any();
+        return pages::misc::MissingHere().into_any();
     }
     view! { <p class="error">{failure.message}</p> }.into_any()
 }

@@ -98,11 +98,10 @@ pub fn bind_server(conn: &mut Connection, viewer: &mut Viewer, server: &str) -> 
     bind_guild(conn, viewer, guild.id)
 }
 
+/// A server the viewer didn't sign into reads as one that isn't there, so
+/// nobody can learn which servers Marian is in by asking for them.
 pub fn bind_guild(conn: &mut Connection, viewer: &mut Viewer, guild_id: i64) -> Result<(), OpError> {
-    if guild_id <= 0 || !viewer.allowed.contains(&guild_id) {
-        return Err(OpError::message("That server isn't one you signed into."));
-    }
-    if store::guild(conn, guild_id)?.is_none() {
+    if guild_id <= 0 || !viewer.allowed.contains(&guild_id) || store::guild(conn, guild_id)?.is_none() {
         return Err(OpError::NotFound);
     }
     let user = logic::ensure_discord_user(
@@ -1842,6 +1841,20 @@ mod tests {
             .to_string();
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, &their_member), Err(OpError::NotFound)));
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, "9"), Err(OpError::NotFound)), "a row key is not an id here");
+    }
+
+    #[test]
+    fn a_server_you_cannot_open_reads_as_one_that_does_not_exist() {
+        let (mut conn, viewer) = world();
+        conn.batch_execute("INSERT INTO guilds (id, name, timezone, discord_id) VALUES (2, 'Other', 'UTC', '77');")
+            .unwrap();
+        let ask = |conn: &mut Connection, server: &str| {
+            let mut viewer = viewer.clone();
+            bind_server(conn, &mut viewer, server)
+        };
+        assert!(matches!(ask(&mut conn, "77"), Err(OpError::NotFound)), "there, but not theirs");
+        assert!(matches!(ask(&mut conn, "78"), Err(OpError::NotFound)), "not there at all");
+        assert!(ask(&mut conn, "99").is_ok(), "their own");
     }
 
     #[test]
