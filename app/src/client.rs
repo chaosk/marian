@@ -143,6 +143,7 @@ pub(crate) fn later(ms: i32, work: impl FnOnce() + 'static) {
     }
 }
 
+#[cfg(feature = "hydrate")]
 const LAST_SERVER: &str = "marian_last_server";
 
 /// Remembers the server this browser opened last. It stays in the browser:
