@@ -1117,7 +1117,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         auto_archive: true,
         auto_archive_hours: 12,
         event_threads: true,
-        auto_join_threads: true,
+        auto_join_threads: false,
         show_attendees: true,
         hour_24: false,
         localize_time: true,
@@ -1811,12 +1811,21 @@ pub fn thread_discord_id(conn: &mut Connection, event_id: i64) -> Result<Option<
         .flatten())
 }
 
+/// Remembers an event's Discord thread, whether or not Marian kept a row for it yet.
 pub fn set_thread_discord_id(
     conn: &mut Connection,
     event_id: i64,
+    name: &str,
     discord_id: &str,
 ) -> Result<(), OpError> {
-    diesel::update(schema::threads::table.filter(schema::threads::event_id.eq(event_id)))
+    diesel::insert_into(schema::threads::table)
+        .values((
+            schema::threads::event_id.eq(event_id),
+            schema::threads::name.eq(name),
+            schema::threads::discord_id.eq(discord_id),
+        ))
+        .on_conflict(schema::threads::event_id)
+        .do_update()
         .set(schema::threads::discord_id.eq(discord_id))
         .execute(conn)?;
     Ok(())
@@ -2216,6 +2225,7 @@ mod tests {
                 "20261019170000".to_string(),
                 "20261021090000".to_string(),
                 "20261024090000".to_string(),
+                "20261024120000".to_string(),
             ]
         );
     }

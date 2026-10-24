@@ -24,6 +24,8 @@ pub struct AttendanceWork {
     pub channel_discord_id: String,
     pub message_id: String,
     pub thread_discord_id: Option<String>,
+    /// The event has a thread turned on and none in Discord yet.
+    pub open_thread: bool,
     pub thread_name: String,
     pub thread_add: Vec<String>,
     pub thread_remove: Vec<String>,
@@ -51,6 +53,7 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         return Ok(if event.status == "posted" { Attendance::Waiting } else { Attendance::Idle });
     };
     let settings = store::settings(conn, event.guild_id)?;
+    let thread_discord_id = store::thread_discord_id(conn, event_id)?;
     let manage_thread = event.thread_enabled && settings.auto_join_threads;
     let desired_thread = if manage_thread {
         let members = store::thread_member_ids(conn, &event)?;
@@ -72,7 +75,8 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         guild_discord_id,
         channel_discord_id,
         message_id,
-        thread_discord_id: store::thread_discord_id(conn, event_id)?,
+        open_thread: event.thread_enabled && thread_discord_id.is_none(),
+        thread_discord_id,
         thread_name: event_thread_name(&event.title, event.starts_at, &guild.timezone),
         thread_add,
         thread_remove,
