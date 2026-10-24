@@ -1437,3 +1437,16 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 .server-pick:hover { border-color: var(--blue); }
 .server-pick-name { flex: 1; font-weight: 600; }
 .gate-actions form { margin: 0; }
+
+/* A popover with no room below opens above what it came from. */
+.popover[data-above] { top: auto; bottom: calc(100% + 6px); }
+
+/* Roles found by name, inside a popover. */
+.role-search { display: flex; flex-direction: column; gap: 6px; }
+.role-search input[type="search"] { width: 100%; box-sizing: border-box; }
+.role-search .pick-list { max-height: 220px; border: 1px solid var(--line); border-radius: 10px; }
+
+/* The Discord preview's message text and markup, as Discord draws them. */
+.d-content { margin: 0 0 6px; color: #dbdee1; }
+.d-mention { background: rgba(88, 101, 242, 0.3); color: #c9cdfb; border-radius: 3px; padding: 0 2px; font-weight: 500; }
+.d-time { background: rgba(255, 255, 255, 0.06); border-radius: 3px; padding: 0 2px; }

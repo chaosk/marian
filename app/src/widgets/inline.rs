@@ -1840,33 +1840,101 @@ fn name_lines(names: Vec<String>, empty: &'static str) -> impl IntoView {
 }
 
 /// Checkboxes for a set of roles.
-fn role_checks(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>) -> impl IntoView {
-    move || {
-        roles.with_value(|roles| {
-            if roles.is_empty() {
-                return view! { <p class="popover-note left">"This server has no roles Marian can see."</p> }.into_any();
+/// Roles to mention, and @everyone, found by name the way members are. With
+/// nothing typed it lists only what is picked; typing finds the rest, so a
+/// server with hundreds of roles stays one short list.
+fn mention_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>, everyone: RwSignal<bool>) -> impl IntoView {
+    let needle = RwSignal::new(String::new());
+    let everyone_on = move || everyone.get();
+    let pick_everyone = move || everyone.update(|on| *on = !*on);
+    let toggle = move |id: String| {
+        picked.update(|ids| match ids.iter().position(|other| *other == id) {
+            Some(at) => {
+                ids.remove(at);
             }
+            None => ids.push(id),
+        })
+    };
+    let check = || {
+        view! { <svg class="pick-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> }
+    };
+    // What the list shows: picked things with nothing typed, matches otherwise.
+    let shown = move |text: &str, chosen: &[String], on: bool| -> (bool, Vec<dto::Role>) {
+        let everyone = if text.is_empty() { on } else { "@everyone".contains(text) };
+        let found = roles.with_value(|roles| {
             roles
                 .iter()
-                .map(|role| {
-                    let id = StoredValue::new(role.id.clone());
-                    view! {
-                        <label class="check-row">
-                            <input type="checkbox" prop:checked=move || picked.with(|ids| id.with_value(|id| ids.contains(id)))
-                                on:change=move |ev| picked.update(|ids| {
-                                    let id = id.get_value();
-                                    ids.retain(|other| *other != id);
-                                    if event_target_checked(&ev) {
-                                        ids.push(id);
-                                    }
-                                })/>
-                            <span>{role.name.clone()}</span>
-                        </label>
-                    }
-                })
-                .collect_view()
-                .into_any()
+                .filter(|role| if text.is_empty() { chosen.contains(&role.id) } else { role.name.to_lowercase().contains(text) })
+                .take(50)
+                .cloned()
+                .collect()
+        });
+        (everyone, found)
+    };
+    let rows = move || {
+        let text = needle.get().trim().to_lowercase();
+        let chosen = picked.get();
+        let on = everyone_on();
+        let (with_everyone, found) = shown(&text, &chosen, on);
+        let everyone_row = with_everyone.then(|| {
+            view! {
+                <button type="button" class="pick-row" role="option" aria-selected=if on { "true" } else { "false" }
+                    on:click=move |_| pick_everyone()>
+                    <span class="pick-name">"@everyone"</span>
+                    {on.then(check)}
+                </button>
+            }
+        });
+        let role_rows = found
+            .into_iter()
+            .map(|role| {
+                let id = role.id.clone();
+                let on = chosen.contains(&id);
+                view! {
+                    <button type="button" class="pick-row" role="option" aria-selected=if on { "true" } else { "false" }
+                        on:click=move |_| toggle(id.clone())>
+                        <span class="pick-name">{role.name}</span>
+                        {on.then(check)}
+                    </button>
+                }
+            })
+            .collect_view();
+        view! { {everyone_row}{role_rows} }
+    };
+    let note = move || {
+        let text = needle.with(|text| text.trim().to_lowercase());
+        if text.is_empty() {
+            return None;
+        }
+        let (with_everyone, found) = shown(&text, &[], false);
+        (!with_everyone && found.is_empty()).then_some(if roles.with_value(Vec::is_empty) {
+            "This server has no roles Marian can see."
+        } else {
+            "No role matches."
         })
+    };
+    // Nothing picked and nothing typed: no list at all, just the search.
+    let listed = move || {
+        let text = needle.with(|text| text.trim().to_lowercase());
+        !text.is_empty() || everyone_on() || picked.with(|ids| !ids.is_empty())
+    };
+    // What is picked, in a field, so the page can tell whether anything changed.
+    let state = move || serde_json::to_string(&(everyone_on(), picked.get())).unwrap_or_default();
+    view! {
+        <div class="role-search">
+            <input type="hidden" prop:value=state/>
+            <input type="search" placeholder="Find a role, or @everyone" aria-label="Find a role, or @everyone" autocomplete="off"
+                prop:value=move || needle.get()
+                on:input=move |ev| needle.set(event_target_value(&ev))
+                // Enter here looks for a role; it doesn't save the form.
+                on:keydown=|ev: leptos::ev::KeyboardEvent| if ev.key() == "Enter" { ev.prevent_default(); }/>
+            {move || listed().then(|| view! {
+                <div class="pick-list" role="listbox" aria-multiselectable="true">
+                    {rows}
+                    {move || note().map(|text| view! { <p class="pick-empty">{text}</p> })}
+                </div>
+            })}
+        </div>
     }
 }
 
@@ -1916,15 +1984,8 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Mentions"</p>
-                    <p class="popover-note left">"The Discord post mentions what you check when it goes out."</p>
-                    <div class="check-list">
-                        <label class="check-row">
-                            <input type="checkbox" prop:checked=move || everyone.get()
-                                on:change=move |ev| everyone.set(event_target_checked(&ev))/>
-                            <span>"@everyone"</span>
-                        </label>
-                        {role_checks(roles, picked)}
-                    </div>
+                    <p class="popover-note left">"The Discord post mentions who you pick when it goes out."</p>
+                    {mention_search(roles, picked, everyone)}
                     {sender.error()}
                     {sender.actions(cancel)}
                 </form>
@@ -1972,8 +2033,10 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Restrictions"</p>
-                    <p class="popover-note left">"Only people with a checked role can sign up. None checked lets everyone in."</p>
-                    <div class="check-list">{role_checks(roles, picked)}</div>
+                    <p class="popover-note left">"Only people with one of these roles can sign up."</p>
+                    // What is picked, in a field, so the page can tell whether anything changed.
+                    <input type="hidden" prop:value=move || serde_json::to_string(&picked.get()).unwrap_or_default()/>
+                    <super::RoleCombo label="Roles that can sign up" roles=roles.get_value() chosen=picked enabled=true empty="Anyone"/>
                     {sender.error()}
                     {sender.actions(cancel)}
                 </form>

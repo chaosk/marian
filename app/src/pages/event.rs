@@ -154,7 +154,7 @@ pub fn EventPage() -> impl IntoView {
                 attendance: signups_cell(signups, members, roles).into_any(),
                 reminders: reminders_cell(key.clone(), event.clone(), reminders).into_any(),
                 roles: roles_cell(key.clone(), event.clone(), roles).into_any(),
-                embed: embed_cell(signups, event.clone(), clock, here, at(path::event), localize, now).into_any(),
+                embed: embed_cell(signups, roles, event.clone(), clock, here, at(path::event), localize, now).into_any(),
                 channel: channel_cell(key.clone(), event.clone(), channels).into_any(),
                 status,
                 activity: Some(view! { <p><A href=format!("{}/events/{}/activity", base(), event.id)>"See what happened"</A></p> }.into_any()),
@@ -265,7 +265,7 @@ pub fn NewEvent() -> impl IntoView {
                     .into_any(),
                     reminders: view! { <EventReminders key=key.clone() event=event.clone() reminders/> }.into_any(),
                     roles: role_cells(key.clone(), &event, roles.get_value()).into_any(),
-                    embed: embed_view(&signups, &event, clock, String::new(), String::new(), localize, now).into_any(),
+                    embed: embed_view(&signups, &roles.get_value(), &event, clock, String::new(), String::new(), localize, now).into_any(),
                     channel: view! { <EventChannel key=key.clone() event=event.clone() channels=channels.get_value()/> }.into_any(),
                     status: view! { <p>"Not saved yet"</p> }.into_any(),
                     activity: None,
@@ -358,8 +358,10 @@ fn week_later(clock: &format::Clock, start: chrono::DateTime<chrono::Utc>) -> ch
         .unwrap_or(start + chrono::Duration::days(7))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn embed_cell(
     signups: Resource<Result<dto::Signups, crate::api::Failure>>,
+    roles: Resource<Result<Vec<dto::Role>, crate::api::Failure>>,
     event: dto::Event,
     clock: format::Clock,
     here: String,
@@ -367,13 +369,17 @@ fn embed_cell(
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
-    show(signups, move |signups| embed_view(&signups, &event, clock, here.clone(), delete_at.clone(), localize, now))
+    when(move || (signups.get(), roles.get()).ready(), move |(signups, roles)| {
+        embed_view(&signups, &roles, &event, clock, here.clone(), delete_at.clone(), localize, now)
+    })
 }
 
 /// The Discord post as it reads. `here` (the event's page) and `delete_at`
 /// (its API path) are empty for an event not saved yet.
+#[allow(clippy::too_many_arguments)]
 fn embed_view(
     signups: &dto::Signups,
+    roles: &[dto::Role],
     event: &dto::Event,
     clock: format::Clock,
     here: String,
@@ -389,6 +395,22 @@ fn embed_view(
     let can = event.can.clone();
     // A finished event's post has no buttons, as on Discord.
     let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
+    // The message text above the embed, as the post words it: @everyone, then each role.
+    let mentions: Vec<String> = event
+        .mention_everyone
+        .then(|| "@everyone".to_string())
+        .into_iter()
+        .chain(
+            event
+                .mention_role_ids
+                .iter()
+                .filter_map(|id| roles.iter().find(|role| role.id == *id))
+                .map(|role| format!("@{}", role.name)),
+        )
+        .collect();
+    // Discord draws <t:…:F>, <t:…:t>, and <t:…:R> in place, each on a grey pill.
+    let start_full = format!("{} {}", format::format_long_date(clock.day(event.starts_at)), clock.clock(event.starts_at));
+    let end_time = clock.end(event.starts_at, event.duration_minutes);
     {
         let fields = signups
             .options
@@ -431,6 +453,11 @@ fn embed_view(
             .collect_view();
         view! {
             <div class="discord">
+                {(!mentions.is_empty()).then(|| view! {
+                    <p class="d-content">
+                        {mentions.iter().map(|mention| view! { <span class="d-mention">{mention.clone()}</span>" " }).collect_view()}
+                    </p>
+                })}
                 <div class="embed" style=border(&color)>
                     <h3>{event.title.clone()}</h3>
                     {(!description.is_empty()).then(|| view! { <div class="d-desc md" inner_html=crate::markdown::render(&description)></div> })}
@@ -439,12 +466,12 @@ fn embed_view(
                         <p class="d-desc">"📍 "{location.clone()}</p>
                     })}
                     <p class="d-kicker">"Time"</p>
-                    <p class="d-desc">{clock.when(event.starts_at)}" - "{clock.end(event.starts_at, event.duration_minutes)}</p>
+                    <p class="d-desc"><span class="d-time">{start_full}</span>" - "<span class="d-time">{end_time}</span></p>
                     <p class="d-links">
                         {event.calendar_url.clone().map(|url| view! { <a href=url>"+"</a> })}
                         {(!here.is_empty()).then(|| view! { " · "<A href=here.clone()>"View on web"</A> })}
                     </p>
-                    <p class="d-desc">"🕐 "{format::format_rel(event.starts_at, now)}</p>
+                    <p class="d-desc">"🕐 "<span class="d-time">{format::format_rel(event.starts_at, now)}</span></p>
                     {(event.status != "posted").then(|| view! { <p class="d-desc"><em>{status_label(&event.status)}</em></p> })}
                     <div class="d-fields">{fields}</div>
                     {image.as_ref().map(|url| view! { <img class="d-image" src=url.clone() alt=""/> })}

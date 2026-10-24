@@ -680,10 +680,9 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
     }
 }
 
-/// Several roles for one permission: a button naming the chosen ones that opens
-/// a searchable list. The choice sits in a hidden field as a JSON list, and the
-/// form hears about it when the list closes with something changed, so one save
-/// covers a run of picks.
+/// Several roles for one permission in a settings form. The choice sits in a
+/// hidden field as a JSON list, and the form hears about it when the list
+/// closes with something changed, so one save covers a run of picks.
 #[component]
 pub fn RolePicker(
     name: &'static str,
@@ -697,12 +696,37 @@ pub fn RolePicker(
 ) -> impl IntoView {
     let start = serde_json::to_string(&chosen).unwrap_or_else(|_| "[]".into());
     let chosen = RwSignal::new(chosen);
+    let field = NodeRef::<leptos::html::Input>::new();
+    let on_change = Callback::new(move |now: Vec<String>| {
+        announce(field, &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()));
+    });
+    view! {
+        <RoleCombo label roles chosen enabled empty on_change>
+            <input type="hidden" name=name data-kind="json" node_ref=field value=start/>
+        </RoleCombo>
+    }
+}
+
+/// Several roles: a button naming the chosen ones that opens a searchable list
+/// of them all. `on_change` hears the choice when the list closes with
+/// something changed; `children` sit beside the button, for a form field.
+#[component]
+pub fn RoleCombo(
+    /// What the list is for, read out with the button.
+    label: &'static str,
+    roles: Vec<dto::Role>,
+    chosen: RwSignal<Vec<String>>,
+    enabled: bool,
+    /// What no role chosen means.
+    empty: &'static str,
+    #[prop(optional)] on_change: Option<Callback<Vec<String>>>,
+    #[prop(optional)] children: Option<Children>,
+) -> impl IntoView {
     let at_open = StoredValue::new(Vec::<String>::new());
     let open = RwSignal::new(false);
     let needle = RwSignal::new(String::new());
     let roles = StoredValue::new(roles);
     let root = NodeRef::<leptos::html::Div>::new();
-    let field = NodeRef::<leptos::html::Input>::new();
     let search = NodeRef::<leptos::html::Input>::new();
     Effect::new(move |_| {
         if let Some(input) = search.get() {
@@ -737,7 +761,9 @@ pub fn RolePicker(
         needle.set(String::new());
         let now = chosen.get_untracked();
         if now != at_open.get_value() {
-            announce(field, &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()));
+            if let Some(on_change) = on_change {
+                on_change.run(now);
+            }
         }
     };
     let toggle = move |id: String| {
@@ -796,12 +822,14 @@ pub fn RolePicker(
                 }
             }
             on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                // Escape closes the list, not an editor the list sits in.
                 if ev.key() == "Escape" && open.get_untracked() {
                     ev.prevent_default();
+                    ev.stop_propagation();
                     close();
                 }
             }>
-            <input type="hidden" name=name data-kind="json" node_ref=field value=start/>
+            {children.map(|children| children())}
             <button type="button" class="combo-trigger" disabled=!enabled aria-haspopup="listbox"
                 aria-label=label
                 title=move || names().join(", ")
@@ -1248,7 +1276,10 @@ pub(crate) fn close_on_outside_press(
 ///   Cancel, holds every press outside it until one of those is chosen. The
 ///   press does nothing, and the editor shakes so the eye finds it. Its own
 ///   anchor, where the button that opened it sits, still works, as does a
-///   dialog on top of the page.
+///   dialog on top of the page. An editor nobody has changed yet just closes,
+///   and the press goes on to whatever it landed on.
+/// - A popover that would run off the bottom of the window opens upward
+///   instead, when there is room above it.
 #[cfg(feature = "hydrate")]
 pub(crate) fn watch_presses() {
     use std::cell::Cell;
@@ -1285,8 +1316,12 @@ pub(crate) fn watch_presses() {
                 }
             }
             if let Some(editor) = outside_editor(&target) {
-                held.set(true);
-                hold(&ev, &editor);
+                if unchanged(&editor) {
+                    let_go(&editor);
+                } else {
+                    held.set(true);
+                    hold(&ev, &editor);
+                }
             }
         })
         .into_js_value()
@@ -1316,10 +1351,41 @@ pub(crate) fn watch_presses() {
             return;
         }
         if let Some(editor) = outside_editor(&target) {
-            hold(&ev, &editor);
+            if unchanged(&editor) {
+                let_go(&editor);
+            } else {
+                hold(&ev, &editor);
+            }
         }
     })
     .into_js_value();
+    // Popovers and editors as they appear: where a popover fits, and what an
+    // editor held when it opened.
+    let on_added = Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(
+        move |records: js_sys::Array, _: web_sys::MutationObserver| {
+            for record in records.iter().filter_map(|record| record.dyn_into::<web_sys::MutationRecord>().ok()) {
+                let added = record.added_nodes();
+                for node in (0..added.length()).filter_map(|n| added.item(n)?.dyn_into::<web_sys::Element>().ok()) {
+                    for popover in matching(&node, ".popover") {
+                        place(&popover);
+                    }
+                    for editor in matching(&node, "[data-editor]") {
+                        let _ = editor.set_attribute("data-start", &editor_state(&editor));
+                    }
+                }
+            }
+        },
+    )
+    .into_js_value();
+    if let (Ok(observer), Some(body)) = (
+        web_sys::MutationObserver::new(on_added.unchecked_ref()),
+        document().body(),
+    ) {
+        let options = web_sys::MutationObserverInit::new();
+        options.set_child_list(true);
+        options.set_subtree(true);
+        let _ = observer.observe_with_options(&body, &options);
+    }
     let window = window();
     let _ = window.add_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
     for kind in ["mousedown", "click"] {
@@ -1330,6 +1396,77 @@ pub(crate) fn watch_presses() {
 
 #[cfg(not(feature = "hydrate"))]
 pub(crate) fn watch_presses() {}
+
+/// `node` itself and everything inside it that matches `selector`.
+#[cfg(feature = "hydrate")]
+fn matching(node: &web_sys::Element, selector: &str) -> Vec<web_sys::Element> {
+    use wasm_bindgen::JsCast;
+    let mut found: Vec<web_sys::Element> = node.matches(selector).unwrap_or(false).then(|| node.clone()).into_iter().collect();
+    if let Ok(inside) = node.query_selector_all(selector) {
+        found.extend((0..inside.length()).filter_map(|n| inside.item(n)?.dyn_into::<web_sys::Element>().ok()));
+    }
+    found
+}
+
+/// Opens a popover upward when it would run past the bottom of the window
+/// and there is room above the thing it opened from.
+#[cfg(feature = "hydrate")]
+fn place(popover: &web_sys::Element) {
+    let room_below = window().inner_height().ok().and_then(|height| height.as_f64()).unwrap_or(f64::MAX);
+    let own = popover.get_bounding_client_rect();
+    if own.bottom() <= room_below - 8.0 {
+        return;
+    }
+    let Some(anchor) = popover.parent_element() else { return };
+    if anchor.get_bounding_client_rect().top() - 6.0 >= own.height() + 8.0 {
+        let _ = popover.set_attribute("data-above", "");
+    }
+}
+
+/// What an editor's fields hold, to tell whether anything changed. A search
+/// box only finds things, so what is typed there doesn't count.
+#[cfg(feature = "hydrate")]
+fn editor_state(editor: &web_sys::Element) -> String {
+    use wasm_bindgen::JsCast;
+    let Ok(fields) = editor.query_selector_all("input, select, textarea, [role=switch]") else {
+        return String::new();
+    };
+    (0..fields.length())
+        .filter_map(|n| fields.item(n))
+        .filter_map(|node| {
+            if let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() {
+                let kind = input.type_();
+                return (kind != "search").then(|| format!("{kind}:{}:{}", input.value(), input.checked()));
+            }
+            if let Some(select) = node.dyn_ref::<web_sys::HtmlSelectElement>() {
+                return Some(format!("select:{}", select.value()));
+            }
+            if let Some(text) = node.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+                return Some(format!("text:{}", text.value()));
+            }
+            let element = node.dyn_ref::<web_sys::Element>()?;
+            Some(format!("switch:{}", element.get_attribute("aria-checked").unwrap_or_default()))
+        })
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
+/// Whether an editor still holds what it opened with.
+#[cfg(feature = "hydrate")]
+fn unchanged(editor: &web_sys::Element) -> bool {
+    editor.get_attribute("data-start").is_some_and(|start| start == editor_state(editor))
+}
+
+/// Closes an editor the way Escape does, which every editor answers by cancelling.
+#[cfg(feature = "hydrate")]
+fn let_go(editor: &web_sys::Element) {
+    let init = web_sys::KeyboardEventInit::new();
+    init.set_key("Escape");
+    init.set_bubbles(true);
+    if let Ok(event) = web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init) {
+        let _ = editor.dispatch_event(&event);
+    }
+}
 
 /// Shakes an editor that is waiting for Save or Cancel, and brings it into view.
 #[cfg(feature = "hydrate")]
