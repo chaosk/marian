@@ -14,13 +14,21 @@ fn main() {
             .leptos_routes_with_context(
                 &options,
                 routes,
-                move || provide_context(web.clone()),
+                {
+                    let web = web.clone();
+                    move || provide_context(web.clone())
+                },
                 {
                     let options = options.clone();
                     move || marian_app::shell(options.clone())
                 },
             )
-            .fallback(leptos_axum::file_and_error_handler(marian_app::shell))
+            // An address no route matches renders the app too, and needs the
+            // same context: the logo, sign-in, and the database come from it.
+            .fallback(leptos_axum::file_and_error_handler_with_context(
+                move || provide_context(web.clone()),
+                marian_app::shell,
+            ))
             .with_state(options)
     });
     if let Err(err) = result {

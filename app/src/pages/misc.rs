@@ -141,14 +141,23 @@ pub fn Help() -> impl IntoView {
     }
 }
 
+/// An address no page answers: a full page of its own.
 #[component]
 pub fn NotFound() -> impl IntoView {
     status(404);
     title("Missing");
+    crate::shell::lost("That page isn't here.", "The address may be mistyped, or the page has moved.", false)
+}
+
+/// Something a page asked for that isn't there, said where the page would have shown it.
+#[component]
+pub fn MissingHere() -> impl IntoView {
+    status(404);
+    title("Missing");
     view! {
         <section class="empty">
-            <h1>"That page isn't here."</h1>
-            <p><A href="/">"Back to the schedule"</A></p>
+            <h1>"That isn't here."</h1>
+            <p>"It may have been deleted, or the link is old."</p>
         </section>
     }
 }

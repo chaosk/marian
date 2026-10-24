@@ -30,15 +30,17 @@ const NAV: &[(&str, &str, bool)] = &[
 /// front page, for a server that can't be opened.
 #[component]
 pub fn Brand(#[prop(optional)] front: bool) -> impl IntoView {
-    let params = use_params_map();
+    // From the address, not route params: the page for an unknown address
+    // matched no route and has none.
+    let pathname = use_location().pathname;
     let remembered = RwSignal::new(None::<String>);
     Effect::new(move |_| remembered.set(crate::client::last_server()));
     let href = move || {
         if front {
             return "/".to_string();
         }
-        params
-            .with(|params| params.get("server"))
+        pathname
+            .with(|path| path.strip_prefix("/servers/").and_then(|rest| rest.split('/').next()).map(str::to_string))
             .filter(|id| !id.is_empty())
             .or_else(|| remembered.get())
             .map(|id| format!("/servers/{id}"))
@@ -52,13 +54,19 @@ pub fn Brand(#[prop(optional)] front: bool) -> impl IntoView {
     }
 }
 
-/// The frame around every server page: sidebar, notices, then the page.
+/// The frame around every server page: sidebar, notices, then the page. A
+/// server that isn't there, or isn't theirs, gets one page of its own instead
+/// of a sidebar and panels that each say so.
 #[component]
 pub fn ServerShell() -> impl IntoView {
+    let params = use_params_map();
+    let opened = params.with_untracked(|params| params.get("server").unwrap_or_default());
+    if let Some(failure) = server_gate(&opened) {
+        return server_gone(&opened, failure).into_any();
+    }
     let me = cache::listen(cache::me_scope(), || ());
     let server = cache::listen(cache::server_scope(), cache::server_key);
     let membership = cache::listen(cache::membership_scope(), cache::server_key);
-    let params = use_params_map();
     let server_id = Memo::new(move |_| params.with(|params| params.get("server").unwrap_or_default()));
     let server_title = use_context::<crate::ServerTitle>().map(|title| title.0);
     on_cleanup(move || {
@@ -74,24 +82,41 @@ pub fn ServerShell() -> impl IntoView {
             crate::client::remember_server(&server.id);
         }
     });
-    view! {
-        <Transition fallback=|| ()>
-            {move || {
-                // A server that isn't there, or isn't theirs, gets one page of its own
-                // instead of a sidebar and panels that each say so.
-                let gone = Memo::new(move |_| matches!(server.get(), Some(Err(failure)) if !failure.unreachable()));
-                view! {
-                    <Show when=move || !gone.get() fallback=move || server.get().and_then(Result::err).map(server_gone)>
-                        {shell(me, server, membership, server_id, server_title, new_build)}
-                    </Show>
-                }
-            }}
-        </Transition>
+    shell(me, server, membership, server_id, server_title, new_build).into_any()
+}
+
+/// Whether this server can't be opened, decided before anything is drawn so
+/// the frame never starts. The server asks the database; the browser reads
+/// the answer off the page the server sent. Wrapping the frame in a
+/// Transition to decide later put every page inside it, and a page whose own
+/// read failed then hydrated differently from what was sent.
+fn server_gate(id: &str) -> Option<crate::api::Failure> {
+    #[cfg(feature = "ssr")]
+    {
+        return crate::api::local::with(id, |_, _| Ok(()))
+            .err()
+            .filter(|failure| matches!(failure.status, 403 | 404));
+    }
+    #[cfg(feature = "hydrate")]
+    {
+        let status = document()
+            .query_selector(&format!("[data-server-gone='{id}']"))
+            .ok()
+            .flatten()?
+            .get_attribute("data-status")?
+            .parse()
+            .ok()?;
+        return Some(crate::api::Failure { status, message: String::new() });
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = id;
+        None
     }
 }
 
 /// A full page for a server that can't be opened, with the way back to the front page.
-fn server_gone(failure: crate::api::Failure) -> impl IntoView {
+fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView {
     let missing = failure.missing();
     crate::status(if missing { 404 } else { 403 });
     crate::title(if missing { "Missing" } else { "Not yours" });
@@ -100,10 +125,20 @@ fn server_gone(failure: crate::api::Failure) -> impl IntoView {
     } else {
         ("That server isn't one you can open.", "Sign in from a server you're in, or pick another one.")
     };
+    // The logo would lead back to this server, so it goes to the front page too.
+    view! {
+        <div data-server-gone=id.to_string() data-status=failure.status.to_string()>
+            {lost(heading, note, true)}
+        </div>
+    }
+}
+
+/// A full page for something that isn't there, with the way back to the front page.
+pub(crate) fn lost(heading: &'static str, note: &'static str, front: bool) -> impl IntoView {
     view! {
         <div class="gate">
             <main class="gate-card">
-                <Brand front=true/>
+                <Brand front/>
                 <h1>{heading}</h1>
                 <p class="lede">{note}</p>
                 <div class="gate-actions">
