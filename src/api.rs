@@ -448,16 +448,50 @@ pub fn events(
         Some(id) => Some(series_here(conn, viewer, id)?.id),
         None => None,
     };
-    let events: Vec<store::Event> = match series_id {
+    let statuses: Vec<&str> = query
+        .status
+        .split(',')
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .collect();
+    let tz = zone(conn, viewer.guild_id)?;
+    let midnight = |day: chrono::NaiveDate| {
+        day.and_hms_opt(0, 0, 0)
+            .and_then(|naive| naive.and_local_timezone(tz).earliest())
+            .map(|at| at.with_timezone(&Utc))
+    };
+    let from_day = query.from_day.and_then(midnight);
+    let to_day = query.to_day.and_then(|day| day.succ_opt()).and_then(midnight);
+    let mut events: Vec<store::Event> = match series_id {
         Some(id) => store::events_in_series(conn, id)?,
         None => store::list_events(conn, viewer.guild_id)?,
     }
     .into_iter()
-    .filter(|event| series_id.is_some() || matches_view(query.view, event, now))
+    .filter(|event| {
+        series_id.is_some()
+            || if statuses.is_empty() {
+                matches_view(query.view, event, now)
+            } else {
+                statuses.contains(&event.status.as_str())
+            }
+    })
+    .filter(|event| {
+        let ended = event.starts_at + Duration::minutes(event.duration_minutes) < now;
+        match query.when {
+            None => true,
+            Some(dto::EventWhen::Upcoming) => !ended,
+            Some(dto::EventWhen::Past) => ended,
+        }
+    })
     .filter(|event| query.from.is_none_or(|from| event.starts_at >= from))
     .filter(|event| query.to.is_none_or(|to| event.starts_at < to))
+    .filter(|event| from_day.is_none_or(|from| event.starts_at >= from))
+    .filter(|event| to_day.is_none_or(|to| event.starts_at < to))
     .filter(|event| q.is_empty() || event.title.to_lowercase().contains(&q))
     .collect();
+    if query.when == Some(dto::EventWhen::Past) {
+        events.reverse();
+    }
     let per_page = query.limit.unwrap_or(PER_PAGE).clamp(1, 100);
     let total = events.len();
     let pages = (total as u32).div_ceil(per_page).max(1);
@@ -1798,6 +1832,79 @@ mod tests {
             .to_string();
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, &their_member), Err(OpError::NotFound)));
         assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, "9"), Err(OpError::NotFound)), "a row key is not an id here");
+    }
+
+    #[test]
+    fn the_event_list_filters_by_status_end_and_day() {
+        let (mut conn, viewer) = world();
+        let now = Utc::now();
+        let mut add = |title: &str, status: &str, starts_at: DateTime<Utc>| {
+            let id = logic::save_event(
+                &mut conn,
+                EventInput {
+                    id: None,
+                    guild_id: 1,
+                    actor_id: 1,
+                    channel_id: 1,
+                    title: title.into(),
+                    description: String::new(),
+                    location: String::new(),
+                    starts_at: now + Duration::days(30),
+                    duration_minutes: 60,
+                    color: "#1e3a6e".into(),
+                    image_url: None,
+                    cutoff_at: None,
+                    attendee_role_id: None,
+                    thread_enabled: false,
+                    multiple_signups: false,
+                    mention_everyone: false,
+                    mention_role_ids: vec![],
+                    restrict_role_ids: vec![],
+                    options: vec![OptionInput::of_type(YES)],
+                    reminders: vec![],
+                    repeat: None,
+                    action: logic::SaveAction::Draft,
+                    post_at: None,
+                    apply_series: false,
+                },
+            )
+            .unwrap();
+            diesel::update(crate::schema::events::table.find(id))
+                .set((crate::schema::events::status.eq(status), crate::schema::events::starts_at.eq(starts_at)))
+                .execute(&mut conn)
+                .unwrap();
+        };
+        add("old raid", "archived", now - Duration::days(20));
+        add("last raid", "posted", now - Duration::days(2));
+        add("next raid", "posted", now + Duration::days(2));
+        add("plan", "draft", now + Duration::days(5));
+        add("queued", "scheduled", now + Duration::days(9));
+        let titles = |conn: &mut Connection, query: dto::EventQuery| -> Vec<String> {
+            events(conn, &viewer, &dto::EventQuery { view: dto::EventView::All, ..query })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|event| event.title)
+                .collect()
+        };
+        let upcoming = dto::EventQuery {
+            status: "scheduled,posted".into(),
+            when: Some(dto::EventWhen::Upcoming),
+            ..Default::default()
+        };
+        assert_eq!(titles(&mut conn, upcoming), ["next raid", "queued"]);
+        let drafts = dto::EventQuery { status: "draft".into(), ..Default::default() };
+        assert_eq!(titles(&mut conn, drafts), ["plan"]);
+        let past = dto::EventQuery { when: Some(dto::EventWhen::Past), ..Default::default() };
+        assert_eq!(titles(&mut conn, past), ["last raid", "old raid"], "newest first");
+        let warsaw: Tz = "Europe/Warsaw".parse().unwrap();
+        let day = |at: DateTime<Utc>| at.with_timezone(&warsaw).date_naive();
+        let days = dto::EventQuery {
+            from_day: Some(day(now + Duration::days(2))),
+            to_day: Some(day(now + Duration::days(5))),
+            ..Default::default()
+        };
+        assert_eq!(titles(&mut conn, days), ["next raid", "plan"], "both days count");
     }
 
     #[test]

@@ -1352,3 +1352,48 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
   .preset-type > :nth-child(4), .preset-type > :nth-child(5) { grid-column: 2 / -1; }
   .library-row { grid-template-columns: 1fr auto; }
 }
+
+/* Events page filters: menus in the column headings. */
+.sheet.filtered { overflow: visible; }
+.sheet.filtered thead tr:first-child th:first-child { border-top-left-radius: 16px; }
+.page-tools { display: flex; align-items: center; gap: 12px; }
+.filter-head { width: auto; }
+.filter-button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.filter-button:hover, .filter-button.on { color: var(--ink); }
+.filter-summary {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #efe6d4;
+  color: var(--ink);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.filter-caret { font-size: 10px; }
+.filter-pop {
+  width: 260px;
+  text-align: left;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.filter-head.right .popover { left: auto; right: 0; }
+.filter-days { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.filter-days .field { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; margin: 0; font-size: 13px; color: var(--muted); }
+.filter-days input { width: 160px; min-width: 0; }
+.empty-row { padding: 28px 16px; color: var(--muted); text-align: center; }
+.empty-row strong { color: var(--ink); }

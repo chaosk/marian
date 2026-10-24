@@ -146,22 +146,30 @@ impl LiveStream {
     }
 }
 
-/// A search box that keeps its query in the address bar.
+/// A search box that keeps its query in the address bar, beside any filters
+/// already there. A new search starts from the first page.
 #[component]
 pub fn Finder(q: String) -> impl IntoView {
     let needle = RwSignal::new(q);
+    let query = leptos_router::hooks::use_query_map();
     view! {
         <form class="finder" method="get" on:submit={
             let go = client::use_go();
             move |ev| {
                 ev.prevent_default();
                 let q = needle.get();
+                let mut parts: Vec<String> = query.with_untracked(|map| {
+                    map.clone()
+                        .into_iter()
+                        .filter(|(key, _)| !matches!(key.as_ref(), "q" | "page"))
+                        .map(|(key, value)| format!("{key}={}", api::encode(&value)))
+                        .collect()
+                });
+                if !q.trim().is_empty() {
+                    parts.push(format!("q={}", api::encode(q.trim())));
+                }
                 let path = client::path();
-                let to = if q.trim().is_empty() {
-                    path
-                } else {
-                    format!("{path}?q={}", api::encode(q.trim()))
-                };
+                let to = if parts.is_empty() { path } else { format!("{path}?{}", parts.join("&")) };
                 go(&to);
             }
         }>
@@ -1175,7 +1183,7 @@ pub(crate) fn focus_left(ev: &leptos::ev::FocusEvent, root: NodeRef<leptos::html
 }
 
 #[cfg(not(feature = "hydrate"))]
-fn focus_left<T>(_: &T, _: NodeRef<leptos::html::Div>) -> bool {
+pub(crate) fn focus_left<T>(_: &T, _: NodeRef<leptos::html::Div>) -> bool {
     false
 }
 
