@@ -172,7 +172,7 @@ fn PresetForm(
         }
     });
     view! {
-        <form class="panel preset-form" on:submit=move |ev| { ev.prevent_default(); save(); }
+        <form class="panel preset-form" data-editor="" on:submit=move |ev| { ev.prevent_default(); save(); }
             on:keydown=move |ev: leptos::ev::KeyboardEvent| if ev.key() == "Escape" { editing.set(None); }>
             <label class="field">"Name"
                 <input required maxlength="60" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev))/>
@@ -432,7 +432,7 @@ fn TypeForm(item: Option<dto::LibraryItem>, editing: RwSignal<Option<String>>) -
         });
     };
     view! {
-        <form class="library-form" on:submit=move |ev| {
+        <form class="library-form" data-editor="" on:submit=move |ev| {
                 ev.prevent_default();
                 // A change to a type in use reaches every event with it, so say so first.
                 if used { asking.set(true) } else { save() }

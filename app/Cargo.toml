@@ -46,6 +46,10 @@ web-sys = { version = "0.3", optional = true, features = [
   "MessageEvent",
   "MouseEvent",
   "Node",
+  "NodeList",
+  "ScrollBehavior",
+  "ScrollIntoViewOptions",
+  "ScrollLogicalPosition",
   "Storage",
   "Window",
 ] }

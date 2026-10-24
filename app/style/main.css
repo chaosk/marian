@@ -1397,3 +1397,19 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 .filter-days input { width: 160px; min-width: 0; }
 .empty-row { padding: 28px 16px; color: var(--muted); text-align: center; }
 .empty-row strong { color: var(--ink); }
+
+/* An editor waiting for Save or Cancel, after a press elsewhere. */
+@keyframes asking {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+[data-editor][data-asking] {
+  animation: asking 0.4s ease-in-out;
+  box-shadow: 0 0 0 3px rgba(196, 150, 54, 0.45);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-editor][data-asking] { animation: none; }
+}

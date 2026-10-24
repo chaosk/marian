@@ -511,7 +511,7 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
         }
     });
     view! {
-        <form class="attend-edit"
+        <form class="attend-edit" data-editor=""
             on:submit=move |ev| {
                 ev.prevent_default();
                 save();
@@ -675,7 +675,7 @@ fn TypePicker(panel: Panel) -> impl IntoView {
         view! { {list}{offer} }.into_any()
     };
     view! {
-        <form class="attend-edit type-picker"
+        <form class="attend-edit type-picker" data-editor=""
             on:submit=move |ev| {
                 ev.prevent_default();
                 if making.get_untracked() { make(); }
@@ -781,6 +781,8 @@ fn PresetChooser(panel: Panel) -> impl IntoView {
             asking.set(Some((preset, question)));
         }
     };
+    // A question about dropped responses waits for its answer.
+    super::close_on_outside_press(root, move || open.get_untracked() && asking.get_untracked().is_none(), move || open.set(false));
     view! {
         <div class="inline-anchor preset-chooser" node_ref=root
             on:focusout=move |ev| {
@@ -1061,6 +1063,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
         (!any).then(|| view! { <p class="pick-empty">"No one in this server matches."</p> }.into_any())
     };
 
+    super::close_on_outside_press(root, move || panel.picking.with_untracked(Option::is_some), move || panel.picking.set(None));
     view! {
         <div class="picker" node_ref=root
             on:mousedown=|ev| ev.prevent_default()

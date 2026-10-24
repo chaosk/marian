@@ -278,6 +278,7 @@ fn FilterMenu(
         }
     };
     let on = summary.is_some();
+    crate::widgets::close_on_outside_press(root, move || open.get_untracked(), close);
     view! {
         <div class="inline-anchor filter-head" class:right=right node_ref=root
             on:focusout=move |ev| {
