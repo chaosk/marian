@@ -2064,21 +2064,6 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
     }))
 }
 
-pub fn move_web_session(
-    conn: &mut Connection,
-    token: &str,
-    guild_id: i64,
-    membership_id: i64,
-) -> Result<(), OpError> {
-    diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
-        .set((
-            schema::web_sessions::guild_id.eq(guild_id),
-            schema::web_sessions::membership_id.eq(membership_id),
-        ))
-        .execute(conn)?;
-    Ok(())
-}
-
 pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
     diesel::delete(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
         .execute(conn)?;

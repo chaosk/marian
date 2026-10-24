@@ -24,13 +24,27 @@ const NAV: &[(&str, &str, bool)] = &[
     ("/settings", "Settings", false),
 ];
 
+/// The logo and name, linking to the server in the address. Away from a
+/// server, it links to the one this browser opened last, once the page has
+/// read that, and to the front page before then.
 #[component]
 pub fn Brand() -> impl IntoView {
+    let params = use_params_map();
+    let remembered = RwSignal::new(None::<String>);
+    Effect::new(move |_| remembered.set(crate::client::last_server()));
+    let href = move || {
+        params
+            .with(|params| params.get("server"))
+            .filter(|id| !id.is_empty())
+            .or_else(|| remembered.get())
+            .map(|id| format!("/servers/{id}"))
+            .unwrap_or_else(|| "/".into())
+    };
     view! {
-        <div class="brand">
+        <a class="brand" href=href>
             <img class="mark" src=api::site().mark alt=""/>
             <p>"Marian"<em>"the discord scheduler"</em></p>
-        </div>
+        </a>
     }
 }
 
@@ -50,6 +64,12 @@ pub fn ServerShell() -> impl IntoView {
     });
     let new_build = RwSignal::new(false);
     provide_context(crate::widgets::NewBuild(new_build));
+    // A server that opened is the one to come back to.
+    Effect::new(move |_| {
+        if let Some(Ok(server)) = server.get() {
+            crate::client::remember_server(&server.id);
+        }
+    });
     view! {
         <a class="skip" href="#content">"Skip to content"</a>
         <div class="app">

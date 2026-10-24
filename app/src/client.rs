@@ -143,6 +143,28 @@ pub(crate) fn later(ms: i32, work: impl FnOnce() + 'static) {
     }
 }
 
+const LAST_SERVER: &str = "marian_last_server";
+
+/// Remembers the server this browser opened last. It stays in the browser:
+/// the server keeps no note of where anyone was.
+pub fn remember_server(id: &str) {
+    #[cfg(feature = "hydrate")]
+    if let Ok(Some(storage)) = leptos::prelude::window().local_storage() {
+        let _ = storage.set_item(LAST_SERVER, id);
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = id;
+}
+
+/// The server this browser opened last, if it remembers one.
+pub fn last_server() -> Option<String> {
+    #[cfg(feature = "hydrate")]
+    if let Ok(Some(storage)) = leptos::prelude::window().local_storage() {
+        return storage.get_item(LAST_SERVER).ok().flatten().filter(|id| !id.is_empty());
+    }
+    None
+}
+
 /// Keeps a notice for the next page to show.
 pub fn flash(notice: &str) {
     #[cfg(feature = "hydrate")]
