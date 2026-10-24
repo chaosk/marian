@@ -1735,17 +1735,27 @@ pub fn event_role_ids(
     Ok(roles.into_iter().map(|role| role.id).collect())
 }
 
-pub fn count_activity(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
-    Ok(Activity::in_guild(guild_id).count().get_result(conn)?)
+/// A server's activity, or only one of its events'.
+pub fn count_activity(conn: &mut Connection, guild_id: i64, event_id: Option<i64>) -> Result<i64, OpError> {
+    let mut query = Activity::in_guild(guild_id).into_boxed();
+    if let Some(event_id) = event_id {
+        query = query.filter(schema::activity::event_id.eq(event_id));
+    }
+    Ok(query.count().get_result(conn)?)
 }
 
 pub fn list_activity(
     conn: &mut Connection,
     guild_id: i64,
+    event_id: Option<i64>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Activity>, OpError> {
-    Ok(Activity::in_guild(guild_id)
+    let mut query = Activity::in_guild(guild_id).into_boxed();
+    if let Some(event_id) = event_id {
+        query = query.filter(schema::activity::event_id.eq(event_id));
+    }
+    Ok(query
         .order(schema::activity::id.desc())
         .limit(limit)
         .offset(offset)
@@ -2205,6 +2215,7 @@ mod tests {
                 "20261019150000".to_string(),
                 "20261019170000".to_string(),
                 "20261021090000".to_string(),
+                "20261024090000".to_string(),
             ]
         );
     }

@@ -23,6 +23,8 @@ struct Slots {
     embed: AnyView,
     channel: AnyView,
     status: AnyView,
+    /// A link to the event's activity, once there is an event to have any.
+    activity: Option<AnyView>,
 }
 
 fn layout(key: (String, String), event: &dto::Event, clock: format::Clock, slots: Slots) -> impl IntoView {
@@ -76,6 +78,7 @@ fn layout(key: (String, String), event: &dto::Event, clock: format::Clock, slots
                 <EventRepeat key=key.clone() event=event.clone() clock=clock/>
                 <p class="kicker">"Status"</p>
                 {slots.status}
+                {slots.activity.map(|link| view! { <p class="kicker">"Activity"</p>{link} })}
             </aside>
         </div>
     }
@@ -154,6 +157,7 @@ pub fn EventPage() -> impl IntoView {
                 embed: embed_cell(signups, event.clone(), clock, here, at(path::event), localize, now).into_any(),
                 channel: channel_cell(key.clone(), event.clone(), channels).into_any(),
                 status,
+                activity: Some(view! { <p><A href=format!("{}/events/{}/activity", base(), event.id)>"See what happened"</A></p> }.into_any()),
             };
             layout(key, &event, clock, slots)
         },
@@ -264,6 +268,7 @@ pub fn NewEvent() -> impl IntoView {
                     embed: embed_view(&signups, &event, clock, String::new(), String::new(), localize, now).into_any(),
                     channel: view! { <EventChannel key=key.clone() event=event.clone() channels=channels.get_value()/> }.into_any(),
                     status: view! { <p>"Not saved yet"</p> }.into_any(),
+                    activity: None,
                 };
                 layout(key, &event, clock, slots)
             };

@@ -56,6 +56,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/live", get(live_server))
         .route("/servers/{server}/reminders", get(pending_reminders))
         .route("/servers/{server}/activity", get(activity))
+        .route("/servers/{server}/events/{id}/activity", get(event_activity))
         .route("/servers/{server}/series", get(series_list))
         .route("/servers/{server}/series/{id}", get(series).patch(patch_series))
         .route("/servers/{server}/series/{id}/end", post(end_series))
@@ -566,6 +567,17 @@ async fn activity(
 ) -> Reply<dto::Paged<dto::Activity>> {
     read(&state, &headers, &server, |db, v| {
         api::activity(db, v, query.page.unwrap_or(1), query.limit.unwrap_or(25))
+    })
+}
+
+async fn event_activity(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Query(query): Query<PageLimit>,
+) -> Reply<dto::Paged<dto::Activity>> {
+    read(&state, &headers, &server, |db, v| {
+        api::event_activity(db, v, &id, query.page.unwrap_or(1), query.limit.unwrap_or(25))
     })
 }
 

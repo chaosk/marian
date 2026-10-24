@@ -66,6 +66,7 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
     match change {
         dto::Change::Signups { event } => {
             client.invalidate_query(signups_scope(), &(here.clone(), event.clone()));
+            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| *s == here && e == event);
             lists(client);
         }
         dto::Change::Event { event } => {
@@ -73,6 +74,7 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
             client.invalidate_query(event_scope(), &key);
             client.invalidate_query(signups_scope(), &key);
             client.invalidate_query(reminders_scope(), &key);
+            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| *s == here && e == event);
             lists(client);
             client.invalidate_query(server_scope(), &here);
             client.invalidate_query(pending_reminders_scope(), &here);
@@ -482,6 +484,17 @@ pub fn pending_reminders_scope() -> QueryScope<String, Result<Vec<dto::PendingRe
 
 async fn get_pending(server: String) -> Result<Vec<dto::PendingReminder>, Failure> {
     api::pending_reminders(&server, 6).await
+}
+
+/// One event's activity: the server, the event, and the page.
+pub fn event_activity_scope() -> QueryScope<(String, String, u32), Result<dto::Paged<dto::Activity>, Failure>> {
+    QueryScope::new(get_event_activity).with_invalidation_link(|(s, id, _)| {
+        ["s".into(), s.clone(), "e".into(), id.clone(), "activity".into()]
+    })
+}
+
+async fn get_event_activity((server, event, page): (String, String, u32)) -> Result<dto::Paged<dto::Activity>, Failure> {
+    api::event_activity(&server, &event, page, 25).await
 }
 
 pub fn activity_scope() -> QueryScope<(String, u32, u32), Result<dto::Paged<dto::Activity>, Failure>> {
