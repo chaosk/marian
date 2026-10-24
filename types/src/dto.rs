@@ -43,7 +43,6 @@ pub struct ServerRef {
 pub struct Me {
     pub name: String,
     pub servers: Vec<ServerRef>,
-    pub last_server: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

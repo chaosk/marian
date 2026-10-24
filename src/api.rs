@@ -92,7 +92,7 @@ pub fn viewer(conn: &mut Connection, headers: &HeaderMap) -> Option<Viewer> {
     })
 }
 
-/// Points the viewer at the server with this Discord id, remembering it as their last.
+/// Points the viewer at the server with this Discord id, for this request.
 pub fn bind_server(conn: &mut Connection, viewer: &mut Viewer, server: &str) -> Result<(), OpError> {
     let guild = store::guild_by_discord(conn, server)?.ok_or(OpError::NotFound)?;
     bind_guild(conn, viewer, guild.id)
@@ -111,20 +111,9 @@ pub fn bind_guild(conn: &mut Connection, viewer: &mut Viewer, guild_id: i64) -> 
         &viewer.discord_user_id,
         &viewer.display_name,
     )?;
-    if viewer.guild_id != guild_id || viewer.membership_id != user.id {
-        store::move_web_session(conn, &viewer.token, guild_id, user.id)?;
-    }
     viewer.guild_id = guild_id;
     viewer.membership_id = user.id;
     Ok(())
-}
-
-/// The server to open first: the last one used, then the first one signed into.
-pub fn home_server(conn: &mut Connection, viewer: &Viewer) -> Option<String> {
-    std::iter::once(viewer.guild_id)
-        .chain(viewer.allowed.iter().copied())
-        .filter(|id| *id > 0 && viewer.allowed.contains(id))
-        .find_map(|id| store::discord_server_id(conn, id).ok().filter(|s| !s.is_empty()))
 }
 
 pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -204,7 +193,6 @@ pub fn me(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Me, OpError> {
     Ok(dto::Me {
         name: viewer.display_name.clone(),
         servers,
-        last_server: home_server(conn, viewer),
     })
 }
 

@@ -157,14 +157,6 @@ fn status(code: u16) {
     let _ = code;
 }
 
-/// Sends the browser elsewhere during server rendering.
-fn redirect(to: &str) {
-    #[cfg(feature = "ssr")]
-    leptos_axum::redirect(to);
-    #[cfg(not(feature = "ssr"))]
-    let _ = to;
-}
-
 fn border(color: &str) -> String {
     format!("border-left-color: {color}")
 }

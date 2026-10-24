@@ -203,24 +203,6 @@ pub(crate) mod remote {
     }
 }
 
-/// What the front page shows someone.
-pub enum Front {
-    Home(String),
-    Landing { ready: bool, next: String },
-}
-
-/// The signed-in person's home server, or the landing page. Server rendering only.
-pub fn front(next: &str) -> Front {
-    #[cfg(feature = "ssr")]
-    if let Ok(Some(server)) = local::signed_in(|db, v| Ok(marian::api::home_server(db, v))) {
-        return Front::Home(server);
-    }
-    Front::Landing {
-        ready: site().oauth_ready,
-        next: next.to_string(),
-    }
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Site {
     pub invite_url: String,

@@ -1812,7 +1812,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(me.name, "Nell");
-        assert_eq!(me.last_server.as_deref(), Some("99"));
         assert_eq!(me.servers[0].name, "Guild");
 
         let membership: marian_types::Membership =

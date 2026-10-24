@@ -47,7 +47,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   height: 100vh;
   overflow: visible;
 }
-.brand { display: flex; align-items: flex-end; gap: 10px; margin: 0; }
+.brand { display: flex; align-items: flex-end; gap: 10px; margin: 0; color: inherit; text-decoration: none; }
 .brand p { font-family: var(--serif); font-size: 28px; line-height: 0.95; margin: 0; }
 .brand em { font-style: italic; font-weight: 520; display: block; font-size: 15px; letter-spacing: 0.04em; color: #d9c7a2; margin-top: 4px; }
 .mark {
@@ -1413,3 +1413,20 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 @media (prefers-reduced-motion: reduce) {
   [data-editor][data-asking] { animation: none; }
 }
+
+/* The front page's server list, for someone signed in. */
+.server-picks { list-style: none; margin: 0 0 22px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.server-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  text-decoration: none;
+  background: var(--paper);
+}
+.server-pick:hover { border-color: var(--blue); }
+.server-pick-name { flex: 1; font-weight: 600; }
+.gate-actions form { margin: 0; }
