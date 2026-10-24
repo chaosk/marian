@@ -76,13 +76,28 @@ pub fn ServerShell() -> impl IntoView {
     });
     let new_build = RwSignal::new(false);
     provide_context(crate::widgets::NewBuild(new_build));
-    // A server that opened is the one to come back to.
-    Effect::new(move |_| {
-        if let Some(Ok(server)) = server.get() {
+    // A server that opened is the one to come back to. One reached by a link
+    // that turns out to be missing or not theirs swaps the frame for the page
+    // that says so. Effects run only once the page is live, so this starts out
+    // the same on the server and in the browser and can't upset hydration.
+    let lost_later = RwSignal::new(None::<crate::api::Failure>);
+    Effect::new(move |_| match server.get() {
+        Some(Ok(server)) => {
             crate::client::remember_server(&server.id);
+            lost_later.set(None);
         }
+        Some(Err(failure)) if matches!(failure.status, 403 | 404) => lost_later.set(Some(failure)),
+        _ => {}
     });
-    shell(me, server, membership, server_id, server_title, new_build).into_any()
+    let showing_lost = Memo::new(move |_| lost_later.with(Option::is_some));
+    (move || match showing_lost.get() {
+        true => lost_later
+            .get_untracked()
+            .map(|failure| server_gone(&server_id.get_untracked(), failure))
+            .into_any(),
+        false => shell(me, server, membership, server_id, server_title, new_build).into_any(),
+    })
+    .into_any()
 }
 
 /// Whether this server can't be opened, decided before anything is drawn so
@@ -294,12 +309,14 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
             view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
+                    // Leaving the server runs this once more after `showing` is gone.
+                    let shown = showing.try_get().flatten();
                     // Schedule is the server's front page; every event page sits under Events,
                     // unless the Events page is showing one of the shortcuts below it.
                     let on = if filters.is_some() {
-                        showing.get() == Some(path)
+                        shown == Some(path)
                     } else if events {
-                        (here == here_href || here.starts_with(&nested)) && showing.get().is_none()
+                        (here == here_href || here.starts_with(&nested)) && shown.is_none()
                     } else {
                         here == here_href || (!schedule && here.starts_with(&nested))
                     };
