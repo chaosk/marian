@@ -156,6 +156,14 @@ pub fn remember_server(id: &str) {
     let _ = id;
 }
 
+/// Forgets a server this browser can no longer open.
+pub fn forget_server() {
+    #[cfg(feature = "hydrate")]
+    if let Ok(Some(storage)) = leptos::prelude::window().local_storage() {
+        let _ = storage.remove_item(LAST_SERVER);
+    }
+}
+
 /// The server this browser opened last, if it remembers one.
 pub fn last_server() -> Option<String> {
     #[cfg(feature = "hydrate")]

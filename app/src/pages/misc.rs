@@ -53,30 +53,47 @@ fn landing(next: String) -> impl IntoView {
     }
 }
 
-/// Every server the person signed into, the one this browser opened last first.
+/// Every server the person signed into. When this browser opened one last and
+/// it is still theirs to open, the page goes straight there instead.
 fn server_picker(me: dto::Me) -> impl IntoView {
-    // Read once the page is live, so the server and the browser draw the same list first.
-    let last = RwSignal::new(None::<String>);
-    Effect::new(move |_| last.set(client::last_server()));
+    // Only the browser knows the last server, so the list waits for it to look:
+    // shown first, it would flash on the way to the server.
+    let decided = RwSignal::new(false);
     let invite = api::site().invite_url;
     let empty = me.servers.is_empty();
     let servers = StoredValue::new(me.servers);
+    let navigate = leptos_router::hooks::use_navigate();
+    Effect::new(move |_| {
+        let remembered = client::last_server();
+        let open = remembered
+            .as_ref()
+            .filter(|id| servers.with_value(|list| list.iter().any(|server| &server.id == *id)));
+        match open {
+            Some(id) => navigate(
+                &format!("/servers/{id}"),
+                leptos_router::NavigateOptions { replace: true, ..Default::default() },
+            ),
+            None => {
+                // Gone from Marian, or no longer theirs: no reason to keep it.
+                if remembered.is_some() {
+                    client::forget_server();
+                }
+                decided.set(true);
+            }
+        }
+    });
     title("");
     let list = move || {
-        let last = last.get();
-        let mut servers = servers.get_value();
-        servers.sort_by_key(|server| Some(&server.id) != last.as_ref());
         servers
+            .get_value()
             .into_iter()
             .map(|server| {
-                let opened = Some(&server.id) == last.as_ref();
                 let initial = server.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                 view! {
                     <li>
                         <A href=format!("/servers/{}", server.id) attr:class="server-pick">
                             <span class="switcher-mark">{initial}</span>
                             <span class="server-pick-name">{server.name}</span>
-                            {opened.then(|| view! { <span class="pick-note">"Last opened"</span> })}
                         </A>
                     </li>
                 }
@@ -85,7 +102,7 @@ fn server_picker(me: dto::Me) -> impl IntoView {
     };
     view! {
         <div class="gate">
-            <main class="gate-card">
+            <main class="gate-card" style:visibility=move || if decided.get() { "visible" } else { "hidden" }>
                 <Brand/>
                 <Flash/>
                 <h1>"Pick a server."</h1>
