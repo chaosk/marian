@@ -198,7 +198,7 @@ jobs:
           path = Path("deploy/marian/values.yaml")
           text = path.read_text()
           text = text.replace("repository: marian", f"repository: {os.environ['IMAGE']}", 1)
-          text = text.replace('tag: "0.7.2"', f'tag: "{os.environ["IMAGE_TAG"]}"', 1)
+          text = text.replace('tag: "0.7.3"', f'tag: "{os.environ["IMAGE_TAG"]}"', 1)
           path.write_text(text)
           PY
           helm package deploy/marian --version "$version" --app-version "$version"

@@ -1,6 +1,6 @@
 [package]
 name = "marian-app"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 description = "Marian's web pages"
 license = "MIT"
