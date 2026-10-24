@@ -680,10 +680,9 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
     }
 }
 
-/// Several roles for one permission: a button naming the chosen ones that opens
-/// a searchable list. The choice sits in a hidden field as a JSON list, and the
-/// form hears about it when the list closes with something changed, so one save
-/// covers a run of picks.
+/// Several roles for one permission in a settings form. The choice sits in a
+/// hidden field as a JSON list, and the form hears about it when the list
+/// closes with something changed, so one save covers a run of picks.
 #[component]
 pub fn RolePicker(
     name: &'static str,
@@ -697,12 +696,37 @@ pub fn RolePicker(
 ) -> impl IntoView {
     let start = serde_json::to_string(&chosen).unwrap_or_else(|_| "[]".into());
     let chosen = RwSignal::new(chosen);
+    let field = NodeRef::<leptos::html::Input>::new();
+    let on_change = Callback::new(move |now: Vec<String>| {
+        announce(field, &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()));
+    });
+    view! {
+        <RoleCombo label roles chosen enabled empty on_change>
+            <input type="hidden" name=name data-kind="json" node_ref=field value=start/>
+        </RoleCombo>
+    }
+}
+
+/// Several roles: a button naming the chosen ones that opens a searchable list
+/// of them all. `on_change` hears the choice when the list closes with
+/// something changed; `children` sit beside the button, for a form field.
+#[component]
+pub fn RoleCombo(
+    /// What the list is for, read out with the button.
+    label: &'static str,
+    roles: Vec<dto::Role>,
+    chosen: RwSignal<Vec<String>>,
+    enabled: bool,
+    /// What no role chosen means.
+    empty: &'static str,
+    #[prop(optional)] on_change: Option<Callback<Vec<String>>>,
+    #[prop(optional)] children: Option<Children>,
+) -> impl IntoView {
     let at_open = StoredValue::new(Vec::<String>::new());
     let open = RwSignal::new(false);
     let needle = RwSignal::new(String::new());
     let roles = StoredValue::new(roles);
     let root = NodeRef::<leptos::html::Div>::new();
-    let field = NodeRef::<leptos::html::Input>::new();
     let search = NodeRef::<leptos::html::Input>::new();
     Effect::new(move |_| {
         if let Some(input) = search.get() {
@@ -737,7 +761,9 @@ pub fn RolePicker(
         needle.set(String::new());
         let now = chosen.get_untracked();
         if now != at_open.get_value() {
-            announce(field, &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()));
+            if let Some(on_change) = on_change {
+                on_change.run(now);
+            }
         }
     };
     let toggle = move |id: String| {
@@ -796,12 +822,14 @@ pub fn RolePicker(
                 }
             }
             on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                // Escape closes the list, not an editor the list sits in.
                 if ev.key() == "Escape" && open.get_untracked() {
                     ev.prevent_default();
+                    ev.stop_propagation();
                     close();
                 }
             }>
-            <input type="hidden" name=name data-kind="json" node_ref=field value=start/>
+            {children.map(|children| children())}
             <button type="button" class="combo-trigger" disabled=!enabled aria-haspopup="listbox"
                 aria-label=label
                 title=move || names().join(", ")

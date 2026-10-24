@@ -1840,28 +1840,13 @@ fn name_lines(names: Vec<String>, empty: &'static str) -> impl IntoView {
 }
 
 /// Checkboxes for a set of roles.
-/// What @everyone means in a list of roles.
-#[derive(Clone, Copy)]
-enum Everyone {
-    /// A choice of its own beside the roles: mention everyone.
-    Own(RwSignal<bool>),
-    /// No role at all: anyone may sign up. Picking it clears the roles.
-    NoRole,
-}
-
-/// Roles to pick, found by name the way members are. With nothing typed it
-/// lists only what is picked, @everyone included; typing finds the rest, so a
+/// Roles to mention, and @everyone, found by name the way members are. With
+/// nothing typed it lists only what is picked; typing finds the rest, so a
 /// server with hundreds of roles stays one short list.
-fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>, everyone: Everyone) -> impl IntoView {
+fn mention_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>, everyone: RwSignal<bool>) -> impl IntoView {
     let needle = RwSignal::new(String::new());
-    let everyone_on = move || match everyone {
-        Everyone::Own(on) => on.get(),
-        Everyone::NoRole => picked.with(Vec::is_empty),
-    };
-    let pick_everyone = move || match everyone {
-        Everyone::Own(on) => on.update(|on| *on = !*on),
-        Everyone::NoRole => picked.set(Vec::new()),
-    };
+    let everyone_on = move || everyone.get();
+    let pick_everyone = move || everyone.update(|on| *on = !*on);
     let toggle = move |id: String| {
         picked.update(|ids| match ids.iter().position(|other| *other == id) {
             Some(at) => {
@@ -1938,7 +1923,7 @@ fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>
     view! {
         <div class="role-search">
             <input type="hidden" prop:value=state/>
-            <input type="search" placeholder="Find a role" aria-label="Find a role" autocomplete="off"
+            <input type="search" placeholder="Find a role, or @everyone" aria-label="Find a role, or @everyone" autocomplete="off"
                 prop:value=move || needle.get()
                 on:input=move |ev| needle.set(event_target_value(&ev))
                 // Enter here looks for a role; it doesn't save the form.
@@ -2000,7 +1985,7 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Mentions"</p>
                     <p class="popover-note left">"The Discord post mentions who you pick when it goes out."</p>
-                    {role_search(roles, picked, Everyone::Own(everyone))}
+                    {mention_search(roles, picked, everyone)}
                     {sender.error()}
                     {sender.actions(cancel)}
                 </form>
@@ -2048,8 +2033,10 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Restrictions"</p>
-                    <p class="popover-note left">"Only people with a picked role can sign up. @everyone lets anyone in."</p>
-                    {role_search(roles, picked, Everyone::NoRole)}
+                    <p class="popover-note left">"Only people with one of these roles can sign up."</p>
+                    // What is picked, in a field, so the page can tell whether anything changed.
+                    <input type="hidden" prop:value=move || serde_json::to_string(&picked.get()).unwrap_or_default()/>
+                    <super::RoleCombo label="Roles that can sign up" roles=roles.get_value() chosen=picked enabled=true empty="Anyone"/>
                     {sender.error()}
                     {sender.actions(cancel)}
                 </form>
