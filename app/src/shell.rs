@@ -86,7 +86,7 @@ pub fn ServerShell() -> impl IntoView {
             crate::client::remember_server(&server.id);
             lost_later.set(None);
         }
-        Some(Err(failure)) if matches!(failure.status, 403 | 404) => lost_later.set(Some(failure)),
+        Some(Err(failure)) if failure.missing() => lost_later.set(Some(failure)),
         _ => {}
     });
     let showing_lost = Memo::new(move |_| lost_later.with(Option::is_some));
@@ -109,7 +109,7 @@ pub fn ServerShell() -> impl IntoView {
 fn server_gate(id: &str) -> Option<crate::api::Failure> {
     crate::api::local::with(id, |_, _| Ok(()))
         .err()
-        .filter(|failure| matches!(failure.status, 403 | 404))
+        .filter(crate::api::Failure::missing)
 }
 
 #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
@@ -129,20 +129,15 @@ fn server_gate(_: &str) -> Option<crate::api::Failure> {
     None
 }
 
-/// A full page for a server that can't be opened, with the way back to the front page.
+/// A full page for a server that can't be opened, with the way back to the
+/// front page. One that doesn't exist and one that isn't theirs read the same.
 fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView {
-    let missing = failure.missing();
-    crate::status(if missing { 404 } else { 403 });
-    crate::title(if missing { "Missing" } else { "Not yours" });
-    let (heading, note) = if missing {
-        ("That server isn't here.", "Marian isn't in it, or it never was.")
-    } else {
-        ("That server isn't one you can open.", "Sign in from a server you're in, or pick another one.")
-    };
+    crate::status(404);
+    crate::title("Missing");
     // The logo would lead back to this server, so it goes to the front page too.
     view! {
         <div data-server-gone=id.to_string() data-status=failure.status.to_string()>
-            {lost(heading, note, true)}
+            {lost("That server isn't here.", "It doesn't exist, or it isn't one you can open.", true)}
         </div>
     }
 }
