@@ -38,16 +38,10 @@ pub fn Settings() -> impl IntoView {
     let membership = cache::listen(cache::membership_scope(), cache::server_key);
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
-    let zones = cache::listen(cache::timezones_scope(), {
-        let settings = settings;
-        move || {
-            settings
-                .get()
-                .and_then(|result| result.ok())
-                .map(|settings| settings.timezone)
-                .unwrap_or_default()
-        }
-    });
+    // The list doesn't depend on the server's zone: keyed on it, it was asked
+    // for once with no zone while settings loaded, and that list, with nothing
+    // marked as chosen, could be the one the form kept.
+    let zones = cache::listen(cache::timezones_scope(), String::new);
     // The first full answer stays, so a save that refetches settings doesn't
     // remount the form under the person using it.
     cache::when_once(
@@ -141,7 +135,7 @@ fn settings_form(
                         <strong>"Time zone"</strong>
                         <span class="muted">"Event times on this site and in Discord are set in this zone."</span>
                     </span>
-                    <span class="combo-slot"><ZonePicker groups=zones enabled=server_manager/></span>
+                    <span class="combo-slot"><ZonePicker groups=zones chosen=settings.timezone.clone() enabled=server_manager/></span>
                 </div>
                 {time_switches}
             </section>
