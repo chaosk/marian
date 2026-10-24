@@ -219,23 +219,42 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
         .parse::<chrono_tz::Tz>()
         .map(|tz| marian_types::time::zone_label(tz, now))
         .unwrap_or_else(|_| server.timezone.clone());
+    let menu = NodeRef::<leptos::html::Details>::new();
     let servers = me
         .servers
         .into_iter()
         .map(|other| {
-            let current = other.id == server.id;
             let initial = other.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+            let href = format!("/servers/{}", other.id);
+            if other.id == server.id {
+                // Picking the server already open only closes the menu.
+                return view! {
+                    <a href=href class="current" aria-current="page" on:click=move |ev| {
+                        ev.prevent_default();
+                        if let Some(menu) = menu.get_untracked() {
+                            menu.set_open(false);
+                        }
+                    }>
+                        <span class="switcher-mark">{initial}</span>
+                        <span class="switcher-label">{other.name}</span>
+                        <span class="switcher-check" aria-hidden="true">"✓"</span>
+                    </a>
+                }
+                .into_any();
+            }
             view! {
-                <A href=format!("/servers/{}", other.id) attr:class=if current { "current" } else { "" }>
+                <A href=href>
                     <span class="switcher-mark">{initial}</span>
                     <span class="switcher-label">{other.name}</span>
-                    {current.then(|| view! { <span class="switcher-check" aria-hidden="true">"✓"</span> })}
                 </A>
             }
+            .into_any()
         })
         .collect_view();
+    let new_event = format!("/servers/{}/events/new", server.id);
     view! {
-        <details class="switcher">
+        <div class="switcher-row">
+        <details class="switcher" node_ref=menu>
             <summary>
                 <span>
                     <strong>{server.name}</strong>
@@ -248,6 +267,8 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
                 {(!invite.is_empty()).then(|| view! { <a class="switcher-add" href=invite.clone()>"+ Add server"</a> })}
             </div>
         </details>
+        <A href=new_event attr:class="switcher-new" attr:title="New event" attr:aria-label="New event">"+"</A>
+        </div>
     }
 }
 
