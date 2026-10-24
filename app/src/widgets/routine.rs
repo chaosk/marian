@@ -128,7 +128,7 @@ pub fn RoutineTitle(edit: RoutineEdit) -> impl IntoView {
     view! {
         {move || if open.get() {
             view! {
-                <form class="inline-form title-form"
+                <form class="inline-form title-form" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <input node_ref=field class="title-input" maxlength="120" aria-label="Event title"
@@ -188,7 +188,7 @@ pub fn RoutineDescription(edit: RoutineEdit) -> impl IntoView {
             }>
             {move || if open.get() {
                 view! {
-                    <form class="inline-form desc-form"
+                    <form class="inline-form desc-form" data-editor=""
                         on:submit=move |ev| { ev.prevent_default(); save(); }
                         on:keydown=move |ev| if escape(&ev) { cancel(); }>
                         <textarea node_ref=field rows="6" maxlength="2000" aria-label="Description"
@@ -232,7 +232,7 @@ fn fact(
                 {face}{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     {body()}

@@ -787,6 +787,7 @@ pub fn RolePicker(
             .into_any()
     };
 
+    close_on_outside_press(root, move || open.get_untracked(), close);
     view! {
         <div class="combo" node_ref=root
             on:focusout=move |ev| {
@@ -925,6 +926,7 @@ pub fn Choice(
             {empty.then(|| view! { <p class="pick-empty">"Nothing matches."</p> })}
         }
     };
+    close_on_outside_press(root, move || open.get_untracked(), close);
     view! {
         <div class="combo" node_ref=root
             on:focusout=move |ev| {
@@ -1073,6 +1075,7 @@ pub fn ZonePicker(groups: Vec<dto::ZoneGroup>, enabled: bool) -> impl IntoView {
         })
     };
 
+    close_on_outside_press(root, move || open.get_untracked(), close);
     view! {
         <div class="combo" node_ref=root
             on:focusout=move |ev| {
@@ -1185,5 +1188,155 @@ pub(crate) fn focus_left(ev: &leptos::ev::FocusEvent, root: NodeRef<leptos::html
 #[cfg(not(feature = "hydrate"))]
 pub(crate) fn focus_left<T>(_: &T, _: NodeRef<leptos::html::Div>) -> bool {
     false
+}
+
+/// Closes a menu when a press lands outside `root`. Focus leaving covers the
+/// keyboard; this covers a click on the page, which in Safari and Firefox on a
+/// Mac never moved focus into the menu to begin with.
+#[cfg(feature = "hydrate")]
+pub(crate) fn close_on_outside_press(
+    root: NodeRef<leptos::html::Div>,
+    open: impl Fn() -> bool + 'static,
+    close: impl Fn() + 'static,
+) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    let on_press = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+        if !open() {
+            return;
+        }
+        let Some(root) = root.try_get_untracked().flatten() else {
+            return;
+        };
+        let target = ev.target().and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+        if !root.contains(target.as_ref()) {
+            close();
+        }
+    })
+    .into_js_value();
+    let _ = document().add_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+    let handle = send_wrapper::SendWrapper::new(on_press);
+    on_cleanup(move || {
+        let on_press = handle.take();
+        let _ = document().remove_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub(crate) fn close_on_outside_press(
+    _: NodeRef<leptos::html::Div>,
+    _: impl Fn() -> bool + 'static,
+    _: impl Fn() + 'static,
+) {
+}
+
+/// Watches every press on the page, once for the app.
+///
+/// - A menu built on `<details>` closes when a press lands outside it.
+/// - An open editor, anything marked `data-editor` with its own Save and
+///   Cancel, holds every press outside it until one of those is chosen. The
+///   press does nothing, and the editor shakes so the eye finds it. Its own
+///   anchor, where the button that opened it sits, still works, as does a
+///   dialog on top of the page.
+#[cfg(feature = "hydrate")]
+pub(crate) fn watch_presses() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    // Whether the press under way was held, so its click is held too.
+    let held = Rc::new(Cell::new(false));
+    let target_of = |ev: &web_sys::Event| ev.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let outside_editor = |target: &web_sys::Element| -> Option<web_sys::Element> {
+        let editor = document().query_selector("[data-editor]").ok().flatten()?;
+        let inside = |area: &web_sys::Element| area.contains(Some(target));
+        let anchor = editor.closest(".inline-anchor").ok().flatten();
+        let dialog = target.closest(".modal-backdrop").ok().flatten();
+        (!inside(&editor) && !anchor.as_ref().is_some_and(inside) && dialog.is_none()).then_some(editor)
+    };
+    let hold = |ev: &web_sys::Event, editor: &web_sys::Element| {
+        ev.prevent_default();
+        ev.stop_immediate_propagation();
+        nudge(editor);
+    };
+
+    let on_press = {
+        let held = held.clone();
+        Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            held.set(false);
+            let Some(target) = target_of(&ev) else { return };
+            if let Ok(open) = document().query_selector_all("details.switcher[open]") {
+                for menu in (0..open.length()).filter_map(|n| open.item(n)?.dyn_into::<web_sys::Element>().ok()) {
+                    if !menu.contains(Some(&target)) {
+                        let _ = menu.remove_attribute("open");
+                    }
+                }
+            }
+            if let Some(editor) = outside_editor(&target) {
+                held.set(true);
+                hold(&ev, &editor);
+            }
+        })
+        .into_js_value()
+    };
+    // Holding the press keeps focus where it is; holding the click keeps
+    // whatever was pressed from acting on it.
+    let on_follow = {
+        let held = held.clone();
+        Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            if held.get() {
+                ev.prevent_default();
+                ev.stop_immediate_propagation();
+            }
+            if ev.type_() == "click" {
+                held.set(false);
+            }
+        })
+        .into_js_value()
+    };
+    // Enter or Space on a button elsewhere would open a second editor.
+    let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+        if !matches!(ev.key().as_str(), "Enter" | " ") {
+            return;
+        }
+        let Some(target) = target_of(&ev) else { return };
+        if target.closest("button, a, summary, [role=button]").ok().flatten().is_none() {
+            return;
+        }
+        if let Some(editor) = outside_editor(&target) {
+            hold(&ev, &editor);
+        }
+    })
+    .into_js_value();
+    let window = window();
+    let _ = window.add_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+    for kind in ["mousedown", "click"] {
+        let _ = window.add_event_listener_with_callback_and_bool(kind, on_follow.unchecked_ref(), true);
+    }
+    let _ = window.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub(crate) fn watch_presses() {}
+
+/// Shakes an editor that is waiting for Save or Cancel, and brings it into view.
+#[cfg(feature = "hydrate")]
+fn nudge(editor: &web_sys::Element) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    let options = web_sys::ScrollIntoViewOptions::new();
+    options.set_block(web_sys::ScrollLogicalPosition::Nearest);
+    options.set_behavior(web_sys::ScrollBehavior::Smooth);
+    editor.scroll_into_view_with_scroll_into_view_options(&options);
+    let _ = editor.remove_attribute("data-asking");
+    // Read layout so the animation starts again when it was already running.
+    let _ = editor.client_width();
+    let _ = editor.set_attribute("data-asking", "");
+    let editor = editor.clone();
+    let done = Closure::once_into_js(move || {
+        let _ = editor.remove_attribute("data-asking");
+    });
+    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(done.unchecked_ref(), 600);
 }
 

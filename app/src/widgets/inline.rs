@@ -423,7 +423,7 @@ pub fn EventTitle(key: (String, String), event: dto::Event) -> impl IntoView {
     view! {
         {move || if open.get() {
             view! {
-                <form class="inline-form title-form"
+                <form class="inline-form title-form" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <input node_ref=field class="title-input" maxlength="120" aria-label="Title"
@@ -509,7 +509,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
             })}
             <button type="button" class="primary" disabled=move || sender.busy().get() on:click=post_now>"Post now"</button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); schedule(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Post to Discord at"
@@ -667,7 +667,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
                 {face}{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Repeats"
@@ -982,7 +982,7 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
             </button>
             <button type="button" class="primary" disabled=move || saving.pending().get() on:click=post_now>"Post now"</button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); schedule.with_value(|schedule| schedule()); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Post to Discord at"
@@ -1044,7 +1044,7 @@ pub fn EventLocation(key: (String, String), event: dto::Event) -> impl IntoView 
     view! {
         {move || if open.get() {
             view! {
-                <form class="inline-form place-form"
+                <form class="inline-form place-form" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <span aria-hidden="true">"📍"</span>
@@ -1174,7 +1174,7 @@ pub fn EventWhen(key: (String, String), event: dto::Event, clock: Clock) -> impl
                 {pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Start time"
@@ -1266,7 +1266,7 @@ pub fn EventDescription(key: (String, String), event: dto::Event) -> impl IntoVi
             }>
             {move || if open.get() {
                 view! {
-                    <form class="inline-form desc-form"
+                    <form class="inline-form desc-form" data-editor=""
                         on:submit=move |ev| { ev.prevent_default(); save(); }
                         on:keydown=move |ev| if escape(&ev) { cancel(); }>
                         <textarea node_ref=field rows="6" maxlength="2000" aria-label="Description"
@@ -1378,7 +1378,7 @@ pub fn EventColor(key: (String, String), event: dto::Event) -> impl IntoView {
                 {face}{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Color"</p>
@@ -1513,7 +1513,7 @@ pub fn EventChannel(key: (String, String), event: dto::Event, channels: Vec<dto:
                 {name}{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Channel"
@@ -1653,7 +1653,7 @@ pub fn EventCutoff(key: (String, String), event: dto::Event, clock: Clock) -> im
                 {face}{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Signups close"
@@ -1788,7 +1788,7 @@ pub fn EventReminders(key: (String, String), event: dto::Event, reminders: Vec<d
                 <span class="face">{face}</span>{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover wide"
+                <form class="popover wide" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Reminders"</p>
@@ -1912,7 +1912,7 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
                 <span class="face">{move || name_lines(shown.get_value(), "No mentions")}</span>{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Mentions"</p>
@@ -1968,7 +1968,7 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
                 <span class="face">{move || name_lines(shown.get_value(), "No restrictions")}</span>{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Restrictions"</p>
@@ -2045,7 +2045,7 @@ pub fn EventAttendeeRole(key: (String, String), event: dto::Event, roles: Vec<dt
                 <span class="face">{face}</span>{pencil()}
             </button>
             {move || open.get().then(|| view! {
-                <form class="popover"
+                <form class="popover" data-editor=""
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <label class="field">"Attendee role"
