@@ -1850,7 +1850,7 @@ enum Everyone {
 }
 
 /// Roles to pick, found by name the way members are. With nothing typed it
-/// lists @everyone and the roles already picked; typing finds the rest, so a
+/// lists only what is picked, @everyone included; typing finds the rest, so a
 /// server with hundreds of roles stays one short list.
 fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>, everyone: Everyone) -> impl IntoView {
     let needle = RwSignal::new(String::new());
@@ -1873,11 +1873,25 @@ fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>
     let check = || {
         view! { <svg class="pick-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> }
     };
+    // What the list shows: picked things with nothing typed, matches otherwise.
+    let shown = move |text: &str, chosen: &[String], on: bool| -> (bool, Vec<dto::Role>) {
+        let everyone = if text.is_empty() { on } else { "@everyone".contains(text) };
+        let found = roles.with_value(|roles| {
+            roles
+                .iter()
+                .filter(|role| if text.is_empty() { chosen.contains(&role.id) } else { role.name.to_lowercase().contains(text) })
+                .take(50)
+                .cloned()
+                .collect()
+        });
+        (everyone, found)
+    };
     let rows = move || {
         let text = needle.get().trim().to_lowercase();
         let chosen = picked.get();
         let on = everyone_on();
-        let everyone_row = (text.is_empty() || "@everyone".contains(&text)).then(|| {
+        let (with_everyone, found) = shown(&text, &chosen, on);
+        let everyone_row = with_everyone.then(|| {
             view! {
                 <button type="button" class="pick-row" role="option" aria-selected=if on { "true" } else { "false" }
                     on:click=move |_| pick_everyone()>
@@ -1886,36 +1900,38 @@ fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>
                 </button>
             }
         });
-        let role_rows = roles.with_value(|roles| {
-            roles
-                .iter()
-                .filter(|role| if text.is_empty() { chosen.contains(&role.id) } else { role.name.to_lowercase().contains(&text) })
-                .take(50)
-                .map(|role| {
-                    let id = role.id.clone();
-                    let on = chosen.contains(&id);
-                    view! {
-                        <button type="button" class="pick-row" role="option" aria-selected=if on { "true" } else { "false" }
-                            on:click=move |_| toggle(id.clone())>
-                            <span class="pick-name">{role.name.clone()}</span>
-                            {on.then(check)}
-                        </button>
-                    }
-                })
-                .collect_view()
-        });
+        let role_rows = found
+            .into_iter()
+            .map(|role| {
+                let id = role.id.clone();
+                let on = chosen.contains(&id);
+                view! {
+                    <button type="button" class="pick-row" role="option" aria-selected=if on { "true" } else { "false" }
+                        on:click=move |_| toggle(id.clone())>
+                        <span class="pick-name">{role.name}</span>
+                        {on.then(check)}
+                    </button>
+                }
+            })
+            .collect_view();
         view! { {everyone_row}{role_rows} }
     };
     let note = move || {
         let text = needle.with(|text| text.trim().to_lowercase());
-        if roles.with_value(Vec::is_empty) {
-            return Some("This server has no roles Marian can see.");
-        }
         if text.is_empty() {
-            return Some("Type to find a role.");
+            return None;
         }
-        let any = roles.with_value(|roles| roles.iter().any(|role| role.name.to_lowercase().contains(&text)));
-        (!any).then_some("No role matches.")
+        let (with_everyone, found) = shown(&text, &[], false);
+        (!with_everyone && found.is_empty()).then_some(if roles.with_value(Vec::is_empty) {
+            "This server has no roles Marian can see."
+        } else {
+            "No role matches."
+        })
+    };
+    // Nothing picked and nothing typed: no list at all, just the search.
+    let listed = move || {
+        let text = needle.with(|text| text.trim().to_lowercase());
+        !text.is_empty() || everyone_on() || picked.with(|ids| !ids.is_empty())
     };
     // What is picked, in a field, so the page can tell whether anything changed.
     let state = move || serde_json::to_string(&(everyone_on(), picked.get())).unwrap_or_default();
@@ -1927,10 +1943,12 @@ fn role_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>
                 on:input=move |ev| needle.set(event_target_value(&ev))
                 // Enter here looks for a role; it doesn't save the form.
                 on:keydown=|ev: leptos::ev::KeyboardEvent| if ev.key() == "Enter" { ev.prevent_default(); }/>
-            <div class="pick-list" role="listbox" aria-multiselectable="true">
-                {rows}
-                {move || note().map(|text| view! { <p class="pick-empty">{text}</p> })}
-            </div>
+            {move || listed().then(|| view! {
+                <div class="pick-list" role="listbox" aria-multiselectable="true">
+                    {rows}
+                    {move || note().map(|text| view! { <p class="pick-empty">{text}</p> })}
+                </div>
+            })}
         </div>
     }
 }
