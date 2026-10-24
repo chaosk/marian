@@ -90,29 +90,28 @@ pub fn ServerShell() -> impl IntoView {
 /// the answer off the page the server sent. Wrapping the frame in a
 /// Transition to decide later put every page inside it, and a page whose own
 /// read failed then hydrated differently from what was sent.
+#[cfg(feature = "ssr")]
 fn server_gate(id: &str) -> Option<crate::api::Failure> {
-    #[cfg(feature = "ssr")]
-    {
-        return crate::api::local::with(id, |_, _| Ok(()))
-            .err()
-            .filter(|failure| matches!(failure.status, 403 | 404));
-    }
-    #[cfg(feature = "hydrate")]
-    {
-        let status = document()
-            .query_selector(&format!("[data-server-gone='{id}']"))
-            .ok()
-            .flatten()?
-            .get_attribute("data-status")?
-            .parse()
-            .ok()?;
-        return Some(crate::api::Failure { status, message: String::new() });
-    }
-    #[allow(unreachable_code)]
-    {
-        let _ = id;
-        None
-    }
+    crate::api::local::with(id, |_, _| Ok(()))
+        .err()
+        .filter(|failure| matches!(failure.status, 403 | 404))
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn server_gate(id: &str) -> Option<crate::api::Failure> {
+    let status = document()
+        .query_selector(&format!("[data-server-gone='{id}']"))
+        .ok()
+        .flatten()?
+        .get_attribute("data-status")?
+        .parse()
+        .ok()?;
+    Some(crate::api::Failure { status, message: String::new() })
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn server_gate(_: &str) -> Option<crate::api::Failure> {
+    None
 }
 
 /// A full page for a server that can't be opened, with the way back to the front page.
