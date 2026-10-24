@@ -975,13 +975,24 @@ pub fn Choice(
 /// list grouped by offset. The choice sits in a hidden `timezone` field, and
 /// picking one tells the surrounding form it changed, so an autosaving form saves.
 #[component]
-pub fn ZonePicker(groups: Vec<dto::ZoneGroup>, enabled: bool) -> impl IntoView {
-    let start = groups
-        .iter()
-        .flat_map(|group| group.zones.iter())
-        .find(|zone| zone.selected)
-        .map(|zone| zone.id.clone())
-        .unwrap_or_default();
+pub fn ZonePicker(mut groups: Vec<dto::ZoneGroup>, chosen: String, enabled: bool) -> impl IntoView {
+    // A zone the list leaves out, like a fixed GMT offset a server already
+    // uses, still shows, in a group of its own at the top.
+    let listed = groups.iter().flat_map(|group| group.zones.iter()).any(|zone| zone.id == chosen);
+    if !listed && !chosen.is_empty() {
+        groups.insert(
+            0,
+            dto::ZoneGroup {
+                offset: "Current".into(),
+                zones: vec![dto::ZoneRow {
+                    label: chosen.clone(),
+                    id: chosen.clone(),
+                    selected: true,
+                }],
+            },
+        );
+    }
+    let start = chosen;
     let chosen = RwSignal::new(start.clone());
     let open = RwSignal::new(false);
     let needle = RwSignal::new(String::new());
