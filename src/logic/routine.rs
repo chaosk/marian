@@ -4,7 +4,8 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use diesel::prelude::*;
 use super::access::can_create;
-use super::db::{log, must_guild, must_membership};
+use super::db::{log, must_guild, must_membership, role_names};
+use super::discord::mention_role_ids;
 use super::event::clean_extras;
 use super::model::{DiscordField, EventExtras, OptionInput, ReminderInput};
 use super::series::mark_posted;
@@ -43,6 +44,10 @@ pub struct RoutinePost {
     pub color: u32,
     pub fields: Vec<DiscordField>,
     pub buttons: Vec<PollButton>,
+    /// Who the open poll mentions: the routine's own mentions. The results
+    /// reply mentions no one.
+    pub mention_everyone: bool,
+    pub mention_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +385,21 @@ pub fn cast_run(
             .select(schema::routine_votes::id)
             .first(tx)
             .optional()?;
+        // Taking a vote back is always allowed; casting one asks for the roles
+        // the routine's events ask of signups.
+        if existing.is_none() && !user.server_manager {
+            let restricts = template::load(tx, routine.template_id)?.restrict_role_ids;
+            if !restricts.is_empty() {
+                let roles = store::membership_role_ids(tx, &user)?;
+                if !restricts.iter().any(|role| roles.contains(role)) {
+                    let names = role_names(tx, &restricts)?;
+                    return Err(OpError::message(format!(
+                        "This poll is limited to {}.",
+                        names.join(", ")
+                    )));
+                }
+            }
+        }
         if existing.is_some() {
             diesel::delete(
                 schema::routine_votes::table
@@ -524,6 +544,12 @@ pub fn routine_post(
     } else {
         Vec::new()
     };
+    let (mention_everyone, mention_roles) = if locked {
+        (false, Vec::new())
+    } else {
+        let template = template::load(conn, routine.template_id)?;
+        (template.mention_everyone, mention_role_ids(conn, &template.mention_role_ids)?)
+    };
     let (message_id, reply_to, title) = if locked {
         (run.results_message_id, run.discord_message_id, format!("Poll results: {}", routine.title))
     } else {
@@ -539,6 +565,8 @@ pub fn routine_post(
         color: 0x1e3a_6e,
         fields,
         buttons,
+        mention_everyone,
+        mention_roles,
     }))
 }
 
@@ -1532,6 +1560,63 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn the_poll_mentions_and_limits_votes_as_the_routines_events_do() {
+        let mut conn = world();
+        conn.batch_execute(
+            "
+            UPDATE channels SET discord_id = '77' WHERE id = 1;
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES
+              (501, 1, 'Players', '#000000', '501501'), (502, 1, 'Pings', '#000000', '502502');
+            INSERT INTO users (discord_id) VALUES ('ollie');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            SELECT 3, id, 1, 'Ollie', 'ollie', '#112233', true, false FROM users WHERE discord_id = 'ollie';
+            INSERT INTO membership_roles (membership_id, role_id) VALUES (3, 501);
+            ",
+        )
+        .unwrap();
+        let (id, _, _) = create_routine(
+            &mut conn,
+            1,
+            1,
+            1,
+            "Game night",
+            "",
+            120,
+            19 * 60,
+            6,
+            10 * 60,
+            1,
+            18 * 60,
+            &[3, 4],
+            Some(EventExtras {
+                color: "#2f6b4f".into(),
+                options: vec![OptionInput::of_type(301)],
+                mention_everyone: true,
+                mention_role_ids: vec![502],
+                restrict_role_ids: vec![501],
+                ..Default::default()
+            }),
+            at(2026, 10, 12, 12, 0),
+        )
+        .unwrap();
+        let open = editable_run(&mut conn, id).unwrap().unwrap();
+
+        let post = routine_post(&mut conn, open.id, "https://marian.test").unwrap().unwrap();
+        assert!(post.mention_everyone);
+        assert_eq!(post.mention_roles, vec!["502502".to_string()]);
+
+        let refused = cast_run(&mut conn, open.id, 2, 3).unwrap_err();
+        assert_eq!(refused.to_string(), "This poll is limited to Players.");
+        cast_run(&mut conn, open.id, 3, 3).unwrap();
+        // A server manager votes whatever their roles.
+        cast_run(&mut conn, open.id, 1, 3).unwrap();
+        // Losing the role still lets a vote be taken back.
+        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 3;").unwrap();
+        cast_run(&mut conn, open.id, 3, 3).unwrap();
+        assert_eq!(vote_counts(&mut conn, open.id).unwrap().get(&3).copied(), Some(1));
     }
 
     #[test]
