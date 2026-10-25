@@ -251,9 +251,7 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
             .into_any()
         })
         .collect_view();
-    let new_event = format!("/servers/{}/events/new", server.id);
     view! {
-        <div class="switcher-row">
         <details class="switcher" node_ref=menu>
             <summary>
                 <span>
@@ -267,8 +265,6 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
                 {(!invite.is_empty()).then(|| view! { <a class="switcher-add" href=invite.clone()>"+ Add server"</a> })}
             </div>
         </details>
-        <A href=new_event attr:class="switcher-new" attr:title="New event" attr:aria-label="New event">"+"</A>
-        </div>
     }
 }
 
@@ -322,7 +318,8 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
             };
             let sub = *sub;
             let path = *path;
-            view! {
+            let new_event = events.then(|| format!("{events_href}/new"));
+            let link = view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
                     // Leaving the server runs this once more after `showing` is gone.
@@ -345,6 +342,16 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
                 }>
                     {*label}" "{count.map(|n| view! { <span class="count">{n}</span> })}
                 </A>
+            };
+            match new_event {
+                Some(new_event) => view! {
+                    <div class="nav-row">
+                        {link}
+                        <A href=new_event attr:class="nav-new" attr:title="New event" attr:aria-label="New event">"+"</A>
+                    </div>
+                }
+                .into_any(),
+                None => link.into_any(),
             }
         })
         .collect_view();

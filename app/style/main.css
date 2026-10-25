@@ -59,22 +59,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   object-position: 68% 18%;
   background: white;
 }
-.switcher-row { display: flex; gap: 8px; align-items: stretch; }
-.switcher { position: relative; flex: 1; min-width: 0; }
-.switcher-new {
-  flex: none;
-  width: 44px;
-  display: grid;
-  place-items: center;
-  background: #f7f4ee;
-  color: var(--ink);
-  border-radius: 12px;
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1;
-  text-decoration: none;
-}
-.switcher-new:hover, .switcher-new[aria-current] { background: white; }
+.switcher { position: relative; }
 .switcher summary {
   list-style: none;
   display: flex;
@@ -173,6 +158,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* Upcoming, Drafts, and Scheduled sit under Events. */
 .nav a.nav-sub { margin-left: 14px; padding-left: 12px; border-left: 1px solid rgba(255, 255, 255, 0.15); border-radius: 0 8px 8px 0; font-size: 14px; }
 .count { color: #d9c7a2; }
+.nav-row { display: flex; gap: 4px; }
+.nav-row > a:first-child { flex: 1; min-width: 0; }
+.nav a.nav-new { flex: none; width: 36px; justify-content: center; padding: 8px 0; font-size: 18px; line-height: 1; }
 .actor { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .actor select, .main select, .main input, .main textarea {
   width: 100%;
