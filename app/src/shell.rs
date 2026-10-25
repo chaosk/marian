@@ -219,23 +219,40 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
         .parse::<chrono_tz::Tz>()
         .map(|tz| marian_types::time::zone_label(tz, now))
         .unwrap_or_else(|_| server.timezone.clone());
+    let menu = NodeRef::<leptos::html::Details>::new();
     let servers = me
         .servers
         .into_iter()
         .map(|other| {
-            let current = other.id == server.id;
             let initial = other.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+            let href = format!("/servers/{}", other.id);
+            if other.id == server.id {
+                // Picking the server already open only closes the menu.
+                return view! {
+                    <a href=href class="current" aria-current="page" on:click=move |ev| {
+                        ev.prevent_default();
+                        if let Some(menu) = menu.get_untracked() {
+                            menu.set_open(false);
+                        }
+                    }>
+                        <span class="switcher-mark">{initial}</span>
+                        <span class="switcher-label">{other.name}</span>
+                        <span class="switcher-check" aria-hidden="true">"✓"</span>
+                    </a>
+                }
+                .into_any();
+            }
             view! {
-                <A href=format!("/servers/{}", other.id) attr:class=if current { "current" } else { "" }>
+                <A href=href>
                     <span class="switcher-mark">{initial}</span>
                     <span class="switcher-label">{other.name}</span>
-                    {current.then(|| view! { <span class="switcher-check" aria-hidden="true">"✓"</span> })}
                 </A>
             }
+            .into_any()
         })
         .collect_view();
     view! {
-        <details class="switcher">
+        <details class="switcher" node_ref=menu>
             <summary>
                 <span>
                     <strong>{server.name}</strong>
@@ -301,7 +318,8 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
             };
             let sub = *sub;
             let path = *path;
-            view! {
+            let new_event = events.then(|| format!("{events_href}/new"));
+            let link = view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
                     // Leaving the server runs this once more after `showing` is gone.
@@ -324,6 +342,18 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
                 }>
                     {*label}" "{count.map(|n| view! { <span class="count">{n}</span> })}
                 </A>
+            };
+            match new_event {
+                Some(new_event) => view! {
+                    <div class="nav-row">
+                        {link}
+                        <A href=new_event attr:class="nav-new" attr:title="New event" attr:aria-label="New event">
+                            <span class="nav-plus" aria-hidden="true"></span>
+                        </A>
+                    </div>
+                }
+                .into_any(),
+                None => link.into_any(),
             }
         })
         .collect_view();
