@@ -160,7 +160,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .count { color: #d9c7a2; }
 .nav-row { display: flex; gap: 4px; }
 .nav-row > a:first-child { flex: 1; min-width: 0; }
-.nav a.nav-new { flex: none; width: 36px; justify-content: center; padding: 8px 0; font-size: 18px; line-height: 1; }
+.nav a.nav-new { flex: none; width: 36px; padding: 0; align-items: center; justify-content: center; }
+/* Drawn rather than typed: a "+" glyph sits off centre in most fonts. */
+.nav-plus {
+  width: 12px;
+  height: 12px;
+  background:
+    linear-gradient(currentColor, currentColor) center / 100% 2px no-repeat,
+    linear-gradient(currentColor, currentColor) center / 2px 100% no-repeat;
+}
 .actor { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .actor select, .main select, .main input, .main textarea {
   width: 100%;

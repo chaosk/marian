@@ -347,7 +347,9 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
                 Some(new_event) => view! {
                     <div class="nav-row">
                         {link}
-                        <A href=new_event attr:class="nav-new" attr:title="New event" attr:aria-label="New event">"+"</A>
+                        <A href=new_event attr:class="nav-new" attr:title="New event" attr:aria-label="New event">
+                            <span class="nav-plus" aria-hidden="true"></span>
+                        </A>
                     </div>
                 }
                 .into_any(),
