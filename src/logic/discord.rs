@@ -186,8 +186,15 @@ pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
 }
 
 fn mention_discord_roles(conn: &mut Connection, event: &store::Event) -> Result<Vec<String>, OpError> {
+    let ids = store::event_role_ids(conn, event, "mention")?;
+    mention_role_ids(conn, &ids)
+}
+
+/// The Discord ids of roles a post may mention: not @everyone or @here, which
+/// go by their own switch, and not roles Marian never learned the id of.
+pub(super) fn mention_role_ids(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
     let mut roles = Vec::new();
-    for role_id in store::event_role_ids(conn, event, "mention")? {
+    for &role_id in ids {
         let Some(role) = store::role(conn, role_id)? else {
             continue;
         };

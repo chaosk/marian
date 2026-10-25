@@ -1947,6 +1947,12 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
     if !editable(&event) {
         return view! { <p class="face">{name_lines(shown, "No mentions")}</p> }.into_any();
     }
+    // A routine's poll goes out first, and mentions them too.
+    let note = if key.1 == "routine" {
+        "The weekly poll mentions who you pick when it goes out."
+    } else {
+        "The Discord post mentions who you pick when it goes out."
+    };
     let sender = Sender::new(key);
     let open = RwSignal::new(false);
     let start = (event.mention_everyone, event.mention_role_ids.clone());
@@ -1984,7 +1990,7 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Mentions"</p>
-                    <p class="popover-note left">"The Discord post mentions who you pick when it goes out."</p>
+                    <p class="popover-note left">{note}</p>
                     {mention_search(roles, picked, everyone)}
                     {sender.error()}
                     {sender.actions(cancel)}
@@ -2001,6 +2007,12 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
     if !editable(&event) {
         return view! { <p class="face">{name_lines(shown, "No restrictions")}</p> }.into_any();
     }
+    // A routine's poll asks the same roles of whoever votes.
+    let (note, label) = if key.1 == "routine" {
+        ("Only people with one of these roles can vote on the poll or sign up.", "Roles that can vote and sign up")
+    } else {
+        ("Only people with one of these roles can sign up.", "Roles that can sign up")
+    };
     let sender = Sender::new(key);
     let open = RwSignal::new(false);
     let start = StoredValue::new(event.restrict_role_ids.clone());
@@ -2033,10 +2045,10 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
                     on:submit=move |ev| { ev.prevent_default(); save(); }
                     on:keydown=move |ev| if escape(&ev) { cancel(); }>
                     <p class="popover-title">"Restrictions"</p>
-                    <p class="popover-note left">"Only people with one of these roles can sign up."</p>
+                    <p class="popover-note left">{note}</p>
                     // What is picked, in a field, so the page can tell whether anything changed.
                     <input type="hidden" prop:value=move || serde_json::to_string(&picked.get()).unwrap_or_default()/>
-                    <super::RoleCombo label="Roles that can sign up" roles=roles.get_value() chosen=picked enabled=true empty="Anyone"/>
+                    <super::RoleCombo label=label roles=roles.get_value() chosen=picked enabled=true empty="Anyone"/>
                     {sender.error()}
                     {sender.actions(cancel)}
                 </form>

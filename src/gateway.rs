@@ -1064,10 +1064,14 @@ async fn push_routine(
         logic::remember_results_message(&mut conn, run_id, &message.id.get().to_string())?;
         return Ok(());
     }
+    // As with an event, a mention pings once: when the poll goes up, or when an
+    // edit to the routine adds it.
     let sent = upsert_message(
         &http,
         channel_id,
         post.message_id.as_deref(),
+        logic::mention_line(post.mention_everyone, &post.mention_roles),
+        event_mentions(post.mention_everyone, &post.mention_roles),
         embed,
         button_rows(&post.buttons),
     )
@@ -1110,6 +1114,8 @@ async fn upsert_message(
     http: &serenity::Http,
     channel_id: serenity::ChannelId,
     message_id: Option<&str>,
+    content: String,
+    mentions: serenity::CreateAllowedMentions,
     embed: serenity::CreateEmbed,
     rows: Vec<serenity::CreateActionRow>,
 ) -> Result<Option<serenity::Message>, Error> {
@@ -1119,8 +1125,10 @@ async fn upsert_message(
                 http,
                 serenity::MessageId::new(message_id),
                 serenity::EditMessage::new()
+                    .content(&content)
                     .embed(embed.clone())
-                    .components(rows.clone()),
+                    .components(rows.clone())
+                    .allowed_mentions(mentions.clone()),
             )
             .await
         {
@@ -1131,7 +1139,11 @@ async fn upsert_message(
     let message = channel_id
         .send_message(
             http,
-            serenity::CreateMessage::new().embed(embed).components(rows),
+            serenity::CreateMessage::new()
+                .content(content)
+                .embed(embed)
+                .components(rows)
+                .allowed_mentions(mentions),
         )
         .await?;
     Ok(Some(message))
