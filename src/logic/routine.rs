@@ -521,6 +521,9 @@ pub fn routine_post(
             poll_day_label(day, when.with_timezone(&tz).date_naive()),
             if votes == 1 { "vote" } else { "votes" },
         )
+    } else if settings.localize_time {
+        // Discord shows it counting down, and the full time in each member's zone on hover.
+        format!("Locks <t:{}:R>.", run.locks_at.timestamp())
     } else {
         format!("Locks {}.", clock::format_when(run.locks_at, tz, settings.hour_24))
     };
@@ -1906,7 +1909,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(post.title, "Next event: Game night");
-        assert!(post.body.starts_with("Locks "), "{post:?}");
+        let locks = format!("Locks <t:{}:R>.", open.locks_at.timestamp());
+        assert!(post.body.starts_with(&locks), "Discord counts down to the lock: {post:?}");
+        let mut settings = store::settings(&mut conn, 1).unwrap();
+        settings.localize_time = false;
+        store::update_settings(&mut conn, &settings).unwrap();
+        let post = routine_post(&mut conn, open.id, "https://marian.example")
+            .unwrap()
+            .unwrap();
+        assert!(
+            post.body.starts_with("Locks Tue, Oct 13 · 6:00 PM."),
+            "without localized times the server's zone is spelled out: {post:?}"
+        );
         assert!(
             post.body.contains(&format!(
                 "[Edit](https://marian.example/servers/99/routines/{public_id})"
