@@ -9,7 +9,7 @@ use super::model::*;
 use crate::clock;
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Channel, Connection, Membership};
+use crate::store::{self, Channel, Connection, Membership, Role};
 
 pub enum Attendance {
     Idle,
@@ -567,25 +567,7 @@ pub fn ensure_discord_channel(
     if let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? {
         return Ok(channel);
     }
-    let slug = {
-        let raw = slug_channel(name);
-        if raw.is_empty() {
-            format!(
-                "channel-{}",
-                &discord_id[discord_id.len().saturating_sub(6)..]
-            )
-        } else {
-            raw
-        }
-    };
-    let slug = if store::channel_by_name(conn, guild_id, &slug)?.is_some() {
-        format!(
-            "{slug}-{}",
-            &discord_id[discord_id.len().saturating_sub(4)..]
-        )
-    } else {
-        slug
-    };
+    let slug = free_channel_slug(conn, guild_id, discord_id, name, None)?;
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
         .select(diesel::dsl::max(schema::channels::position))
@@ -603,6 +585,213 @@ pub fn ensure_discord_channel(
         .returning(schema::channels::id)
         .get_result(conn)?;
     store::channel(conn, id)?.ok_or(OpError::NotFound)
+}
+
+/// The slug a Discord channel goes by here, with a bit of its id added when
+/// another channel (other than `except`) already has the name.
+fn free_channel_slug(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+    except: Option<i64>,
+) -> Result<String, OpError> {
+    let raw = slug_channel(name);
+    let slug = if raw.is_empty() {
+        format!(
+            "channel-{}",
+            &discord_id[discord_id.len().saturating_sub(6)..]
+        )
+    } else {
+        raw
+    };
+    let taken = store::channel_by_name(conn, guild_id, &slug)?
+        .is_some_and(|other| Some(other.id) != except);
+    Ok(if taken {
+        format!(
+            "{slug}-{}",
+            &discord_id[discord_id.len().saturating_sub(4)..]
+        )
+    } else {
+        slug
+    })
+}
+
+/// Brings the stored channel for a Discord text channel up to date: adds it,
+/// follows a rename, or brings it back. An event channel Marian is still
+/// creating under this name is taken over, so it isn't stored twice.
+pub fn sync_discord_channel(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Channel, OpError> {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? else {
+        let pending = store::channel_by_name(conn, guild_id, &slug_channel(name))?.filter(|channel| {
+            channel.kind == "event" && channel.discord_id.as_deref().is_none_or(str::is_empty)
+        });
+        let Some(pending) = pending else {
+            return ensure_discord_channel(conn, guild_id, discord_id, name);
+        };
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(pending.id)))
+            .set(schema::channels::discord_id.eq(discord_id))
+            .execute(conn)?;
+        return store::channel(conn, pending.id)?.ok_or(OpError::NotFound);
+    };
+    let renamed = !slug_channel(name).is_empty() && slug_channel(name) != channel.name;
+    if !renamed && channel.gone_at.is_none() {
+        return Ok(channel);
+    }
+    let slug = if renamed {
+        free_channel_slug(conn, guild_id, discord_id, name, Some(channel.id))?
+    } else {
+        channel.name.clone()
+    };
+    diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
+        .set((
+            schema::channels::name.eq(&slug),
+            schema::channels::gone_at.eq(None::<DateTime<Utc>>),
+        ))
+        .execute(conn)?;
+    store::channel(conn, channel.id)?.ok_or(OpError::NotFound)
+}
+
+/// Marks the channel for a deleted Discord channel as gone.
+pub fn discord_channel_gone(conn: &mut Connection, guild_id: i64, discord_id: &str) -> Result<(), OpError> {
+    diesel::update(
+        schema::channels::table
+            .filter(schema::channels::guild_id.eq(guild_id))
+            .filter(schema::channels::discord_id.eq(discord_id))
+            .filter(schema::channels::gone_at.is_null()),
+    )
+    .set(schema::channels::gone_at.eq(Utc::now()))
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Matches the server's channels to the text channels Discord lists, as
+/// (Discord id, name): new ones are added, renames followed, missing ones gone.
+pub fn sync_discord_channels(
+    conn: &mut Connection,
+    guild_id: i64,
+    present: &[(String, String)],
+) -> Result<(), OpError> {
+    for (discord_id, name) in present {
+        sync_discord_channel(conn, guild_id, discord_id, name)?;
+    }
+    let listed: HashSet<&str> = present.iter().map(|(id, _)| id.as_str()).collect();
+    for channel in store::list_channels(conn, guild_id)? {
+        let Some(discord_id) = channel.discord_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        if !listed.contains(discord_id) {
+            discord_channel_gone(conn, guild_id, discord_id)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::roles)]
+struct NewDiscordRole<'a> {
+    guild_id: i64,
+    name: &'a str,
+    color: &'a str,
+    discord_id: &'a str,
+}
+
+/// A Discord role colour as stored here; Discord's "no colour" reads as grey.
+fn stored_role_color(colour: &str) -> String {
+    let hex = colour.trim_start_matches('#');
+    if hex.is_empty() || hex.trim_start_matches('0').is_empty() {
+        "#99aab5".to_string()
+    } else {
+        format!("#{hex}")
+    }
+}
+
+/// Brings the stored role for a Discord role up to date, matched by its
+/// Discord id: adds it, follows a rename or colour change, or brings it back.
+/// A role Marian is still creating under this name is taken over, so it isn't
+/// stored twice.
+pub fn sync_discord_role(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+    colour: &str,
+) -> Result<Role, OpError> {
+    let color = stored_role_color(colour);
+    let stored = match store::role_by_discord(conn, guild_id, discord_id)? {
+        Some(role) => Some(role),
+        None => store::role_by_name(conn, guild_id, name)?
+            .filter(|role| role.discord_id.as_deref().is_none_or(str::is_empty)),
+    };
+    let Some(role) = stored else {
+        let id = diesel::insert_into(schema::roles::table)
+            .values(&NewDiscordRole {
+                guild_id,
+                name,
+                color: &color,
+                discord_id,
+            })
+            .returning(schema::roles::id)
+            .get_result(conn)?;
+        return store::role(conn, id)?.ok_or(OpError::NotFound);
+    };
+    let current = role.name == name
+        && role.color == color
+        && role.discord_id.as_deref() == Some(discord_id)
+        && role.gone_at.is_none();
+    if current {
+        return Ok(role);
+    }
+    diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
+        .set((
+            schema::roles::name.eq(name),
+            schema::roles::color.eq(&color),
+            schema::roles::discord_id.eq(discord_id),
+            schema::roles::gone_at.eq(None::<DateTime<Utc>>),
+        ))
+        .execute(conn)?;
+    store::role(conn, role.id)?.ok_or(OpError::NotFound)
+}
+
+/// Marks the role for a deleted Discord role as gone; nobody holds it any more.
+pub fn discord_role_gone(conn: &mut Connection, guild_id: i64, discord_id: &str) -> Result<(), OpError> {
+    let Some(role) = store::role_by_discord(conn, guild_id, discord_id)? else {
+        return Ok(());
+    };
+    diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::role_id.eq(role.id)))
+        .execute(conn)?;
+    if role.gone_at.is_none() {
+        diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
+            .set(schema::roles::gone_at.eq(Utc::now()))
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Matches the server's roles to the roles Discord lists, as (Discord id,
+/// name, colour): new ones are added, changes followed, missing ones gone.
+pub fn sync_discord_roles(
+    conn: &mut Connection,
+    guild_id: i64,
+    present: &[(String, String, String)],
+) -> Result<(), OpError> {
+    for (discord_id, name, colour) in present {
+        sync_discord_role(conn, guild_id, discord_id, name, colour)?;
+    }
+    let listed: HashSet<&str> = present.iter().map(|(id, _, _)| id.as_str()).collect();
+    for role in store::list_roles(conn, guild_id)? {
+        let Some(discord_id) = role.discord_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        if !listed.contains(discord_id) {
+            discord_role_gone(conn, guild_id, discord_id)?;
+        }
+    }
+    Ok(())
 }
 
 fn unique_handle(
@@ -682,6 +871,142 @@ mod tests {
     use diesel::connection::SimpleConnection;
 
     use super::*;
+
+    fn one_channel() -> Connection {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, position, discord_id) VALUES (41, 1, 'raids', 'text', 1, '100');
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn names(conn: &mut Connection) -> Vec<String> {
+        store::list_channels(conn, 1)
+            .unwrap()
+            .into_iter()
+            .map(|channel| channel.name)
+            .collect()
+    }
+
+    fn one_role() -> Connection {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES (51, 1, 'Raider', '#112233', '700');
+            INSERT INTO users (id, discord_id) VALUES (61, 'u1');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            VALUES (71, 61, 1, 'Nell', 'nell', '#112233', true, false);
+            INSERT INTO membership_roles (membership_id, role_id) VALUES (71, 51);
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn role_names(conn: &mut Connection) -> Vec<String> {
+        store::list_roles(conn, 1)
+            .unwrap()
+            .into_iter()
+            .map(|role| role.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_renamed_role_keeps_its_row() {
+        let mut conn = one_role();
+        let role = sync_discord_role(&mut conn, 1, "700", "Veteran", "aa0000").unwrap();
+        assert_eq!((role.id, role.name.as_str(), role.color.as_str()), (51, "Veteran", "#aa0000"));
+        assert_eq!(role_names(&mut conn), vec!["Veteran"]);
+        assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
+    }
+
+    #[test]
+    fn a_role_without_colour_reads_as_grey() {
+        let mut conn = one_role();
+        let role = sync_discord_role(&mut conn, 1, "701", "Plain", "000000").unwrap();
+        assert_eq!(role.color, "#99aab5");
+    }
+
+    #[test]
+    fn a_deleted_role_leaves_the_list_and_its_holders() {
+        let mut conn = one_role();
+        discord_role_gone(&mut conn, 1, "700").unwrap();
+        assert!(role_names(&mut conn).is_empty());
+        assert!(!store::membership_has_role(&mut conn, 71, 51).unwrap());
+        assert!(store::role(&mut conn, 51).unwrap().unwrap().gone_at.is_some());
+
+        let back = sync_discord_role(&mut conn, 1, "700", "Raider", "112233").unwrap();
+        assert_eq!(back.id, 51);
+        assert!(back.gone_at.is_none());
+    }
+
+    #[test]
+    fn syncing_roles_drops_missing_ones_and_takes_over_unlinked_ones() {
+        let mut conn = one_role();
+        conn.batch_execute(
+            "INSERT INTO roles (id, guild_id, name, color) VALUES (52, 1, 'Race attendee', '#1e3a6e');",
+        )
+        .unwrap();
+        sync_discord_roles(&mut conn, 1, &[("800".into(), "Race attendee".into(), "1e3a6e".into())]).unwrap();
+        let roles = store::list_roles(&mut conn, 1).unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!((roles[0].id, roles[0].discord_id.as_deref()), (52, Some("800")));
+    }
+
+    #[test]
+    fn a_renamed_discord_channel_is_renamed_here() {
+        let mut conn = one_channel();
+        let channel = sync_discord_channel(&mut conn, 1, "100", "Raid Night").unwrap();
+        assert_eq!((channel.id, channel.name.as_str()), (41, "raid-night"));
+
+        sync_discord_channel(&mut conn, 1, "200", "general").unwrap();
+        let clash = sync_discord_channel(&mut conn, 1, "200", "raid night").unwrap();
+        assert_eq!(clash.name, "raid-night-200");
+    }
+
+    #[test]
+    fn a_deleted_channel_leaves_the_list_and_frees_its_name() {
+        let mut conn = one_channel();
+        discord_channel_gone(&mut conn, 1, "100").unwrap();
+        assert!(names(&mut conn).is_empty());
+        assert!(store::channel(&mut conn, 41).unwrap().unwrap().gone_at.is_some());
+
+        let fresh = sync_discord_channel(&mut conn, 1, "300", "raids").unwrap();
+        assert_ne!(fresh.id, 41);
+        assert_eq!(fresh.name, "raids");
+    }
+
+    #[test]
+    fn syncing_adds_new_channels_and_drops_missing_ones() {
+        let mut conn = one_channel();
+        conn.batch_execute(
+            "INSERT INTO channels (id, guild_id, name, kind, position) VALUES (42, 1, 'pending', 'event', 2);",
+        )
+        .unwrap();
+        sync_discord_channels(&mut conn, 1, &[("200".into(), "general".into())]).unwrap();
+        assert_eq!(names(&mut conn), vec!["pending", "general"]);
+
+        sync_discord_channels(&mut conn, 1, &[("100".into(), "raids".into())]).unwrap();
+        assert_eq!(names(&mut conn), vec!["raids", "pending"]);
+    }
+
+    #[test]
+    fn a_channel_marian_is_creating_is_taken_over_not_doubled() {
+        let mut conn = one_channel();
+        conn.batch_execute(
+            "INSERT INTO channels (id, guild_id, name, kind, position) VALUES (42, 1, 'race-night', 'event', 2);",
+        )
+        .unwrap();
+        let channel = sync_discord_channel(&mut conn, 1, "500", "race-night").unwrap();
+        assert_eq!((channel.id, channel.kind.as_str()), (42, "event"));
+        assert_eq!(channel.discord_id.as_deref(), Some("500"));
+        assert_eq!(names(&mut conn), vec!["raids", "race-night"]);
+    }
 
     #[test]
     fn only_a_posted_event_waits_for_its_post() {

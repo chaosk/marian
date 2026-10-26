@@ -422,7 +422,7 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers).is_some()
     };
-    if signed_in {
+    if signed_in && recheck_session_guilds(&state, &headers).await {
         refresh_member_roles(&state, &path, &headers).await;
         return next.run(request).await;
     }
@@ -614,6 +614,120 @@ async fn discord_member(
     Some((status, body))
 }
 
+/// Makes the member at home in every Marian server they share on Discord and
+/// returns those servers with their membership in each, oldest server first.
+fn admit_guilds(
+    db: &mut Connection,
+    discord_user: &str,
+    name: &str,
+    member_of: &[MemberGuild],
+) -> Result<Vec<(i64, i64)>, OpError> {
+    let pairs: Vec<(i64, String)> = store::list_guilds(db)?
+        .into_iter()
+        .filter_map(|guild| Some((guild.id, guild.discord_id?)))
+        .collect();
+    let discord_ids: Vec<String> = member_of.iter().map(|guild| guild.id.clone()).collect();
+    let mut admitted = Vec::new();
+    for guild_id in auth::guilds_in_common(&pairs, &discord_ids) {
+        let discord_id = pairs
+            .iter()
+            .find(|(id, _)| *id == guild_id)
+            .map(|(_, discord_id)| discord_id.as_str())
+            .unwrap_or("");
+        let user = logic::ensure_discord_user(db, guild_id, discord_user, name)?;
+        let manages = member_of
+            .iter()
+            .find(|guild| guild.id == discord_id)
+            .is_some_and(|guild| guild.manages);
+        logic::set_server_manager(db, user.id, manages)?;
+        admitted.push((guild_id, user.id));
+    }
+    Ok(admitted)
+}
+
+const SESSION_GUILDS_TTL: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Re-reads the member's Discord servers every few minutes, so a server Marian
+/// joins after they sign in shows up, and one they leave drops out. Answers
+/// whether the session is still good.
+async fn recheck_session_guilds(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(token) = cookie(headers, "marian_session") else {
+        return false;
+    };
+    let session = {
+        let mut db = state.db.get().expect("database");
+        match store::web_session(&mut db, &token) {
+            Ok(Some(session)) => session,
+            _ => return true,
+        }
+    };
+    let Some(grant) = session.grant else {
+        return true;
+    };
+    if Utc::now() - session.guilds_checked_at < SESSION_GUILDS_TTL {
+        return true;
+    }
+    {
+        let mut db = state.db.get().expect("database");
+        if let Err(err) = store::touch_session_guilds(&mut db, &token) {
+            tracing::warn!("could not note the server check: {err}");
+            return true;
+        }
+    }
+    let grant = if grant.expires_at - chrono::Duration::minutes(1) > Utc::now() {
+        grant
+    } else {
+        let fresh = discord_refresh(state, &grant.refresh).await;
+        let mut db = state.db.get().expect("database");
+        match fresh {
+            Ok(fresh) => {
+                if let Err(err) = store::set_session_grant(&mut db, &token, Some(&fresh)) {
+                    tracing::warn!("could not keep the refreshed Discord grant: {err}");
+                }
+                fresh
+            }
+            Err(err) => {
+                if err.revoked() {
+                    let _ = store::set_session_grant(&mut db, &token, None);
+                }
+                return true;
+            }
+        }
+    };
+    let member_of = match fetch_guilds(state, &grant.access).await {
+        Ok(member_of) => member_of,
+        Err(err) => {
+            if err.revoked() {
+                let mut db = state.db.get().expect("database");
+                let _ = store::set_session_grant(&mut db, &token, None);
+            }
+            return true;
+        }
+    };
+    let mut db = state.db.get().expect("database");
+    let admitted = match admit_guilds(
+        &mut db,
+        &session.discord_user_id,
+        &session.display_name,
+        &member_of,
+    ) {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            tracing::warn!("could not recheck the member's servers: {err}");
+            return true;
+        }
+    };
+    let Some(&home) = admitted.first() else {
+        let _ = store::delete_web_session(&mut db, &token);
+        return false;
+    };
+    let guilds: Vec<i64> = admitted.iter().map(|(guild_id, _)| *guild_id).collect();
+    if let Err(err) = store::replace_session_guilds(&mut db, &token, &guilds, home) {
+        tracing::warn!("could not store the member's servers: {err}");
+    }
+    true
+}
+
 async fn auth_start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -676,10 +790,11 @@ async fn auth_callback(
     let Some(redirect_uri) = oauth_redirect(&state, &headers) else {
         return nav_redirect("/", "Set MARIAN_PUBLIC_URL so Discord can send you back.");
     };
-    let access = match discord_token(&state, code, &redirect_uri).await {
-        Ok(token) => token,
+    let grant = match discord_token(&state, code, &redirect_uri).await {
+        Ok(grant) => grant,
         Err(err) => return nav_redirect("/", &err),
     };
+    let access = grant.access.clone();
     let me = match discord_me(&state, &access).await {
         Ok(me) => me,
         Err(err) => return nav_redirect("/", &err),
@@ -688,52 +803,31 @@ async fn auth_callback(
         Ok(ids) => ids,
         Err(err) => return nav_redirect("/", &err),
     };
+    let name = auth::discord_display_name(me.global_name.as_deref(), &me.username);
     let mut db = state.db.get().expect("database");
-    let guilds = match store::list_guilds(&mut db) {
-        Ok(guilds) => guilds,
+    let admitted = match admit_guilds(&mut db, &me.id, &name, &member_of) {
+        Ok(admitted) => admitted,
         Err(err) => return plain_error(err),
     };
-    let pairs: Vec<(i64, String)> = guilds
-        .iter()
-        .filter_map(|guild| Some((guild.id, guild.discord_id.clone()?)))
-        .collect();
-    let discord_ids: Vec<String> = member_of.iter().map(|guild| guild.id.clone()).collect();
-    let allowed = auth::guilds_in_common(&pairs, &discord_ids);
-    if allowed.is_empty() {
-        return nav_redirect("/", "Marian isn't in a server you belong to yet.");
-    }
-    let name = auth::discord_display_name(me.global_name.as_deref(), &me.username);
-    let mut signed_in = None;
-    for &guild_id in &allowed {
-        let discord_id = pairs
-            .iter()
-            .find(|(id, _)| *id == guild_id)
-            .map(|(_, discord_id)| discord_id.as_str())
-            .unwrap_or("");
-        let user = match logic::ensure_discord_user(&mut db, guild_id, &me.id, &name) {
-            Ok(user) => user,
-            Err(err) => return plain_error(err),
-        };
-        let manages = member_of
-            .iter()
-            .find(|guild| guild.id == discord_id)
-            .is_some_and(|guild| guild.manages);
-        if let Err(err) = logic::set_server_manager(&mut db, user.id, manages) {
-            return plain_error(err);
-        }
-        if signed_in.is_none() {
-            signed_in = Some((guild_id, user.id));
-        }
-    }
-    let Some((guild_id, membership_id)) = signed_in else {
+    let Some(&(guild_id, membership_id)) = admitted.first() else {
         return nav_redirect("/", "Marian isn't in a server you belong to yet.");
     };
+    let allowed: Vec<i64> = admitted.iter().map(|(guild_id, _)| *guild_id).collect();
     let token = match auth::random_token() {
         Ok(token) => token,
         Err(err) => return plain_error(err),
     };
     if let Err(err) =
-        store::insert_web_session(&mut db, &token, &me.id, &name, guild_id, membership_id, &allowed)
+        store::insert_web_session(
+            &mut db,
+            &token,
+            &me.id,
+            &name,
+            guild_id,
+            membership_id,
+            &allowed,
+            Some(&grant),
+        )
     {
         return plain_error(err);
     }
@@ -1098,33 +1192,87 @@ fn cookie_secure(state: &AppState, headers: &HeaderMap) -> bool {
     )
 }
 
-async fn discord_token(state: &AppState, code: &str, redirect_uri: &str) -> Result<String, String> {
+async fn discord_token(
+    state: &AppState,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<store::DiscordGrant, String> {
+    discord_grant(
+        state,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+        ],
+    )
+    .await
+    .map_err(|err| err.message)
+}
+
+async fn discord_refresh(state: &AppState, refresh: &str) -> Result<store::DiscordGrant, DiscordError> {
+    discord_grant(
+        state,
+        &[("grant_type", "refresh_token"), ("refresh_token", refresh)],
+    )
+    .await
+}
+
+async fn discord_grant(state: &AppState, form: &[(&str, &str)]) -> Result<store::DiscordGrant, DiscordError> {
+    let mut fields = vec![
+        ("client_id", state.client_id.as_str()),
+        ("client_secret", state.client_secret.as_str()),
+    ];
+    fields.extend_from_slice(form);
     let response = crate::observe::send_traced(
         state
             .http
             .post("https://discord.com/api/oauth2/token")
-            .form(&[
-                ("client_id", state.client_id.as_str()),
-                ("client_secret", state.client_secret.as_str()),
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-            ]),
+            .form(&fields),
     )
     .await
-    .map_err(|_| "Discord didn't answer the sign-in.".to_string())?;
-    if !response.status().is_success() {
-        tracing::warn!("discord token exchange returned {}", response.status());
-        return Err("Discord didn't accept the sign-in. Try again.".into());
+    .map_err(|_| DiscordError::new(None, "Discord didn't answer the sign-in."))?;
+    let status = response.status();
+    if !status.is_success() {
+        tracing::warn!("discord token exchange returned {status}");
+        return Err(DiscordError::new(
+            Some(status),
+            "Discord didn't accept the sign-in. Try again.",
+        ));
     }
     let body: DiscordToken = response
         .json()
         .await
-        .map_err(|_| "Discord sent an unexpected sign-in reply.".to_string())?;
+        .map_err(|_| DiscordError::new(None, "Discord sent an unexpected sign-in reply."))?;
     if body.access_token.is_empty() {
-        return Err("Discord sent an unexpected sign-in reply.".into());
+        return Err(DiscordError::new(None, "Discord sent an unexpected sign-in reply."));
     }
-    Ok(body.access_token)
+    Ok(store::DiscordGrant {
+        access: body.access_token,
+        refresh: body.refresh_token,
+        expires_at: Utc::now() + chrono::Duration::seconds(body.expires_in),
+    })
+}
+
+struct DiscordError {
+    status: Option<StatusCode>,
+    message: String,
+}
+
+impl DiscordError {
+    fn new(status: Option<StatusCode>, message: &str) -> Self {
+        Self {
+            status,
+            message: message.to_string(),
+        }
+    }
+
+    /// Discord no longer honours the grant, so asking again won't help.
+    fn revoked(&self) -> bool {
+        matches!(
+            self.status,
+            Some(StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED)
+        )
+    }
 }
 
 async fn discord_me(state: &AppState, access: &str) -> Result<DiscordMe, String> {
@@ -1147,6 +1295,10 @@ async fn discord_me(state: &AppState, access: &str) -> Result<DiscordMe, String>
 }
 
 async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuild>, String> {
+    fetch_guilds(state, access).await.map_err(|err| err.message)
+}
+
+async fn fetch_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuild>, DiscordError> {
     let mut found = Vec::new();
     let mut after = String::new();
     for _ in 0..5 {
@@ -1157,18 +1309,22 @@ async fn discord_guilds(state: &AppState, access: &str) -> Result<Vec<MemberGuil
         }
         let response = crate::observe::send_traced(state.http.get(endpoint).bearer_auth(access))
             .await
-            .map_err(|_| "Discord didn't answer with your servers.".to_string())?;
-        if !response.status().is_success() {
-            tracing::warn!("discord guilds returned {}", response.status());
-            return Err("Discord didn't share your servers. Try again.".into());
+            .map_err(|_| DiscordError::new(None, "Discord didn't answer with your servers."))?;
+        let status = response.status();
+        if !status.is_success() {
+            tracing::warn!("discord guilds returned {status}");
+            return Err(DiscordError::new(
+                Some(status),
+                "Discord didn't share your servers. Try again.",
+            ));
         }
         let body = response
             .text()
             .await
-            .map_err(|_| "Discord sent an unexpected server list.".to_string())?;
+            .map_err(|_| DiscordError::new(None, "Discord sent an unexpected server list."))?;
         let guilds = member_guilds(&body).map_err(|err| {
             tracing::warn!("discord guild list did not match: {err}");
-            "Discord sent an unexpected server list.".to_string()
+            DiscordError::new(None, "Discord sent an unexpected server list.")
         })?;
         let page = guilds.len();
         if let Some(last) = guilds.last() {
@@ -1209,6 +1365,14 @@ struct NextForm {
 #[derive(serde::Deserialize)]
 struct DiscordToken {
     access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default = "week_seconds")]
+    expires_in: i64,
+}
+
+fn week_seconds() -> i64 {
+    7 * 24 * 3600
 }
 
 #[derive(serde::Deserialize)]
@@ -1707,6 +1871,7 @@ mod tests {
             1,
             membership_id,
             &[1],
+            None,
         )
         .unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

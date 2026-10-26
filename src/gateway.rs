@@ -41,20 +41,30 @@ pub fn start(
         job_loop(data_db, jobs, retry, data_http, jobs_url).await;
     });
     tokio::spawn(async move {
+        let mut members = true;
         loop {
-            if let Err(err) = connect(
+            let stopped = connect(
                 &token,
                 db.clone(),
                 http.clone(),
                 public_url.clone(),
                 status.clone(),
+                members,
             )
-            .await
-            {
-                tracing::warn!("Discord gateway stopped: {err}");
-            }
+            .await;
             if let Ok(mut slot) = http.lock() {
                 *slot = None;
+            }
+            match stopped {
+                Err(err) if members && members_refused(&err) => {
+                    tracing::warn!(
+                        "Discord refused the Server Members intent, so member roles update only when people use Marian. Turn it on under Bot in the Discord Developer Portal and restart Marian."
+                    );
+                    members = false;
+                    continue;
+                }
+                Err(err) => tracing::warn!("Discord gateway stopped: {err}"),
+                Ok(()) => {}
             }
             tokio::time::sleep(Duration::from_secs(8)).await;
         }
@@ -120,12 +130,23 @@ fn requeue(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
     }
 }
 
+/// Whether Discord closed the gateway because the bot may not ask for members.
+fn members_refused(err: &Error) -> bool {
+    matches!(
+        err.downcast_ref::<serenity::Error>(),
+        Some(serenity::Error::Gateway(
+            serenity::GatewayError::DisallowedGatewayIntents
+        ))
+    )
+}
+
 async fn connect(
     token: &str,
     db: store::Db,
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
     status: String,
+    members: bool,
 ) -> Result<(), Error> {
     let presence = presence_line(&status);
     let framework = poise::Framework::builder()
@@ -167,10 +188,12 @@ async fn connect(
         })
         .build();
 
-    let mut builder = serenity::ClientBuilder::new(
-        token,
-        serenity::GatewayIntents::GUILDS | serenity::GatewayIntents::DIRECT_MESSAGES,
-    )
+    let mut intents = serenity::GatewayIntents::GUILDS | serenity::GatewayIntents::DIRECT_MESSAGES;
+    if members {
+        // Privileged: it has to be turned on for the bot in the Developer Portal.
+        intents |= serenity::GatewayIntents::GUILD_MEMBERS;
+    }
+    let mut builder = serenity::ClientBuilder::new(token, intents)
     .status(serenity::model::user::OnlineStatus::Online);
     if let Some(line) = presence {
         builder = builder.activity(serenity::gateway::ActivityData::custom(line));
@@ -199,7 +222,49 @@ async fn on_event(
             if let Err(err) = remember_guild(data, guild) {
                 tracing::warn!("could not store {}: {err}", guild.name);
             }
+            tokio::spawn(admit_signed_in(data.db.clone(), ctx.http.clone(), guild.id));
             register_guild(ctx, framework, data, guild.id).await;
+        }
+        serenity::FullEvent::ChannelCreate { channel }
+        | serenity::FullEvent::ChannelUpdate { new: channel, .. } => {
+            if let Err(err) = follow_channel(data, channel, false) {
+                tracing::warn!("could not follow #{}: {err}", channel.name);
+            }
+        }
+        serenity::FullEvent::ChannelDelete { channel, .. } => {
+            if let Err(err) = follow_channel(data, channel, true) {
+                tracing::warn!("could not forget #{}: {err}", channel.name);
+            }
+        }
+        serenity::FullEvent::GuildRoleCreate { new: role }
+        | serenity::FullEvent::GuildRoleUpdate { new: role, .. } => {
+            if let Err(err) = follow_role(data, role) {
+                tracing::warn!("could not follow the {} role: {err}", role.name);
+            }
+        }
+        serenity::FullEvent::GuildRoleDelete {
+            guild_id,
+            removed_role_id,
+            ..
+        } => {
+            if let Err(err) = role_deleted(data, *guild_id, *removed_role_id) {
+                tracing::warn!("could not forget a deleted role: {err}");
+            }
+        }
+        serenity::FullEvent::GuildMemberUpdate { event, .. } => {
+            if let Err(err) = follow_member_roles(data, event.guild_id, &event.user, &event.roles) {
+                tracing::warn!("could not follow a member's roles: {err}");
+            }
+        }
+        serenity::FullEvent::GuildMemberAddition { new_member } => {
+            if let Err(err) = member_joined(data, new_member) {
+                tracing::warn!("could not open the server to a new member: {err}");
+            }
+        }
+        serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
+            if let Err(err) = member_left(data, *guild_id, user) {
+                tracing::warn!("could not close the server to a member who left: {err}");
+            }
         }
         serenity::FullEvent::Message { new_message } => {
             if new_message.guild_id.is_some() || new_message.author.bot {
@@ -283,75 +348,183 @@ async fn register_guild(
 fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
     let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
     let stored = logic::ensure_discord_guild(&mut conn, &guild.id.get().to_string(), &guild.name)?;
-    for channel in guild.channels.values() {
-        if !matches!(
-            channel.kind,
-            serenity::ChannelType::Text | serenity::ChannelType::News
-        ) {
-            continue;
-        }
-        logic::ensure_discord_channel(
-            &mut conn,
-            stored.id,
-            &channel.id.get().to_string(),
-            &channel.name,
-        )?;
+    let channels: Vec<(String, String)> = guild
+        .channels
+        .values()
+        .filter(|channel| postable(channel.kind))
+        .map(|channel| (channel.id.get().to_string(), channel.name.clone()))
+        .collect();
+    logic::sync_discord_channels(&mut conn, stored.id, &channels)?;
+    let roles: Vec<(String, String, String)> = guild
+        .roles
+        .values()
+        .filter(|role| role.id.get() != guild.id.get())
+        .map(|role| (role.id.get().to_string(), role.name.clone(), role.colour.hex()))
+        .collect();
+    logic::sync_discord_roles(&mut conn, stored.id, &roles)?;
+    Ok(())
+}
+
+fn stored_guild(conn: &mut Connection, guild: serenity::GuildId) -> Result<Option<store::Guild>, Error> {
+    Ok(store::guild_by_discord(conn, &guild.get().to_string())?)
+}
+
+/// Follows a role Discord added or changed.
+fn follow_role(data: &Data, role: &serenity::Role) -> Result<(), Error> {
+    if role.id.get() == role.guild_id.get() {
+        return Ok(());
     }
-    for role in guild.roles.values() {
-        if role.name == "@everyone" {
-            continue;
-        }
-        ensure_role(
-            &mut conn,
-            stored.id,
-            &role.name,
-            &role.colour.hex(),
-            &role.id.get().to_string(),
-        )?;
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = stored_guild(&mut conn, role.guild_id)? else {
+        return Ok(());
+    };
+    logic::sync_discord_role(
+        &mut conn,
+        guild.id,
+        &role.id.get().to_string(),
+        &role.name,
+        &role.colour.hex(),
+    )?;
+    Ok(())
+}
+
+fn role_deleted(data: &Data, guild: serenity::GuildId, role: serenity::RoleId) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = stored_guild(&mut conn, guild)? else {
+        return Ok(());
+    };
+    logic::discord_role_gone(&mut conn, guild.id, &role.get().to_string())?;
+    Ok(())
+}
+
+/// Keeps a member's roles as Discord has them. Only members Marian already
+/// knows are kept; the rest are picked up when they first use Marian.
+fn follow_member_roles(
+    data: &Data,
+    guild: serenity::GuildId,
+    user: &serenity::User,
+    roles: &[serenity::RoleId],
+) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = stored_guild(&mut conn, guild)? else {
+        return Ok(());
+    };
+    let Some(member) = store::membership_by_discord(&mut conn, guild.id, &user.id.get().to_string())? else {
+        return Ok(());
+    };
+    let roles: Vec<String> = roles.iter().map(|role| role.get().to_string()).collect();
+    store::replace_discord_roles(&mut conn, guild.id, member.id, &roles)?;
+    Ok(())
+}
+
+/// Opens the server to the new member's web sessions.
+fn member_joined(data: &Data, member: &serenity::Member) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = stored_guild(&mut conn, member.guild_id)? else {
+        return Ok(());
+    };
+    let user = member.user.id.get().to_string();
+    let sessions = store::sessions_without_guild(&mut conn, guild.id, Some(&user))?;
+    let Some((_, _, name)) = sessions.first() else {
+        return Ok(());
+    };
+    logic::ensure_discord_user(&mut conn, guild.id, &user, name)?;
+    for (token, _, _) in &sessions {
+        store::add_session_guild(&mut conn, token, guild.id)?;
     }
     Ok(())
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = schema::roles)]
-struct NewRole<'a> {
-    guild_id: i64,
-    name: &'a str,
-    color: &'a str,
-    discord_id: &'a str,
+/// Takes the server out of a departing member's web sessions and drops their roles in it.
+fn member_left(data: &Data, guild: serenity::GuildId, user: &serenity::User) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = stored_guild(&mut conn, guild)? else {
+        return Ok(());
+    };
+    let user = user.id.get().to_string();
+    if let Some(member) = store::membership_by_discord(&mut conn, guild.id, &user)? {
+        store::replace_discord_roles(&mut conn, guild.id, member.id, &[])?;
+    }
+    store::drop_session_guild(&mut conn, &user, guild.id)?;
+    Ok(())
 }
 
-fn ensure_role(
-    conn: &mut Connection,
-    guild_id: i64,
-    name: &str,
-    colour: &str,
-    discord_id: &str,
-) -> Result<(), Error> {
-    let color = if colour.is_empty() {
-        "#99aab5".to_string()
-    } else if colour.starts_with('#') {
-        colour.to_string()
-    } else {
-        format!("#{colour}")
+/// Opens a server to the signed-in members who are in it, so a server Marian
+/// joins shows up in their server picker without signing in again.
+async fn admit_signed_in(db: store::Db, http: Arc<serenity::Http>, guild: serenity::GuildId) {
+    let waiting = || -> Result<_, Error> {
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        let Some(stored) = store::guild_by_discord(&mut conn, &guild.get().to_string())? else {
+            return Ok(None);
+        };
+        Ok(Some((stored.id, store::sessions_without_guild(&mut conn, stored.id, None)?)))
     };
-    if let Some(role) = store::role_by_name(conn, guild_id, name)? {
-        diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
-            .set((
-                schema::roles::discord_id.eq(discord_id),
-                schema::roles::color.eq(&color),
-            ))
-            .execute(conn)?;
-        return Ok(());
+    let (guild_id, sessions) = match waiting() {
+        Ok(Some(found)) => found,
+        Ok(None) => return,
+        Err(err) => {
+            tracing::warn!("could not list sessions for {guild}: {err}");
+            return;
+        }
+    };
+    let mut members: Vec<(String, String, Vec<String>)> = Vec::new();
+    for (token, user, name) in sessions {
+        match members.last_mut() {
+            Some((last, _, tokens)) if *last == user => tokens.push(token),
+            _ => members.push((user, name, vec![token])),
+        }
     }
-    diesel::insert_into(schema::roles::table)
-        .values(&NewRole {
-            guild_id,
-            name,
-            color: &color,
-            discord_id,
-        })
-        .execute(conn)?;
+    for (user, name, tokens) in members {
+        let Ok(user_id) = user.parse::<u64>() else {
+            continue;
+        };
+        match http.get_member(guild, serenity::UserId::new(user_id)).await {
+            Ok(_) => {}
+            Err(serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(reply)))
+                if reply.status_code == serenity::StatusCode::NOT_FOUND =>
+            {
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!("could not check membership in {guild}: {err}");
+                continue;
+            }
+        }
+        let admitted = || -> Result<(), Error> {
+            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+            logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
+            for token in &tokens {
+                store::add_session_guild(&mut conn, token, guild_id)?;
+            }
+            Ok(())
+        };
+        if let Err(err) = admitted() {
+            tracing::warn!("could not open {guild} to a signed-in member: {err}");
+        }
+    }
+}
+
+/// Channels Marian can post events in.
+fn postable(kind: serenity::ChannelType) -> bool {
+    matches!(
+        kind,
+        serenity::ChannelType::Text | serenity::ChannelType::News
+    )
+}
+
+/// Follows a channel Discord added, renamed or deleted, so the channel lists
+/// match Discord without waiting for a restart.
+fn follow_channel(data: &Data, channel: &serenity::GuildChannel, deleted: bool) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = store::guild_by_discord(&mut conn, &channel.guild_id.get().to_string())? else {
+        return Ok(());
+    };
+    let discord_id = channel.id.get().to_string();
+    if deleted || !postable(channel.kind) {
+        logic::discord_channel_gone(&mut conn, guild.id, &discord_id)?;
+    } else {
+        logic::sync_discord_channel(&mut conn, guild.id, &discord_id, &channel.name)?;
+    }
     Ok(())
 }
 
@@ -739,11 +912,7 @@ fn sync_roles(
         .execute(conn)?;
     let mut role_ids = Vec::new();
     for (name, colour, discord_id) in roles {
-        ensure_role(conn, guild_id, name, colour, discord_id)?;
-        let Some(role) = store::role_by_name(conn, guild_id, name)? else {
-            continue;
-        };
-        role_ids.push(role.id);
+        role_ids.push(logic::sync_discord_role(conn, guild_id, discord_id, name, colour)?.id);
     }
     store::insert_membership_roles(conn, membership_id, &role_ids)?;
     Ok(())
