@@ -52,6 +52,7 @@ diesel::table! {
         color -> Text,
         discord_id -> Nullable<Text>,
         public_id -> Uuid,
+        gone_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -65,6 +66,7 @@ diesel::table! {
         purged_at -> Nullable<Timestamptz>,
         discord_id -> Nullable<Text>,
         public_id -> Uuid,
+        gone_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -316,6 +318,10 @@ diesel::table! {
         guild_id -> BigInt,
         membership_id -> BigInt,
         created_at -> Timestamptz,
+        discord_access -> Nullable<Text>,
+        discord_refresh -> Nullable<Text>,
+        discord_expires_at -> Nullable<Timestamptz>,
+        guilds_checked_at -> Timestamptz,
     }
 }
 

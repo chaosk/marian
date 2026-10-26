@@ -206,6 +206,8 @@ pub struct Role {
     pub discord_id: Option<String>,
     /// The id the API shows. The sequential `id` never leaves the server.
     pub public_id: uuid::Uuid,
+    /// When the Discord role was deleted; the row stays for what names it.
+    pub gone_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -223,6 +225,8 @@ pub struct Channel {
     pub discord_id: Option<String>,
     /// The id the API shows. The sequential `id` never leaves the server.
     pub public_id: uuid::Uuid,
+    /// When the Discord channel was deleted; the row stays for its events.
+    pub gone_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -550,6 +554,10 @@ struct SessionRow {
     guild_id: i64,
     membership_id: i64,
     created_at: DateTime<Utc>,
+    discord_access: Option<String>,
+    discord_refresh: Option<String>,
+    discord_expires_at: Option<DateTime<Utc>>,
+    guilds_checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations)]
@@ -615,6 +623,7 @@ impl Role {
         let roles: RoleQuery = Role::query();
         roles
             .filter(schema::roles::guild_id.eq(guild_id))
+            .filter(schema::roles::gone_at.is_null())
             .filter(schema::lower(schema::roles::name).eq(schema::lower(name)))
     }
 }
@@ -637,6 +646,7 @@ impl Channel {
         let channels: ChannelQuery = Channel::query();
         channels
             .filter(schema::channels::guild_id.eq(guild_id))
+            .filter(schema::channels::gone_at.is_null())
             .filter(schema::lower(schema::channels::name).eq(schema::lower(name)))
     }
 
@@ -1373,10 +1383,23 @@ pub fn set_guild_timezone(conn: &mut Connection, guild_id: i64, timezone: &str) 
     Ok(())
 }
 
+/// The server's roles that still exist in Discord.
 pub fn list_roles(conn: &mut Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
     Ok(Role::in_guild(guild_id)
+        .filter(schema::roles::gone_at.is_null())
         .order(schema::roles::id.asc())
         .load(conn)?)
+}
+
+pub fn role_by_discord(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+) -> Result<Option<Role>, OpError> {
+    Ok(Role::in_guild(guild_id)
+        .filter(schema::roles::discord_id.eq(discord_id))
+        .first(conn)
+        .optional()?)
 }
 
 pub fn role(conn: &mut Connection, id: i64) -> Result<Option<Role>, OpError> {
@@ -1391,7 +1414,16 @@ pub fn role_by_name(
     Ok(Role::named(guild_id, name).first(conn).optional()?)
 }
 
+/// The server's channels that still exist, for picking where to post.
 pub fn list_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
+    Ok(Channel::in_guild(guild_id)
+        .filter(schema::channels::gone_at.is_null())
+        .order((schema::channels::position.asc(), schema::channels::id.asc()))
+        .load(conn)?)
+}
+
+/// Every channel the server has had, including deleted ones events still point at.
+pub fn all_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
     Ok(Channel::in_guild(guild_id)
         .order((schema::channels::position.asc(), schema::channels::id.asc()))
         .load(conn)?)
@@ -1969,7 +2001,20 @@ pub struct WebSession {
     pub membership_id: i64,
     pub created_at: DateTime<Utc>,
     pub guilds: Vec<i64>,
+    pub grant: Option<DiscordGrant>,
+    pub guilds_checked_at: DateTime<Utc>,
 }
+
+/// The member's Discord OAuth grant, kept to re-read their server list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscordGrant {
+    pub access: String,
+    pub refresh: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// How long a web session lasts after sign-in.
+pub const SESSION_DAYS: i64 = 30;
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::web_sessions)]
@@ -1980,8 +2025,12 @@ struct NewWebSession<'a> {
     guild_id: i64,
     membership_id: i64,
     created_at: DateTime<Utc>,
+    discord_access: Option<&'a str>,
+    discord_refresh: Option<&'a str>,
+    discord_expires_at: Option<DateTime<Utc>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn insert_web_session(
     conn: &mut Connection,
     token: &str,
@@ -1990,6 +2039,7 @@ pub fn insert_web_session(
     guild_id: i64,
     membership_id: i64,
     guilds: &[i64],
+    grant: Option<&DiscordGrant>,
 ) -> Result<(), OpError> {
     let token = token.to_string();
     let discord_user_id = discord_user_id.to_string();
@@ -2004,6 +2054,9 @@ pub fn insert_web_session(
                 guild_id,
                 membership_id,
                 created_at: Utc::now(),
+                discord_access: grant.map(|grant| grant.access.as_str()),
+                discord_refresh: grant.map(|grant| grant.refresh.as_str()),
+                discord_expires_at: grant.map(|grant| grant.expires_at),
             })
             .execute(conn)?;
         insert_session_guilds(conn, &token, &guilds)?;
@@ -2053,6 +2106,14 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
         .into_iter()
         .map(|link| link.guild_id)
         .collect();
+    let grant = match (row.discord_access, row.discord_refresh, row.discord_expires_at) {
+        (Some(access), Some(refresh), Some(expires_at)) => Some(DiscordGrant {
+            access,
+            refresh,
+            expires_at,
+        }),
+        _ => None,
+    };
     Ok(Some(WebSession {
         token: row.token,
         discord_user_id: row.discord_user_id,
@@ -2061,7 +2122,156 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
         membership_id: row.membership_id,
         created_at: row.created_at,
         guilds,
+        grant,
+        guilds_checked_at: row.guilds_checked_at,
     }))
+}
+
+/// Notes that the session's servers were just looked at, so a burst of
+/// requests asks Discord once.
+pub fn touch_session_guilds(conn: &mut Connection, token: &str) -> Result<(), OpError> {
+    diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
+        .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Replaces the session's grant; `None` forgets it once Discord stops honouring it.
+pub fn set_session_grant(
+    conn: &mut Connection,
+    token: &str,
+    grant: Option<&DiscordGrant>,
+) -> Result<(), OpError> {
+    diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
+        .set((
+            schema::web_sessions::discord_access.eq(grant.map(|grant| grant.access.as_str())),
+            schema::web_sessions::discord_refresh.eq(grant.map(|grant| grant.refresh.as_str())),
+            schema::web_sessions::discord_expires_at.eq(grant.map(|grant| grant.expires_at)),
+        ))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Swaps the session's servers for `guilds`, landing on `home` when the one it
+/// pointed at is no longer among them.
+pub fn replace_session_guilds(
+    conn: &mut Connection,
+    token: &str,
+    guilds: &[i64],
+    home: (i64, i64),
+) -> Result<(), OpError> {
+    conn.transaction(|conn| {
+        diesel::delete(
+            schema::web_session_guilds::table.filter(schema::web_session_guilds::token.eq(token)),
+        )
+        .execute(conn)?;
+        insert_session_guilds(conn, token, guilds)?;
+        let current: i64 = schema::web_sessions::table
+            .filter(schema::web_sessions::token.eq(token))
+            .select(schema::web_sessions::guild_id)
+            .first(conn)?;
+        let sessions = schema::web_sessions::table.filter(schema::web_sessions::token.eq(token));
+        if guilds.contains(&current) {
+            diesel::update(sessions)
+                .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
+                .execute(conn)?;
+        } else {
+            diesel::update(sessions)
+                .set((
+                    schema::web_sessions::guild_id.eq(home.0),
+                    schema::web_sessions::membership_id.eq(home.1),
+                    schema::web_sessions::guilds_checked_at.eq(Utc::now()),
+                ))
+                .execute(conn)?;
+        }
+        Ok(())
+    })
+}
+
+/// Live sessions that can't open this server yet, as (token, Discord user id,
+/// display name); only `user`'s when given.
+pub fn sessions_without_guild(
+    conn: &mut Connection,
+    guild_id: i64,
+    user: Option<&str>,
+) -> Result<Vec<(String, String, String)>, OpError> {
+    let has_it = schema::web_session_guilds::table
+        .filter(schema::web_session_guilds::guild_id.eq(guild_id))
+        .select(schema::web_session_guilds::token);
+    let mut query = schema::web_sessions::table
+        .filter(schema::web_sessions::created_at.gt(Utc::now() - chrono::Duration::days(SESSION_DAYS)))
+        .filter(diesel::dsl::not(schema::web_sessions::token.eq_any(has_it)))
+        .into_boxed();
+    if let Some(user) = user {
+        query = query.filter(schema::web_sessions::discord_user_id.eq(user.to_string()));
+    }
+    Ok(query
+        .select((
+            schema::web_sessions::token,
+            schema::web_sessions::discord_user_id,
+            schema::web_sessions::display_name,
+        ))
+        .order(schema::web_sessions::discord_user_id.asc())
+        .load(conn)?)
+}
+
+/// Takes a server out of the member's sessions once they leave it. A session
+/// that was on it moves to another of its servers, or ends with none left.
+pub fn drop_session_guild(conn: &mut Connection, discord_user_id: &str, guild_id: i64) -> Result<(), OpError> {
+    conn.transaction(|conn| {
+        let tokens: Vec<String> = schema::web_sessions::table
+            .filter(schema::web_sessions::discord_user_id.eq(discord_user_id))
+            .select(schema::web_sessions::token)
+            .load(conn)?;
+        diesel::delete(
+            schema::web_session_guilds::table
+                .filter(schema::web_session_guilds::token.eq_any(&tokens))
+                .filter(schema::web_session_guilds::guild_id.eq(guild_id)),
+        )
+        .execute(conn)?;
+        let stranded: Vec<String> = schema::web_sessions::table
+            .filter(schema::web_sessions::token.eq_any(&tokens))
+            .filter(schema::web_sessions::guild_id.eq(guild_id))
+            .select(schema::web_sessions::token)
+            .load(conn)?;
+        for token in stranded {
+            let next = schema::web_session_guilds::table
+                .inner_join(
+                    schema::memberships::table
+                        .on(schema::memberships::guild_id.eq(schema::web_session_guilds::guild_id)),
+                )
+                .inner_join(schema::users::table.on(schema::users::id.eq(schema::memberships::user_id)))
+                .filter(schema::web_session_guilds::token.eq(&token))
+                .filter(schema::users::discord_id.eq(discord_user_id))
+                .order(schema::web_session_guilds::guild_id.asc())
+                .select((schema::web_session_guilds::guild_id, schema::memberships::id))
+                .first::<(i64, i64)>(conn)
+                .optional()?;
+            let session = schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token));
+            match next {
+                Some((next_guild, membership_id)) => {
+                    diesel::update(session)
+                        .set((
+                            schema::web_sessions::guild_id.eq(next_guild),
+                            schema::web_sessions::membership_id.eq(membership_id),
+                        ))
+                        .execute(conn)?;
+                }
+                None => {
+                    diesel::delete(session).execute(conn)?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+pub fn add_session_guild(conn: &mut Connection, token: &str, guild_id: i64) -> Result<(), OpError> {
+    diesel::insert_into(schema::web_session_guilds::table)
+        .values(&NewSessionGuild { token, guild_id })
+        .on_conflict_do_nothing()
+        .execute(conn)?;
+    Ok(())
 }
 
 pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
@@ -2211,6 +2421,9 @@ mod tests {
                 "20261021090000".to_string(),
                 "20261024090000".to_string(),
                 "20261024120000".to_string(),
+                "20261026090000".to_string(),
+                "20261026100000".to_string(),
+                "20261026110000".to_string(),
             ]
         );
     }
@@ -2239,5 +2452,126 @@ mod tests {
         replace_discord_roles(&mut conn, 1, 1, &[]).unwrap();
         let person = membership(&mut conn, 1).unwrap().unwrap();
         assert!(membership_role_ids(&mut conn, &person).unwrap().is_empty());
+    }
+
+    fn two_servers() -> Connection {
+        let mut conn = open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'One', 'UTC', '10'), (2, 'Two', 'UTC', '20');
+            INSERT INTO users (discord_id) VALUES ('u1');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, false FROM users WHERE discord_id = 'u1'
+            UNION ALL
+            SELECT 2, id, 2, 'Nell', 'nell', '#112233', true, false FROM users WHERE discord_id = 'u1';
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_session_keeps_its_discord_grant() {
+        let mut conn = two_servers();
+        let grant = DiscordGrant {
+            access: "access".into(),
+            refresh: "refresh".into(),
+            expires_at: Utc::now(),
+        };
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], Some(&grant)).unwrap();
+        let stored = web_session(&mut conn, "t").unwrap().unwrap().grant.unwrap();
+        assert_eq!(stored.access, "access");
+        assert_eq!(stored.refresh, "refresh");
+
+        set_session_grant(&mut conn, "t", None).unwrap();
+        assert!(web_session(&mut conn, "t").unwrap().unwrap().grant.is_none());
+    }
+
+    #[test]
+    fn replacing_servers_moves_off_one_the_member_left() {
+        let mut conn = two_servers();
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None).unwrap();
+
+        replace_session_guilds(&mut conn, "t", &[1, 2], (1, 1)).unwrap();
+        let session = web_session(&mut conn, "t").unwrap().unwrap();
+        assert_eq!(session.guilds, vec![1, 2]);
+        assert_eq!(session.guild_id, 1);
+
+        replace_session_guilds(&mut conn, "t", &[2], (2, 2)).unwrap();
+        let session = web_session(&mut conn, "t").unwrap().unwrap();
+        assert_eq!(session.guilds, vec![2]);
+        assert_eq!((session.guild_id, session.membership_id), (2, 2));
+    }
+
+    #[test]
+    fn a_new_server_is_offered_to_sessions_without_it() {
+        let mut conn = two_servers();
+        insert_web_session(&mut conn, "a", "u1", "Nell", 1, 1, &[1], None).unwrap();
+        insert_web_session(&mut conn, "b", "u1", "Nell", 1, 1, &[1, 2], None).unwrap();
+
+        let waiting = sessions_without_guild(&mut conn, 2, None).unwrap();
+        assert_eq!(waiting, vec![("a".into(), "u1".into(), "Nell".into())]);
+        assert!(sessions_without_guild(&mut conn, 2, Some("u2")).unwrap().is_empty());
+
+        add_session_guild(&mut conn, "a", 2).unwrap();
+        add_session_guild(&mut conn, "a", 2).unwrap();
+        assert_eq!(web_session(&mut conn, "a").unwrap().unwrap().guilds, vec![1, 2]);
+        assert!(sessions_without_guild(&mut conn, 2, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn leaving_a_server_takes_it_out_of_the_members_sessions() {
+        let mut conn = two_servers();
+        insert_web_session(&mut conn, "both", "u1", "Nell", 1, 1, &[1, 2], None).unwrap();
+        insert_web_session(&mut conn, "only", "u1", "Nell", 1, 1, &[1], None).unwrap();
+
+        drop_session_guild(&mut conn, "u1", 1).unwrap();
+        let both = web_session(&mut conn, "both").unwrap().unwrap();
+        assert_eq!(both.guilds, vec![2]);
+        assert_eq!((both.guild_id, both.membership_id), (2, 2));
+        assert!(web_session(&mut conn, "only").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_role_stored_twice_is_folded_into_one() {
+        let mut conn = two_servers();
+        conn.revert_last_migration(MIGRATIONS).unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (81, 1, 'raids', 'text', 1);
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES
+              (91, 1, 'Raider', '#112233', '700'), (92, 1, 'Raiders', '#112233', '700'), (93, 1, 'Healer', '#112233', '701');
+            INSERT INTO membership_roles (membership_id, role_id) VALUES (1, 91), (1, 92), (2, 92);
+            INSERT INTO permission_roles (guild_id, kind, role_id) VALUES (1, 'event', 92);
+            INSERT INTO event_templates (id, guild_id, channel_id, title, duration_minutes, created_at, mention_role_ids, restrict_role_ids)
+            VALUES (95, 1, 81, 'Raid', 60, now(), '{92,93,91}', '{93}');
+            ",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+
+        let ids: Vec<i64> = schema::roles::table
+            .order(schema::roles::id.asc())
+            .select(schema::roles::id)
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(ids, vec![91, 93]);
+        let held: Vec<(i64, i64)> = schema::membership_roles::table
+            .order(schema::membership_roles::membership_id.asc())
+            .select((schema::membership_roles::membership_id, schema::membership_roles::role_id))
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(held, vec![(1, 91), (2, 91)]);
+        let granted: Vec<i64> = schema::permission_roles::table
+            .select(schema::permission_roles::role_id)
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(granted, vec![91]);
+        let (mention, restrict): (Vec<i64>, Vec<i64>) = schema::event_templates::table
+            .select((schema::event_templates::mention_role_ids, schema::event_templates::restrict_role_ids))
+            .first(&mut conn)
+            .unwrap();
+        assert_eq!(mention, vec![91, 93]);
+        assert_eq!(restrict, vec![93]);
     }
 }

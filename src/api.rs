@@ -68,7 +68,7 @@ impl Outcome {
 pub fn viewer(conn: &mut Connection, headers: &HeaderMap) -> Option<Viewer> {
     let token = cookie(headers, "marian_session")?;
     let row = store::web_session(conn, &token).ok()??;
-    let fresh = Utc::now() - row.created_at < Duration::days(30);
+    let fresh = Utc::now() - row.created_at < Duration::days(store::SESSION_DAYS);
     if !fresh {
         let _ = store::delete_web_session(conn, &token);
         return None;
@@ -491,7 +491,7 @@ pub fn events(
         .collect();
     let options = store::options_by_event(conn, &shown)?;
     let signups = store::signups_by_event(conn, &shown)?;
-    let channels: HashMap<i64, String> = store::list_channels(conn, viewer.guild_id)?
+    let channels: HashMap<i64, String> = store::all_channels(conn, viewer.guild_id)?
         .into_iter()
         .map(|channel| (channel.id, channel.name))
         .collect();
