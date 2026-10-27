@@ -1374,9 +1374,19 @@ fn answer_next(
         }
         "4" => {
             let id = logic::duplicate_event(conn, event_id, membership_id)?;
-            just(next_card(Some(&format!(
-                "Duplicated it. The copy is event {id}, one week later."
-            ))))
+            // The copy goes by its public id; the row number stays on the server.
+            let copy = store::event(conn, id)?.ok_or(OpError::NotFound)?;
+            let guild = store::guild(conn, copy.guild_id)?.ok_or(OpError::NotFound)?;
+            let path = event_path(&guild, &copy.public_id);
+            let line = if public_url.trim().is_empty() {
+                format!("Duplicated it, one week later. Open {path}.")
+            } else {
+                format!(
+                    "Duplicated it, one week later. [Open the copy]({}{path})",
+                    public_url.trim().trim_end_matches('/')
+                )
+            };
+            just(next_card(Some(&line)))
         }
         _ => just(next_card(None)),
     }
@@ -2692,5 +2702,23 @@ mod tests {
             "[Click here to view the event](https://discord.com/channels/4242/100/555)"
         );
         assert_eq!(sent[1].title.as_deref(), Some("What would you like to do?"));
+
+        let duplicated = only(answer_event_dm(&mut conn, "u1", "4", "https://marian.example.com"));
+        let copy = store::list_events(&mut conn, 1)
+            .unwrap()
+            .into_iter()
+            .find(|other| other.id != event.id)
+            .expect("a copy");
+        assert!(
+            duplicated.body.starts_with(&format!(
+                "Duplicated it, one week later. [Open the copy](https://marian.example.com/servers/4242/events/{})",
+                copy.public_id
+            )),
+            "{duplicated}"
+        );
+        assert!(
+            !duplicated.body.contains(&format!("event {}", copy.id)),
+            "the row number stays on the server: {duplicated}"
+        );
     }
 }
