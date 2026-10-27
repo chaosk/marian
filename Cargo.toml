@@ -55,6 +55,8 @@ tracing = "0.1"
 tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 uuid = { version = "1.28.0", features = ["v7", "serde"] }
+fluent-bundle = "0.16"
+unic-langid = { version = "0.9", features = ["macros"] }
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["trace", "testing"] }

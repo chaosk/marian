@@ -70,7 +70,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     let settings = store::settings(conn, input.guild_id)?;
     let actor = must_membership(conn, input.actor_id)?;
     if actor.guild_id != input.guild_id {
-        return Err(OpError::message("That person isn't in this server."));
+        return Err(OpError::from(crate::msg!("err-person-elsewhere")));
     }
     let roles = store::membership_role_ids(conn, &actor)?;
     let existing = if let Some(id) = input.id {
@@ -79,50 +79,36 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
             return Err(OpError::NotFound);
         }
         if !can_edit(&actor, &event, &settings, &roles) {
-            return Err(OpError::message(
-                "You can edit events you created, or any event if you run the server.",
-            ));
+            return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
         if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
-            return Err(OpError::message(
-                "That date is already closed. Duplicate it if you need another one.",
-            ));
+            return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         Some(event)
     } else {
         if !can_create(&actor, &settings, &roles) {
-            return Err(OpError::message(
-                "You don't have the role required to create events.",
-            ));
+            return Err(OpError::from(crate::msg!("err-no-event-role")));
         }
         None
     };
 
     let title = input.title.trim().to_string();
     if title.is_empty() || title.chars().count() > 120 {
-        return Err(OpError::message(
-            "Give the event a title, up to 120 characters.",
-        ));
+        return Err(OpError::from(crate::msg!("err-title-length")));
     }
     let description = input.description.trim().to_string();
     if description.chars().count() > 2000 {
-        return Err(OpError::message(
-            "Keep the description under 2000 characters.",
-        ));
+        return Err(OpError::from(crate::msg!("err-description-length")));
     }
     let location = input.location.trim().to_string();
     if location.chars().count() > 200 {
-        return Err(OpError::message(
-            "Keep the location under 200 characters.",
-        ));
+        return Err(OpError::from(crate::msg!("err-location-length")));
     }
     if !(15..=1440).contains(&input.duration_minutes) {
-        return Err(OpError::message(
-            "Duration needs to be between 15 minutes and 24 hours.",
-        ));
+        return Err(OpError::from(crate::msg!("err-duration")));
     }
     if !valid_color(&input.color) {
-        return Err(OpError::message("Pick one of the event colors."));
+        return Err(OpError::from(crate::msg!("err-color")));
     }
     let image_url = match input
         .image_url
@@ -137,21 +123,17 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
             Some(url.to_string())
         }
         Some(_) => {
-            return Err(OpError::message(
-                "Image links need to start with http:// or https://.",
-            ))
+            return Err(OpError::from(crate::msg!("err-image-link")))
         }
     };
     let channel = must_channel(conn, input.channel_id)?;
     if channel.guild_id != input.guild_id {
-        return Err(OpError::message("Pick a channel from this server."));
+        return Err(OpError::from(crate::msg!("err-channel-elsewhere")));
     }
     if let Some(role_id) = input.attendee_role_id {
         let role = must_role(conn, role_id)?;
         if role.guild_id != input.guild_id {
-            return Err(OpError::message(
-                "The attendee role isn't from this server.",
-            ));
+            return Err(OpError::from(crate::msg!("err-attendee-role-elsewhere")));
         }
     }
     for role_id in input
@@ -161,14 +143,12 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     {
         let role = must_role(conn, *role_id)?;
         if role.guild_id != input.guild_id {
-            return Err(OpError::message("A selected role isn't from this server."));
+            return Err(OpError::from(crate::msg!("err-selected-role-elsewhere")));
         }
     }
     if let Some(cutoff) = input.cutoff_at {
         if cutoff > input.starts_at {
-            return Err(OpError::message(
-                "The signup cutoff has to be before the event starts.",
-            ));
+            return Err(OpError::from(crate::msg!("err-cutoff-late")));
         }
     }
 
@@ -191,7 +171,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         });
     }
     if reminders.len() > 5 {
-        return Err(OpError::message("An event can have up to 5 reminders."));
+        return Err(OpError::from(crate::msg!("err-reminders-many")));
     }
 
     if let Some(repeat) = &input.repeat {
@@ -199,36 +179,28 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
             repeat.cadence.as_str(),
             "daily" | "weekly" | "biweekly" | "monthly"
         ) {
-            return Err(OpError::message(
-                "Repeat daily, weekly, every two weeks, or monthly.",
-            ));
+            return Err(OpError::from(crate::msg!("err-repeat-values")));
         }
         if let Some(max) = repeat.max_occurrences {
             if max < 2 {
-                return Err(OpError::message(
-                    "A series needs at least 2 dates. Leave the count empty to keep going.",
-                ));
+                return Err(OpError::from(crate::msg!("err-series-two-dates")));
             }
         }
         if let Some(end) = repeat.end_on {
             if end < input.starts_at {
-                return Err(OpError::message(
-                    "The series end date is before the first event.",
-                ));
+                return Err(OpError::from(crate::msg!("err-series-end-early")));
             }
         }
     }
     if matches!(input.action, SaveAction::Schedule) {
         let post_at = input
             .post_at
-            .ok_or_else(|| OpError::message("Pick a time for Marian to post this."))?;
+            .ok_or_else(|| OpError::from(crate::msg!("err-post-time")))?;
         if post_at <= Utc::now() {
-            return Err(OpError::message(
-                "That post time is already past. Post it now, or pick a later time.",
-            ));
+            return Err(OpError::from(crate::msg!("err-post-time-past")));
         }
         if post_at >= input.starts_at {
-            return Err(OpError::message("Post the event before it starts."));
+            return Err(OpError::from(crate::msg!("err-post-before-start")));
         }
     }
 
@@ -270,14 +242,10 @@ pub fn save_options(
         let settings = store::settings(tx, event.guild_id)?;
         let roles = store::membership_role_ids(tx, &actor)?;
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
-            return Err(OpError::message(
-                "You can edit events you created, or any event if you run the server.",
-            ));
+            return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
         if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
-            return Err(OpError::message(
-                "That date is already closed. Duplicate it if you need another one.",
-            ));
+            return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let options = clean_types(tx, event.guild_id, input)?;
         known_options(tx, &event, &options)?;
@@ -298,14 +266,10 @@ pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInp
             continue;
         }
         if !(1..=10_080).contains(&rem.offset_minutes) {
-            return Err(OpError::message(
-                "Reminders need to be between 1 minute and 7 days out.",
-            ));
+            return Err(OpError::from(crate::msg!("err-reminder-range")));
         }
         if rem.message.chars().count() > 300 {
-            return Err(OpError::message(
-                "Keep reminder notes under 300 characters.",
-            ));
+            return Err(OpError::from(crate::msg!("err-reminder-note")));
         }
         reminders.push(ReminderInput {
             offset_minutes: rem.offset_minutes,
@@ -313,7 +277,7 @@ pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInp
         });
     }
     if reminders.len() > 5 {
-        return Err(OpError::message("An event can have up to 5 reminders."));
+        return Err(OpError::from(crate::msg!("err-reminders-many")));
     }
     Ok(reminders)
 }
@@ -322,10 +286,10 @@ pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInp
 pub(super) fn clean_extras(conn: &mut Connection, guild_id: i64, extras: &EventExtras) -> Result<EventExtras, OpError> {
     let location = extras.location.trim().to_string();
     if location.chars().count() > 200 {
-        return Err(OpError::message("Keep the location under 200 characters."));
+        return Err(OpError::from(crate::msg!("err-location-length")));
     }
     if !valid_color(&extras.color) {
-        return Err(OpError::message("Pick one of the event colors."));
+        return Err(OpError::from(crate::msg!("err-color")));
     }
     for role_id in extras
         .mention_role_ids
@@ -334,11 +298,11 @@ pub(super) fn clean_extras(conn: &mut Connection, guild_id: i64, extras: &EventE
         .chain(extras.attendee_role_id.iter())
     {
         if must_role(conn, *role_id)?.guild_id != guild_id {
-            return Err(OpError::message("A selected role isn't from this server."));
+            return Err(OpError::from(crate::msg!("err-selected-role-elsewhere")));
         }
     }
     if extras.cutoff_offset_minutes.is_some_and(|mins| mins < 0) {
-        return Err(OpError::message("Signups have to close before the event starts."));
+        return Err(OpError::from(crate::msg!("err-signups-close-late")));
     }
     let options = clean_types(conn, guild_id, &extras.options)?
         .into_iter()
@@ -661,7 +625,7 @@ fn transition(
         | ("scheduled", SaveAction::Save) => {
             let post_at = input
                 .post_at
-                .ok_or_else(|| OpError::message("Pick a time for Marian to post this."))?;
+                .ok_or_else(|| OpError::from(crate::msg!("err-post-time")))?;
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
                     schema::events::status.eq("scheduled"),
@@ -686,7 +650,7 @@ fn transition(
                 .execute(conn)?;
         }
         _ => {
-            return Err(OpError::message("That event can't take this change."));
+            return Err(OpError::from(crate::msg!("err-event-change")));
         }
     }
     Ok(())

@@ -173,21 +173,17 @@ pub(super) fn retune_series(
 ) -> Result<(), OpError> {
     let series = must_series(conn, series_id)?;
     if !series.active {
-        return Err(OpError::message("This series has ended."));
+        return Err(OpError::from(crate::msg!("err-series-ended")));
     }
     if !matches!(
         repeat.cadence.as_str(),
         "daily" | "weekly" | "biweekly" | "monthly"
     ) {
-        return Err(OpError::message(
-            "Repeat daily, weekly, every two weeks, or monthly.",
-        ));
+        return Err(OpError::from(crate::msg!("err-repeat-values")));
     }
     if let Some(max) = repeat.max_occurrences {
         if max < 2 {
-            return Err(OpError::message(
-                "A series needs at least 2 dates. Leave the count empty to keep going.",
-            ));
+            return Err(OpError::from(crate::msg!("err-series-two-dates")));
         }
     }
     let guild = must_guild(conn, series.guild_id)?;
@@ -195,9 +191,7 @@ pub(super) fn retune_series(
     let anchor = series.anchor_start;
     if let Some(end) = repeat.end_on {
         if end < anchor {
-            return Err(OpError::message(
-                "The series end date is before the first event.",
-            ));
+            return Err(OpError::from(crate::msg!("err-series-end-early")));
         }
     }
     let cadence_changed = series.cadence != repeat.cadence;

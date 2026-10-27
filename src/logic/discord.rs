@@ -8,7 +8,9 @@ use super::db::{must_channel, must_event, must_guild, trim_chars};
 use super::model::*;
 use crate::clock;
 use crate::error::OpError;
+use crate::i18n::{self, Lang};
 use crate::schema;
+use crate::tr;
 use crate::store::{self, Channel, Connection, Membership, Role};
 
 pub enum Attendance {
@@ -77,7 +79,12 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         message_id,
         open_thread: event.thread_enabled && thread_discord_id.is_none(),
         thread_discord_id,
-        thread_name: event_thread_name(&event.title, event.starts_at, &guild.timezone),
+        thread_name: event_thread_name(
+            i18n::lang_of(conn, event.guild_id),
+            &event.title,
+            event.starts_at,
+            &guild.timezone,
+        ),
         thread_add,
         thread_remove,
         role_id: role.as_ref().map(|role| role.id),
@@ -97,12 +104,13 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
 
 /// Discord thread title: the event name, then its date in the guild's zone.
 /// Discord allows 100 characters, so a long name is shortened and the date stays.
-pub fn event_thread_name(title: &str, starts_at: DateTime<Utc>, timezone: &str) -> String {
+pub fn event_thread_name(lang: Lang, title: &str, starts_at: DateTime<Utc>, timezone: &str) -> String {
     let date = clock::zone(timezone)
         .ok()
-        .map(|tz| clock::format_day(starts_at.with_timezone(&tz).date_naive()));
+        .map(|tz| i18n::format_day(lang, starts_at.with_timezone(&tz).date_naive()));
+    let fallback = tr!(lang, "post-event-fallback");
     let title = title.trim();
-    let title = if title.is_empty() { "Event" } else { title };
+    let title = if title.is_empty() { fallback.as_str() } else { title };
     let Some(date) = date else {
         return trim_chars(title, 100);
     };
@@ -118,7 +126,8 @@ pub(super) fn stored_thread_name(
     let timezone = store::guild(conn, event.guild_id)?
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
-    Ok(event_thread_name(&event.title, event.starts_at, &timezone))
+    let lang = i18n::lang_of(conn, event.guild_id);
+    Ok(event_thread_name(lang, &event.title, event.starts_at, &timezone))
 }
 
 fn id_diff(desired: &[String], applied: &[String]) -> (Vec<String>, Vec<String>) {
@@ -139,13 +148,15 @@ fn role_color(color: &str) -> u32 {
 /// "Delete event". A posted event is cancelled and its post is removed. Anything else
 /// that can still be deleted is removed outright.
 pub fn delete_confirm_body(
+    lang: Lang,
     title: &str,
     starts_at: DateTime<Utc>,
     url: Option<&str>,
     posted: bool,
 ) -> String {
+    let fallback = tr!(lang, "post-event-fallback");
     let name = title.trim();
-    let name = if name.is_empty() { "Event" } else { name };
+    let name = if name.is_empty() { fallback.as_str() } else { name };
     let label = trim_chars(&name.replace(['\n', '\r'], " "), 200);
     let label = label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
     let head = match url.map(str::trim).filter(|url| !url.is_empty()) {
@@ -154,9 +165,9 @@ pub fn delete_confirm_body(
     };
     let when = format!(" · <t:{}:R>", starts_at.timestamp());
     let consequence = if posted {
-        "This removes the Discord post. The event is marked cancelled."
+        tr!(lang, "post-delete-posted")
     } else {
-        "This deletes the event."
+        tr!(lang, "post-delete-draft")
     };
     format!("{head}{when}\n\n{consequence}")
 }
@@ -230,6 +241,7 @@ pub fn discord_view(
     };
     let guild = must_guild(conn, event.guild_id)?;
     let settings = store::settings(conn, event.guild_id)?;
+    let lang = Lang::from_code(&settings.language).unwrap_or_default();
     let start = event.starts_at;
     let end = start + chrono::Duration::minutes(event.duration_minutes);
     let mut body = String::new();
@@ -239,10 +251,11 @@ pub fn discord_view(
     }
     let location = event.location.trim();
     if !location.is_empty() {
-        body.push_str(&format!("**Location**\n📍 {location}\n"));
+        body.push_str(&format!("**{}**\n📍 {location}\n", tr!(lang, "post-location")));
     }
     body.push_str(&format!(
-        "**Time**\n<t:{}:F> - <t:{}:t>\n",
+        "**{}**\n<t:{}:F> - <t:{}:t>\n",
+        tr!(lang, "post-time"),
         start.timestamp(),
         end.timestamp()
     ));
@@ -250,13 +263,14 @@ pub fn discord_view(
     let web = web_event_url(public_url, guild.discord_id.as_deref(), &event.public_id);
     match web.as_deref() {
         Some(url) => body.push_str(&format!(
-            "[+]({plus}) · [View on web]({url})\n",
+            "[+]({plus}) · [{}]({url})\n",
+            tr!(lang, "post-view-on-web"),
         )),
         None => body.push_str(&format!("[+]({plus})\n")),
     }
     body.push_str(&format!("🕐 <t:{}:R>", start.timestamp()));
     if event.status != "posted" {
-        body.push_str(&format!("\n\n_{}_", status_label(&event.status)));
+        body.push_str(&format!("\n\n_{}_", status_text(lang, &event.status)));
     }
     let options = store::options_for(conn, &event)?;
     let signups = store::signups_for(conn, &event)?;
@@ -290,7 +304,7 @@ pub fn discord_view(
             );
         }
         if waiting > 0 {
-            lines.push(format!("{waiting} waiting"));
+            lines.push(tr!(lang, "post-waiting", count = waiting));
         }
         let value = if lines.is_empty() {
             "-".to_string()
@@ -304,7 +318,12 @@ pub fn discord_view(
         });
         buttons.push(DiscordButton {
             role: ButtonRole::Signup(opt.public_id),
-            label: String::new(),
+            // An option without an emoji still needs something on its button.
+            label: if opt.emoji.trim().is_empty() {
+                tr!(lang, "post-option-fallback")
+            } else {
+                String::new()
+            },
             emoji: opt.emoji.clone(),
             tone: ButtonTone::Secondary,
             disabled: closed,
@@ -312,14 +331,14 @@ pub fn discord_view(
     }
     buttons.push(DiscordButton {
         role: ButtonRole::Edit,
-        label: "Edit".into(),
+        label: tr!(lang, "post-edit"),
         emoji: String::new(),
         tone: ButtonTone::Primary,
         disabled: false,
     });
     buttons.push(DiscordButton {
         role: ButtonRole::Delete,
-        label: "Delete".into(),
+        label: tr!(lang, "post-delete"),
         emoji: String::new(),
         tone: ButtonTone::Danger,
         disabled: false,
@@ -351,7 +370,7 @@ pub fn discord_view(
         body,
         color: u32::from_str_radix(event.color.trim_start_matches('#'), 16).unwrap_or(0x1e3a6e),
         fields,
-        footer: format!("Created by {creator}"),
+        footer: tr!(lang, "post-created-by", name = creator),
         image_url,
         buttons,
         mention_everyone: event.mention_everyone,
@@ -396,14 +415,10 @@ pub fn channel_reverse_plan(
     discord_channel_id: &str,
 ) -> Result<ChannelReverse, OpError> {
     let Some(channel) = store::channel_by_discord(conn, guild_id, discord_channel_id)? else {
-        return Err(OpError::message(
-            "Sort reverses the posts in an event channel.",
-        ));
+        return Err(OpError::from(crate::msg!("err-sort-where")));
     };
     if channel.kind != "event" {
-        return Err(OpError::message(
-            "Sort reverses the posts in an event channel.",
-        ));
+        return Err(OpError::from(crate::msg!("err-sort-where")));
     }
     let mut posts = Vec::new();
     for event in store::list_events(conn, guild_id)? {
@@ -424,9 +439,7 @@ pub fn channel_reverse_plan(
     }
     posts.sort_by_key(|post| post.0);
     if posts.len() < 2 {
-        return Err(OpError::message(
-            "This event channel has nothing to reverse.",
-        ));
+        return Err(OpError::from(crate::msg!("err-sort-nothing")));
     }
     let messages = posts.iter().map(|post| post.2.clone()).collect();
     let repost = posts.iter().rev().map(|post| post.1).collect();
@@ -1150,6 +1163,7 @@ mod tests {
     fn delete_confirm_names_the_event_and_says_what_delete_does() {
         let when = clock::parse_stamp("2026-10-16T14:00:00Z").unwrap();
         let posted = delete_confirm_body(
+            Lang::En,
             "Test",
             when,
             Some("https://marian.example.com/servers/1/events/abc"),
@@ -1162,7 +1176,7 @@ mod tests {
             "{posted}"
         );
         assert!(posted.contains(":R>\n\nThis removes the Discord post. The event is marked cancelled."));
-        let draft = delete_confirm_body("Shore", when, None, false);
+        let draft = delete_confirm_body(Lang::En, "Shore", when, None, false);
         assert!(draft.starts_with("Shore · <t:"), "{draft}");
         assert!(draft.contains("This deletes the event."));
     }
@@ -1277,6 +1291,20 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         assert!(event_channel_purge(&mut conn, 1).unwrap().is_none());
+    }
+}
+
+/// An event's status as a post shows it, in `lang`.
+pub fn status_text(lang: Lang, status: &str) -> String {
+    match status {
+        "draft" => tr!(lang, "status-draft"),
+        "scheduled" => tr!(lang, "status-scheduled"),
+        "posted" => tr!(lang, "status-posted"),
+        "archived" => tr!(lang, "status-archived"),
+        "cancelled" => tr!(lang, "status-cancelled"),
+        "skipped" => tr!(lang, "status-skipped"),
+        "failed" => tr!(lang, "status-failed"),
+        _ => tr!(lang, "status-unknown"),
     }
 }
 

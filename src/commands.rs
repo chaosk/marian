@@ -9,6 +9,8 @@ use diesel::upsert::excluded;
 
 use crate::clock;
 use crate::error::OpError;
+use crate::i18n::{self, Lang};
+use crate::tr;
 use crate::logic::{
     self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction,
 };
@@ -60,7 +62,7 @@ fn find_event(conn: &mut Connection, guild_id: i64, token: &str) -> Result<Event
             }
         }
     }
-    Err(OpError::message("That event isn't in this server."))
+    Err(OpError::from(crate::msg!("err-event-elsewhere")))
 }
 
 /// Discord URL of the posted event message, once Discord has assigned an id.
@@ -91,10 +93,9 @@ pub fn posted_message_url(conn: &mut Connection, event_id: i64) -> Result<Option
 }
 
 pub fn link_created_event(replies: &mut [DmReply], message_url: &str) {
-    let body = format!("[Click here to view the event]({message_url})");
     for reply in replies {
-        if reply.title.as_deref() == Some("Event has been created!") {
-            reply.body = body.clone();
+        if let Some(lang) = reply.created {
+            reply.body = tr!(lang, "dm-view-event", url = message_url);
         }
     }
 }
@@ -143,12 +144,10 @@ fn dispatch(
         "settings" => cmd_settings(conn, guild_id, membership_id, &pos, &map),
         "signup_options" => cmd_signup_options(conn, guild_id, membership_id, &pos, &map),
         "signup_presets" => cmd_presets(conn, guild_id, membership_id, &pos, &map),
-        "channel" => Err(OpError::message(
-            "Create the channel from /channel in Discord or the channels page.",
-        )),
+        "channel" => Err(OpError::from(crate::msg!("err-channel-where"))),
         "google" => cmd_google(conn, guild_id, membership_id, &pos, &map),
-        "sort" => Ok("Run /sort inside an event channel. It reverses the order of the posts there.".into()),
-        other => Err(OpError::message(format!("Unknown command /{other}. Try /help."))),
+        "sort" => Ok(tr!(Lang::En, "reply-sort-where")),
+        other => Err(OpError::from(crate::msg!("err-unknown-command", command = other))),
     }
 }
 
@@ -175,14 +174,10 @@ fn cmd_event(
     rest: &str,
 ) -> Result<String, OpError> {
     if !rest.trim().is_empty() {
-        return Err(OpError::message(
-            "/event doesn't take options. Run /event and answer the questions.",
-        ));
+        return Err(OpError::from(crate::msg!("err-event-no-options")));
     }
     if store::list_channels(conn, guild_id)?.is_empty() {
-        return Err(OpError::message(
-            "Create a channel before posting an event.",
-        ));
+        return Err(OpError::from(crate::msg!("err-no-channels")));
     }
     let discord_user_id = prompt_key(conn, membership_id)?;
     diesel::insert_into(schema::event_prompts::table)
@@ -212,7 +207,7 @@ fn cmd_event(
             schema::event_prompts::draft.eq(None::<serde_json::Value>),
         ))
         .execute(conn)?;
-    Ok(where_to_post(conn, guild_id, &None, &None)?.to_string())
+    Ok(where_to_post(conn, guild_id, &None, &None, Lang::En)?.to_string())
 }
 
 fn prompt_key(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
@@ -221,7 +216,7 @@ fn prompt_key(conn: &mut Connection, membership_id: i64) -> Result<String, OpErr
 
 fn desk_answer(conn: &mut Connection, membership_id: i64, line: &str) -> Result<Option<String>, OpError> {
     let key = prompt_key(conn, membership_id)?;
-    let Some(replies) = answer_event_dm(conn, &key, line, "")? else {
+    let Some(replies) = answer_event_dm_in(conn, &key, line, "", Some(Lang::En))? else {
         return Ok(None);
     };
     Ok(Some(
@@ -237,6 +232,9 @@ fn desk_answer(conn: &mut Connection, membership_id: i64, line: &str) -> Result<
 pub struct DmReply {
     pub title: Option<String>,
     pub body: String,
+    /// Set on the card that announces a new event, in the language it was
+    /// written in, so its link can point at the Discord post once there is one.
+    pub created: Option<Lang>,
 }
 
 impl DmReply {
@@ -244,6 +242,7 @@ impl DmReply {
         Self {
             title: None,
             body: body.into(),
+            created: None,
         }
     }
 
@@ -251,8 +250,20 @@ impl DmReply {
         Self {
             title: Some(title.into()),
             body: body.into(),
+            created: None,
         }
     }
+}
+
+/// Words a DM answer may be, in English or Polish, whatever the server's language.
+const CANCEL: [&str; 2] = ["cancel", "anuluj"];
+const NONE: [&str; 3] = ["none", "brak", "nic"];
+const NOW: [&str; 2] = ["now", "teraz"];
+const ZONE: [&str; 2] = ["timezone", "strefa"];
+const EVERYONE: [&str; 2] = ["everyone", "wszyscy"];
+
+fn said(text: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| text.trim().eq_ignore_ascii_case(word))
 }
 
 impl std::fmt::Display for DmReply {
@@ -271,17 +282,14 @@ pub fn start_event_dm(
     discord_user_id: &str,
     source_channel: &str,
     source_discord: Option<&str>,
+    lang: Lang,
 ) -> Result<DmReply, OpError> {
     let channels = store::list_channels(conn, guild_id)?;
     if channels.is_empty() {
-        return Err(OpError::message(
-            "Create a channel before posting an event.",
-        ));
+        return Err(OpError::from(crate::msg!("err-no-channels")));
     }
     if store::channel_by_name(conn, guild_id, source_channel)?.is_none() {
-        return Err(OpError::message(
-            "Create a channel before posting an event.",
-        ));
+        return Err(OpError::from(crate::msg!("err-no-channels")));
     }
     diesel::insert_into(schema::event_prompts::table)
         .values(&NewEventPrompt {
@@ -314,7 +322,7 @@ pub fn start_event_dm(
         .execute(conn)?;
     let source = Some(source_channel.to_string());
     let discord = source_discord.map(str::to_string);
-    where_to_post(conn, guild_id, &source, &discord)
+    where_to_post(conn, guild_id, &source, &discord, lang)
 }
 
 pub fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
@@ -326,11 +334,23 @@ pub fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(
     Ok(())
 }
 
+/// Answers the next question of someone's event DM, in their server's language.
 pub fn answer_event_dm(
     conn: &mut Connection,
     discord_user_id: &str,
     text: &str,
     public_url: &str,
+) -> Result<Option<Vec<DmReply>>, OpError> {
+    answer_event_dm_in(conn, discord_user_id, text, public_url, None)
+}
+
+/// As `answer_event_dm`, in `lang` when given.
+fn answer_event_dm_in(
+    conn: &mut Connection,
+    discord_user_id: &str,
+    text: &str,
+    public_url: &str,
+    lang: Option<Lang>,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let row = schema::event_prompts::table
         .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
@@ -387,12 +407,11 @@ pub fn answer_event_dm(
     let mut draft = draft
         .and_then(|raw| serde_json::from_value::<EventDraft>(raw).ok())
         .unwrap_or_default();
+    let lang = lang.unwrap_or_else(|| i18n::lang_of(conn, guild_id));
     let text = text.trim();
-    if text.eq_ignore_ascii_case("cancel") {
+    if said(text, &CANCEL) {
         cancel_event_dm(conn, discord_user_id)?;
-        return just(DmReply::plain(
-            "Cancelled. Run /event in the server when you want to try again.",
-        ));
+        return just(DmReply::plain(tr!(lang, "dm-cancelled")));
     }
     match step.as_str() {
         "channel" => answer_channel(
@@ -402,21 +421,19 @@ pub fn answer_event_dm(
             text,
             source_channel.as_deref(),
             source_discord.as_deref(),
+            lang,
         ),
         "channel_other" => {
             let others = other_channels(conn, guild_id, source_channel.as_deref())?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(channel) = choice.and_then(|n| others.get(n - 1)) else {
-                return just(other_channel_prompt(&others));
+                return just(other_channel_prompt(&others, lang));
             };
-            just(advance_to_title(conn, discord_user_id, &channel.name)?)
+            just(advance_to_title(conn, discord_user_id, &channel.name, lang)?)
         }
         "title" => {
             if text.is_empty() || text.chars().count() > 120 {
-                return just(note(
-                    &title_card(),
-                    "Give the event a title, up to 120 characters.",
-                ));
+                return just(note(&title_card(lang), &tr!(lang, "err-title-length")));
             }
             diesel::update(
                 schema::event_prompts::table
@@ -427,52 +444,49 @@ pub fn answer_event_dm(
                 schema::event_prompts::step.eq("description"),
             ))
             .execute(conn)?;
-            just(description_card())
+            just(description_card(lang))
         }
         "description" => {
             if text.chars().count() > 2000 {
-                return just(note(
-                    &description_card(),
-                    "Keep the description under 2000 characters.",
-                ));
+                return just(note(&description_card(lang), &tr!(lang, "err-description-length")));
             }
-            draft.description = if text.eq_ignore_ascii_case("none") {
+            draft.description = if said(text, &NONE) {
                 String::new()
             } else {
                 text.to_string()
             };
             save_draft(conn, discord_user_id, "start", &draft)?;
-            just(start_card(conn, guild_id)?)
+            just(start_card(conn, guild_id, lang)?)
         }
         "timezone" => {
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(name) = choice.and_then(|n| clock::ZONES.get(n - 1)) else {
-                return just(timezone_card());
+                return just(timezone_card(lang));
             };
             diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
                 .set(schema::guilds::timezone.eq(*name))
                 .execute(conn)?;
             save_draft(conn, discord_user_id, "start", &draft)?;
-            just(start_card(conn, guild_id)?)
+            just(start_card(conn, guild_id, lang)?)
         }
         "start" => {
-            if text.eq_ignore_ascii_case("timezone") {
+            if said(text, &ZONE) {
                 save_draft(conn, discord_user_id, "timezone", &draft)?;
-                return just(timezone_card());
+                return just(timezone_card(lang));
             }
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
-    let tz = clock::zone(&guild.timezone)?;
-            let stored = if text.eq_ignore_ascii_case("now") {
+            let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+            let tz = clock::zone(&guild.timezone)?;
+            let stored = if said(text, &NOW) {
                 Some(clock::stamp(Utc::now()))
             } else if parse::parse_when(text, Utc::now(), tz).is_some() {
                 Some(text.to_string())
-    } else {
+            } else {
                 None
             };
             let Some(stored) = stored else {
                 return just(note(
-                    &start_card(conn, guild_id)?,
-                    "Marian couldn't read that time.",
+                    &start_card(conn, guild_id, lang)?,
+                    &tr!(lang, "dm-time-unreadable"),
                 ));
             };
             diesel::update(
@@ -484,20 +498,20 @@ pub fn answer_event_dm(
                 schema::event_prompts::step.eq("end"),
             ))
             .execute(conn)?;
-            just(end_card())
+            just(end_card(lang))
         }
         "end" => {
             let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
             let tz = clock::zone(&guild.timezone)?;
             let start = parse::parse_when(start_raw.as_deref().unwrap_or(""), Utc::now(), tz)
-                .ok_or_else(|| OpError::message("Marian couldn't read the start time."))?;
-            match span_minutes(text, start, tz) {
+                .ok_or_else(|| OpError::from(crate::msg!("err-start-unreadable")))?;
+            match span_minutes(text, start, tz, lang) {
                 Ok(minutes) => {
                     draft.duration_minutes = minutes;
                     save_draft(conn, discord_user_id, "repeat", &draft)?;
-                    just(repeat_card())
+                    just(repeat_card(lang))
                 }
-                Err(err) => just(note(&end_card(), &err)),
+                Err(err) => just(note(&end_card(lang), &err)),
             }
         }
         "repeat" => {
@@ -507,11 +521,11 @@ pub fn answer_event_dm(
                 "3" => Some("weekly"),
                 "4" => Some("biweekly"),
                 "5" => Some("monthly"),
-                _ => return just(repeat_card()),
+                _ => return just(repeat_card(lang)),
             };
             draft.repeat = cadence.map(str::to_string);
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
         "finish" => answer_finish(
             conn,
@@ -524,8 +538,9 @@ pub fn answer_event_dm(
             channel_name.as_deref(),
             &mut draft,
             public_url,
+            lang,
         ),
-        "signup" => answer_signup(conn, discord_user_id, guild_id, text, &mut draft),
+        "signup" => answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang),
         "signup_custom" => {
             let names: Vec<&str> = text
                 .split(',')
@@ -534,8 +549,9 @@ pub fn answer_event_dm(
                 .collect();
             if names.is_empty() || names.iter().any(|name| name.chars().count() > 80) {
                 return just(ask(
-                    "Configure signup options",
-                    "Send the option names, separated by commas.",
+                    &tr!(lang, "dm-signup-custom-title"),
+                    &tr!(lang, "dm-signup-custom-body"),
+                    lang,
                 ));
             }
             // Each name is a type from the library, added there if it is new.
@@ -547,13 +563,13 @@ pub fn answer_event_dm(
             }
             draft.types = types;
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
         "signup_preset" => {
             let presets = store::list_presets(conn, guild_id)?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(preset) = choice.and_then(|n| presets.get(n - 1)) else {
-                return just(preset_card(&presets));
+                return just(preset_card(&presets, lang));
             };
             draft.multiple = preset.multiple_signups;
             draft.types = logic::preset_types(conn, preset.id)?
@@ -561,36 +577,33 @@ pub fn answer_event_dm(
                 .map(|opt| draft_type(conn, opt.type_id))
                 .collect::<Result<_, _>>()?;
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
-        "mention" => answer_mention(conn, discord_user_id, guild_id, text, &mut draft),
+        "mention" => answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang),
         "image" => {
-            if text.eq_ignore_ascii_case("none") {
+            if said(text, &NONE) {
                 draft.image_url = None;
             } else if (text.starts_with("https://") || text.starts_with("http://"))
                 && text.len() <= 500
             {
                 draft.image_url = Some(text.to_string());
             } else {
-                return just(ask(
-                    "Add an image",
-                    "Send an http:// or https:// link, or `none` to clear it.",
-                ));
+                return just(image_card(lang));
             }
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
         "color" => {
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some((color, _)) = choice.and_then(|n| EVENT_COLORS.get(n - 1)) else {
-                return just(color_card());
+                return just(color_card(lang));
             };
             draft.color = (*color).to_string();
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
-        "restrict" => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft),
-        "role" => answer_attendee_role(conn, discord_user_id, guild_id, text, &mut draft),
+        "restrict" => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        "role" => answer_attendee_role(conn, discord_user_id, guild_id, text, &mut draft, lang),
         "cutoff" => answer_clock_field(
             conn,
             discord_user_id,
@@ -599,6 +612,7 @@ pub fn answer_event_dm(
             &mut draft,
             true,
             start_raw.as_deref(),
+            lang,
         ),
         "post" => answer_clock_field(
             conn,
@@ -608,6 +622,7 @@ pub fn answer_event_dm(
             &mut draft,
             false,
             start_raw.as_deref(),
+            lang,
         ),
         "reminder" => {
             let minutes = text
@@ -615,20 +630,17 @@ pub fn answer_event_dm(
                 .ok()
                 .filter(|n| (1..=10_080).contains(n));
             let Some(minutes) = minutes else {
-                return just(ask(
-                    "Configure reminders",
-                    "How many minutes before the start should Marian remind people? From 1 to 10080.",
-                ));
+                return just(reminder_card(lang));
             };
             draft.reminders = vec![ReminderInput {
                 offset_minutes: minutes,
                 message: String::new(),
             }];
             save_draft(conn, discord_user_id, "finish", &draft)?;
-            just(finish_card(&draft))
+            just(finish_card(&draft, lang))
         }
-        "next" => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url),
-        "respond" => answer_respond(conn, discord_user_id, membership_id, text, &draft),
+        "next" => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url, lang),
+        "respond" => answer_respond(conn, discord_user_id, membership_id, text, &draft, lang),
         _ => {
             cancel_event_dm(conn, discord_user_id)?;
             Ok(None)
@@ -710,60 +722,69 @@ fn marian_blue() -> String {
 }
 
 const EVENT_COLORS: &[(&str, &str)] = &[
-    ("#1e3a6e", "Marian blue"),
-    ("#2f6b4f", "Tide green"),
-    ("#8a6232", "Brass"),
-    ("#6b3a6b", "Plum"),
-    ("#8d3a32", "Seal red"),
-    ("#243038", "Ink"),
+    ("#1e3a6e", "color-marian-blue"),
+    ("#2f6b4f", "color-tide-green"),
+    ("#8a6232", "color-brass"),
+    ("#6b3a6b", "color-plum"),
+    ("#8d3a32", "color-seal-red"),
+    ("#243038", "color-ink"),
 ];
 
 fn just(reply: DmReply) -> Result<Option<Vec<DmReply>>, OpError> {
     Ok(Some(vec![reply]))
 }
 
-fn ask(title: &str, body: &str) -> DmReply {
-    DmReply::card(title, format!("{body}\n\nTo exit, type 'cancel'"))
+fn ask(title: &str, body: &str, lang: Lang) -> DmReply {
+    DmReply::card(title, format!("{body}\n\n{}", tr!(lang, "dm-exit")))
 }
 
 fn note(card: &DmReply, line: &str) -> DmReply {
     DmReply {
         title: card.title.clone(),
         body: format!("{line}\n\n{}", card.body),
+        created: None,
     }
 }
 
-fn title_card() -> DmReply {
-    ask(
-        "Enter the event title",
-        "Up to 120 characters are permitted",
-    )
+fn title_card(lang: Lang) -> DmReply {
+    ask(&tr!(lang, "dm-title-title"), &tr!(lang, "dm-title-body"), lang)
 }
 
-fn description_card() -> DmReply {
-    ask(
-        "Enter the event description",
-        "Type `none` for no description. Up to 2000 characters are permitted.",
-    )
+fn description_card(lang: Lang) -> DmReply {
+    ask(&tr!(lang, "dm-description-title"), &tr!(lang, "dm-description-body"), lang)
 }
 
-fn end_card() -> DmReply {
-    ask(
-        "When does the event end?",
-        "Type `none` for a 1 hour event.\n\n> 2 hours\n> 9pm\n> Friday at 6am",
-    )
+fn end_card(lang: Lang) -> DmReply {
+    ask(&tr!(lang, "dm-end-title"), &tr!(lang, "dm-end-body"), lang)
 }
 
-fn repeat_card() -> DmReply {
+fn image_card(lang: Lang) -> DmReply {
+    ask(&tr!(lang, "dm-image-title"), &tr!(lang, "dm-image-body"), lang)
+}
+
+fn reminder_card(lang: Lang) -> DmReply {
+    ask(&tr!(lang, "dm-reminder-title"), &tr!(lang, "dm-reminder-body"), lang)
+}
+
+fn clock_card(cutoff: bool, lang: Lang) -> DmReply {
+    if cutoff {
+        ask(&tr!(lang, "dm-cutoff-title"), &tr!(lang, "dm-cutoff-body"), lang)
+    } else {
+        ask(&tr!(lang, "dm-post-title"), &tr!(lang, "dm-post-body"), lang)
+    }
+}
+
+fn repeat_card(lang: Lang) -> DmReply {
     numbered_prompt(
-        "How often should this event repeat?",
+        &tr!(lang, "dm-repeat-title"),
         &[
-            "Never".into(),
-            "Daily".into(),
-            "Weekly".into(),
-            "Every two weeks".into(),
-            "Monthly".into(),
+            tr!(lang, "dm-repeat-never"),
+            tr!(lang, "dm-repeat-daily"),
+            tr!(lang, "dm-repeat-weekly"),
+            tr!(lang, "dm-repeat-biweekly"),
+            tr!(lang, "dm-repeat-monthly"),
         ],
+        lang,
     )
 }
 
@@ -779,7 +800,7 @@ fn draft_type(conn: &mut Connection, type_id: i64) -> Result<DraftType, OpError>
     Ok(DraftType { type_id, name: kind.name })
 }
 
-fn finish_card(draft: &EventDraft) -> DmReply {
+fn finish_card(draft: &EventDraft, lang: Lang) -> DmReply {
     let mut notes = Vec::new();
     if !draft.types.is_empty() {
         let names = draft
@@ -788,60 +809,92 @@ fn finish_card(draft: &EventDraft) -> DmReply {
             .map(|kind| kind.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        notes.push(format!("Signup options: {names}."));
+        notes.push(tr!(lang, "dm-finish-types", names = names));
     }
     if draft.multiple {
-        notes.push("People can pick more than one option.".into());
+        notes.push(tr!(lang, "dm-finish-multiple"));
     }
+    let plain = tr!(lang, "dm-finish-plain");
     let intro = if notes.is_empty() {
-        "Don't need anything fancy?".to_string()
+        plain
     } else {
-        format!("{}\n\nDon't need anything fancy?", notes.join("\n"))
+        format!("{}\n\n{plain}", notes.join("\n"))
     };
+    let changes = [
+        tr!(lang, "dm-finish-signup"),
+        tr!(lang, "dm-finish-mention"),
+        tr!(lang, "dm-finish-image"),
+        tr!(lang, "dm-finish-color"),
+        tr!(lang, "dm-finish-restrict"),
+        tr!(lang, "dm-finish-multiple-toggle"),
+        tr!(lang, "dm-finish-role"),
+        tr!(lang, "dm-finish-cutoff"),
+        tr!(lang, "dm-finish-post"),
+        tr!(lang, "dm-finish-reminders"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, line)| format!("**{}** {line}", index + 2))
+    .collect::<Vec<_>>()
+    .join("\n");
     DmReply::card(
-        "Finish or customize",
+        tr!(lang, "dm-finish-title"),
         format!(
-            "{intro}\n**1** Finish event creation\n\nOr change something first:\n**2** Signup options\n**3** Mention roles when the event is posted\n**4** Add an image\n**5** Change the event color\n**6** Restrict signup to certain roles\n**7** Allow multiple responses\n**8** Assign a role to attendees\n**9** Set a time when signups close\n**10** Schedule when the event is posted\n**11** Configure reminders\n\nEnter a number to select an option\nTo exit, type 'cancel'"
+            "{intro}\n**1** {}\n\n{}\n{changes}\n\n{}\n{}",
+            tr!(lang, "dm-finish-done"),
+            tr!(lang, "dm-finish-or"),
+            tr!(lang, "dm-pick-number"),
+            tr!(lang, "dm-exit"),
         ),
     )
 }
 
-fn signup_card() -> DmReply {
+fn signup_card(lang: Lang) -> DmReply {
     numbered_prompt(
-        "Signup options",
+        &tr!(lang, "dm-signup-title"),
         &[
-            "Keep the defaults (Accepted, Declined, Tentative)".into(),
-            "Configure signup options".into(),
-            "Use a signup option preset".into(),
+            tr!(lang, "dm-signup-defaults"),
+            tr!(lang, "dm-signup-custom-title"),
+            tr!(lang, "dm-signup-preset"),
         ],
+        lang,
     )
 }
 
-fn next_card(note_line: Option<&str>) -> DmReply {
-    let choices = "**1** Modify the event\n**2** Remove responses\n**3** Add a response\n**4** Duplicate the event";
+fn next_card(note_line: Option<&str>, lang: Lang) -> DmReply {
+    let choices = [
+        tr!(lang, "dm-next-modify"),
+        tr!(lang, "dm-next-clear"),
+        tr!(lang, "dm-next-respond"),
+        tr!(lang, "dm-next-duplicate"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, line)| format!("**{}** {line}", index + 1))
+    .collect::<Vec<_>>()
+    .join("\n");
     let body = match note_line {
         Some(line) => format!("{line}\n\n{choices}"),
-        None => choices.to_string(),
+        None => choices,
     };
     DmReply::card(
-        "What would you like to do?",
-        format!("{body}\n\nEnter a number to select an option\nTo exit, type 'cancel'"),
+        tr!(lang, "dm-next-title"),
+        format!("{body}\n\n{}\n{}", tr!(lang, "dm-pick-number"), tr!(lang, "dm-exit")),
     )
 }
 
-fn start_card(conn: &mut Connection, guild_id: i64) -> Result<DmReply, OpError> {
+fn start_card(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<DmReply, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let label = clock::zone_label(tz);
     Ok(ask(
-        "When should the event start?",
-        &format!(
-            "Your time zone is: **{label}**\nType `timezone` to change it.\n\n> Friday at 9pm\n> Tomorrow at 18:00\n> Now\n> In 1 hour\n> 2026-10-14 19:00"
-        ),
+        &tr!(lang, "dm-start-title"),
+        &tr!(lang, "dm-start-body", zone = label),
+        lang,
     ))
 }
 
-fn timezone_card() -> DmReply {
+fn timezone_card(lang: Lang) -> DmReply {
     let lines = clock::ZONES
         .iter()
         .map(|name| {
@@ -850,31 +903,41 @@ fn timezone_card() -> DmReply {
                 .unwrap_or_else(|_| (*name).to_string())
         })
         .collect::<Vec<_>>();
-    numbered_prompt("Which time zone?", &lines)
+    numbered_prompt(&tr!(lang, "dm-zone-title"), &lines, lang)
 }
 
-fn color_card() -> DmReply {
+fn color_card(lang: Lang) -> DmReply {
     let lines = EVENT_COLORS
         .iter()
-        .map(|(_, label)| (*label).to_string())
+        .map(|(_, key)| i18n::text(lang, key, &[]))
         .collect::<Vec<_>>();
-    numbered_prompt("Change the event color", &lines)
+    numbered_prompt(&tr!(lang, "dm-color-title"), &lines, lang)
 }
 
-fn preset_card(presets: &[store::Preset]) -> DmReply {
+fn preset_card(presets: &[store::Preset], lang: Lang) -> DmReply {
     if presets.is_empty() {
-        return note(&signup_card(), "There are no signup presets yet.");
+        return note(&signup_card(lang), &tr!(lang, "dm-no-presets"));
     }
     let lines = presets
         .iter()
         .map(|preset| preset.name.clone())
         .collect::<Vec<_>>();
-    numbered_prompt("Use a signup option preset", &lines)
+    numbered_prompt(&tr!(lang, "dm-signup-preset"), &lines, lang)
 }
 
-fn role_card(title: &str, roles: &[store::Role], extra: &str) -> DmReply {
+/// The heading and the hint for picking roles at one step of the DM.
+fn role_step(step: &str, lang: Lang) -> (String, String) {
+    match step {
+        "mention" => (tr!(lang, "dm-finish-mention"), tr!(lang, "dm-mention-hint")),
+        "restrict" => (tr!(lang, "dm-finish-restrict"), tr!(lang, "dm-restrict-hint")),
+        _ => (tr!(lang, "dm-finish-role"), tr!(lang, "dm-role-hint")),
+    }
+}
+
+fn role_card(step: &str, roles: &[store::Role], lang: Lang) -> DmReply {
+    let (title, extra) = role_step(step, lang);
     if roles.is_empty() {
-        return ask(title, "This server has no roles yet.");
+        return ask(&title, &tr!(lang, "dm-no-roles"), lang);
     }
     let lines = roles
         .iter()
@@ -882,7 +945,7 @@ fn role_card(title: &str, roles: &[store::Role], extra: &str) -> DmReply {
         .map(|(index, role)| format!("**{}** {}", index + 1, role.name))
         .collect::<Vec<_>>()
         .join("\n");
-    ask(title, &format!("{extra}\n\n{lines}"))
+    ask(&title, &format!("{extra}\n\n{lines}"), lang)
 }
 
 fn save_draft(
@@ -909,6 +972,7 @@ fn advance_to_title(
     conn: &mut Connection,
     discord_user_id: &str,
     channel: &str,
+    lang: Lang,
 ) -> Result<DmReply, OpError> {
     diesel::update(
         schema::event_prompts::table
@@ -919,7 +983,7 @@ fn advance_to_title(
         schema::event_prompts::step.eq("title"),
     ))
     .execute(conn)?;
-    Ok(title_card())
+    Ok(title_card(lang))
 }
 
 fn answer_channel(
@@ -929,19 +993,20 @@ fn answer_channel(
     text: &str,
     source_channel: Option<&str>,
     source_discord: Option<&str>,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(source) = source_channel else {
         let channels = store::list_channels(conn, guild_id)?;
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(channel) = choice.and_then(|n| channels.get(n - 1)) else {
-            return just(where_to_post(conn, guild_id, &None, &None)?);
+            return just(where_to_post(conn, guild_id, &None, &None, lang)?);
         };
-        return just(advance_to_title(conn, discord_user_id, &channel.name)?);
+        return just(advance_to_title(conn, discord_user_id, &channel.name, lang)?);
     };
     let source_owned = Some(source.to_string());
     let discord_owned = source_discord.map(str::to_string);
     match text {
-        "1" => just(advance_to_title(conn, discord_user_id, source)?),
+        "1" => just(advance_to_title(conn, discord_user_id, source, lang)?),
         "2" => {
             let others = other_channels(conn, guild_id, Some(source))?;
             if others.is_empty() {
@@ -950,6 +1015,7 @@ fn answer_channel(
                     guild_id,
                     &source_owned,
                     &discord_owned,
+                    lang,
                 )?);
             }
             diesel::update(
@@ -958,13 +1024,14 @@ fn answer_channel(
             )
             .set(schema::event_prompts::step.eq("channel_other"))
             .execute(conn)?;
-            just(other_channel_prompt(&others))
+            just(other_channel_prompt(&others, lang))
         }
         _ => just(where_to_post(
             conn,
             guild_id,
             &source_owned,
             &discord_owned,
+            lang,
         )?),
     }
 }
@@ -980,6 +1047,7 @@ fn answer_finish(
     channel_name: Option<&str>,
     draft: &mut EventDraft,
     public_url: &str,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let step = match text {
         "1" => {
@@ -993,75 +1061,50 @@ fn answer_finish(
                 channel_name,
                 draft,
                 public_url,
+                lang,
             )
         }
         "2" => {
             save_draft(conn, discord_user_id, "signup", draft)?;
-            return just(signup_card());
+            return just(signup_card(lang));
         }
         "3" => "mention",
         "4" => {
             save_draft(conn, discord_user_id, "image", draft)?;
-            return just(ask(
-                "Add an image",
-                "Send an http:// or https:// link, or `none` to clear it.",
-            ));
+            return just(image_card(lang));
         }
         "5" => {
             save_draft(conn, discord_user_id, "color", draft)?;
-            return just(color_card());
+            return just(color_card(lang));
         }
         "6" => "restrict",
         "7" => {
             draft.multiple = !draft.multiple;
             save_draft(conn, discord_user_id, "finish", draft)?;
-            return just(finish_card(draft));
+            return just(finish_card(draft, lang));
         }
         "8" => "role",
         "9" => {
             save_draft(conn, discord_user_id, "cutoff", draft)?;
-            return just(ask(
-                "Set a time when signups close",
-                "For example, \"tomorrow at 3pm\", or `none` to leave signups open.",
-            ));
+            return just(clock_card(true, lang));
         }
         "10" => {
             save_draft(conn, discord_user_id, "post", draft)?;
-            return just(ask(
-                "Schedule when the event is posted",
-                "For example, \"tomorrow at 9am\", or `none` to post it now.",
-            ));
+            return just(clock_card(false, lang));
         }
         "11" => {
             save_draft(conn, discord_user_id, "reminder", draft)?;
-            return just(ask(
-                "Configure reminders",
-                "How many minutes before the start should Marian remind people? From 1 to 10080.",
-            ));
+            return just(reminder_card(lang));
         }
-        _ => return just(finish_card(draft)),
+        _ => return just(finish_card(draft, lang)),
     };
     let roles = store::list_roles(conn, guild_id)?;
-    let (heading, extra) = match step {
-        "mention" => (
-            "Mention roles when the event is posted",
-            "Send the numbers, separated by commas. `everyone` mentions @everyone. `none` clears mentions.",
-        ),
-        "restrict" => (
-            "Restrict signup to certain roles",
-            "Send the numbers, separated by commas, or `none` to clear the limit.",
-        ),
-        _ => (
-            "Assign a role to attendees",
-            "Send a number, or `none` for no role.",
-        ),
-    };
     save_draft(conn, discord_user_id, step, draft)?;
     if roles.is_empty() {
         save_draft(conn, discord_user_id, "finish", draft)?;
-        return just(note(&finish_card(draft), "This server has no roles yet."));
+        return just(note(&finish_card(draft, lang), &tr!(lang, "dm-no-roles")));
     }
-    just(role_card(heading, &roles, extra))
+    just(role_card(step, &roles, lang))
 }
 
 fn answer_signup(
@@ -1070,27 +1113,29 @@ fn answer_signup(
     guild_id: i64,
     text: &str,
     draft: &mut EventDraft,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     match text {
         "1" => {
             draft.types.clear();
             draft.multiple = false;
             save_draft(conn, discord_user_id, "finish", draft)?;
-            just(finish_card(draft))
+            just(finish_card(draft, lang))
         }
         "2" => {
             save_draft(conn, discord_user_id, "signup_custom", draft)?;
             just(ask(
-                "Configure signup options",
-                "Send the option names, separated by commas.",
+                &tr!(lang, "dm-signup-custom-title"),
+                &tr!(lang, "dm-signup-custom-body"),
+                lang,
             ))
         }
         "3" => {
             let presets = store::list_presets(conn, guild_id)?;
             save_draft(conn, discord_user_id, "signup_preset", draft)?;
-            just(preset_card(&presets))
+            just(preset_card(&presets, lang))
         }
-        _ => just(signup_card()),
+        _ => just(signup_card(lang)),
     }
 }
 
@@ -1100,34 +1145,28 @@ fn answer_mention(
     guild_id: i64,
     text: &str,
     draft: &mut EventDraft,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let roles = store::list_roles(conn, guild_id)?;
-    if text.eq_ignore_ascii_case("none") {
+    if said(text, &NONE) {
         draft.mention_everyone = false;
         draft.mention_role_ids.clear();
-    } else if text.eq_ignore_ascii_case("everyone") {
+    } else if said(text, &EVERYONE) {
         draft.mention_everyone = true;
         draft.mention_role_ids.clear();
     } else {
-        match picked_roles(text, &roles) {
+        match picked_roles(text, &roles, lang) {
             Ok(ids) => {
                 draft.mention_everyone = false;
                 draft.mention_role_ids = ids;
             }
             Err(err) => {
-                return just(note(
-                    &role_card(
-                        "Mention roles when the event is posted",
-                        &roles,
-                        "Send the numbers, separated by commas. `everyone` mentions @everyone. `none` clears mentions.",
-                    ),
-                    &err,
-                ));
+                return just(note(&role_card("mention", &roles, lang), &err));
             }
         }
     }
     save_draft(conn, discord_user_id, "finish", draft)?;
-    just(finish_card(draft))
+    just(finish_card(draft, lang))
 }
 
 fn answer_restrict(
@@ -1136,27 +1175,21 @@ fn answer_restrict(
     guild_id: i64,
     text: &str,
     draft: &mut EventDraft,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let roles = store::list_roles(conn, guild_id)?;
-    if text.eq_ignore_ascii_case("none") {
+    if said(text, &NONE) {
         draft.restrict_role_ids.clear();
     } else {
-        match picked_roles(text, &roles) {
+        match picked_roles(text, &roles, lang) {
             Ok(ids) => draft.restrict_role_ids = ids,
             Err(err) => {
-                return just(note(
-                    &role_card(
-                        "Restrict signup to certain roles",
-                        &roles,
-                        "Send the numbers, separated by commas, or `none` to clear the limit.",
-                    ),
-                    &err,
-                ));
+                return just(note(&role_card("restrict", &roles, lang), &err));
             }
         }
     }
     save_draft(conn, discord_user_id, "finish", draft)?;
-    just(finish_card(draft))
+    just(finish_card(draft, lang))
 }
 
 fn answer_attendee_role(
@@ -1165,28 +1198,26 @@ fn answer_attendee_role(
     guild_id: i64,
     text: &str,
     draft: &mut EventDraft,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let roles = store::list_roles(conn, guild_id)?;
-    if text.eq_ignore_ascii_case("none") {
+    if said(text, &NONE) {
         draft.attendee_role_id = None;
     } else {
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(role) = choice.and_then(|n| roles.get(n - 1)) else {
             return just(note(
-                &role_card(
-                    "Assign a role to attendees",
-                    &roles,
-                    "Send a number, or `none` for no role.",
-                ),
-                "Send a number from the list.",
+                &role_card("role", &roles, lang),
+                &tr!(lang, "dm-pick-from-list"),
             ));
         };
         draft.attendee_role_id = Some(role.id);
     }
     save_draft(conn, discord_user_id, "finish", draft)?;
-    just(finish_card(draft))
+    just(finish_card(draft, lang))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn answer_clock_field(
     conn: &mut Connection,
     discord_user_id: &str,
@@ -1195,34 +1226,25 @@ fn answer_clock_field(
     draft: &mut EventDraft,
     cutoff: bool,
     start_raw: Option<&str>,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
-    let heading = if cutoff {
-        "Set a time when signups close"
-    } else {
-        "Schedule when the event is posted"
-    };
-    let hint = if cutoff {
-        "For example, \"tomorrow at 3pm\", or `none` to leave signups open."
-    } else {
-        "For example, \"tomorrow at 9am\", or `none` to post it now."
-    };
-    if text.eq_ignore_ascii_case("none") {
+    if said(text, &NONE) {
         if cutoff {
             draft.cutoff_raw = None;
         } else {
             draft.post_raw = None;
         }
     } else if parse::parse_when(text, Utc::now(), tz).is_none() {
-        return just(note(&ask(heading, hint), "Marian couldn't read that time."));
+        return just(note(&clock_card(cutoff, lang), &tr!(lang, "dm-time-unreadable")));
     } else if cutoff {
         if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz)) {
             if let Some(when) = parse::parse_when(text, Utc::now(), tz) {
                 if when >= start {
                     return just(note(
-                        &ask(heading, hint),
-                        "Signups need to close before the event starts.",
+                        &clock_card(cutoff, lang),
+                        &tr!(lang, "err-signups-close-late"),
                     ));
                 }
             }
@@ -1232,9 +1254,10 @@ fn answer_clock_field(
         draft.post_raw = Some(text.to_string());
     }
     save_draft(conn, discord_user_id, "finish", draft)?;
-    just(finish_card(draft))
+    just(finish_card(draft, lang))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_event(
     conn: &mut Connection,
     discord_user_id: &str,
@@ -1245,13 +1268,14 @@ fn finish_event(
     channel_name: Option<&str>,
     draft: &mut EventDraft,
     public_url: &str,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let starts_at = parse::parse_when(start_raw.unwrap_or(""), Utc::now(), tz)
-        .ok_or_else(|| OpError::message("Marian couldn't read the start time."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-start-unreadable")))?;
     let channel = store::channel_by_name(conn, guild_id, channel_name.unwrap_or(""))?
-        .ok_or_else(|| OpError::message("That channel is no longer saved."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-channel-gone")))?;
     let cutoff_at = draft
         .cutoff_raw
         .as_deref()
@@ -1288,7 +1312,7 @@ fn finish_event(
             guild_id,
             actor_id: membership_id,
             channel_id: channel.id,
-            title: title.unwrap_or("Event").to_string(),
+            title: title.map(str::to_string).unwrap_or_else(|| tr!(lang, "post-event-fallback")),
             description: draft.description.clone(),
             location: String::new(),
             starts_at,
@@ -1312,22 +1336,21 @@ fn finish_event(
     );
     let id = match saved {
         Ok(id) => id,
-        Err(err) => return just(note(&finish_card(draft), &err.to_string())),
+        Err(err) => return just(note(&finish_card(draft, lang), &err.localized(lang))),
     };
     draft.event_id = Some(id);
     save_draft(conn, discord_user_id, "next", draft)?;
     let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
     let path = event_path(&guild, &event.public_id);
-    let created = if public_url.trim().is_empty() {
-        DmReply::card("Event has been created!", format!("Open {path}."))
+    let body = if public_url.trim().is_empty() {
+        tr!(lang, "reply-open-path", path = path)
     } else {
         let link = format!("{}{path}", public_url.trim().trim_end_matches('/'));
-        DmReply::card(
-            "Event has been created!",
-            format!("[Click here to view the event]({link})"),
-        )
+        tr!(lang, "dm-view-event", url = link)
     };
-    Ok(Some(vec![created, next_card(None)]))
+    let mut created = DmReply::card(tr!(lang, "dm-created-title"), body);
+    created.created = Some(lang);
+    Ok(Some(vec![created, next_card(None, lang)]))
 }
 
 fn answer_next(
@@ -1337,6 +1360,7 @@ fn answer_next(
     text: &str,
     draft: &EventDraft,
     public_url: &str,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(event_id) = draft.event_id else {
         cancel_event_dm(conn, discord_user_id)?;
@@ -1348,19 +1372,20 @@ fn answer_next(
             let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
             let path = event_path(&guild, &event.public_id);
             let line = if public_url.trim().is_empty() {
-                format!("Open {path}.")
+                tr!(lang, "reply-open-path", path = path)
             } else {
-                format!(
-                    "[Open the event]({}{path})",
-                    public_url.trim().trim_end_matches('/')
+                tr!(
+                    lang,
+                    "dm-open-event",
+                    url = format!("{}{path}", public_url.trim().trim_end_matches('/'))
                 )
             };
-            just(next_card(Some(&line)))
+            just(next_card(Some(&line), lang))
         }
         "2" => {
             diesel::delete(schema::signups::table.filter(schema::signups::event_id.eq(event_id)))
                 .execute(conn)?;
-            just(next_card(Some("Removed the responses.")))
+            just(next_card(Some(&tr!(lang, "dm-cleared")), lang))
         }
         "3" => {
             save_draft(conn, discord_user_id, "respond", draft)?;
@@ -1370,15 +1395,13 @@ fn answer_next(
                 .iter()
                 .map(|opt| format!("{} {}", opt.emoji, opt.name))
                 .collect::<Vec<_>>();
-            just(numbered_prompt("Add a response", &lines))
+            just(numbered_prompt(&tr!(lang, "dm-next-respond"), &lines, lang))
         }
         "4" => {
             let id = logic::duplicate_event(conn, event_id, membership_id)?;
-            just(next_card(Some(&format!(
-                "Duplicated it. The copy is event {id}, one week later."
-            ))))
+            just(next_card(Some(&tr!(lang, "dm-duplicated", id = id)), lang))
         }
-        _ => just(next_card(None)),
+        _ => just(next_card(None, lang)),
     }
 }
 
@@ -1388,6 +1411,7 @@ fn answer_respond(
     membership_id: i64,
     text: &str,
     draft: &EventDraft,
+    lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(event_id) = draft.event_id else {
         cancel_event_dm(conn, discord_user_id)?;
@@ -1401,14 +1425,14 @@ fn answer_respond(
             .iter()
             .map(|opt| format!("{} {}", opt.emoji, opt.name))
             .collect::<Vec<_>>();
-        return just(numbered_prompt("Add a response", &lines));
+        return just(numbered_prompt(&tr!(lang, "dm-next-respond"), &lines, lang));
     };
     let reply = logic::signup(conn, event_id, option.id, membership_id)?;
     save_draft(conn, discord_user_id, "next", draft)?;
-    just(next_card(Some(&reply)))
+    just(next_card(Some(&reply.render(lang)), lang))
 }
 
-fn picked_roles(text: &str, roles: &[store::Role]) -> Result<Vec<i64>, String> {
+fn picked_roles(text: &str, roles: &[store::Role], lang: Lang) -> Result<Vec<i64>, String> {
     let mut ids = Vec::new();
     for part in text.split(|c: char| c == ',' || c.is_whitespace()) {
         if part.is_empty() {
@@ -1416,40 +1440,41 @@ fn picked_roles(text: &str, roles: &[store::Role]) -> Result<Vec<i64>, String> {
         }
         let n: usize = part
             .parse()
-            .map_err(|_| "Send the numbers, separated by commas.".to_string())?;
+            .map_err(|_| tr!(lang, "dm-send-numbers"))?;
         if n == 0 {
-            return Err("Send a number from the list.".into());
+            return Err(tr!(lang, "dm-pick-from-list"));
         }
         let role = roles
             .get(n - 1)
-            .ok_or_else(|| "That number isn't in the list.".to_string())?;
+            .ok_or_else(|| tr!(lang, "dm-not-in-list"))?;
         ids.push(role.id);
     }
     if ids.is_empty() {
-        return Err("Send the numbers, separated by commas.".into());
+        return Err(tr!(lang, "dm-send-numbers"));
     }
     Ok(ids)
 }
 
-fn span_minutes(text: &str, start: DateTime<Utc>, tz: Tz) -> Result<i64, String> {
+fn span_minutes(text: &str, start: DateTime<Utc>, tz: Tz, lang: Lang) -> Result<i64, String> {
     let text = text.trim();
-    if text.eq_ignore_ascii_case("none") {
+    if said(text, &NONE) {
         return Ok(60);
     }
     if let Some(minutes) = hour_span(text) {
-        return fit_span(minutes);
+        return fit_span(minutes, lang);
     }
     let Some(mut end) = parse::parse_when(text, Utc::now(), tz) else {
-        return Err("Try \"2 hours\", \"9pm\", \"Friday at 6am\", or `none` for 1 hour.".into());
+        return Err(tr!(lang, "dm-end-unreadable"));
     };
     if end <= start {
         end += Duration::days(1);
     }
-    fit_span((end - start).num_minutes())
+    fit_span((end - start).num_minutes(), lang)
 }
 
+/// "2 hours" or "90 minutes", in English or Polish, as minutes.
 fn hour_span(text: &str) -> Option<i64> {
-    let lower = text.to_lowercase();
+    let lower = parse::normalize(text);
     let mut parts = lower.split_whitespace();
     let count: i64 = parts.next()?.parse().ok()?;
     let unit = parts.next()?;
@@ -1465,11 +1490,11 @@ fn hour_span(text: &str) -> Option<i64> {
     }
 }
 
-fn fit_span(minutes: i64) -> Result<i64, String> {
+fn fit_span(minutes: i64, lang: Lang) -> Result<i64, String> {
     if (15..=1440).contains(&minutes) {
         Ok(minutes)
     } else {
-        Err("The event needs to last between 15 minutes and 24 hours.".into())
+        Err(tr!(lang, "err-event-length"))
     }
 }
 
@@ -1478,6 +1503,7 @@ fn where_to_post(
     guild_id: i64,
     source_channel: &Option<String>,
     source_discord: &Option<String>,
+    lang: Lang,
 ) -> Result<DmReply, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let Some(source) = source_channel else {
@@ -1485,10 +1511,7 @@ fn where_to_post(
             .into_iter()
             .map(|channel| channel_label(&channel))
             .collect::<Vec<_>>();
-        return Ok(numbered_prompt(
-            "Where would you like to post this event?",
-            &lines,
-        ));
+        return Ok(numbered_prompt(&tr!(lang, "dm-where-title"), &lines, lang));
     };
     let here = source_discord
         .as_deref()
@@ -1496,11 +1519,12 @@ fn where_to_post(
         .map(|id| format!("<#{id}>"))
         .unwrap_or_else(|| format!("{} #{source}", guild.name));
     Ok(numbered_prompt(
-        "Where would you like to post this event?",
+        &tr!(lang, "dm-where-title"),
         &[
-            format!("In the current channel, {here}"),
-            "In another channel".into(),
+            tr!(lang, "dm-where-here", channel = here),
+            tr!(lang, "dm-where-other"),
         ],
+        lang,
     ))
 }
 
@@ -1515,9 +1539,9 @@ fn other_channels(
         .collect())
 }
 
-fn other_channel_prompt(channels: &[store::Channel]) -> DmReply {
+fn other_channel_prompt(channels: &[store::Channel], lang: Lang) -> DmReply {
     let lines = channels.iter().map(channel_label).collect::<Vec<_>>();
-    numbered_prompt("Where would you like to post this event?", &lines)
+    numbered_prompt(&tr!(lang, "dm-where-title"), &lines, lang)
 }
 
 fn channel_label(channel: &store::Channel) -> String {
@@ -1529,7 +1553,7 @@ fn channel_label(channel: &store::Channel) -> String {
         .unwrap_or_else(|| format!("#{}", channel.name))
 }
 
-fn numbered_prompt(heading: &str, lines: &[String]) -> DmReply {
+fn numbered_prompt(heading: &str, lines: &[String], lang: Lang) -> DmReply {
     let body = lines
         .iter()
         .enumerate()
@@ -1538,7 +1562,7 @@ fn numbered_prompt(heading: &str, lines: &[String]) -> DmReply {
         .join("\n");
     DmReply::card(
         heading,
-        format!("{body}\n\nEnter a number to select an option\nTo exit, type 'cancel'"),
+        format!("{body}\n\n{}\n{}", tr!(lang, "dm-pick-number"), tr!(lang, "dm-exit")),
     )
 }
 
@@ -1556,6 +1580,7 @@ pub fn edit_event(
     guild_id: i64,
     membership_id: i64,
     change: EditChange,
+    lang: Lang,
 ) -> Result<String, OpError> {
     if change.title.is_none()
         && change.description.is_none()
@@ -1563,9 +1588,7 @@ pub fn edit_event(
         && change.duration.is_none()
         && change.channel.is_none()
     {
-        return Err(OpError::message(
-            "Name a change: title, description, start, length, or channel.",
-        ));
+        return Err(OpError::from(crate::msg!("err-edit-nothing")));
     }
     let event = find_event(conn, guild_id, &change.event)?;
     let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
@@ -1579,7 +1602,7 @@ pub fn edit_event(
     }
     if let Some(start) = change.start {
         input.starts_at = parse::parse_when(&start, Utc::now(), tz).ok_or_else(|| {
-            OpError::message(format!("Marian couldn't read the time \"{start}\"."))
+            OpError::from(crate::msg!("err-time-unreadable", text = start.as_str()))
         })?;
     }
     if let Some(duration) = change.duration {
@@ -1587,16 +1610,17 @@ pub fn edit_event(
     }
     if let Some(name) = change.channel {
         input.channel_id = store::channel_by_name(conn, event.guild_id, &name)?
-            .ok_or_else(|| OpError::message(format!("No channel named {name}.")))?
+            .ok_or_else(|| OpError::from(crate::msg!("err-no-channel", name = name.as_str())))?
             .id;
     }
     input.action = SaveAction::Save;
     let id = logic::save_event(conn, input)?;
     let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
-    Ok(format!(
-        "Updated {}. Open {}.",
-        event.title,
-        event_path(&guild, &event.public_id)
+    Ok(tr!(
+        lang,
+        "reply-event-updated",
+        title = &event.title,
+        path = event_path(&guild, &event.public_id)
     ))
 }
 
@@ -1611,7 +1635,7 @@ fn cmd_edit(
         .get("id")
         .or_else(|| pos.first())
         .cloned()
-        .ok_or_else(|| OpError::message("Say which event to edit."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-edit-which")))?;
     edit_event(
         conn,
         guild_id,
@@ -1624,6 +1648,7 @@ fn cmd_edit(
             duration: map.get("duration").and_then(|value| value.parse().ok()),
             channel: map.get("channel").cloned(),
         },
+        Lang::En,
     )
 }
 
@@ -1631,15 +1656,16 @@ pub fn set_reminders(
     conn: &mut Connection,
     membership_id: i64,
     enabled: Option<bool>,
+    lang: Lang,
 ) -> Result<String, OpError> {
     match enabled {
-        Some(value) => logic::set_user_reminders(conn, membership_id, value),
+        Some(value) => Ok(logic::set_user_reminders(conn, membership_id, value)?.render(lang)),
         None => {
             let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
             Ok(if user.reminders_enabled {
-                format!("{} gets reminders.", user.name)
-    } else {
-                format!("{} is opted out of reminders.", user.name)
+                tr!(lang, "reply-reminders-get", name = &user.name)
+            } else {
+                tr!(lang, "reply-reminders-opted-out", name = &user.name)
             })
         }
     }
@@ -1661,7 +1687,7 @@ fn cmd_reminders(
         "on" | "yes" | "true" => Some(true),
         _ => None,
     };
-    set_reminders(conn, membership_id, enabled)
+    set_reminders(conn, membership_id, enabled, Lang::En)
 }
 
 fn cmd_response(
@@ -1679,21 +1705,21 @@ fn cmd_response(
         .get("event")
         .or_else(|| pos.get(1))
         .map(String::as_str)
-        .ok_or_else(|| OpError::message("Name the event id."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-name-event")))?;
     let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let handle = map
         .get("user")
         .cloned()
         .or_else(|| pos.get(2).cloned())
-        .ok_or_else(|| OpError::message("Name the person by handle."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-name-person")))?;
     let user = store::membership_by_handle(conn, actor.guild_id, &handle)?
-        .ok_or_else(|| OpError::message(format!("Nobody here goes by {handle}.")))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-no-handle", handle = handle.as_str())))?;
     let option_name = map
         .get("option")
         .cloned()
         .or_else(|| pos.get(3).cloned())
-        .ok_or_else(|| OpError::message("Name the signup option."))?;
-    Ok(roster_action(conn, actor_id, token, user.id, &option_name, &action)?.0)
+        .ok_or_else(|| OpError::from(crate::msg!("err-name-option")))?;
+    Ok(roster_action(conn, actor_id, token, user.id, &option_name, &action, Lang::En)?.0)
 }
 
 pub struct Choice {
@@ -1706,6 +1732,7 @@ pub fn response_events(
     guild_id: i64,
     partial: &str,
     now: DateTime<Utc>,
+    lang: Lang,
 ) -> Result<Vec<Choice>, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
@@ -1720,8 +1747,8 @@ pub fn response_events(
         if end < now {
             continue;
         }
-        let start_label = menu_date(start, tz);
-        let end_label = menu_date(end, tz);
+        let start_label = menu_date(start, tz, lang);
+        let end_label = menu_date(end, tz, lang);
         let label = event_menu_label(&event.title, &start_label, &end_label);
         let typed = partial.trim();
         if !needle.is_empty()
@@ -1781,12 +1808,13 @@ pub fn roster_action(
     target_id: i64,
     option_token: &str,
     action: &str,
+    lang: Lang,
 ) -> Result<(String, i64), OpError> {
     let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let event = find_event(conn, actor.guild_id, event_token)?;
     let option = resolve_option(conn, &event, option_token)?;
     let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action)?;
-    Ok((notice, event.id))
+    Ok((notice.render(lang), event.id))
 }
 
 fn resolve_option(
@@ -1803,14 +1831,11 @@ fn resolve_option(
     {
         return Ok(opt.clone());
     }
-    Err(OpError::message(format!("No option named {token}.")))
+    Err(OpError::from(crate::msg!("err-no-option", name = token)))
 }
 
-fn menu_date(dt: DateTime<Utc>, tz: Tz) -> String {
-    let local = dt.with_timezone(&tz).date_naive();
-    let day = local.format("%d").to_string();
-    let day = day.trim_start_matches('0');
-    format!("{} {day}", local.format("%b"))
+fn menu_date(dt: DateTime<Utc>, tz: Tz, lang: Lang) -> String {
+    i18n::format_month_day(lang, dt.with_timezone(&tz).date_naive())
 }
 
 fn event_menu_label(title: &str, start: &str, end: &str) -> String {
@@ -1838,6 +1863,7 @@ pub fn channel_choices(
     conn: &mut Connection,
     guild_id: i64,
     partial: &str,
+    lang: Lang,
 ) -> Result<Vec<Choice>, OpError> {
     let needle = partial.trim().to_lowercase();
     let mut choices = Vec::new();
@@ -1846,9 +1872,9 @@ pub fn channel_choices(
             continue;
         }
         let kind = if channel.kind == "event" {
-            "event"
+            tr!(lang, "reply-channel-kind-event")
         } else {
-            "text"
+            tr!(lang, "reply-channel-kind-text")
         };
         let label = format!("#{} · {kind}", channel.name);
         choices.push(Choice {
@@ -1878,6 +1904,7 @@ pub enum Setting {
     Digest(String),
     PostLeadHours(i64),
     Role { which: String, name: String },
+    Language(String),
 }
 
 pub fn apply_setting(
@@ -1885,9 +1912,11 @@ pub fn apply_setting(
     guild_id: i64,
     membership_id: i64,
     setting: Setting,
+    lang: Lang,
 ) -> Result<String, OpError> {
     require_server_manager(conn, membership_id)?;
     let mut settings = store::settings(conn, guild_id)?;
+    let mut lang = lang;
     let key = match setting {
         Setting::ReminderInterval(minutes) => {
             settings.default_reminder_minutes = minutes;
@@ -1939,7 +1968,7 @@ pub fn apply_setting(
         }
         Setting::Digest(value) => {
             if !matches!(value.as_str(), "off" | "daily" | "weekly") {
-                return Err(OpError::message("Digest can be off, daily, or weekly."));
+                return Err(OpError::from(crate::msg!("err-digest-values")));
             }
             settings.digest = value;
             "digest"
@@ -1955,7 +1984,7 @@ pub fn apply_setting(
             } else {
                 vec![
                     store::role_by_name(conn, guild_id, &name)?
-                        .ok_or_else(|| OpError::message(format!("No role named {name}.")))?
+                        .ok_or_else(|| OpError::from(crate::msg!("err-no-role", name = name.as_str())))?
                         .id,
                 ]
             };
@@ -1965,13 +1994,21 @@ pub fn apply_setting(
                 "delete" => settings.role_delete = role_id,
                 "channel" => settings.role_channel = role_id,
                 "signup_options" | "signup" => settings.role_signup = role_id,
-                other => return Err(OpError::message(format!("Unknown role setting {other}."))),
+                other => return Err(OpError::from(crate::msg!("err-unknown-role-setting", name = other))),
             }
             "role"
         }
+        Setting::Language(code) => {
+            let picked = Lang::from_code(&code)
+                .ok_or_else(|| OpError::from(crate::msg!("err-unknown-language", code = code.as_str())))?;
+            settings.language = picked.code().to_string();
+            // The reply is in the language just picked.
+            lang = picked;
+            "language"
+        }
     };
     store::update_settings(conn, &settings)?;
-    Ok(format!("Updated {key}."))
+    Ok(tr!(lang, "reply-setting-updated", key = key))
 }
 
 fn cmd_settings(
@@ -1987,7 +2024,7 @@ fn cmd_settings(
         .next()
                 .cloned()
         .or_else(|| pos.first().cloned())
-        .ok_or_else(|| OpError::message("Name a setting."))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-name-setting")))?;
     let value = map
         .get(&key)
                 .cloned()
@@ -1998,14 +2035,14 @@ fn cmd_settings(
         "reminder_interval" => Setting::ReminderInterval(
             value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of minutes."))?,
+                .map_err(|_| OpError::from(crate::msg!("err-number-minutes")))?,
         ),
         "24_hour_time" => Setting::Hour24(on(&value)?),
         "auto_archive" => Setting::AutoArchive(on(&value)?),
         "auto_archive_interval" => Setting::AutoArchiveHours(
             value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of hours."))?,
+                .map_err(|_| OpError::from(crate::msg!("err-number-hours")))?,
         ),
         "auto_join_threads" => Setting::AutoJoinThreads(on(&value)?),
         "event_threads" => Setting::EventThreads(on(&value)?),
@@ -2019,28 +2056,29 @@ fn cmd_settings(
         "post_lead" => Setting::PostLeadHours(
             value
                 .parse()
-                .map_err(|_| OpError::message("Use a number of hours."))?,
+                .map_err(|_| OpError::from(crate::msg!("err-number-hours")))?,
         ),
         "role" => Setting::Role {
             which: value,
             name: extra,
         },
-        other => return Err(OpError::message(format!("Unknown setting {other}."))),
+        "language" => Setting::Language(value),
+        other => return Err(OpError::from(crate::msg!("err-unknown-setting", name = other))),
     };
-    apply_setting(conn, guild_id, membership_id, setting)
+    apply_setting(conn, guild_id, membership_id, setting, Lang::En)
 }
 
-pub fn library_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
-            let lines: Vec<_> = store::list_library(conn, guild_id)?
-                .into_iter()
-                .map(|opt| format!("{} {}", opt.emoji, opt.name))
-                .collect();
-            if lines.is_empty() {
-                Ok("The option library is empty.".into())
-            } else {
-                Ok(lines.join("\n"))
-            }
-        }
+pub fn library_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
+    let lines: Vec<_> = store::list_library(conn, guild_id)?
+        .into_iter()
+        .map(|opt| format!("{} {}", opt.emoji, opt.name))
+        .collect();
+    if lines.is_empty() {
+        Ok(tr!(lang, "reply-library-empty"))
+    } else {
+        Ok(lines.join("\n"))
+    }
+}
 
 /// Adds a type to the library, or gives an existing one a new emoji.
 pub fn add_library_option(
@@ -2050,6 +2088,7 @@ pub fn add_library_option(
     name: &str,
     emoji: &str,
     attending: bool,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let emoji = if emoji.trim().is_empty() { "•" } else { emoji.trim() };
     match store::library_type_named(conn, guild_id, name)? {
@@ -2064,7 +2103,7 @@ pub fn add_library_option(
                     attending: existing.attending,
                 },
             )?;
-            Ok(format!("{emoji} {} is in the library.", existing.name))
+            Ok(tr!(lang, "reply-library-kept", emoji = emoji, name = &existing.name))
         }
         None => {
             let made = logic::add_type(
@@ -2077,7 +2116,7 @@ pub fn add_library_option(
                     attending,
                 },
             )?;
-            Ok(format!("Saved {} {} in the library.", made.emoji, made.name))
+            Ok(tr!(lang, "reply-library-saved", emoji = &made.emoji, name = &made.name))
         }
     }
 }
@@ -2088,11 +2127,12 @@ pub fn remove_library_option(
     guild_id: i64,
     membership_id: i64,
     name: &str,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let kind = store::library_type_named(conn, guild_id, name)?
-        .ok_or_else(|| OpError::message(format!("The library has no {}.", name.trim())))?;
+        .ok_or_else(|| OpError::from(crate::msg!("err-library-missing", name = name.trim())))?;
     logic::delete_type(conn, kind.id, membership_id)?;
-    Ok(format!("Removed {} from the library.", kind.name))
+    Ok(tr!(lang, "reply-library-removed", name = &kind.name))
 }
 
 fn cmd_signup_options(
@@ -2110,11 +2150,11 @@ fn cmd_signup_options(
                 .cloned()
                 .or_else(|| pos.get(2).cloned())
                 .or_else(|| pos.get(1).cloned())
-                .ok_or_else(|| OpError::message("Name the option."))?;
+                .ok_or_else(|| OpError::from(crate::msg!("err-name-library-option")))?;
             let emoji = map.get("emoji").cloned().unwrap_or_else(|| "•".into());
             // A new type counts as attending unless told otherwise.
             let attending = !matches!(map.get("attending").map(|value| value.trim().to_lowercase()).as_deref(), Some("no" | "false"));
-            add_library_option(conn, guild_id, membership_id, &name, &emoji, attending)
+            add_library_option(conn, guild_id, membership_id, &name, &emoji, attending, Lang::En)
         }
         "remove" => {
             let name = map
@@ -2122,19 +2162,19 @@ fn cmd_signup_options(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            remove_library_option(conn, guild_id, membership_id, &name)
+            remove_library_option(conn, guild_id, membership_id, &name, Lang::En)
         }
-        _ => library_text(conn, guild_id),
+        _ => library_text(conn, guild_id, Lang::En),
     }
 }
 
-pub fn preset_text(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
+pub fn preset_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
     let lines: Vec<_> = store::list_presets(conn, guild_id)?
         .into_iter()
         .map(|preset| preset.name)
         .collect();
     if lines.is_empty() {
-        Ok("No presets yet.".into())
+        Ok(tr!(lang, "reply-presets-empty"))
     } else {
         Ok(lines.join("\n"))
     }
@@ -2148,6 +2188,7 @@ pub fn add_preset(
     membership_id: i64,
     name: &str,
     options: &str,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let mut types = Vec::new();
     for part in options.split(',').map(str::trim).filter(|part| !part.is_empty()) {
@@ -2164,7 +2205,7 @@ pub fn add_preset(
             options: types,
         },
     )?;
-    Ok(format!("Saved the {} preset.", name.trim()))
+    Ok(tr!(lang, "reply-preset-saved", name = name.trim()))
 }
 
 pub fn remove_preset(
@@ -2172,14 +2213,15 @@ pub fn remove_preset(
     guild_id: i64,
     membership_id: i64,
     name: &str,
+    lang: Lang,
 ) -> Result<String, OpError> {
-            if let Some(preset) = store::list_presets(conn, guild_id)?
-                .into_iter()
+    if let Some(preset) = store::list_presets(conn, guild_id)?
+        .into_iter()
         .find(|preset| preset.name.eq_ignore_ascii_case(name))
-            {
+    {
         logic::delete_preset(conn, preset.id, membership_id)?;
-            }
-            Ok(format!("Removed {name}."))
+    }
+    Ok(tr!(lang, "reply-preset-removed", name = name))
 }
 
 fn cmd_presets(
@@ -2196,9 +2238,9 @@ fn cmd_presets(
         .get("name")
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
-                .ok_or_else(|| OpError::message("Name the preset."))?;
+                .ok_or_else(|| OpError::from(crate::msg!("err-name-preset")))?;
             let raw = map.get("options").cloned().unwrap_or_default();
-            add_preset(conn, guild_id, membership_id, &name, &raw)
+            add_preset(conn, guild_id, membership_id, &name, &raw, Lang::En)
         }
         "remove" => {
             let name = map
@@ -2206,9 +2248,9 @@ fn cmd_presets(
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_default();
-            remove_preset(conn, guild_id, membership_id, &name)
+            remove_preset(conn, guild_id, membership_id, &name, Lang::En)
         }
-        _ => preset_text(conn, guild_id),
+        _ => preset_text(conn, guild_id, Lang::En),
     }
 }
 
@@ -2238,43 +2280,33 @@ fn person_user_id(conn: &mut Connection, membership_id: i64) -> Result<i64, OpEr
     store::membership(conn, membership_id)?
         .map(|membership| membership.user_id)
         .ok_or_else(|| {
-            OpError::message(
-                "Marian needs your Discord account before it can connect Google Calendar.",
-            )
+            OpError::from(crate::msg!("err-google-needs-account"))
         })
 }
 
 pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
     if !crate::google::configured_from_env() {
-        return Err(OpError::message("Google Calendar is not configured yet."));
+        return Err(OpError::from(crate::msg!("err-google-unconfigured")));
     }
     let base = public_base();
     if base.is_empty() {
-        return Err(OpError::message(
-            "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-no-url")));
     }
     let user_id = person_user_id(conn, membership_id)?;
     let state = crate::google::begin_link(conn, user_id)?;
     let Some(url) = crate::google::connect_url(&base, &state) else {
-        return Err(OpError::message(
-            "Set MARIAN_PUBLIC_URL so Marian can send the Google link.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-no-url")));
     };
     if url.len() > 512 {
         let _ = crate::google::finish_oauth(conn, &state);
-        return Err(OpError::message(
-            "The Google sign-in link is too long for Discord. Connect from Settings.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-link-long")));
     }
     Ok(url)
 }
 
-pub fn google_authorize(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
+pub fn google_authorize(conn: &mut Connection, membership_id: i64, lang: Lang) -> Result<String, OpError> {
     let url = google_sign_in_url(conn, membership_id)?;
-    Ok(format!(
-        "Click the button below to connect Google Calendar.\n{url}"
-    ))
+    Ok(format!("{}\n{url}", tr!(lang, "reply-google-click")))
 }
 
 pub fn google_auto_sync(
@@ -2282,13 +2314,14 @@ pub fn google_auto_sync(
     _guild_id: i64,
     membership_id: i64,
     enabled: bool,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let user_id = person_user_id(conn, membership_id)?;
     crate::google::set_auto_sync(conn, user_id, enabled)?;
     Ok(if enabled {
-        "Marian will keep your Google Calendar updated.".into()
-            } else {
-        "Automatic Google Calendar updates are paused. /google sync still adds one event.".into()
+        tr!(lang, "reply-google-auto-on")
+    } else {
+        tr!(lang, "reply-google-auto-off")
     })
 }
 
@@ -2296,12 +2329,13 @@ pub fn google_revoke(
     conn: &mut Connection,
     _guild_id: i64,
     membership_id: i64,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let user_id = person_user_id(conn, membership_id)?;
     if !crate::google::queue_revoke(conn, user_id)? {
-        return Ok("Google Calendar is already disconnected.".into());
+        return Ok(tr!(lang, "reply-google-already-off"));
     }
-    Ok("Google Calendar will be disconnected, and Marian will remove the events it added.".into())
+    Ok(tr!(lang, "reply-google-revoking"))
 }
 
 pub fn google_sync(
@@ -2309,19 +2343,15 @@ pub fn google_sync(
     guild_id: i64,
     membership_id: i64,
     event: &str,
+    lang: Lang,
 ) -> Result<String, OpError> {
     let event = find_event(conn, guild_id, event)?;
     if !matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
-        return Err(OpError::message(
-            "Post or schedule the event before syncing it.",
-        ));
+        return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
     let user_id = person_user_id(conn, membership_id)?;
     crate::google::queue_event(conn, user_id, event.id)?;
-    Ok(format!(
-        "Marian will add {} to your Google Calendar.",
-        event.title
-    ))
+    Ok(tr!(lang, "reply-google-sync", title = &event.title))
 }
 
 fn cmd_google(
@@ -2333,25 +2363,25 @@ fn cmd_google(
 ) -> Result<String, OpError> {
     let action = pos.first().map(String::as_str).unwrap_or("authorize");
     match action {
-        "authorize" => google_authorize(conn, membership_id),
+        "authorize" => google_authorize(conn, membership_id, Lang::En),
         "auto_sync" => {
             let value = map
                 .get("state")
                 .cloned()
                 .or_else(|| pos.get(1).cloned())
                 .unwrap_or_else(|| "on".into());
-            google_auto_sync(conn, guild_id, membership_id, on(&value)?)
+            google_auto_sync(conn, guild_id, membership_id, on(&value)?, Lang::En)
         }
-        "revoke" => google_revoke(conn, guild_id, membership_id),
+        "revoke" => google_revoke(conn, guild_id, membership_id, Lang::En),
         "sync" => {
             let token = map
                 .get("event")
                 .map(String::as_str)
                 .or_else(|| pos.get(1).map(String::as_str))
-                .ok_or_else(|| OpError::message("Say which event to sync."))?;
-            google_sync(conn, guild_id, membership_id, token)
+                .ok_or_else(|| OpError::from(crate::msg!("err-sync-which")))?;
+            google_sync(conn, guild_id, membership_id, token, Lang::En)
         }
-        other => Err(OpError::message(format!("Unknown google command {other}."))),
+        other => Err(OpError::from(crate::msg!("err-unknown-google", name = other))),
     }
 }
 
@@ -2405,7 +2435,7 @@ fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(
     if user.server_manager {
         Ok(())
     } else {
-        Err(OpError::message("Only a server manager can change that."))
+        Err(OpError::from(crate::msg!("err-managers-only")))
     }
 }
 
@@ -2413,7 +2443,7 @@ fn on(value: &str) -> Result<bool, OpError> {
     match value.to_lowercase().as_str() {
         "on" | "yes" | "true" | "1" => Ok(true),
         "off" | "no" | "false" | "0" => Ok(false),
-        _ => Err(OpError::message("Use on or off.")),
+        _ => Err(OpError::from(crate::msg!("err-on-off"))),
     }
 }
 
@@ -2507,11 +2537,11 @@ mod tests {
         assert_eq!(choices.len(), 1);
         let picked = &choices[0].value;
         assert_eq!(uuid::Uuid::parse_str(picked).unwrap().get_version_num(), 7, "not a row number");
-        roster_action(&mut conn, 1, &token, 2, picked, "add").unwrap();
+        roster_action(&mut conn, 1, &token, 2, picked, "add", Lang::En).unwrap();
         let healer = store::options_for(&mut conn, &event).unwrap().into_iter().find(|opt| opt.name == "Healer").unwrap();
         assert!(store::signups_for(&mut conn, &event).unwrap().iter().any(|s| s.option_id == healer.id && s.membership_id == 2));
         // A typed name still works.
-        roster_action(&mut conn, 1, &token, 2, "tank", "add").unwrap();
+        roster_action(&mut conn, 1, &token, 2, "tank", "add", Lang::En).unwrap();
     }
 
     #[test]
@@ -2557,6 +2587,76 @@ mod tests {
     }
 
     #[test]
+    fn a_polish_server_gets_the_questions_and_the_post_in_polish() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'Europe/Warsaw', '4242');
+            INSERT INTO channels (id, guild_id, name, kind, position, discord_id) VALUES (1, 1, 'social', 'text', 0, '99');
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let switched = apply_setting(&mut conn, 1, 1, Setting::Language("pl".into()), Lang::En).unwrap();
+        assert_eq!(switched, "Zaktualizowano ustawienie language.", "the reply is in the new language");
+        assert_eq!(i18n::lang_of(&mut conn, 1), Lang::Pl);
+
+        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::Pl).unwrap();
+        assert_eq!(first.title.as_deref(), Some("Gdzie opublikować to wydarzenie?"));
+        assert!(first.body.contains("**1** Na obecnym kanale, <#99>"), "{first}");
+        assert!(first.body.ends_with("Aby wyjść, wpisz „anuluj”"), "{first}");
+        let title = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        assert_eq!(title.title.as_deref(), Some("Podaj tytuł wydarzenia"));
+        only(answer_event_dm(&mut conn, "u1", "Sprzątanie plaży", ""));
+        let start = only(answer_event_dm(&mut conn, "u1", "brak", ""));
+        assert_eq!(start.title.as_deref(), Some("Kiedy wydarzenie ma się zacząć?"));
+        let again = only(answer_event_dm(&mut conn, "u1", "kiedyś", ""));
+        assert!(again.body.starts_with("Marian nie rozumie tej godziny."), "{again}");
+        let end = only(answer_event_dm(&mut conn, "u1", "jutro o 16", ""));
+        assert_eq!(end.title.as_deref(), Some("Kiedy wydarzenie się kończy?"));
+        let repeat = only(answer_event_dm(&mut conn, "u1", "2 godziny", ""));
+        assert_eq!(repeat.title.as_deref(), Some("Jak często wydarzenie ma się powtarzać?"));
+        assert!(repeat.body.contains("**3** Co tydzień"), "{repeat}");
+        let finish = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        assert_eq!(finish.title.as_deref(), Some("Zakończ albo dostosuj"));
+        assert!(finish.body.contains("**11** Ustaw przypomnienia"), "{finish}");
+        let posted = answer_event_dm(&mut conn, "u1", "1", "https://marian.example.com")
+            .unwrap()
+            .unwrap();
+        assert_eq!(posted[0].title.as_deref(), Some("Wydarzenie zostało utworzone!"));
+        assert_eq!(posted[0].created, Some(Lang::Pl));
+        assert_eq!(posted[1].title.as_deref(), Some("Co chcesz zrobić?"));
+
+        let id = channel_posts_waiting(&mut conn, "u1").unwrap()[0];
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!(event.title, "Sprzątanie plaży");
+        assert_eq!(event.duration_minutes, 120);
+        let local = event.starts_at.with_timezone(&chrono_tz::Europe::Warsaw);
+        assert_eq!(chrono::Timelike::hour(&local), 16, "jutro o 16 is 16:00 in Warsaw");
+        let view = logic::discord_view(&mut conn, id, "https://marian.example.com")
+            .unwrap()
+            .unwrap();
+        assert!(view.body.contains("**Czas**"), "{}", view.body);
+        assert!(view.body.contains("[Zobacz w przeglądarce]("), "{}", view.body);
+        assert_eq!(view.footer, "Utworzone przez Nell");
+        assert!(view.buttons.iter().any(|button| button.label == "Edytuj"));
+
+        let mut sent = posted;
+        link_created_event(&mut sent, "https://discord.com/channels/4242/99/555");
+        assert_eq!(
+            sent[0].body,
+            "[Kliknij tutaj, aby zobaczyć wydarzenie](https://discord.com/channels/4242/99/555)"
+        );
+
+        let unknown = find_event(&mut conn, 1, "nope").unwrap_err();
+        assert_eq!(unknown.to_string(), "That event isn't in this server.", "the web reads English");
+        assert_eq!(unknown.localized(Lang::Pl), "Tego wydarzenia nie ma na tym serwerze.");
+    }
+
+    #[test]
     fn event_dm_asks_then_posts() {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
@@ -2571,7 +2671,7 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
-        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99")).unwrap();
+        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::En).unwrap();
         assert_eq!(
             first.title.as_deref(),
             Some("Where would you like to post this event?")

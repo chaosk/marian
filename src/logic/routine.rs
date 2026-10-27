@@ -145,9 +145,7 @@ pub fn create_routine(
     let description = clean_description(description)?;
     let days = clean_days(days)?;
     if !(15..=24 * 60).contains(&duration_minutes) {
-        return Err(OpError::message(
-            "The event needs to last between 15 minutes and 24 hours.",
-        ));
+        return Err(OpError::from(crate::msg!("err-event-length")));
     }
     check_clock(poll_weekday, poll_minutes)?;
     check_clock(lock_weekday, lock_minutes)?;
@@ -155,12 +153,12 @@ pub fn create_routine(
     store::with_tx(conn, |tx| {
         let actor = must_membership(tx, actor_id)?;
         if actor.guild_id != guild_id {
-            return Err(OpError::message("That person isn't in this server."));
+            return Err(OpError::from(crate::msg!("err-person-elsewhere")));
         }
         let settings = store::settings(tx, guild_id)?;
         let roles = store::membership_role_ids(tx, &actor)?;
         if !can_create(&actor, &settings, &roles) {
-            return Err(OpError::message("You can't create events here."));
+            return Err(OpError::from(crate::msg!("err-cant-create-events")));
         }
         let channel = store::channel(tx, channel_id)?.ok_or(OpError::NotFound)?;
         if channel.guild_id != guild_id {
@@ -246,9 +244,7 @@ pub fn save_routine(
     let description = clean_description(description)?;
     let days = clean_days(days)?;
     if !(15..=24 * 60).contains(&duration_minutes) {
-        return Err(OpError::message(
-            "The event needs to last between 15 minutes and 24 hours.",
-        ));
+        return Err(OpError::from(crate::msg!("err-event-length")));
     }
     check_clock(poll_weekday, poll_minutes)?;
     check_clock(lock_weekday, lock_minutes)?;
@@ -330,7 +326,7 @@ pub fn save_run_days(
         let routine = must_routine(tx, routine_id)?;
         require_owner(tx, &routine, actor_id)?;
         let Some(run) = editable_run(tx, routine.id)? else {
-            return Err(OpError::message("There isn't a poll to change yet."));
+            return Err(OpError::from(crate::msg!("err-no-poll-yet")));
         };
         diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
             .set(schema::routine_runs::days_json.eq(days_json(&days)))
@@ -367,15 +363,15 @@ pub fn cast_run(
     store::with_tx(conn, |tx| {
         let run = must_run(tx, run_id)?;
         if run.status != "open" {
-            return Err(OpError::message("That poll is closed."));
+            return Err(OpError::from(crate::msg!("err-poll-closed")));
         }
         if !run.days.contains(&day) {
-            return Err(OpError::message("That day isn't on this poll."));
+            return Err(OpError::from(crate::msg!("err-poll-day-missing")));
         }
         let user = must_membership(tx, membership_id)?;
         let routine = must_routine(tx, run.routine_id)?;
         if user.guild_id != routine.guild_id {
-            return Err(OpError::message("That person isn't in this server."));
+            return Err(OpError::from(crate::msg!("err-person-elsewhere")));
         }
         let choice = day.to_string();
         let existing: Option<i64> = schema::routine_votes::table
@@ -393,9 +389,9 @@ pub fn cast_run(
                 let roles = store::membership_role_ids(tx, &user)?;
                 if !restricts.iter().any(|role| roles.contains(role)) {
                     let names = role_names(tx, &restricts)?;
-                    return Err(OpError::message(format!(
-                        "This poll is limited to {}.",
-                        names.join(", ")
+                    return Err(OpError::from(crate::msg!(
+                        "err-poll-limited",
+                        roles = crate::i18n::each(|lang| crate::i18n::list_or(lang, &names)),
                     )));
                 }
             }
@@ -490,6 +486,7 @@ pub fn routine_post(
     let guild = must_guild(conn, routine.guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
     let settings = store::settings(conn, routine.guild_id)?;
+    let lang = crate::i18n::Lang::from_code(&settings.language).unwrap_or_default();
     let names = vote_names(conn, run.id)?;
     // Every day on the poll with who voted for it, open or final.
     let fields = run
@@ -503,7 +500,7 @@ pub fn routine_post(
                 people.join("\n")
             };
             let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
-            let label = poll_day_label(*day, when.with_timezone(&tz).date_naive());
+            let label = poll_day_label(lang, when.with_timezone(&tz).date_naive());
             DiscordField {
                 name: format!("**{label}** ({})", people.len()),
                 value,
@@ -516,22 +513,27 @@ pub fn routine_post(
         let day = run.winner_weekday.unwrap_or(run.days[0]);
         let when = event_start(run.locks_at, day, routine.start_minutes, tz);
         let votes = names.get(&day).map(Vec::len).unwrap_or(0);
-        format!(
-            "**{}** won with {votes} {}. The event is in the post above.",
-            poll_day_label(day, when.with_timezone(&tz).date_naive()),
-            if votes == 1 { "vote" } else { "votes" },
+        crate::tr!(
+            lang,
+            "poll-won",
+            day = poll_day_label(lang, when.with_timezone(&tz).date_naive()),
+            count = votes,
         )
     } else if settings.localize_time {
         // Discord shows it counting down, and the full time in each member's zone on hover.
-        format!("Locks <t:{}:R>.", run.locks_at.timestamp())
+        crate::tr!(lang, "poll-locks", when = format!("<t:{}:R>", run.locks_at.timestamp()))
     } else {
-        format!("Locks {}.", clock::format_when(run.locks_at, tz, settings.hour_24))
+        crate::tr!(
+            lang,
+            "poll-locks",
+            when = crate::i18n::format_when(lang, run.locks_at, tz, settings.hour_24)
+        )
     };
     // The results reply only reports; editing the routine is for the open poll.
     let body = if locked {
         body
     } else {
-        with_edit_link(body, public_url, guild.discord_id.as_deref(), routine.public_id)
+        with_edit_link(body, public_url, guild.discord_id.as_deref(), routine.public_id, lang)
     };
     let buttons = if run.status == "open" {
         run.days
@@ -540,7 +542,7 @@ pub fn routine_post(
                 let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
                 PollButton {
                     custom_id: format!("marian:w:{}:{day}", run.public_id),
-                    label: poll_day_label(*day, when.with_timezone(&tz).date_naive()),
+                    label: poll_day_label(lang, when.with_timezone(&tz).date_naive()),
                 }
             })
             .collect()
@@ -554,9 +556,13 @@ pub fn routine_post(
         (template.mention_everyone, mention_role_ids(conn, &template.mention_role_ids)?)
     };
     let (message_id, reply_to, title) = if locked {
-        (run.results_message_id, run.discord_message_id, format!("Poll results: {}", routine.title))
+        (
+            run.results_message_id,
+            run.discord_message_id,
+            crate::tr!(lang, "poll-results-title", title = &routine.title),
+        )
     } else {
-        (run.discord_message_id, None, format!("Next event: {}", routine.title))
+        (run.discord_message_id, None, crate::tr!(lang, "poll-next-title", title = &routine.title))
     };
     Ok(Some(RoutinePost {
         channel_discord_id: discord_id,
@@ -578,6 +584,7 @@ fn with_edit_link(
     public_url: &str,
     server: Option<&str>,
     public_id: Uuid,
+    lang: crate::i18n::Lang,
 ) -> String {
     let Some(url) = routine_url(public_url, server, public_id) else {
         return body;
@@ -585,16 +592,13 @@ fn with_edit_link(
     if !body.is_empty() {
         body.push('\n');
     }
-    body.push_str(&format!("[Edit]({url})"));
+    body.push_str(&format!("[{}]({url})", crate::tr!(lang, "post-edit")));
     body
 }
 
-fn poll_day_label(day: u8, date: NaiveDate) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let month = MONTHS[date.month0() as usize];
-    format!("{}, {} {}", clock::weekday_name(day), month, date.day())
+/// "Thursday, Oct 15": a day as the poll offers it.
+fn poll_day_label(lang: crate::i18n::Lang, date: NaiveDate) -> String {
+    crate::i18n::capitalized(&crate::i18n::format_long_day(lang, date))
 }
 
 fn routine_url(public_url: &str, server: Option<&str>, public_id: Uuid) -> Option<String> {
@@ -1227,7 +1231,7 @@ pub fn event_from(
         .iter()
         .map(|opt| {
             let kind = store::library_type_by_public(conn, guild_id, &opt.type_id)?
-                .ok_or_else(|| OpError::message("That attendance type isn't in this server's library."))?;
+                .ok_or_else(|| OpError::from(crate::msg!("err-type-elsewhere")))?;
             Ok(OptionInput {
                 id: None,
                 type_id: kind.id,
@@ -1287,9 +1291,7 @@ fn default_reminder() -> Vec<ReminderInput> {
 fn clean_title(title: &str) -> Result<String, OpError> {
     let title = title.trim();
     if title.is_empty() || title.chars().count() > 120 {
-        return Err(OpError::message(
-            "Give the event a title, up to 120 characters.",
-        ));
+        return Err(OpError::from(crate::msg!("err-title-length")));
     }
     Ok(title.to_string())
 }
@@ -1297,9 +1299,7 @@ fn clean_title(title: &str) -> Result<String, OpError> {
 fn clean_description(description: &str) -> Result<String, OpError> {
     let description = description.trim();
     if description.chars().count() > 2000 {
-        return Err(OpError::message(
-            "Keep the description under 2000 characters.",
-        ));
+        return Err(OpError::from(crate::msg!("err-description-length")));
     }
     Ok(description.to_string())
 }
@@ -1309,16 +1309,14 @@ fn clean_days(days: &[u8]) -> Result<Vec<u8>, OpError> {
     days.sort_unstable();
     days.dedup();
     if days.is_empty() {
-        return Err(OpError::message(
-            "Pick at least one day people can vote for.",
-        ));
+        return Err(OpError::from(crate::msg!("err-poll-no-days")));
     }
     Ok(days)
 }
 
 fn check_clock(weekday: u8, minutes: u16) -> Result<(), OpError> {
     if weekday > 6 || minutes >= 24 * 60 {
-        return Err(OpError::message("Pick a weekday and a time."));
+        return Err(OpError::from(crate::msg!("err-weekday-time")));
     }
     Ok(())
 }
@@ -1328,9 +1326,7 @@ fn require_owner(conn: &mut Connection, routine: &Routine, actor_id: i64) -> Res
     if routine.created_by == Some(actor.id) || actor.server_manager {
         return Ok(());
     }
-    Err(OpError::message(
-        "You can change routines you created, or any routine if you run the server.",
-    ))
+    Err(OpError::from(crate::msg!("err-routine-not-yours")))
 }
 
 fn vote_names(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, Vec<String>>, OpError> {

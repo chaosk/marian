@@ -11,15 +11,15 @@ pub fn set_user_reminders(
     conn: &mut Connection,
     membership_id: i64,
     enabled: bool,
-) -> Result<String, OpError> {
+) -> Result<crate::i18n::Msg, OpError> {
     let user = must_membership(conn, membership_id)?;
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
         .set(schema::memberships::reminders_enabled.eq(enabled))
         .execute(conn)?;
     Ok(if enabled {
-        format!("Reminders are on for {}.", user.name)
+        crate::msg!("notice-reminders-on", name = &user.name)
     } else {
-        format!("{} won't be pinged for reminders.", user.name)
+        crate::msg!("notice-reminders-off", name = &user.name)
     })
 }
 
@@ -39,11 +39,11 @@ pub fn create_channel(
             holds_any(&settings.role_channel, &roles)
         };
     if !allowed {
-        return Err(OpError::message("You can't create channels here."));
+        return Err(OpError::from(crate::msg!("err-cant-create-channels")));
     }
     let slug = slug_channel(name);
     if slug.is_empty() {
-        return Err(OpError::message("Give the channel a name."));
+        return Err(OpError::from(crate::msg!("err-channel-name")));
     }
     if let Some(existing) = store::channel_by_name(conn, guild_id, &slug)? {
         let linked = existing
@@ -53,7 +53,7 @@ pub fn create_channel(
         if existing.kind == "event" && !linked {
             return Ok(existing.id);
         }
-        return Err(OpError::message(format!("#{slug} already exists.")));
+        return Err(OpError::from(crate::msg!("err-channel-exists", name = slug.as_str())));
     }
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
@@ -77,13 +77,13 @@ pub fn bind_channel_discord(
     conn: &mut Connection,
     channel_id: i64,
     discord_id: &str,
-) -> Result<String, OpError> {
+) -> Result<crate::i18n::Msg, OpError> {
     let channel = store::channel(conn, channel_id)?.ok_or(OpError::NotFound)?;
     diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
         .set(schema::channels::discord_id.eq(discord_id))
         .execute(conn)?;
-    let notice = format!("Created #{}.", channel.name);
-    log(conn, channel.guild_id, None, &notice)?;
+    let notice = crate::msg!("notice-channel-created", name = &channel.name);
+    log(conn, channel.guild_id, None, &notice.to_string())?;
     Ok(notice)
 }
 
@@ -127,12 +127,10 @@ pub fn manual_calendar_sync(
     let settings = store::settings(conn, event.guild_id)?;
     let roles = store::membership_role_ids(conn, &actor)?;
     if !can_edit(&actor, &event, &settings, &roles) {
-        return Err(OpError::message("You can't sync this event."));
+        return Err(OpError::from(crate::msg!("err-cant-sync")));
     }
     if !matches!(event.status.as_str(), "posted" | "scheduled") {
-        return Err(OpError::message(
-            "Post or schedule the event before syncing it.",
-        ));
+        return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
     let stamp = Utc::now();
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
@@ -198,7 +196,7 @@ mod tests {
         let same = create_channel(&mut conn, 1, 1, "#This is an event channel").unwrap();
         assert_eq!(same, id);
         let notice = bind_channel_discord(&mut conn, id, "900").unwrap();
-        assert_eq!(notice, "Created #this-is-an-event-channel.");
+        assert_eq!(notice.to_string(), "Created #this-is-an-event-channel.");
         let again = create_channel(&mut conn, 1, 1, "this-is-an-event-channel").unwrap_err();
         assert_eq!(again.to_string(), "#this-is-an-event-channel already exists.");
         let channel = store::channel(&mut conn, id).unwrap().unwrap();

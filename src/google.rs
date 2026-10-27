@@ -290,14 +290,10 @@ pub fn set_auto_sync(
     on: bool,
 ) -> Result<(), OpError> {
     let Some(account) = account(conn, user_id)? else {
-        return Err(OpError::message(
-            "Connect Google Calendar with /google authorize.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-connect-first")));
     };
     if account.revoking {
-        return Err(OpError::message(
-            "Google Calendar is disconnecting. /google authorize connects it again.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-disconnecting")));
     }
     diesel::update(
         schema::google_accounts::table
@@ -324,14 +320,10 @@ pub fn queue_event(
     event_id: i64,
 ) -> Result<(), OpError> {
     let Some(account) = account(conn, user_id)? else {
-        return Err(OpError::message(
-            "Connect Google Calendar with /google authorize.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-connect-first")));
     };
     if account.revoking {
-        return Err(OpError::message(
-            "Google Calendar is disconnecting. /google authorize connects it again.",
-        ));
+        return Err(OpError::from(crate::msg!("err-google-disconnecting")));
     }
     diesel::insert_into(schema::google_events::table)
         .values(&NewGoogleEvent {

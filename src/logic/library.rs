@@ -75,7 +75,7 @@ pub fn add_type(
     require_editor(conn, guild_id, actor_id)?;
     let input = clean_type(input)?;
     if let Some(existing) = store::library_type_named(conn, guild_id, &input.name)? {
-        return Err(OpError::message(format!("The library already has {}.", existing.name)));
+        return Err(OpError::from(crate::msg!("err-library-has", name = &existing.name)));
     }
     let id = ensure_type(conn, guild_id, &input.name, &input.emoji, input.attending)?;
     store::library_type(conn, id)?.ok_or(OpError::NotFound)
@@ -95,7 +95,7 @@ pub fn update_type(
     let input = clean_type(input)?;
     if let Some(other) = store::library_type_named(conn, current.guild_id, &input.name)? {
         if other.id != type_id {
-            return Err(OpError::message(format!("The library already has {}.", other.name)));
+            return Err(OpError::from(crate::msg!("err-library-has", name = &other.name)));
         }
     }
     store::with_tx(conn, |tx| {
@@ -141,7 +141,11 @@ pub fn delete_type(conn: &mut Connection, type_id: i64, actor_id: i64) -> Result
     require_editor(conn, current.guild_id, actor_id)?;
     let usage = store::type_usage(conn, current.guild_id)?;
     if let Some(used) = usage.get(&type_id).filter(|used| used.total() > 0) {
-        return Err(OpError::message(format!("{} is still used by {}.", current.name, used.describe())));
+        return Err(OpError::from(crate::msg!(
+            "err-type-in-use",
+            name = &current.name,
+            usage = crate::i18n::each(|lang| used.describe_in(lang)),
+        )));
     }
     diesel::delete(schema::option_library::table.find(type_id)).execute(conn)?;
     Ok(())
@@ -158,7 +162,7 @@ pub fn save_preset(
     require_editor(conn, guild_id, actor_id)?;
     let name = input.name.trim();
     if name.is_empty() || name.chars().count() > 60 {
-        return Err(OpError::message("Name the preset, up to 60 characters."));
+        return Err(OpError::from(crate::msg!("err-preset-name")));
     }
     let options = clean_types(conn, guild_id, &input.options)?;
     store::with_tx(conn, |tx| match preset_id {
@@ -219,9 +223,7 @@ pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Re
     let preset = store::preset(conn, preset_id)?.ok_or(OpError::NotFound)?;
     require_editor(conn, preset.guild_id, actor_id)?;
     if store::settings(conn, preset.guild_id)?.default_preset_id == Some(preset.id) {
-        return Err(OpError::message(
-            "That is the default preset. Make another one the default first.",
-        ));
+        return Err(OpError::from(crate::msg!("err-preset-default")));
     }
     diesel::delete(schema::presets::table.find(preset.id)).execute(conn)?;
     Ok(())
@@ -289,14 +291,10 @@ pub fn apply_preset(
         let settings = store::settings(tx, event.guild_id)?;
         let roles = store::membership_role_ids(tx, &actor)?;
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
-            return Err(OpError::message(
-                "You can edit events you created, or any event if you run the server.",
-            ));
+            return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
         if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
-            return Err(OpError::message(
-                "That date is already closed. Duplicate it if you need another one.",
-            ));
+            return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let preset = store::preset(tx, preset_id)?
             .filter(|preset| preset.guild_id == event.guild_id)
@@ -313,7 +311,7 @@ pub fn apply_preset(
             })
             .collect();
         if options.is_empty() {
-            return Err(OpError::message("That preset has no attendance types."));
+            return Err(OpError::from(crate::msg!("err-preset-empty")));
         }
         sync_options(tx, event.id, &options)?;
         diesel::update(schema::events::table.find(event.id))
@@ -345,28 +343,28 @@ pub(super) fn clean_types(
     let mut options = Vec::new();
     for opt in input {
         if !library.contains(&opt.type_id) {
-            return Err(OpError::message("That attendance type isn't in this server's library."));
+            return Err(OpError::from(crate::msg!("err-type-elsewhere")));
         }
         if !seen.insert(opt.type_id) {
-            return Err(OpError::message("Each attendance type can be on the list once."));
+            return Err(OpError::from(crate::msg!("err-type-twice")));
         }
         if let Some(cap) = opt.capacity {
             if !(1..=500).contains(&cap) {
-                return Err(OpError::message("Capacity has to be at least 1, or left open."));
+                return Err(OpError::from(crate::msg!("err-capacity")));
             }
         }
         if let Some(role_id) = opt.role_id {
             if must_role(conn, role_id)?.guild_id != guild_id {
-                return Err(OpError::message("A type is limited to a role from another server."));
+                return Err(OpError::from(crate::msg!("err-type-role-elsewhere")));
             }
         }
         options.push(opt.clone());
     }
     if options.is_empty() {
-        return Err(OpError::message("Add at least one attendance type."));
+        return Err(OpError::from(crate::msg!("err-types-none")));
     }
     if options.len() > MAX_OPTIONS {
-        return Err(OpError::message("Use up to 8 attendance types."));
+        return Err(OpError::from(crate::msg!("err-types-many")));
     }
     Ok(options)
 }
@@ -374,11 +372,11 @@ pub(super) fn clean_types(
 fn clean_type(input: &TypeInput) -> Result<TypeInput, OpError> {
     let name = input.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 40 {
-        return Err(OpError::message("Name the attendance type, up to 40 characters."));
+        return Err(OpError::from(crate::msg!("err-type-name")));
     }
     let emoji = match input.emoji.trim() {
         "" => "•".to_string(),
-        emoji if emoji.chars().count() > 8 => return Err(OpError::message("Keep the emoji short.")),
+        emoji if emoji.chars().count() > 8 => return Err(OpError::from(crate::msg!("err-emoji-long"))),
         emoji => emoji.to_string(),
     };
     Ok(TypeInput {
@@ -407,7 +405,7 @@ pub(super) fn require_editor(conn: &mut Connection, guild_id: i64, actor_id: i64
     if allowed {
         Ok(())
     } else {
-        Err(OpError::message("You can't change attendance types or presets."))
+        Err(OpError::from(crate::msg!("err-cant-change-types")))
     }
 }
 

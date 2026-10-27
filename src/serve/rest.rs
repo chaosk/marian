@@ -92,6 +92,7 @@ impl From<OpError> for Problem {
         match err {
             OpError::NotFound => Problem(StatusCode::NOT_FOUND, "That isn't here.".into()),
             OpError::Message(text) => Problem(StatusCode::UNPROCESSABLE_ENTITY, text),
+            OpError::Text(msg) => Problem(StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()),
             OpError::Db(err) => {
                 tracing::warn!("database: {err}");
                 Problem(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.".into())

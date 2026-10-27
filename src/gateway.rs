@@ -10,7 +10,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::Instrument;
 
 use crate::commands;
+use crate::i18n::{self, Lang};
 use crate::jobs::DiscordJob;
+use crate::tr;
 use crate::logic;
 use crate::schema;
 use crate::store::{self, Connection};
@@ -151,19 +153,7 @@ async fn connect(
     let presence = presence_line(&status);
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                event(),
-                edit(),
-                reminders(),
-                response(),
-                settings(),
-                signup_options(),
-                signup_presets(),
-                channel(),
-                google(),
-                sort(),
-                help(),
-            ],
+            commands: all_commands(),
             event_handler: |ctx, event, framework, data| {
                 Box::pin(on_event(ctx, event, framework, data))
             },
@@ -206,7 +196,7 @@ async fn connect(
 async fn on_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
-    framework: poise::FrameworkContext<'_, Data, Error>,
+    _framework: poise::FrameworkContext<'_, Data, Error>,
     data: &Data,
 ) -> Result<(), Error> {
     match event {
@@ -215,7 +205,7 @@ async fn on_event(
                 *slot = Some(ctx.http.clone());
             }
             for guild in &data_about_bot.guilds {
-                register_guild(ctx, framework, data, guild.id).await;
+                register_guild(ctx, data, guild.id).await;
             }
         }
         serenity::FullEvent::GuildCreate { guild, .. } => {
@@ -223,7 +213,7 @@ async fn on_event(
                 tracing::warn!("could not store {}: {err}", guild.name);
             }
             tokio::spawn(admit_signed_in(data.db.clone(), ctx.http.clone(), guild.id));
-            register_guild(ctx, framework, data, guild.id).await;
+            register_guild(ctx, data, guild.id).await;
         }
         serenity::FullEvent::ChannelCreate { channel }
         | serenity::FullEvent::ChannelUpdate { new: channel, .. } => {
@@ -321,12 +311,76 @@ async fn on_event(
     Ok(())
 }
 
-async fn register_guild(
-    ctx: &serenity::Context,
-    framework: poise::FrameworkContext<'_, Data, Error>,
-    data: &Data,
+fn all_commands() -> Vec<poise::Command<Data, Error>> {
+    vec![
+        event(),
+        edit(),
+        reminders(),
+        response(),
+        settings(),
+        signup_options(),
+        signup_presets(),
+        channel(),
+        google(),
+        sort(),
+        help(),
+    ]
+}
+
+/// Registers the commands in one server, described in its language.
+async fn register_commands(
+    http: impl AsRef<serenity::Http>,
     guild_id: serenity::GuildId,
-) {
+    lang: Lang,
+) -> Result<(), serenity::Error> {
+    let mut commands = all_commands();
+    for command in &mut commands {
+        describe_command(command, lang, "");
+    }
+    poise::builtins::register_in_guild(http, &commands, guild_id).await
+}
+
+/// Puts a command's descriptions, its options' and its choices' in `lang`,
+/// from the `cmd-` messages: `cmd-settings-hour_24` describes `/settings
+/// hour_24`, `cmd-edit--title` its `title` option. English is what the
+/// command itself says.
+fn describe_command(command: &mut poise::Command<Data, Error>, lang: Lang, parent: &str) {
+    let path = if parent.is_empty() {
+        command.name.clone()
+    } else {
+        format!("{parent}-{}", command.name)
+    };
+    if lang != Lang::En {
+        // Discord shows a description for the reader's own locale over the
+        // plain one; the server's language wins here.
+        command.description_localizations.clear();
+        if let Some(text) = command_text(lang, &format!("cmd-{path}")) {
+            command.description = Some(text);
+        }
+        for parameter in &mut command.parameters {
+            parameter.description_localizations.clear();
+            if let Some(text) = command_text(lang, &format!("cmd-{path}--{}", parameter.name)) {
+                parameter.description = Some(text);
+            }
+            for choice in &mut parameter.choices {
+                if let Some(text) =
+                    command_text(lang, &format!("cmd-{path}--{}--{}", parameter.name, choice.name))
+                {
+                    choice.name = text;
+                }
+            }
+        }
+    }
+    for subcommand in &mut command.subcommands {
+        describe_command(subcommand, lang, &path);
+    }
+}
+
+fn command_text(lang: Lang, key: &str) -> Option<String> {
+    i18n::has(lang, key).then(|| i18n::text(lang, key, &[]))
+}
+
+async fn register_guild(ctx: &serenity::Context, data: &Data, guild_id: serenity::GuildId) {
     let fresh = data
         .registered
         .lock()
@@ -335,9 +389,16 @@ async fn register_guild(
     if !fresh {
         return;
     }
-    if let Err(err) =
-        poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await
-    {
+    let lang = data
+        .db
+        .get()
+        .ok()
+        .and_then(|mut conn| {
+            let guild = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).ok()??;
+            Some(i18n::lang_of(&mut conn, guild.id))
+        })
+        .unwrap_or_default();
+    if let Err(err) = register_commands(ctx, guild_id, lang).await {
         if let Ok(mut seen) = data.registered.lock() {
             seen.remove(&guild_id.get());
         }
@@ -561,7 +622,8 @@ async fn handle_button(
         }
     };
     let Some(found) = found else {
-        return followup(ctx, component, "That isn't here any more.").await;
+        let lang = button_lang(data, component);
+        return followup(ctx, component, &tr!(lang, "reply-gone")).await;
     };
     match found {
         Found::Edit(event_id) => edit_from_button(ctx, component, data, event_id).await,
@@ -591,16 +653,16 @@ async fn routine_from_button(
     day: u8,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let saved = {
+    let (saved, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let membership_id = bind_clicker(&mut conn, &click)?;
-        logic::cast_run(&mut conn, run_id, membership_id, day)
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        (logic::cast_run(&mut conn, run_id, membership_id, day), lang)
     };
     if let Err(err) = saved {
-        return followup(ctx, component, &err.to_string()).await;
+        return followup(ctx, component, &err.localized(lang)).await;
     }
     if let Err(err) = push_routine(&data.db, &data.http, &data.public_url, run_id).await {
         tracing::warn!("could not refresh the routine poll: {err}");
@@ -616,16 +678,16 @@ async fn signup_from_button(
     option_id: i64,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let signed = {
+    let (signed, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let membership_id = bind_clicker(&mut conn, &click)?;
-        logic::signup(&mut conn, event_id, option_id, membership_id)
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        (logic::signup(&mut conn, event_id, option_id, membership_id), lang)
     };
     if let Err(err) = signed {
-        return followup(ctx, component, &err.to_string()).await;
+        return followup(ctx, component, &err.localized(lang)).await;
     }
     tell_pages(&data.db, event_id, true);
     if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
@@ -644,18 +706,18 @@ async fn edit_from_button(
     event_id: i64,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
     let text = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let membership_id = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
             Some(event) if event.created_by == Some(membership_id) => {
-                Some(event_link(&mut conn, &data.public_url, &event)?)
+                Some(event_link(&mut conn, &data.public_url, &event, lang)?)
             }
             Some(_) => None,
-            None => Some("That event isn't here.".to_string()),
+            None => Some(tr!(lang, "reply-event-missing")),
         }
     };
     let Some(text) = text else {
@@ -671,14 +733,14 @@ async fn ask_delete(
     event_id: i64,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let card = {
+    let (card, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let membership_id = bind_clicker(&mut conn, &click)?;
-        match store::event(&mut conn, event_id)? {
-            None => Err("That event isn't here.".to_string()),
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let card = match store::event(&mut conn, event_id)? {
+            None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event)
                 if !matches!(
@@ -686,7 +748,7 @@ async fn ask_delete(
                     "draft" | "scheduled" | "failed" | "posted"
                 ) =>
             {
-                Err("That event is already closed.".to_string())
+                Err(tr!(lang, "err-event-closed"))
             }
             Some(event) => {
                 let server = store::discord_server_id(&mut conn, event.guild_id).unwrap_or_default();
@@ -697,6 +759,7 @@ async fn ask_delete(
                 );
                 Ok(Some((
                     logic::delete_confirm_body(
+                        lang,
                         &event.title,
                         event.starts_at,
                         url.as_deref(),
@@ -705,7 +768,8 @@ async fn ask_delete(
                     event.public_id,
                 )))
             }
-        }
+        };
+        (card, lang)
     };
     let body = match card {
         Ok(Some(body)) => body,
@@ -714,12 +778,12 @@ async fn ask_delete(
     };
     let (body, event) = body;
     let embed = serenity::CreateEmbed::new()
-        .title("Delete event")
+        .title(tr!(lang, "post-delete-title"))
         .description(clip(&body, 4000))
         .color(serenity::Colour::new(0xF1C40F));
     let delete = serenity::CreateButton::new(format!("marian:{event}:confirm-delete"))
         .style(serenity::ButtonStyle::Danger)
-        .label("Delete");
+        .label(tr!(lang, "post-delete"));
     component
         .create_followup(
             &ctx.http,
@@ -739,27 +803,27 @@ async fn delete_from_button(
     event_id: i64,
 ) -> Result<(), Error> {
     let Some(click) = click_context(ctx, component) else {
-        followup(ctx, component, "Use that button inside a server.").await?;
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
     let removed = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let membership_id = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
         match store::event(&mut conn, event_id)? {
-            None => Err("That event isn't here.".to_string()),
+            None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event) => {
                 let plan = logic::event_channel_purge(&mut conn, event.id)
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| err.localized(lang))?;
                 let channel_discord = store::channel(&mut conn, event.channel_id)?
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
                 match logic::delete_event(&mut conn, event_id, membership_id) {
                     Ok(notice) => {
                         crate::live::event(event.guild_id, event.public_id);
-                        Ok(Some((plan, channel_discord, message_id, notice)))
+                        Ok(Some((plan, channel_discord, message_id, notice.render(lang))))
                     }
-                    Err(err) => Err(err.to_string()),
+                    Err(err) => Err(err.localized(lang)),
                 }
             }
         }
@@ -871,7 +935,8 @@ fn click_context(
     })
 }
 
-fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
+/// The member who pressed a button, and their server's language.
+fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<(i64, Lang), Error> {
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
     let user = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
     if let Some(manage) = click.manage {
@@ -880,13 +945,28 @@ fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<i64, Error> {
     if let Some(roles) = &click.roles {
         sync_roles(conn, guild.id, user.id, roles)?;
     }
-    Ok(user.id)
+    Ok((user.id, i18n::lang_of(conn, guild.id)))
+}
+
+/// The language of the server a button is in; English outside one.
+fn button_lang(data: &Data, component: &serenity::ComponentInteraction) -> Lang {
+    let Some(guild_id) = component.guild_id else {
+        return Lang::En;
+    };
+    let Ok(mut conn) = data.db.get() else {
+        return Lang::En;
+    };
+    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()) {
+        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id),
+        _ => Lang::En,
+    }
 }
 
 fn event_link(
     conn: &mut Connection,
     public_url: &str,
     event: &store::Event,
+    lang: Lang,
 ) -> Result<String, Error> {
     let server = store::discord_server_id(conn, event.guild_id).unwrap_or_default();
     let path = if server.is_empty() {
@@ -896,7 +976,7 @@ fn event_link(
     };
     let base = public_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        Ok(format!("Open {path}."))
+        Ok(tr!(lang, "reply-open-path", path = path))
     } else {
         Ok(format!("{base}{}", path))
     }
@@ -1573,11 +1653,17 @@ async fn push_remind(
             logic::web_event_url(public_url, guild_id.as_deref(), &event.public_id)
         });
         RemindPlan {
+            lang: i18n::lang_of(&mut conn, event.guild_id),
             channel_id,
             thread_id: store::thread_discord_id(&mut conn, event_id)?,
             in_thread: event.thread_enabled && settings.thread_reminders,
             message_id,
-            thread_name: logic::event_thread_name(&event.title, event.starts_at, &timezone),
+            thread_name: logic::event_thread_name(
+                i18n::lang_of(&mut conn, event.guild_id),
+                &event.title,
+                event.starts_at,
+                &timezone,
+            ),
             title: event.title,
             start: start.timestamp(),
             end: end.timestamp(),
@@ -1610,6 +1696,7 @@ async fn push_remind(
         plan.channel_id.parse()?
     };
     let card = logic::reminder_card(
+        plan.lang,
         &plan.title,
         plan.start,
         plan.end,
@@ -1634,6 +1721,7 @@ async fn push_remind(
 }
 
 struct RemindPlan {
+    lang: Lang,
     channel_id: String,
     thread_id: Option<String>,
     in_thread: bool,
@@ -1650,6 +1738,8 @@ struct Actor {
     guild_id: i64,
     membership_id: i64,
     discord_user: String,
+    /// The server's language, for the reply.
+    lang: Lang,
 }
 
 async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
@@ -1702,6 +1792,7 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
         guild_id: guild.id,
         membership_id: user.id,
         discord_user,
+        lang: i18n::lang_of(&mut conn, guild.id),
     }))
 }
 
@@ -1747,16 +1838,25 @@ fn embed_parts(reply: &commands::DmReply) -> (Option<String>, String) {
     }
 }
 
-fn dm_blocked(lead: &str, public_url: &str, server: Option<u64>) -> String {
+/// Why the event questions didn't arrive, and where else to make the event.
+/// `sent` is whether the DM opened and the message was refused.
+fn dm_blocked(lang: Lang, sent: bool, public_url: &str, server: Option<u64>) -> String {
+    let lead = if sent {
+        tr!(lang, "reply-dm-not-sent")
+    } else {
+        tr!(lang, "reply-dm-not-opened")
+    };
     let base = public_url.trim().trim_end_matches('/');
     let web = match (base.is_empty(), server) {
-        (false, Some(server)) => {
-            format!(" You can always create the event at {base}/servers/{server}/events/new.")
-        }
-        (false, None) => format!(" You can always create the event at {base}."),
-        _ => " You can always create the event on the web.".to_string(),
+        (false, Some(server)) => tr!(
+            lang,
+            "reply-dm-web-at",
+            url = format!("{base}/servers/{server}/events/new")
+        ),
+        (false, None) => tr!(lang, "reply-dm-web-at", url = base),
+        _ => tr!(lang, "reply-dm-web"),
     };
-    format!("{lead} Allow direct messages from server members, then run /event again.{web}")
+    format!("{lead} {} {web}", tr!(lang, "reply-dm-allow"))
 }
 
 fn event_mentions(everyone: bool, roles: &[String]) -> serenity::CreateAllowedMentions {
@@ -1787,7 +1887,7 @@ fn clip(text: &str, max: usize) -> String {
 async fn event(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use /event inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-event-outside")).await?;
         return Ok(());
     };
     let invoked_id = ctx.channel_id().get().to_string();
@@ -1815,12 +1915,13 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
             &actor.discord_user,
             &channel.name,
             Some(&invoked_id),
+            actor.lang,
         )
     };
     let question = match started {
         Ok(question) => question,
         Err(err) => {
-            ctx.say(clip(&err.to_string(), 1800)).await?;
+            ctx.say(clip(&err.localized(actor.lang), 1800)).await?;
             return Ok(());
         }
     };
@@ -1836,15 +1937,15 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
                 }
                 tracing::warn!("could not send the event questions: {err}");
                 ctx.say(dm_blocked(
-                    "I couldn't send the DM.",
+                    actor.lang,
+                    true,
                     &ctx.data().public_url,
                     ctx.guild_id().map(|id| id.get()),
                 ))
                 .await?;
                 return Ok(());
             }
-            ctx.say("I sent you a DM. Answer there and I'll post the event.")
-                .await?;
+            ctx.say(tr!(actor.lang, "reply-dm-sent")).await?;
         }
         Err(err) => {
             {
@@ -1853,7 +1954,8 @@ async fn event(ctx: Context<'_>) -> Result<(), Error> {
             }
             tracing::warn!("could not open a DM: {err}");
             ctx.say(dm_blocked(
-                "I couldn't open a DM.",
+                actor.lang,
+                false,
                 &ctx.data().public_url,
                 ctx.guild_id().map(|id| id.get()),
             ))
@@ -1873,7 +1975,8 @@ async fn complete_channel(ctx: Context<'_>, partial: &str) -> Vec<serenity::Auto
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::channel_choices(&mut conn, guild.id, partial)
+    let lang = i18n::lang_of(&mut conn, guild.id);
+    commands::channel_choices(&mut conn, guild.id, partial, lang)
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -1889,7 +1992,7 @@ async fn deliver(
     let data = ctx.data();
     let text = match &outcome {
         Ok(text) => text.clone(),
-        Err(err) => err.to_string(),
+        Err(err) => err.localized(actor.lang),
     };
     let refresh = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
@@ -1929,7 +2032,7 @@ async fn edit(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let label = format!("/edit {event}");
@@ -1947,6 +2050,7 @@ async fn edit(
                 duration,
                 channel,
             },
+            actor.lang,
         )
     };
     deliver(ctx, &actor, &label, outcome).await
@@ -1963,12 +2067,12 @@ async fn reminders(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::set_reminders(&mut conn, actor.membership_id, enabled)
+        commands::set_reminders(&mut conn, actor.membership_id, enabled, actor.lang)
     };
     deliver(ctx, &actor, "/reminders", outcome).await
 }
@@ -2050,7 +2154,8 @@ async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoco
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::response_events(&mut conn, guild.id, partial, chrono::Utc::now())
+    let lang = i18n::lang_of(&mut conn, guild.id);
+    commands::response_events(&mut conn, guild.id, partial, chrono::Utc::now(), lang)
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -2102,7 +2207,7 @@ async fn run_response(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let name = crate::auth::discord_display_name(user.global_name.as_deref(), &user.name);
@@ -2115,7 +2220,7 @@ async fn run_response(
             &user.id.get().to_string(),
             &name,
         )?;
-        commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action)
+        commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action, actor.lang)
     };
     match outcome {
         Ok((reply, event_id)) => {
@@ -2129,7 +2234,7 @@ async fn run_response(
             ctx.say(clip(&reply, 1800)).await?;
         }
         Err(err) => {
-            ctx.say(clip(&err.to_string(), 1800)).await?;
+            ctx.say(clip(&err.localized(actor.lang), 1800)).await?;
         }
     }
     Ok(())
@@ -2138,13 +2243,24 @@ async fn run_response(
 async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
-    let outcome = {
+    let language = matches!(change, commands::Setting::Language(_));
+    let (outcome, lang) = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::apply_setting(&mut conn, actor.guild_id, actor.membership_id, change)
+        let outcome = commands::apply_setting(&mut conn, actor.guild_id, actor.membership_id, change, actor.lang);
+        (outcome, i18n::lang_of(&mut conn, actor.guild_id))
     };
+    if language && outcome.is_ok() {
+        // The commands' descriptions follow the server's language.
+        if let Some(guild_id) = ctx.guild_id() {
+            if let Err(err) = register_commands(ctx.http(), guild_id, lang).await {
+                tracing::warn!("could not register commands in {guild_id}: {err}");
+            }
+        }
+    }
+    let actor = Actor { lang, ..actor };
     deliver(ctx, &actor, label, outcome).await
 }
 
@@ -2166,7 +2282,8 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         "settings_waitlist",
         "settings_digest",
         "settings_post_lead",
-        "settings_role"
+        "settings_role",
+        "settings_language"
     ),
     description_localized("en-US", "Change a server setting")
 )]
@@ -2450,6 +2567,31 @@ async fn settings_role(
 #[poise::command(
     slash_command,
     guild_only,
+    rename = "language",
+    description_localized("en-US", "The language Marian writes in on this server")
+)]
+async fn settings_language(
+    ctx: Context<'_>,
+    #[description = "English or Polski"]
+    #[choices("English", "Polski")]
+    language: &'static str,
+) -> Result<(), Error> {
+    let code = Lang::ALL
+        .into_iter()
+        .find(|lang| lang.name() == language)
+        .unwrap_or_default()
+        .code();
+    setting(
+        ctx,
+        "/settings language",
+        commands::Setting::Language(code.to_string()),
+    )
+    .await
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
     subcommands("signup_options_list", "signup_options_add", "signup_options_remove"),
     description_localized("en-US", "List, add, or remove a library option")
 )]
@@ -2466,12 +2608,12 @@ async fn signup_options(_ctx: Context<'_>) -> Result<(), Error> {
 async fn signup_options_list(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::library_text(&mut conn, actor.guild_id)
+        commands::library_text(&mut conn, actor.guild_id, actor.lang)
     };
     deliver(ctx, &actor, "/signup_options list", outcome).await
 }
@@ -2490,7 +2632,7 @@ async fn signup_options_add(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let emoji = emoji.unwrap_or_else(|| "•".into());
@@ -2503,6 +2645,7 @@ async fn signup_options_add(
             &name,
             &emoji,
             attending.unwrap_or(true),
+            actor.lang,
         )
     };
     deliver(ctx, &actor, "/signup_options add", outcome).await
@@ -2520,12 +2663,12 @@ async fn signup_options_remove(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::remove_library_option(&mut conn, actor.guild_id, actor.membership_id, &name)
+        commands::remove_library_option(&mut conn, actor.guild_id, actor.membership_id, &name, actor.lang)
     };
     deliver(ctx, &actor, "/signup_options remove", outcome).await
 }
@@ -2549,12 +2692,12 @@ async fn signup_presets(_ctx: Context<'_>) -> Result<(), Error> {
 async fn signup_presets_list(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::preset_text(&mut conn, actor.guild_id)
+        commands::preset_text(&mut conn, actor.guild_id, actor.lang)
     };
     deliver(ctx, &actor, "/signup_presets list", outcome).await
 }
@@ -2572,12 +2715,12 @@ async fn signup_presets_add(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::add_preset(&mut conn, actor.guild_id, actor.membership_id, &name, &options)
+        commands::add_preset(&mut conn, actor.guild_id, actor.membership_id, &name, &options, actor.lang)
     };
     deliver(ctx, &actor, "/signup_presets add", outcome).await
 }
@@ -2594,12 +2737,12 @@ async fn signup_presets_remove(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::remove_preset(&mut conn, actor.guild_id, actor.membership_id, &name)
+        commands::remove_preset(&mut conn, actor.guild_id, actor.membership_id, &name, actor.lang)
     };
     deliver(ctx, &actor, "/signup_presets remove", outcome).await
 }
@@ -2615,7 +2758,7 @@ async fn channel(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = open_event_channel(
@@ -2639,19 +2782,19 @@ pub async fn open_event_channel(
     let guild_discord = {
         let mut conn = db
             .get()
-            .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+            .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
         store::guild(&mut conn, guild_id)?
             .and_then(|guild| guild.discord_id)
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| crate::error::OpError::message("This server isn't connected to Discord."))?
+            .ok_or_else(|| crate::error::OpError::from(crate::msg!("err-server-not-connected")))?
     };
     let guild_discord = guild_discord.parse::<u64>().map_err(|_| {
-        crate::error::OpError::message("This server isn't connected to Discord.")
+        crate::error::OpError::from(crate::msg!("err-server-not-connected"))
     })?;
     let (channel_id, slug) = {
         let mut conn = db
             .get()
-            .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+            .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
         let id = logic::create_channel(&mut conn, guild_id, membership_id, name)?;
         let channel = store::channel(&mut conn, id)?.ok_or(crate::error::OpError::NotFound)?;
         (id, channel.name)
@@ -2669,18 +2812,18 @@ pub async fn open_event_channel(
             if let Ok(mut conn) = db.get() {
                 let _ = logic::discard_channel(&mut conn, channel_id);
             }
-            return Err(crate::error::OpError::message(channel_create_failure(&err)));
+            return Err(crate::error::OpError::from(channel_create_failure(&err)));
         }
     };
     let mut conn = db
         .get()
-        .map_err(|_| crate::error::OpError::message("Could not reach the database."))?;
+        .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
     match logic::bind_channel_discord(
         &mut conn,
         channel_id,
         &discord_channel.id.get().to_string(),
     ) {
-        Ok(notice) => Ok(notice),
+        Ok(notice) => Ok(notice.render(i18n::lang_of(&mut conn, guild_id))),
         Err(err) => {
             if let Err(delete_err) = discord_channel.delete(http).await {
                 tracing::warn!("could not remove the Discord channel: {delete_err}");
@@ -2691,12 +2834,12 @@ pub async fn open_event_channel(
     }
 }
 
-fn channel_create_failure(err: &serenity::Error) -> String {
+fn channel_create_failure(err: &serenity::Error) -> crate::i18n::Msg {
     let text = err.to_string().to_ascii_lowercase();
     if text.contains("missing permission") || text.contains("50013") || text.contains("50001") {
-        "Marian needs the Manage Channels permission. Give it to Marian's role in Server Settings, then try again.".into()
+        crate::msg!("err-manage-channels")
     } else {
-        "Discord didn't create the channel.".into()
+        crate::msg!("err-channel-not-created")
     }
 }
 
@@ -2719,7 +2862,7 @@ async fn google(_ctx: Context<'_>) -> Result<(), Error> {
 async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
@@ -2742,9 +2885,9 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
     }
     ctx.send(
         poise::CreateReply::default()
-            .content("Click the button below to connect Google Calendar.")
+            .content(tr!(actor.lang, "reply-google-click"))
             .components(vec![serenity::CreateActionRow::Buttons(vec![
-                serenity::CreateButton::new_link(url).label("Sign in with Google"),
+                serenity::CreateButton::new_link(url).label(tr!(actor.lang, "reply-google-button")),
             ])]),
     )
     .await?;
@@ -2763,12 +2906,12 @@ async fn google_auto_sync(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::google_auto_sync(&mut conn, actor.guild_id, actor.membership_id, enabled)
+        commands::google_auto_sync(&mut conn, actor.guild_id, actor.membership_id, enabled, actor.lang)
     };
     deliver(ctx, &actor, "/google auto_sync", outcome).await
 }
@@ -2787,13 +2930,13 @@ async fn google_sync(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let label = format!("/google sync {event}");
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::google_sync(&mut conn, actor.guild_id, actor.membership_id, &event)
+        commands::google_sync(&mut conn, actor.guild_id, actor.membership_id, &event, actor.lang)
     };
     deliver(ctx, &actor, &label, outcome).await
 }
@@ -2807,12 +2950,12 @@ async fn google_sync(
 async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let outcome = {
         let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id)
+        commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id, actor.lang)
     };
     deliver(ctx, &actor, "/google revoke", outcome).await
 }
@@ -2825,7 +2968,7 @@ async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
 async fn sort(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
-        ctx.say("Use Marian inside a server.").await?;
+        ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
     let discord_channel = ctx.channel_id().get().to_string();
@@ -2874,7 +3017,7 @@ async fn sort(ctx: Context<'_>) -> Result<(), Error> {
         ctx,
         &actor,
         "/sort",
-        Ok(format!("Reversed the posts in #{}.", plan.name)),
+        Ok(tr!(actor.lang, "reply-sorted", channel = &plan.name)),
     )
     .await
 }
@@ -2888,22 +3031,29 @@ async fn sort(ctx: Context<'_>) -> Result<(), Error> {
     )
 )]
 async fn help(ctx: Context<'_>) -> Result<(), Error> {
+    let lang = match ctx.guild_id() {
+        Some(guild_id) => {
+            let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
+            match store::guild_by_discord(&mut conn, &guild_id.get().to_string())? {
+                Some(guild) => i18n::lang_of(&mut conn, guild.id),
+                None => Lang::En,
+            }
+        }
+        None => Lang::En,
+    };
     let base = ctx.data().public_url.trim().trim_end_matches('/');
     let more = if base.is_empty() {
-        "The other commands are explained on the Help page.".to_string()
+        tr!(lang, "reply-help-more-page")
     } else {
-        format!("The other commands are explained at {base}/help.")
+        tr!(lang, "reply-help-more-at", url = format!("{base}/help"))
     };
-    ctx.say(format!(
-        "/event starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats.\n\n{more}"
-    ))
-    .await?;
+    ctx.say(format!("{}\n\n{more}", tr!(lang, "reply-help"))).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{dm_blocked, embed_parts, parse_button, presence_line, ButtonAction};
+    use super::{dm_blocked, embed_parts, parse_button, presence_line, ButtonAction, Lang};
 
     #[test]
     fn a_button_names_its_rows_by_public_id() {
@@ -2930,6 +3080,61 @@ mod tests {
     }
     use crate::commands::DmReply;
 
+    /// Every command, option and choice, as the path its `cmd-` message uses.
+    fn command_paths(
+        command: &poise::Command<super::Data, super::Error>,
+        parent: &str,
+        out: &mut Vec<(String, Option<String>)>,
+    ) {
+        let path = if parent.is_empty() {
+            command.name.clone()
+        } else {
+            format!("{parent}-{}", command.name)
+        };
+        out.push((format!("cmd-{path}"), command.description.clone()));
+        for parameter in &command.parameters {
+            out.push((format!("cmd-{path}--{}", parameter.name), parameter.description.clone()));
+            // A language is named in itself, whatever the server's language.
+            if parameter.name == "language" {
+                continue;
+            }
+            for choice in &parameter.choices {
+                out.push((format!("cmd-{path}--{}--{}", parameter.name, choice.name), None));
+            }
+        }
+        for subcommand in &command.subcommands {
+            command_paths(subcommand, &path, out);
+        }
+    }
+
+    #[test]
+    fn every_command_is_described_in_polish_within_discords_limit() {
+        let mut paths = Vec::new();
+        for command in super::all_commands() {
+            command_paths(&command, "", &mut paths);
+        }
+        assert!(paths.len() > 80, "{}", paths.len());
+        for (key, english) in &paths {
+            assert!(crate::i18n::has(Lang::Pl, key), "Polish has no {key}");
+            let polish = crate::i18n::text(Lang::Pl, key, &[]);
+            assert!(polish.chars().count() <= 100, "{key} is longer than Discord allows");
+            if let Some(english) = english {
+                assert!(english.chars().count() <= 100, "{key} in English is too long");
+            }
+        }
+        let mut described = super::all_commands();
+        for command in &mut described {
+            super::describe_command(command, Lang::Pl, "");
+        }
+        let settings = described.iter().find(|command| command.name == "settings").unwrap();
+        let digest = settings.subcommands.iter().find(|command| command.name == "digest").unwrap();
+        assert_eq!(digest.description.as_deref(), Some("Jak często Marian publikuje podsumowanie"));
+        assert!(digest.description_localizations.is_empty(), "the server's language wins");
+        assert_eq!(digest.parameters[0].choices[1].name, "codziennie");
+        let language = settings.subcommands.iter().find(|command| command.name == "language").unwrap();
+        assert_eq!(language.parameters[0].choices[1].name, "Polski");
+    }
+
     #[test]
     fn presence_is_the_status_text() {
         assert_eq!(
@@ -2944,6 +3149,7 @@ mod tests {
         let question = embed_parts(&DmReply {
             title: None,
             body: "What should it be called?".into(),
+            created: None,
         });
         assert_eq!(question.0.as_deref(), Some("What should it be called?"));
         assert!(question.1.is_empty());
@@ -2951,6 +3157,7 @@ mod tests {
         let when = embed_parts(&DmReply {
             title: None,
             body: "When does **Shore** start?\n\nFor example, \"tomorrow at 7pm\".".into(),
+            created: None,
         });
         assert!(when.0.is_none());
         assert!(when.1.contains("**Shore**"));
@@ -2958,15 +3165,18 @@ mod tests {
 
     #[test]
     fn a_blocked_dm_offers_the_web_page() {
-        let noted = dm_blocked("I couldn't send the DM.", "https://marian.example.com/", Some(4242));
+        let noted = dm_blocked(Lang::En, true, "https://marian.example.com/", Some(4242));
         assert_eq!(
             noted,
             "I couldn't send the DM. Allow direct messages from server members, then run /event again. You can always create the event at https://marian.example.com/servers/4242/events/new."
         );
-        let plain = dm_blocked("I couldn't open a DM.", "  ", None);
+        let plain = dm_blocked(Lang::En, false, "  ", None);
         assert_eq!(
             plain,
             "I couldn't open a DM. Allow direct messages from server members, then run /event again. You can always create the event on the web."
         );
+        let polish = dm_blocked(Lang::Pl, true, "https://marian.example.com", Some(4242));
+        assert!(polish.starts_with("Nie udało się wysłać wiadomości prywatnej."), "{polish}");
+        assert!(polish.ends_with("https://marian.example.com/servers/4242/events/new."), "{polish}");
     }
 }

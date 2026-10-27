@@ -3,9 +3,9 @@ use chrono_tz::Tz;
 
 use crate::clock;
 
-/// Read a start time the way someone would type it in Discord.
+/// Read a start time the way someone would type it in Discord, in English or Polish.
 pub fn parse_when(input: &str, now: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
-    let text = input.trim().to_lowercase();
+    let text = normalize(input);
     if text.is_empty() {
         return None;
     }
@@ -20,7 +20,11 @@ pub fn parse_when(input: &str, now: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
     let mut date = local_now.date_naive();
     let mut rest = text.as_str();
 
-    if let Some(tail) = rest.strip_prefix("tomorrow") {
+    if let Some(tail) = rest.strip_prefix("overmorrow") {
+        date = clock::shift_days(date, 2);
+        rest = tail.trim();
+        rest = rest.strip_prefix("at").unwrap_or(rest).trim();
+    } else if let Some(tail) = rest.strip_prefix("tomorrow") {
         date = clock::shift_days(date, 1);
         rest = tail.trim();
         rest = rest.strip_prefix("at").unwrap_or(rest).trim();
@@ -63,6 +67,182 @@ pub fn parse_when(input: &str, now: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
         return None;
     }
     Some(when)
+}
+
+/// Lower case, with Polish words swapped for the English ones the parser reads:
+/// "jutro o 19" reads as "tomorrow at 19", "w piątek o 18:30" as "friday at
+/// 18:30", "za 2 godziny" as "in 2 hours", "14 października" as "oct 14".
+pub fn normalize(input: &str) -> String {
+    let words: Vec<String> = input
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .map(|word| word.trim_end_matches(',').to_string())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for word in &words {
+        let plain = fold(word);
+        let last = out.last().map(String::as_str);
+        let mapped: Option<&str> = match plain.as_str() {
+            "za" => Some("in"),
+            "o" | "godz" | "godz." | "godzinie" if last == Some("at") => None,
+            "o" | "godz" | "godz." => Some("at"),
+            "w" | "we" | "na" => None,
+            "dzis" | "dzisiaj" => Some("today"),
+            "jutro" => Some("tomorrow"),
+            "pojutrze" => Some("overmorrow"),
+            "wieczorem" => Some("8pm"),
+            "rano" => Some("9am"),
+            "teraz" => Some("now"),
+            "nastepny" | "nastepna" | "nastepne" | "nastepnym" | "nastepnej" | "przyszly"
+            | "przyszla" | "przyszle" | "przyszlym" | "przyszlej" => Some("next"),
+            _ => None,
+        };
+        if let Some(mapped) = mapped {
+            out.push(mapped.to_string());
+            continue;
+        }
+        if matches!(plain.as_str(), "o" | "godz" | "godz." | "godzinie" | "w" | "we" | "na") {
+            continue;
+        }
+        if let Some(day) = polish_weekday(&plain) {
+            out.push(day.to_string());
+            continue;
+        }
+        if let Some(unit) = polish_unit(&plain) {
+            // "za godzinę" is one hour.
+            if last == Some("in") {
+                out.push("1".into());
+            }
+            out.push(unit.to_string());
+            continue;
+        }
+        if let Some(month) = polish_month(&plain) {
+            // Polish puts the day first: "14 października" reads as "oct 14".
+            match out.pop() {
+                Some(day) if day.chars().all(|ch| ch.is_ascii_digit()) => {
+                    out.push(month.to_string());
+                    out.push(day);
+                }
+                other => {
+                    out.extend(other);
+                    out.push(month.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(dated) = dotted_date(&plain, last) {
+            out.extend(dated);
+            continue;
+        }
+        if last == Some("at") {
+            // "o 19.30" is a clock time.
+            if let Some((hour, minute)) = plain.split_once('.') {
+                if hour.chars().all(|ch| ch.is_ascii_digit()) && minute.len() == 2 && minute.chars().all(|ch| ch.is_ascii_digit()) {
+                    out.push(format!("{hour}:{minute}"));
+                    continue;
+                }
+            }
+        }
+        out.push(word.clone());
+    }
+    out.join(" ")
+}
+
+/// Polish letters without their marks, so "środa" and "sroda" read the same.
+fn fold(word: &str) -> String {
+    word.chars()
+        .map(|ch| match ch {
+            'ą' => 'a',
+            'ć' => 'c',
+            'ę' => 'e',
+            'ł' => 'l',
+            'ń' => 'n',
+            'ó' => 'o',
+            'ś' => 's',
+            'ź' | 'ż' => 'z',
+            other => other,
+        })
+        .collect()
+}
+
+fn polish_weekday(word: &str) -> Option<&'static str> {
+    Some(match word.trim_end_matches('.') {
+        "poniedzialek" | "poniedzialku" | "pon" | "pn" => "monday",
+        "wtorek" | "wtorku" | "wt" | "wto" => "tuesday",
+        "sroda" | "srode" | "srody" | "sr" | "sro" => "wednesday",
+        "czwartek" | "czwartku" | "czw" | "cz" => "thursday",
+        "piatek" | "piatku" | "pt" | "pia" => "friday",
+        "sobota" | "sobote" | "soboty" | "sob" | "sb" => "saturday",
+        "niedziela" | "niedziele" | "niedzieli" | "niedz" | "nd" | "ndz" => "sunday",
+        _ => return None,
+    })
+}
+
+fn polish_unit(word: &str) -> Option<&'static str> {
+    Some(match word.trim_end_matches('.') {
+        "godzina" | "godziny" | "godzin" | "godzine" | "h" => "hours",
+        "minuta" | "minuty" | "minut" | "minute" | "min" => "minutes",
+        "dzien" | "dni" | "dnia" => "days",
+        _ => return None,
+    })
+}
+
+fn polish_month(word: &str) -> Option<&'static str> {
+    let word = word.trim_end_matches('.');
+    const MONTHS: [(&str, &str); 12] = [
+        ("stycz", "jan"),
+        ("lut", "feb"),
+        ("mar", "mar"),
+        ("kwie", "apr"),
+        ("maj", "may"),
+        ("czerw", "jun"),
+        ("lip", "jul"),
+        ("sierp", "aug"),
+        ("wrze", "sep"),
+        ("pazdz", "oct"),
+        ("listop", "nov"),
+        ("grud", "dec"),
+    ];
+    const SHORT: [(&str, &str); 7] = [
+        ("sty", "jan"),
+        ("kwi", "apr"),
+        ("cze", "jun"),
+        ("sie", "aug"),
+        ("wrz", "sep"),
+        ("paz", "oct"),
+        ("lis", "nov"),
+    ];
+    if let Some((_, month)) = SHORT.iter().find(|(name, _)| *name == word) {
+        return Some(month);
+    }
+    if word == "gru" {
+        return Some("dec");
+    }
+    // Every form of a Polish month starts with its stem: "października", "maja".
+    MONTHS
+        .iter()
+        .find(|(stem, _)| word.starts_with(stem) && (word.len() > 3 || word == "maj" || word == "mar" || word == "lut"))
+        .map(|(_, month)| *month)
+}
+
+/// "14.10" or "14.10.2026" as a day: "oct 14", unless it follows "at" and is a time.
+fn dotted_date(word: &str, last: Option<&str>) -> Option<Vec<String>> {
+    if last == Some("at") {
+        return None;
+    }
+    let parts: Vec<&str> = word.trim_end_matches('.').split('.').collect();
+    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit())) {
+        return None;
+    }
+    let day: u32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    if !(1..=31).contains(&day) || !(1..=12).contains(&month) {
+        return None;
+    }
+    const NAMES: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    Some(vec![NAMES[month as usize - 1].to_string(), day.to_string()])
 }
 
 fn text_starts_with_weekday(text: &str) -> bool {
@@ -352,6 +532,32 @@ mod tests {
         let local = dated.with_timezone(&tz);
         assert_eq!(local.date_naive().to_string(), "2026-10-20");
         assert_eq!(local.hour(), 20);
+    }
+
+    #[test]
+    fn polish_times_read_like_english_ones() {
+        let tz = la();
+        let at = |text: &str| parse_when(text, now(), tz).map(|when| when.with_timezone(&tz));
+        let tomorrow = at("jutro o 19").unwrap();
+        assert_eq!((tomorrow.date_naive().to_string(), tomorrow.hour()), ("2026-10-15".into(), 19));
+        let friday = at("w piątek o 18:30").unwrap();
+        assert_eq!((friday.weekday(), friday.hour(), friday.minute()), (Weekday::Fri, 18, 30));
+        assert_eq!(at("we wtorek").unwrap().weekday(), Weekday::Tue);
+        assert_eq!(at("sroda o godz. 20").unwrap().hour(), 20);
+        assert_eq!(parse_when("za 2 godziny", now(), tz), Some(now() + Duration::hours(2)));
+        assert_eq!(parse_when("za godzinę", now(), tz), Some(now() + Duration::hours(1)));
+        assert_eq!(parse_when("za 30 minut", now(), tz), Some(now() + Duration::minutes(30)));
+        let dated = at("20 października o 20:00").unwrap();
+        assert_eq!((dated.date_naive().to_string(), dated.hour()), ("2026-10-20".into(), 20));
+        let dotted = at("20.10 o 19.30").unwrap();
+        assert_eq!((dotted.date_naive().to_string(), dotted.hour(), dotted.minute()), ("2026-10-20".into(), 19, 30));
+        let later = at("pojutrze o 9").unwrap();
+        assert_eq!((later.date_naive().to_string(), later.hour()), ("2026-10-16".into(), 9));
+        assert_eq!(at("dziś wieczorem").unwrap().hour(), 20);
+        let next = at("następny piątek o 18").unwrap();
+        assert_eq!(next.weekday(), Weekday::Fri);
+        assert_eq!(at("1 maja o 12").unwrap().date_naive().to_string(), "2027-05-01");
+        assert_eq!(normalize("Friday at 9pm"), "friday at 9pm", "English stays as it is");
     }
 
     #[test]

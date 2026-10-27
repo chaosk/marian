@@ -30,7 +30,7 @@ pub use marian_types::time::{
 
 pub fn zone(name: &str) -> Result<Tz, OpError> {
     name.parse()
-        .map_err(|_| OpError::message("Pick a time zone from the list."))
+        .map_err(|_| OpError::from(crate::msg!("err-pick-zone")))
 }
 
 pub fn zone_label(tz: Tz) -> String {
@@ -44,7 +44,7 @@ pub fn stamp(dt: DateTime<Utc>) -> String {
 pub fn parse_stamp(value: &str) -> Result<DateTime<Utc>, OpError> {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|_| OpError::message("A stored time was unreadable."))
+        .map_err(|_| OpError::from(crate::msg!("err-stored-time")))
 }
 
 pub fn shift_days(date: NaiveDate, days: i64) -> NaiveDate {
@@ -89,30 +89,30 @@ pub fn at_local(date: NaiveDate, hour: u32, minute: u32, tz: Tz) -> DateTime<Utc
 
 pub fn anchor_at_clock(raw: &str, tz: Tz) -> Result<DateTime<Utc>, OpError> {
     let time = NaiveTime::parse_from_str(raw.trim(), "%H:%M")
-        .map_err(|_| OpError::message("Use a clock time like 19:00."))?;
+        .map_err(|_| OpError::from(crate::msg!("err-clock-time")))?;
     let date = Utc::now().with_timezone(&tz).date_naive();
     date.and_time(time)
         .and_local_timezone(tz)
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
-        .ok_or_else(|| OpError::message("That clock time doesn't exist in this zone."))
+        .ok_or_else(|| OpError::from(crate::msg!("err-clock-missing")))
 }
 
 pub fn parse_local(value: &str, tz: Tz) -> Result<DateTime<Utc>, OpError> {
     let value = value.trim();
     let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S"))
-        .map_err(|_| OpError::message("Use a date and a time."))?;
+        .map_err(|_| OpError::from(crate::msg!("err-date-and-time")))?;
     naive
         .and_local_timezone(tz)
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
-        .ok_or_else(|| OpError::message("That local time doesn't exist in this zone."))
+        .ok_or_else(|| OpError::from(crate::msg!("err-local-missing")))
 }
 
 pub fn parse_date(value: &str, tz: Tz) -> Result<DateTime<Utc>, OpError> {
     let date = chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-        .map_err(|_| OpError::message("Use a calendar date."))?;
+        .map_err(|_| OpError::from(crate::msg!("err-calendar-date")))?;
     at_local_result(date, tz)
 }
 
@@ -122,7 +122,7 @@ fn at_local_result(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, OpError> {
         .and_local_timezone(tz)
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
-        .ok_or_else(|| OpError::message("That date doesn't land in this zone."))
+        .ok_or_else(|| OpError::from(crate::msg!("err-date-missing")))
 }
 
 pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: &str, tz: Tz) -> DateTime<Utc> {
