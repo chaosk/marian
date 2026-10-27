@@ -242,8 +242,13 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
                 }
                 .into_any();
             }
+            // Another server opens, and the menu closes behind it.
             view! {
-                <A href=href>
+                <A href=href on:click=move |_| {
+                    if let Some(menu) = menu.get_untracked() {
+                        menu.set_open(false);
+                    }
+                }>
                     <span class="switcher-mark">{initial}</span>
                     <span class="switcher-label">{other.name}</span>
                 </A>
