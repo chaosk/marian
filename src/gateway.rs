@@ -1213,22 +1213,46 @@ async fn push_routine(
             field.inline,
         );
     }
-    // A locked poll's post is now the event; its results go in a reply to it,
-    // posted once and edited after.
+    // A locked poll's post is now the event. Its results go in the event's
+    // thread, or in a reply to the post when it has none; posted once and
+    // edited after.
     if post.results {
-        if let Some(reply) = post.message_id.as_deref().and_then(|id| id.parse().ok()) {
-            let edited = channel_id
-                .edit_message(&http, serenity::MessageId::new(reply), serenity::EditMessage::new().embed(embed.clone()))
+        let thread = match (&post.thread, post.reply_to.as_deref()) {
+            (Some(thread), Some(parent)) => match thread_on_message(
+                db,
+                &http,
+                thread.event_id,
+                &post.channel_discord_id,
+                parent,
+                &thread.name,
+                thread.discord_id.as_deref(),
+            )
+            .await
+            {
+                Ok(id) => Some(serenity::ChannelId::new(id)),
+                Err(err) => {
+                    tracing::warn!("could not open the thread for the poll results: {err}");
+                    None
+                }
+            },
+            _ => None,
+        };
+        let target = thread.unwrap_or(channel_id);
+        if let Some(sent) = post.message_id.as_deref().and_then(|id| id.parse().ok()) {
+            let edited = target
+                .edit_message(&http, serenity::MessageId::new(sent), serenity::EditMessage::new().embed(embed.clone()))
                 .await;
             if edited.is_ok() {
                 return Ok(());
             }
         }
         let mut message = serenity::CreateMessage::new().embed(embed);
-        if let Some(parent) = post.reply_to.as_deref().and_then(|id| id.parse().ok()) {
-            message = message.reference_message((channel_id, serenity::MessageId::new(parent)));
+        if thread.is_none() {
+            if let Some(parent) = post.reply_to.as_deref().and_then(|id| id.parse().ok()) {
+                message = message.reference_message((channel_id, serenity::MessageId::new(parent)));
+            }
         }
-        let message = channel_id.send_message(&http, message).await?;
+        let message = target.send_message(&http, message).await?;
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         logic::remember_results_message(&mut conn, run_id, &message.id.get().to_string())?;
         return Ok(());
