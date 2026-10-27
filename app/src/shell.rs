@@ -285,10 +285,13 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
         "scheduled" => Some(Filters::scheduled()),
         _ => None,
     };
-    // The shortcut the Events page shows right now, if it shows one.
-    let showing = Memo::new({
+    // The shortcut the Events page shows right now, if it shows one. Each link
+    // reads it straight from the router, which outlives this sidebar: a memo
+    // of its own here could be thrown away while the links still read it, after
+    // a few switches between servers, and every shortcut would then read as off.
+    let showing = std::sync::Arc::new({
         let events_href = events_href.clone();
-        move |_| {
+        move || {
             if pathname.get() != events_href {
                 return None;
             }
@@ -324,11 +327,11 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
             let sub = *sub;
             let path = *path;
             let new_event = events.then(|| format!("{events_href}/new"));
+            let showing = std::sync::Arc::clone(&showing);
             let link = view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
-                    // Leaving the server runs this once more after `showing` is gone.
-                    let shown = showing.try_get().flatten();
+                    let shown = showing();
                     // Schedule is the server's front page; every event page sits under Events,
                     // unless the Events page is showing one of the shortcuts below it.
                     let on = if filters.is_some() {
