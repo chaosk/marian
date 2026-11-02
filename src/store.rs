@@ -1768,10 +1768,23 @@ pub fn event_role_ids(
 }
 
 /// A server's activity, or only one of its events'.
-pub fn count_activity(conn: &mut Connection, guild_id: i64, event_id: Option<i64>) -> Result<i64, OpError> {
+/// The server's activity, or one event's, leaving out the `hidden` events'.
+pub fn count_activity(
+    conn: &mut Connection,
+    guild_id: i64,
+    event_id: Option<i64>,
+    hidden: &[i64],
+) -> Result<i64, OpError> {
     let mut query = Activity::in_guild(guild_id).into_boxed();
     if let Some(event_id) = event_id {
         query = query.filter(schema::activity::event_id.eq(event_id));
+    }
+    if !hidden.is_empty() {
+        query = query.filter(
+            schema::activity::event_id
+                .is_null()
+                .or(schema::activity::event_id.ne_all(hidden.to_vec())),
+        );
     }
     Ok(query.count().get_result(conn)?)
 }
@@ -1780,12 +1793,20 @@ pub fn list_activity(
     conn: &mut Connection,
     guild_id: i64,
     event_id: Option<i64>,
+    hidden: &[i64],
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Activity>, OpError> {
     let mut query = Activity::in_guild(guild_id).into_boxed();
     if let Some(event_id) = event_id {
         query = query.filter(schema::activity::event_id.eq(event_id));
+    }
+    if !hidden.is_empty() {
+        query = query.filter(
+            schema::activity::event_id
+                .is_null()
+                .or(schema::activity::event_id.ne_all(hidden.to_vec())),
+        );
     }
     Ok(query
         .order(schema::activity::id.desc())
@@ -2424,6 +2445,7 @@ mod tests {
                 "20261026090000".to_string(),
                 "20261026100000".to_string(),
                 "20261026110000".to_string(),
+                "20261102090000".to_string(),
             ]
         );
     }
@@ -2535,7 +2557,8 @@ mod tests {
     #[test]
     fn a_role_stored_twice_is_folded_into_one() {
         let mut conn = two_servers();
-        conn.revert_last_migration(MIGRATIONS).unwrap();
+        // Back to before the migration that folds the duplicates.
+        while conn.revert_last_migration(MIGRATIONS).unwrap().to_string() != "20261026110000" {}
         conn.batch_execute(
             "
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (81, 1, 'raids', 'text', 1);

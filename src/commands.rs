@@ -52,15 +52,30 @@ fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String
     }
 }
 
-fn find_event(conn: &mut Connection, guild_id: i64, token: &str) -> Result<Event, OpError> {
+/// An event in the server named by public id, if `sight` takes in its channel.
+fn find_event(conn: &mut Connection, guild_id: i64, sight: &logic::Sight, token: &str) -> Result<Event, OpError> {
     if crate::ids::parse_event_id(token).is_some() {
         if let Some(event) = store::event_by_public(conn, token)? {
-            if event.guild_id == guild_id {
+            if event.guild_id == guild_id && sight.sees_event(&event) {
                 return Ok(event);
             }
         }
     }
     Err(OpError::message("That event isn't in this server."))
+}
+
+fn member_sight(conn: &mut Connection, membership_id: i64) -> Result<logic::Sight, OpError> {
+    let member = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
+    logic::sight(conn, &member)
+}
+
+/// The server's channels the Discord member can see.
+fn seen_channels(conn: &mut Connection, guild_id: i64, discord_user_id: &str) -> Result<Vec<store::Channel>, OpError> {
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
+    Ok(store::list_channels(conn, guild_id)?
+        .into_iter()
+        .filter(|channel| sight.sees_channel(channel.id))
+        .collect())
 }
 
 /// Discord URL of the posted event message, once Discord has assigned an id.
@@ -212,7 +227,7 @@ fn cmd_event(
             schema::event_prompts::draft.eq(None::<serde_json::Value>),
         ))
         .execute(conn)?;
-    Ok(where_to_post(conn, guild_id, &None, &None)?.to_string())
+    Ok(where_to_post(conn, guild_id, &discord_user_id, &None, &None)?.to_string())
 }
 
 fn prompt_key(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
@@ -314,7 +329,7 @@ pub fn start_event_dm(
         .execute(conn)?;
     let source = Some(source_channel.to_string());
     let discord = source_discord.map(str::to_string);
-    where_to_post(conn, guild_id, &source, &discord)
+    where_to_post(conn, guild_id, discord_user_id, &source, &discord)
 }
 
 pub fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
@@ -404,7 +419,7 @@ pub fn answer_event_dm(
             source_discord.as_deref(),
         ),
         "channel_other" => {
-            let others = other_channels(conn, guild_id, source_channel.as_deref())?;
+            let others = other_channels(conn, guild_id, discord_user_id, source_channel.as_deref())?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(channel) = choice.and_then(|n| others.get(n - 1)) else {
                 return just(other_channel_prompt(&others));
@@ -931,10 +946,10 @@ fn answer_channel(
     source_discord: Option<&str>,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(source) = source_channel else {
-        let channels = store::list_channels(conn, guild_id)?;
+        let channels = seen_channels(conn, guild_id, discord_user_id)?;
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(channel) = choice.and_then(|n| channels.get(n - 1)) else {
-            return just(where_to_post(conn, guild_id, &None, &None)?);
+            return just(where_to_post(conn, guild_id, discord_user_id, &None, &None)?);
         };
         return just(advance_to_title(conn, discord_user_id, &channel.name)?);
     };
@@ -943,11 +958,12 @@ fn answer_channel(
     match text {
         "1" => just(advance_to_title(conn, discord_user_id, source)?),
         "2" => {
-            let others = other_channels(conn, guild_id, Some(source))?;
+            let others = other_channels(conn, guild_id, discord_user_id, Some(source))?;
             if others.is_empty() {
                 return just(where_to_post(
                     conn,
                     guild_id,
+                    discord_user_id,
                     &source_owned,
                     &discord_owned,
                 )?);
@@ -963,6 +979,7 @@ fn answer_channel(
         _ => just(where_to_post(
             conn,
             guild_id,
+            discord_user_id,
             &source_owned,
             &discord_owned,
         )?),
@@ -1486,12 +1503,13 @@ fn fit_span(minutes: i64) -> Result<i64, String> {
 fn where_to_post(
     conn: &mut Connection,
     guild_id: i64,
+    discord_user_id: &str,
     source_channel: &Option<String>,
     source_discord: &Option<String>,
 ) -> Result<DmReply, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let Some(source) = source_channel else {
-        let lines = store::list_channels(conn, guild_id)?
+        let lines = seen_channels(conn, guild_id, discord_user_id)?
             .into_iter()
             .map(|channel| channel_label(&channel))
             .collect::<Vec<_>>();
@@ -1517,9 +1535,10 @@ fn where_to_post(
 fn other_channels(
     conn: &mut Connection,
     guild_id: i64,
+    discord_user_id: &str,
     source_channel: Option<&str>,
 ) -> Result<Vec<store::Channel>, OpError> {
-    Ok(store::list_channels(conn, guild_id)?
+    Ok(seen_channels(conn, guild_id, discord_user_id)?
         .into_iter()
         .filter(|channel| source_channel != Some(channel.name.as_str()))
         .collect())
@@ -1577,7 +1596,8 @@ pub fn edit_event(
             "Name a change: title, description, start, length, or channel.",
         ));
     }
-    let event = find_event(conn, guild_id, &change.event)?;
+    let sight = member_sight(conn, membership_id)?;
+    let event = find_event(conn, guild_id, &sight, &change.event)?;
     let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let mut input = input_from(conn, &event, membership_id)?;
@@ -1597,6 +1617,7 @@ pub fn edit_event(
     }
     if let Some(name) = change.channel {
         input.channel_id = store::channel_by_name(conn, event.guild_id, &name)?
+            .filter(|channel| sight.sees_channel(channel.id))
             .ok_or_else(|| OpError::message(format!("No channel named {name}.")))?
             .id;
     }
@@ -1714,15 +1735,17 @@ pub struct Choice {
 pub fn response_events(
     conn: &mut Connection,
     guild_id: i64,
+    discord_user_id: &str,
     partial: &str,
     now: DateTime<Utc>,
 ) -> Result<Vec<Choice>, OpError> {
     let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
     let needle = partial.trim().to_lowercase();
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
     let mut choices = Vec::new();
     for event in store::list_events(conn, guild_id)? {
-        if event.status != "posted" {
+        if event.status != "posted" || !sight.sees_event(&event) {
             continue;
         }
         let start = event.starts_at;
@@ -1755,10 +1778,12 @@ pub fn response_events(
 pub fn response_options(
     conn: &mut Connection,
     guild_id: i64,
+    discord_user_id: &str,
     event_token: &str,
     partial: &str,
 ) -> Result<Vec<Choice>, OpError> {
-    let event = match find_event(conn, guild_id, event_token) {
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
+    let event = match find_event(conn, guild_id, &sight, event_token) {
         Ok(event) => event,
         Err(_) => return Ok(Vec::new()),
     };
@@ -1793,7 +1818,8 @@ pub fn roster_action(
     action: &str,
 ) -> Result<(String, i64), OpError> {
     let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
-    let event = find_event(conn, actor.guild_id, event_token)?;
+    let sight = logic::sight(conn, &actor)?;
+    let event = find_event(conn, actor.guild_id, &sight, event_token)?;
     let option = resolve_option(conn, &event, option_token)?;
     let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action)?;
     Ok((notice, event.id))
@@ -1847,11 +1873,12 @@ fn option_menu_label(emoji: &str, name: &str) -> String {
 pub fn channel_choices(
     conn: &mut Connection,
     guild_id: i64,
+    discord_user_id: &str,
     partial: &str,
 ) -> Result<Vec<Choice>, OpError> {
     let needle = partial.trim().to_lowercase();
     let mut choices = Vec::new();
-    for channel in store::list_channels(conn, guild_id)? {
+    for channel in seen_channels(conn, guild_id, discord_user_id)? {
         if !needle.is_empty() && !channel.name.to_lowercase().contains(&needle) {
             continue;
         }
@@ -2320,7 +2347,8 @@ pub fn google_sync(
     membership_id: i64,
     event: &str,
 ) -> Result<String, OpError> {
-    let event = find_event(conn, guild_id, event)?;
+    let sight = member_sight(conn, membership_id)?;
+    let event = find_event(conn, guild_id, &sight, event)?;
     if !matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
         return Err(OpError::message(
             "Post or schedule the event before syncing it.",
@@ -2513,7 +2541,7 @@ mod tests {
         .unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
         let token = event.public_id.to_string();
-        let choices = response_options(&mut conn, 1, &token, "heal").unwrap();
+        let choices = response_options(&mut conn, 1, "100", &token, "heal").unwrap();
         assert_eq!(choices.len(), 1);
         let picked = &choices[0].value;
         assert_eq!(uuid::Uuid::parse_str(picked).unwrap().get_version_num(), 7, "not a row number");

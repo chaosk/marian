@@ -20,7 +20,7 @@ pub(crate) fn events_for_person(
     conn: &mut Connection,
     user_id: i64,
 ) -> Result<Vec<Event>, OpError> {
-    Ok(events::table
+    let events = events::table
         .inner_join(memberships::table.on(memberships::guild_id.eq(events::guild_id)))
         .left_join(
             signups::table.on(signups::event_id
@@ -48,7 +48,20 @@ pub(crate) fn events_for_person(
         .select(Event::as_select())
         .distinct()
         .order((events::starts_at.asc(), events::id.asc()))
-        .load(conn)?)
+        .load::<Event>(conn)?;
+    // Only events in channels they can still see in Discord.
+    let mut sights = std::collections::HashMap::new();
+    for member in memberships::table
+        .filter(memberships::user_id.eq(user_id))
+        .select(crate::store::Membership::as_select())
+        .load(conn)?
+    {
+        sights.insert(member.guild_id, crate::logic::sight(conn, &member)?);
+    }
+    Ok(events
+        .into_iter()
+        .filter(|event| sights.get(&event.guild_id).is_some_and(|sight| sight.sees_event(event)))
+        .collect())
 }
 
 fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {

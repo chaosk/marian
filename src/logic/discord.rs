@@ -794,6 +794,61 @@ pub fn sync_discord_roles(
     Ok(())
 }
 
+/// Stores a role's server-wide permissions; @everyone's id is the server's.
+pub fn sync_discord_permissions(
+    conn: &mut Connection,
+    guild_id: i64,
+    guild_discord_id: &str,
+    role_discord_id: &str,
+    permissions: u64,
+) -> Result<(), OpError> {
+    if role_discord_id == guild_discord_id {
+        diesel::update(schema::guilds::table.find(guild_id))
+            .set(schema::guilds::everyone_permissions.eq(permissions as i64))
+            .execute(conn)?;
+    } else {
+        diesel::update(
+            schema::roles::table
+                .filter(schema::roles::guild_id.eq(guild_id))
+                .filter(schema::roles::discord_id.eq(role_discord_id)),
+        )
+        .set(schema::roles::permissions.eq(permissions as i64))
+        .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// Replaces a Discord channel's stored permission overwrites with `overwrites`.
+pub fn sync_channel_overwrites(
+    conn: &mut Connection,
+    guild_id: i64,
+    channel_discord_id: &str,
+    overwrites: &[super::access::Overwrite],
+) -> Result<(), OpError> {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, channel_discord_id)? else {
+        return Ok(());
+    };
+    diesel::delete(schema::channel_overwrites::table.filter(schema::channel_overwrites::channel_id.eq(channel.id)))
+        .execute(conn)?;
+    let rows: Vec<_> = overwrites
+        .iter()
+        .map(|o| {
+            (
+                schema::channel_overwrites::channel_id.eq(channel.id),
+                schema::channel_overwrites::kind.eq(if o.member { "member" } else { "role" }),
+                schema::channel_overwrites::target.eq(&o.target),
+                schema::channel_overwrites::allow.eq(o.allow as i64),
+                schema::channel_overwrites::deny.eq(o.deny as i64),
+            )
+        })
+        .collect();
+    diesel::insert_into(schema::channel_overwrites::table)
+        .values(&rows)
+        .on_conflict_do_nothing()
+        .execute(conn)?;
+    Ok(())
+}
+
 fn unique_handle(
     conn: &mut Connection,
     guild_id: i64,

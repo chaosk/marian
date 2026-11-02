@@ -362,28 +362,73 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
         .map(|role| (role.id.get().to_string(), role.name.clone(), role.colour.hex()))
         .collect();
     logic::sync_discord_roles(&mut conn, stored.id, &roles)?;
+    let guild_discord = guild.id.get().to_string();
+    for role in guild.roles.values() {
+        logic::sync_discord_permissions(
+            &mut conn,
+            stored.id,
+            &guild_discord,
+            &role.id.get().to_string(),
+            role.permissions.bits(),
+        )?;
+    }
+    for channel in guild.channels.values().filter(|channel| postable(channel.kind)) {
+        logic::sync_channel_overwrites(
+            &mut conn,
+            stored.id,
+            &channel.id.get().to_string(),
+            &overwrites(channel),
+        )?;
+    }
     Ok(())
+}
+
+/// A channel's permission overwrites, as Marian stores them.
+fn overwrites(channel: &serenity::GuildChannel) -> Vec<logic::Overwrite> {
+    channel
+        .permission_overwrites
+        .iter()
+        .filter_map(|overwrite| {
+            let (member, target) = match overwrite.kind {
+                serenity::PermissionOverwriteType::Member(user) => (true, user.get()),
+                serenity::PermissionOverwriteType::Role(role) => (false, role.get()),
+                _ => return None,
+            };
+            Some(logic::Overwrite {
+                member,
+                target: target.to_string(),
+                allow: overwrite.allow.bits(),
+                deny: overwrite.deny.bits(),
+            })
+        })
+        .collect()
 }
 
 fn stored_guild(conn: &mut Connection, guild: serenity::GuildId) -> Result<Option<store::Guild>, Error> {
     Ok(store::guild_by_discord(conn, &guild.get().to_string())?)
 }
 
-/// Follows a role Discord added or changed.
+/// Follows a role Discord added or changed, and @everyone's permissions.
 fn follow_role(data: &Data, role: &serenity::Role) -> Result<(), Error> {
-    if role.id.get() == role.guild_id.get() {
-        return Ok(());
-    }
     let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
     let Some(guild) = stored_guild(&mut conn, role.guild_id)? else {
         return Ok(());
     };
-    logic::sync_discord_role(
+    if role.id.get() != role.guild_id.get() {
+        logic::sync_discord_role(
+            &mut conn,
+            guild.id,
+            &role.id.get().to_string(),
+            &role.name,
+            &role.colour.hex(),
+        )?;
+    }
+    logic::sync_discord_permissions(
         &mut conn,
         guild.id,
+        &role.guild_id.get().to_string(),
         &role.id.get().to_string(),
-        &role.name,
-        &role.colour.hex(),
+        role.permissions.bits(),
     )?;
     Ok(())
 }
@@ -524,6 +569,7 @@ fn follow_channel(data: &Data, channel: &serenity::GuildChannel, deleted: bool) 
         logic::discord_channel_gone(&mut conn, guild.id, &discord_id)?;
     } else {
         logic::sync_discord_channel(&mut conn, guild.id, &discord_id, &channel.name)?;
+        logic::sync_channel_overwrites(&mut conn, guild.id, &discord_id, &overwrites(channel))?;
     }
     Ok(())
 }
@@ -1897,7 +1943,7 @@ async fn complete_channel(ctx: Context<'_>, partial: &str) -> Vec<serenity::Auto
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::channel_choices(&mut conn, guild.id, partial)
+    commands::channel_choices(&mut conn, guild.id, &ctx.author().id.get().to_string(), partial)
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -2074,7 +2120,7 @@ async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoco
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::response_events(&mut conn, guild.id, partial, chrono::Utc::now())
+    commands::response_events(&mut conn, guild.id, &ctx.author().id.get().to_string(), partial, chrono::Utc::now())
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -2094,7 +2140,7 @@ async fn complete_option(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoc
     let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
         return Vec::new();
     };
-    commands::response_options(&mut conn, guild.id, &event, partial)
+    commands::response_options(&mut conn, guild.id, &ctx.author().id.get().to_string(), &event, partial)
         .unwrap_or_default()
         .into_iter()
         .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))

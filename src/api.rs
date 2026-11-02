@@ -161,20 +161,61 @@ fn must_member(conn: &mut Connection, viewer: &Viewer) -> Result<store::Membersh
     store::membership(conn, viewer.membership_id)?.ok_or(OpError::NotFound)
 }
 
+/// Which of the server's channels the viewer can see in Discord.
+fn sight(conn: &mut Connection, viewer: &Viewer) -> Result<logic::Sight, OpError> {
+    let user = must_member(conn, viewer)?;
+    logic::sight(conn, &user)
+}
+
+/// An event in the viewer's server, in a channel they can see.
 fn event_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Event, OpError> {
     let event = store::event_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if event.guild_id != viewer.guild_id {
+    if event.guild_id != viewer.guild_id || !sight(conn, viewer)?.sees_event(&event) {
         return Err(OpError::NotFound);
     }
     Ok(event)
 }
 
+/// The channel the events made from a template go to.
+fn template_channel(conn: &mut Connection, template_id: i64) -> Result<i64, OpError> {
+    use diesel::prelude::*;
+    Ok(crate::schema::event_templates::table
+        .find(template_id)
+        .select(crate::schema::event_templates::channel_id)
+        .first(conn)?)
+}
+
 fn series_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Series, OpError> {
     let series = store::series_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
-    if series.guild_id != viewer.guild_id {
+    if series.guild_id != viewer.guild_id
+        || !sight(conn, viewer)?.sees_channel(template_channel(conn, series.template_id)?)
+    {
         return Err(OpError::NotFound);
     }
     Ok(series)
+}
+
+/// A routine in the viewer's server, posting in a channel they can see.
+fn routine_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<i64, OpError> {
+    use diesel::prelude::*;
+    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let template_id: i64 = crate::schema::routines::table
+        .find(id)
+        .select(crate::schema::routines::template_id)
+        .first(conn)?;
+    if !sight(conn, viewer)?.sees_channel(template_channel(conn, template_id)?) {
+        return Err(OpError::NotFound);
+    }
+    Ok(id)
+}
+
+/// A channel the viewer picked, if it's in their server and they can see it.
+fn channel_seen(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<i64, OpError> {
+    let id = ids::public::channel_id(conn, viewer.guild_id, public_id)?;
+    if !sight(conn, viewer)?.sees_channel(id) {
+        return Err(OpError::message("Pick a channel."));
+    }
+    Ok(id)
 }
 
 pub fn me(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Me, OpError> {
@@ -391,9 +432,14 @@ pub fn remember_members(
 }
 
 pub fn channels(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Channel>, OpError> {
-    let events = store::list_events(conn, viewer.guild_id)?;
+    let sight = sight(conn, viewer)?;
+    let events: Vec<store::Event> = store::list_events(conn, viewer.guild_id)?
+        .into_iter()
+        .filter(|event| sight.sees_event(event))
+        .collect();
     Ok(store::list_channels(conn, viewer.guild_id)?
         .into_iter()
+        .filter(|channel| sight.sees_channel(channel.id))
         .map(|channel| dto::Channel {
             events: events.iter().filter(|e| e.channel_id == channel.id).count() as i64,
             id: channel.public_id.to_string(),
@@ -449,11 +495,13 @@ pub fn events(
     };
     let from_day = query.from_day.and_then(midnight);
     let to_day = query.to_day.and_then(|day| day.succ_opt()).and_then(midnight);
+    let sight = sight(conn, viewer)?;
     let mut events: Vec<store::Event> = match series_id {
         Some(id) => store::events_in_series(conn, id)?,
         None => store::list_events(conn, viewer.guild_id)?,
     }
     .into_iter()
+    .filter(|event| sight.sees_event(event))
     .filter(|event| {
         series_id.is_some()
             || if statuses.is_empty() {
@@ -899,9 +947,10 @@ pub fn pending_reminders(
     viewer: &Viewer,
     limit: usize,
 ) -> Result<Vec<dto::PendingReminder>, OpError> {
+    let sight = sight(conn, viewer)?;
     let events: Vec<store::Event> = store::list_events(conn, viewer.guild_id)?
         .into_iter()
-        .filter(|event| event.status == "posted")
+        .filter(|event| event.status == "posted" && sight.sees_event(event))
         .collect();
     let groups = store::reminders_by_event(conn, &events)?;
     Ok(events
@@ -950,12 +999,18 @@ fn activity_of(
     limit: i64,
 ) -> Result<dto::Paged<dto::Activity>, OpError> {
     let per_page = limit.clamp(1, 200) as u32;
-    let total = store::count_activity(conn, viewer.guild_id, event_id)? as usize;
+    let sight = sight(conn, viewer)?;
+    let hidden: Vec<i64> = store::list_events(conn, viewer.guild_id)?
+        .into_iter()
+        .filter(|event| !sight.sees_event(event))
+        .map(|event| event.id)
+        .collect();
+    let total = store::count_activity(conn, viewer.guild_id, event_id, &hidden)? as usize;
     let pages = (total as u32).div_ceil(per_page).max(1);
     let page = page.clamp(1, pages);
     let offset = i64::from((page - 1) * per_page);
     let mut items = Vec::new();
-    for item in store::list_activity(conn, viewer.guild_id, event_id, i64::from(per_page), offset)? {
+    for item in store::list_activity(conn, viewer.guild_id, event_id, &hidden, i64::from(per_page), offset)? {
         let event_id = match item.event_id {
             Some(id) => store::event(conn, id)?.map(|event| event.public_id.to_string()),
             None => None,
@@ -1017,7 +1072,7 @@ fn event_input(
         id: existing.map(|event| event.id),
         guild_id: viewer.guild_id,
         actor_id: viewer.membership_id,
-        channel_id: ids::public::channel_id(conn, viewer.guild_id, &draft.channel_id)?,
+        channel_id: channel_seen(conn, viewer, &draft.channel_id)?,
         title: draft.title.clone(),
         description: draft.description.clone(),
         location: draft.location.clone(),
@@ -1132,7 +1187,7 @@ fn save_stored(
     }
     let unposted = matches!(event.status.as_str(), "draft" | "scheduled" | "failed") && event.discord_message_id.is_none();
     let channel_id = match &patch.channel_id {
-        Some(public) => ids::public::channel_id(conn, viewer.guild_id, public)?,
+        Some(public) => channel_seen(conn, viewer, public)?,
         None => event.channel_id,
     };
     if channel_id != event.channel_id && !unposted {
@@ -1295,9 +1350,10 @@ fn series_dto(conn: &mut Connection, series: store::Series) -> Result<dto::Serie
 }
 
 pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Series>, OpError> {
+    let sight = sight(conn, viewer)?;
     let mut rows = Vec::new();
     for series in store::list_series(conn, viewer.guild_id)? {
-        if series.cadence != "once" {
+        if series.cadence != "once" && sight.sees_channel(template_channel(conn, series.template_id)?) {
             rows.push(series_dto(conn, series)?);
         }
     }
@@ -1546,11 +1602,24 @@ pub fn commands(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Comma
 }
 
 pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::RoutineSummary>, OpError> {
-    logic::list_routines(conn, viewer.guild_id)
+    use diesel::prelude::*;
+    let hidden: Vec<String> = crate::schema::routines::table
+        .inner_join(crate::schema::event_templates::table)
+        .filter(crate::schema::routines::guild_id.eq(viewer.guild_id))
+        .filter(crate::schema::event_templates::channel_id.eq_any(sight(conn, viewer)?.hidden_channels()))
+        .select(crate::schema::routines::public_id)
+        .load::<uuid::Uuid>(conn)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+    Ok(logic::list_routines(conn, viewer.guild_id)?
+        .into_iter()
+        .filter(|routine| !hidden.contains(&routine.id))
+        .collect())
 }
 
 pub fn routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::RoutineView, OpError> {
-    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let id = routine_here(conn, viewer, public_id)?;
     logic::routine_page_data(conn, id)?.ok_or(OpError::NotFound)
 }
 
@@ -1560,7 +1629,7 @@ fn routine_parts(
     viewer: &Viewer,
     draft: &dto::RoutineDraft,
 ) -> Result<(i64, Option<logic::EventExtras>), OpError> {
-    let channel_id = ids::public::channel_id(conn, viewer.guild_id, &draft.channel_id)?;
+    let channel_id = channel_seen(conn, viewer, &draft.channel_id)?;
     let extras = draft
         .event
         .as_ref()
@@ -1620,7 +1689,7 @@ pub fn update_routine(
     public_id: &str,
     draft: &dto::RoutineDraft,
 ) -> Result<Outcome, OpError> {
-    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let id = routine_here(conn, viewer, public_id)?;
     let (channel_id, extras) = routine_parts(conn, viewer, draft)?;
     let effect = logic::save_routine(
         conn,
@@ -1651,7 +1720,7 @@ pub fn routine_days(
     public_id: &str,
     days: &dto::RoutineDays,
 ) -> Result<Outcome, OpError> {
-    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let id = routine_here(conn, viewer, public_id)?;
     match days.scope {
         dto::DayScope::Usual => {
             logic::save_usual_days(conn, id, viewer.membership_id, &days.days)?;
@@ -1668,7 +1737,7 @@ pub fn routine_days(
 }
 
 pub fn vote(conn: &mut Connection, viewer: &Viewer, public_id: &str, vote: &dto::Vote) -> Result<Outcome, OpError> {
-    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let id = routine_here(conn, viewer, public_id)?;
     let run = logic::open_run_id(conn, id)?.ok_or_else(|| OpError::message("That poll is closed."))?;
     let effect = logic::cast_run(conn, run, viewer.membership_id, vote.day)?;
     Ok(Outcome {
@@ -1678,7 +1747,7 @@ pub fn vote(conn: &mut Connection, viewer: &Viewer, public_id: &str, vote: &dto:
 }
 
 pub fn stop_routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
-    let id = logic::routine_in_guild(conn, viewer.guild_id, public_id)?;
+    let id = routine_here(conn, viewer, public_id)?;
     logic::stop_routine(conn, id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
@@ -1887,6 +1956,52 @@ mod tests {
         assert_eq!(activity(&mut conn, &viewer, 1, 25).unwrap().total, 4, "the server's log keeps everything");
         let theirs = public(&mut conn, 13);
         assert!(matches!(event_activity(&mut conn, &viewer, &theirs, 1, 25), Err(OpError::NotFound)));
+    }
+
+    #[test]
+    fn a_member_sees_only_the_events_in_channels_discord_shows_them() {
+        let (mut conn, nell) = world();
+        // #elsewhere is closed to @everyone (the server's id, 99) and open to Raider.
+        conn.batch_execute(
+            "
+            UPDATE guilds SET everyone_permissions = 1024 WHERE id = 1;
+            UPDATE channels SET discord_id = 'c' || id WHERE guild_id = 1;
+            UPDATE roles SET discord_id = 'r1' WHERE id = 1;
+            INSERT INTO channel_overwrites (channel_id, kind, target, allow, deny)
+            VALUES (2, 'role', '99', 0, 1024), (2, 'role', 'r1', 1024, 0);
+            INSERT INTO events (id, public_id, guild_id, channel_id, title, starts_at, status, created_by, created_at, updated_at)
+            VALUES (11, marian_uuid_v7(), 1, 1, 'Raid', now(), 'draft', 1, now(), now()),
+                   (12, marian_uuid_v7(), 1, 2, 'Officers', now(), 'draft', 1, now(), now());
+            INSERT INTO activity (guild_id, event_id, body, created_at) VALUES
+              (1, 11, 'Nell created Raid', now()),
+              (1, 12, 'Nell created Officers', now());
+            ",
+        )
+        .unwrap();
+        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
+        let officers = store::event(&mut conn, 12).unwrap().unwrap().public_id.to_string();
+        let all = dto::EventQuery { view: dto::EventView::All, ..Default::default() };
+        let titles = |conn: &mut Connection, viewer: &Viewer| -> Vec<String> {
+            events(conn, viewer, &all).unwrap().items.into_iter().map(|e| e.title).collect()
+        };
+        let channel_names = |conn: &mut Connection, viewer: &Viewer| -> Vec<String> {
+            channels(conn, viewer).unwrap().into_iter().map(|c| c.name).collect()
+        };
+
+        assert_eq!(titles(&mut conn, &june), ["Raid"]);
+        assert_eq!(channel_names(&mut conn, &june), ["events"]);
+        assert!(matches!(event(&mut conn, &june, &officers), Err(OpError::NotFound)));
+        assert_eq!(activity(&mut conn, &june, 1, 25).unwrap().total, 1);
+
+        // The server manager sees everything.
+        assert_eq!(titles(&mut conn, &nell).len(), 2);
+        assert_eq!(channel_names(&mut conn, &nell), ["events", "elsewhere"]);
+
+        // Given Raider, June sees #elsewhere too.
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
+        assert_eq!(titles(&mut conn, &june).len(), 2);
+        assert!(event(&mut conn, &june, &officers).is_ok());
+        assert_eq!(activity(&mut conn, &june, 1, 25).unwrap().total, 2);
     }
 
     #[test]
