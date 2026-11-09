@@ -1,6 +1,6 @@
 [package]
 name = "marian-frontend"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Hydrates Marian's dashboard in the browser"
 license = "MIT"
