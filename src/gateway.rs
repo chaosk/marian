@@ -1,6 +1,6 @@
 //! Outbound Discord gateway. The cluster does not need a public interactions URL.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -212,7 +212,18 @@ async fn on_event(
             if let Err(err) = remember_guild(data, guild) {
                 tracing::warn!("could not store {}: {err}", guild.name);
             }
-            tokio::spawn(admit_signed_in(data.db.clone(), ctx.http.clone(), guild.id));
+            let roles = guild
+                .roles
+                .iter()
+                .map(|(id, role)| (id.get(), role.permissions.bits()))
+                .collect();
+            tokio::spawn(admit_signed_in(
+                data.db.clone(),
+                ctx.http.clone(),
+                guild.id,
+                guild.owner_id,
+                roles,
+            ));
             register_guild(ctx, data, guild.id).await;
         }
         serenity::FullEvent::ChannelCreate { channel }
@@ -556,8 +567,16 @@ fn member_left(data: &Data, guild: serenity::GuildId, user: &serenity::User) -> 
 }
 
 /// Opens a server to the signed-in members who are in it, so a server Marian
-/// joins shows up in their server picker without signing in again.
-async fn admit_signed_in(db: store::Db, http: Arc<serenity::Http>, guild: serenity::GuildId) {
+/// joins shows up in their server picker without signing in again. Each comes
+/// in with their roles, and as a server manager if they own the server or
+/// their roles (`roles`: each role's permissions, by Discord id) make them one.
+async fn admit_signed_in(
+    db: store::Db,
+    http: Arc<serenity::Http>,
+    guild: serenity::GuildId,
+    owner: serenity::UserId,
+    roles: HashMap<u64, u64>,
+) {
     let waiting = || -> Result<_, Error> {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         let Some(stored) = store::guild_by_discord(&mut conn, &guild.get().to_string())? else {
@@ -584,8 +603,8 @@ async fn admit_signed_in(db: store::Db, http: Arc<serenity::Http>, guild: sereni
         let Ok(user_id) = user.parse::<u64>() else {
             continue;
         };
-        match http.get_member(guild, serenity::UserId::new(user_id)).await {
-            Ok(_) => {}
+        let member = match http.get_member(guild, serenity::UserId::new(user_id)).await {
+            Ok(member) => member,
             Err(serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(reply)))
                 if reply.status_code == serenity::StatusCode::NOT_FOUND =>
             {
@@ -595,10 +614,20 @@ async fn admit_signed_in(db: store::Db, http: Arc<serenity::Http>, guild: sereni
                 tracing::warn!("could not check membership in {guild}: {err}");
                 continue;
             }
-        }
+        };
+        let held: Vec<u64> = member
+            .roles
+            .iter()
+            .filter_map(|role| roles.get(&role.get()).copied())
+            .collect();
+        let everyone = roles.get(&guild.get()).copied().unwrap_or(0);
+        let manages = crate::auth::manages_member(member.user.id == owner, everyone, &held);
+        let role_ids: Vec<String> = member.roles.iter().map(|role| role.get().to_string()).collect();
         let admitted = || -> Result<(), Error> {
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
+            let membership = logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
+            logic::set_server_manager(&mut conn, membership.id, manages)?;
+            store::replace_discord_roles(&mut conn, guild_id, membership.id, &role_ids)?;
             for token in &tokens {
                 store::add_session_guild(&mut conn, token, guild_id)?;
             }
