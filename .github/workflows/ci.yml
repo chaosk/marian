@@ -193,11 +193,13 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           python3 - <<'PY'
           import os
+          import re
           from pathlib import Path
           path = Path("deploy/marian/values.yaml")
           text = path.read_text()
           text = text.replace("repository: marian", f"repository: {os.environ['IMAGE']}", 1)
-          text = text.replace('tag: "0.8.0"', f'tag: "{os.environ["IMAGE_TAG"]}"', 1)
+          # Whatever version values.yaml names, so a release needn't edit this file.
+          text = re.sub(r'(?m)^(  tag: )".*"$', lambda m: f'{m.group(1)}"{os.environ["IMAGE_TAG"]}"', text, count=1)
           path.write_text(text)
           PY
           helm package deploy/marian --version "$version" --app-version "$version"
