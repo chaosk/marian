@@ -28,12 +28,17 @@ pub fn discord_display_name(global_name: Option<&str>, username: &str) -> String
 
 /// Owner, Administrator, or Manage Server on the guild list Discord returns at sign-in.
 pub fn manages_guild(owner: bool, permissions: &str) -> bool {
-    if owner {
-        return true;
-    }
-    let Ok(bits) = permissions.parse::<u64>() else {
-        return false;
-    };
+    owner || permissions.parse::<u64>().is_ok_and(manages)
+}
+
+/// The same for a member the bot looks up: @everyone's permissions and those
+/// of the roles they hold, together.
+pub fn manages_member(owner: bool, everyone: u64, held: &[u64]) -> bool {
+    owner || manages(held.iter().fold(everyone, |bits, role| bits | role))
+}
+
+/// Whether permission bits include Administrator or Manage Server.
+fn manages(bits: u64) -> bool {
     const ADMINISTRATOR: u64 = 1 << 3;
     const MANAGE_GUILD: u64 = 1 << 5;
     bits & (ADMINISTRATOR | MANAGE_GUILD) != 0
@@ -238,6 +243,10 @@ mod tests {
         assert!(!manages_guild(false, "0"));
         assert!(!manages_guild(false, ""));
         assert!(!manages_guild(false, "nope"));
+        assert!(manages_member(true, 0, &[]));
+        assert!(manages_member(false, 0, &[1024, 32]));
+        assert!(manages_member(false, 8, &[]));
+        assert!(!manages_member(false, 1024, &[2048]));
     }
 
     #[test]
