@@ -1,0 +1,44 @@
+name: Tag
+
+# A merged release pull request lands on main as "Release X.Y.Z (#N)". This
+# tags that commit and starts CI for the tag, which publishes the image, the
+# chart and the GitHub release.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag release
+    if: startsWith(github.event.head_commit.message, 'Release ')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          subject="${SUBJECT%%$'\n'*}"
+          if [[ ! "$subject" =~ ^Release\ ([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
+            echo "Not a release commit: $subject"
+            exit 0
+          fi
+          version="${BASH_REMATCH[1]}"
+          # The tag has to name the version the commit builds.
+          built=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ "$built" != "$version" ]]; then
+            echo "::error::The commit says $version, but Cargo.toml says $built."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "::error::Tag $version already exists."
+            exit 1
+          fi
+          git tag "$version" "$GITHUB_SHA"
+          git push origin "refs/tags/$version"
+          gh workflow run ci.yml --ref "$version"
