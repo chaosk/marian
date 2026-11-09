@@ -35,7 +35,7 @@ jobs:
       DATABASE_URL: postgres://marian:marian@127.0.0.1:5432/marian
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: wasm32-unknown-unknown
       - name: libpq
@@ -62,7 +62,7 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       # The @ref is the toolchain this action installs. It has to match
       # rust-toolchain.toml, or the musl target lands on a compiler cargo does not use.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       - name: musl linker
