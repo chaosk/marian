@@ -39,6 +39,9 @@ pub struct RoutinePost {
     pub results: bool,
     /// What the results answer: the post the event took over, when there was one.
     pub reply_to: Option<String>,
+    /// The thread of the event a locked poll became, when the event has one:
+    /// the results go there instead of under the post.
+    pub thread: Option<ResultsThread>,
     pub title: String,
     pub body: String,
     pub color: u32,
@@ -48,6 +51,16 @@ pub struct RoutinePost {
     /// reply mentions no one.
     pub mention_everyone: bool,
     pub mention_roles: Vec<String>,
+}
+
+/// Where a locked poll's results go when its event has a thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultsThread {
+    pub event_id: i64,
+    /// The thread in Discord, once there is one.
+    pub discord_id: Option<String>,
+    /// What to call the thread if it has to be opened.
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -555,6 +568,22 @@ pub fn routine_post(
         let template = template::load(conn, routine.template_id)?;
         (template.mention_everyone, mention_role_ids(conn, &template.mention_role_ids)?)
     };
+    let thread = match run.event_id.filter(|_| locked) {
+        Some(event_id) => {
+            let event = super::db::must_event(conn, event_id)?;
+            if event.thread_enabled {
+                Some(ResultsThread {
+                    event_id,
+                    discord_id: store::thread_discord_id(conn, event_id)?
+                        .filter(|id| !id.is_empty()),
+                    name: super::discord::stored_thread_name(conn, &event)?,
+                })
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
     let (message_id, reply_to, title) = if locked {
         (
             run.results_message_id,
@@ -569,6 +598,7 @@ pub fn routine_post(
         message_id,
         results: locked,
         reply_to,
+        thread,
         title,
         body,
         color: 0x1e3a_6e,
@@ -1012,7 +1042,7 @@ fn lock_run(
     );
     let event_id = insert_event(conn, routine, start, now)?;
     // The event takes over the poll's post: its sync edits that message into the
-    // event, and the results go in a reply.
+    // event, and the results go in its thread, or in a reply when it has none.
     if let Some(message) = &run.discord_message_id {
         super::discord::remember_discord_message(conn, event_id, message)?;
     }
@@ -1033,7 +1063,7 @@ fn lock_run(
             clock::weekday_name(winner)
         ),
     )?;
-    // The event first, so the results reply lands under the finished post.
+    // The event first, so the results land in its thread or under the finished post.
     Ok(vec![
         DiscordJob::sync(event_id),
         DiscordJob::attend(event_id),
@@ -1818,7 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_poll_hands_its_post_to_the_event_and_replies_with_results() {
+    fn a_locked_poll_hands_its_post_to_the_event_and_posts_the_results_in_its_thread() {
         let mut conn = world();
         conn.batch_execute("UPDATE channels SET discord_id = '123' WHERE id = 1")
             .unwrap();
@@ -1861,6 +1891,22 @@ mod tests {
         remember_results_message(&mut conn, open.id, "777").unwrap();
         let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
         assert_eq!(post.message_id.as_deref(), Some("777"), "a second run edits the reply instead of posting again");
+
+        // With a thread on the event, the results go in it rather than under the post.
+        conn.batch_execute(&format!("UPDATE events SET thread_enabled = false WHERE id = {event_id}"))
+            .unwrap();
+        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        assert_eq!(post.thread, None, "no thread, so the results reply to the post");
+        conn.batch_execute(&format!("UPDATE events SET thread_enabled = true WHERE id = {event_id}"))
+            .unwrap();
+        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let thread = post.thread.expect("the event's thread");
+        assert_eq!(thread.event_id, event_id);
+        assert_eq!(thread.discord_id, None, "not open yet, so the results open it");
+        assert!(thread.name.starts_with("Game night -- "), "{}", thread.name);
+        store::set_thread_discord_id(&mut conn, event_id, &thread.name, "888").unwrap();
+        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        assert_eq!(post.thread.unwrap().discord_id.as_deref(), Some("888"));
     }
 
     #[test]

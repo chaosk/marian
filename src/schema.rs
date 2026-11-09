@@ -11,6 +11,7 @@ diesel::table! {
         name -> Text,
         timezone -> Text,
         discord_id -> Nullable<Text>,
+        everyone_permissions -> Nullable<BigInt>,
     }
 }
 
@@ -54,6 +55,7 @@ diesel::table! {
         discord_id -> Nullable<Text>,
         public_id -> Uuid,
         gone_at -> Nullable<Timestamptz>,
+        permissions -> BigInt,
     }
 }
 
@@ -68,6 +70,16 @@ diesel::table! {
         discord_id -> Nullable<Text>,
         public_id -> Uuid,
         gone_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    channel_overwrites (channel_id, kind, target) {
+        channel_id -> BigInt,
+        kind -> Text,
+        target -> Text,
+        allow -> BigInt,
+        deny -> BigInt,
     }
 }
 
@@ -445,6 +457,7 @@ diesel::table! {
 diesel::joinable!(settings -> guilds (guild_id));
 diesel::joinable!(roles -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
+diesel::joinable!(channel_overwrites -> channels (channel_id));
 diesel::joinable!(memberships -> users (user_id));
 diesel::joinable!(calendar_feeds -> users (user_id));
 diesel::joinable!(google_accounts -> users (user_id));
@@ -504,6 +517,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     activity,
     applied_access,
     calendar_feeds,
+    channel_overwrites,
     channels,
     command_log,
     event_prompts,

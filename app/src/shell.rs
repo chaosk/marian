@@ -219,7 +219,6 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
         .parse::<chrono_tz::Tz>()
         .map(|tz| marian_types::time::zone_label(tz, now))
         .unwrap_or_else(|_| server.timezone.clone());
-    let menu = NodeRef::<leptos::html::Details>::new();
     let servers = me
         .servers
         .into_iter()
@@ -229,11 +228,9 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
             if other.id == server.id {
                 // Picking the server already open only closes the menu.
                 return view! {
-                    <a href=href class="current" aria-current="page" on:click=move |ev| {
+                    <a href=href class="current" aria-current="page" on:click=|ev| {
                         ev.prevent_default();
-                        if let Some(menu) = menu.get_untracked() {
-                            menu.set_open(false);
-                        }
+                        close_menu(&ev);
                     }>
                         <span class="switcher-mark">{initial}</span>
                         <span class="switcher-label">{other.name}</span>
@@ -242,8 +239,9 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
                 }
                 .into_any();
             }
+            // Another server opens, and the menu closes behind it.
             view! {
-                <A href=href>
+                <A href=href on:click=|ev| close_menu(&ev)>
                     <span class="switcher-mark">{initial}</span>
                     <span class="switcher-label">{other.name}</span>
                 </A>
@@ -252,7 +250,7 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
         })
         .collect_view();
     view! {
-        <details class="switcher" node_ref=menu>
+        <details class="switcher">
             <summary>
                 <span>
                     <strong>{server.name}</strong>
@@ -268,6 +266,26 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
     }
 }
 
+/// Closes the server menu holding the clicked link. The menu comes from the
+/// click, not from a node ref: after a switch, the sidebar on screen can be one
+/// whose reactive values were already thrown away, and the ref with them, so a
+/// later switch left the menu open.
+#[cfg(feature = "hydrate")]
+fn close_menu(ev: &leptos::ev::MouseEvent) {
+    use wasm_bindgen::JsCast;
+    let menu = ev
+        .current_target()
+        .and_then(|target| target.dyn_into::<leptos::web_sys::Element>().ok())
+        .and_then(|element| element.closest("details").ok().flatten())
+        .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlDetailsElement>().ok());
+    if let Some(menu) = menu {
+        menu.set_open(false);
+    }
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn close_menu(_: &leptos::ev::MouseEvent) {}
+
 #[component]
 fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
     use crate::pages::lists::Filters;
@@ -280,10 +298,13 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
         "scheduled" => Some(Filters::scheduled()),
         _ => None,
     };
-    // The shortcut the Events page shows right now, if it shows one.
-    let showing = Memo::new({
+    // The shortcut the Events page shows right now, if it shows one. Each link
+    // reads it straight from the router, which outlives this sidebar: a memo
+    // of its own here could be thrown away while the links still read it, after
+    // a few switches between servers, and every shortcut would then read as off.
+    let showing = std::sync::Arc::new({
         let events_href = events_href.clone();
-        move |_| {
+        move || {
             if pathname.get() != events_href {
                 return None;
             }
@@ -319,11 +340,11 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
             let sub = *sub;
             let path = *path;
             let new_event = events.then(|| format!("{events_href}/new"));
+            let showing = std::sync::Arc::clone(&showing);
             let link = view! {
                 <A href=href exact=schedule attr:class=move || {
                     let here = pathname.get();
-                    // Leaving the server runs this once more after `showing` is gone.
-                    let shown = showing.try_get().flatten();
+                    let shown = showing();
                     // Schedule is the server's front page; every event page sits under Events,
                     // unless the Events page is showing one of the shortcuts below it.
                     let on = if filters.is_some() {
