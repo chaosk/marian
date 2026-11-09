@@ -1,33 +1,23 @@
 name: Dependabot
 
-on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+on: pull_request
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  merge:
-    name: Merge
-    if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]'
+  auto-merge:
+    name: Auto-merge
+    # Minor and patch bumps squash-merge on their own once main's required
+    # checks pass. Major bumps wait for a person.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Merge the pull request
+      - uses: dependabot/fetch-metadata@v3
+        id: metadata
+      - if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
         env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          REPO: ${{ github.repository }}
-        run: |
-          number="$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
-            --jq '.[] | select(.user.login == "dependabot[bot]" and .state == "open") | .number')"
-          if [ -z "$number" ]; then
-            echo "No open Dependabot pull request for ${SHA}"
-            exit 1
-          fi
-          gh pr merge "$number" --repo "$REPO" --squash --delete-branch
