@@ -1,0 +1,40 @@
+name: Tag
+
+# A merged pull request labelled "release" is tagged with the version in its
+# merge commit's Cargo.toml, and CI is started for the tag, which publishes the
+# image, the chart and the GitHub release.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag release
+    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - name: Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml has no release version: '$version'."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "::error::Tag $version already exists. Bump the version in the release pull request."
+            exit 1
+          fi
+          git tag "$version" "$COMMIT"
+          git push origin "refs/tags/$version"
+          gh workflow run ci.yml --ref "$version"

@@ -4,19 +4,19 @@ on:
   push:
     branches: ["**"]
     tags: ["*"]
-  pull_request:
+  # Pull requests aren't a trigger: a branch here is tested by its push run.
+  # A skipped pull request run named Test would pass main's required Test
+  # check before the push run finished. Pull requests from forks get no run.
+  # The tag workflow starts this for the tag it creates, because a tag pushed
+  # with the workflow token doesn't start a push run.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
-    # A branch in this repository is already tested by its push run, which also
-    # builds its image. A pull request runs the tests only when it comes from a
-    # fork, which has no push run here. The skipped run goes by another name,
-    # because main requires a check named Test and a skipped one would pass it.
-    name: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository) && 'Test' || 'Test (on push)' }}
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    name: Test
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -47,7 +47,6 @@ jobs:
 
   binary:
     name: Release binary
-    if: github.event_name == 'push'
     needs: [test]
     runs-on: ubuntu-latest
     steps:
@@ -125,7 +124,6 @@ jobs:
 
   release:
     name: Image and chart
-    if: github.event_name == 'push'
     needs: [test, binary]
     runs-on: ubuntu-latest
     permissions:
