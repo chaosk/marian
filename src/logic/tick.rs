@@ -348,12 +348,13 @@ fn reminder_text(
 pub struct ReminderCard {
     pub title: String,
     pub description: String,
-    pub footer: &'static str,
+    pub footer: String,
 }
 
 /// The Discord embed for a reminder. The title's relative time updates after
 /// the message is sent. `link` is the event post, when one exists.
 pub fn reminder_card(
+    lang: crate::i18n::Lang,
     event_title: &str,
     start_unix: i64,
     end_unix: i64,
@@ -362,7 +363,7 @@ pub fn reminder_card(
 ) -> ReminderCard {
     let label = event_title.replace(['[', ']'], "");
     let label = if label.trim().is_empty() {
-        "Event".to_string()
+        crate::tr!(lang, "post-event-fallback")
     } else {
         label
     };
@@ -379,9 +380,9 @@ pub fn reminder_card(
     description.push('\n');
     description.push_str(&format!("<t:{start_unix}:F> - <t:{end_unix}:t>"));
     ReminderCard {
-        title: format!("REMINDER: Event starting <t:{start_unix}:R>!"),
+        title: crate::tr!(lang, "reminder-title", start = format!("<t:{start_unix}:R>")),
         description,
-        footer: "Opt out of reminders with /reminders off",
+        footer: crate::tr!(lang, "reminder-footer"),
     }
 }
 

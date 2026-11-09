@@ -34,6 +34,7 @@ diesel::table! {
         digest -> Text,
         waitlist -> Bool,
         default_preset_id -> Nullable<BigInt>,
+        language -> Text,
     }
 }
 

@@ -51,6 +51,10 @@ pub(crate) mod local {
                 status: 422,
                 message,
             },
+            OpError::Text(message) => Failure {
+                status: 422,
+                message: message.to_string(),
+            },
             OpError::Db(_) => Failure {
                 status: 500,
                 message: "Something went wrong.".into(),

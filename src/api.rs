@@ -294,6 +294,7 @@ pub fn patch_membership(
             viewer.guild_id,
             viewer.membership_id,
             enabled,
+            crate::i18n::Lang::En,
         )?;
     }
     Ok(Outcome::ok())

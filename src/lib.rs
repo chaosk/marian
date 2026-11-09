@@ -7,6 +7,7 @@ pub mod clock;
 pub mod commands;
 pub mod error;
 pub mod gateway;
+pub mod i18n;
 pub mod google;
 pub mod ics;
 pub(crate) mod ids;

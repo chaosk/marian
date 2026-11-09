@@ -14,7 +14,7 @@ pub fn signup(
     event_id: i64,
     option_id: i64,
     membership_id: i64,
-) -> Result<String, OpError> {
+) -> Result<crate::i18n::Msg, OpError> {
     store::with_tx(conn, |tx| signup_tx(tx, event_id, option_id, membership_id))
 }
 
@@ -23,18 +23,18 @@ fn signup_tx(
     event_id: i64,
     option_id: i64,
     membership_id: i64,
-) -> Result<String, OpError> {
+) -> Result<crate::i18n::Msg, OpError> {
     let event = must_event(conn, event_id)?;
     let user = must_membership(conn, membership_id)?;
     if user.guild_id != event.guild_id {
-        return Err(OpError::message("That person isn't in this server."));
+        return Err(OpError::from(crate::msg!("err-person-elsewhere")));
     }
     let option = must_option(conn, option_id)?;
     if option.event_id != event.id {
         return Err(OpError::NotFound);
     }
     if event.status != "posted" {
-        return Err(OpError::message("Signups open once the event is posted."));
+        return Err(OpError::from(crate::msg!("err-signups-not-open")));
     }
     let now = Utc::now();
     if let Some(existing) = find_signup(conn, option_id, membership_id)? {
@@ -44,36 +44,35 @@ fn signup_tx(
         fill_all(conn, &event)?;
         sync_access(conn, event.id)?;
         let notice = if state == "waitlisted" {
-            format!("{} left the {} waitlist.", user.name, option.name)
+            crate::msg!("notice-left-waitlist", name = &user.name, option = &option.name)
         } else {
-            format!("{} left {}.", user.name, option.name)
+            crate::msg!("notice-left", name = &user.name, option = &option.name)
         };
-        log(conn, event.guild_id, Some(event.id), &notice)?;
+        log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
         return Ok(notice);
     }
     if event.signups_closed || cutoff_passed(&event, now) {
-        return Err(OpError::message(format!(
-            "Signups for {} are closed.",
-            event.title
-        )));
+        return Err(OpError::from(crate::msg!("err-signups-closed", title = &event.title)));
     }
     let restricts = store::event_role_ids(conn, &event, "restrict")?;
     if !restricts.is_empty() && !user.server_manager {
         let roles = store::membership_role_ids(conn, &user)?;
         if !restricts.iter().any(|role| roles.contains(role)) {
             let names = role_names(conn, &restricts)?;
-            return Err(OpError::message(format!(
-                "This event is limited to {}.",
-                names.join(", ")
+            return Err(OpError::from(crate::msg!(
+                "err-event-limited",
+                roles = crate::i18n::each(|lang| crate::i18n::list_or(lang, &names)),
             )));
         }
     }
     if let Some(role_id) = option.role_id {
         if !user.server_manager && !store::membership_has_role(conn, user.id, role_id)? {
             let role = must_role(conn, role_id)?;
-            return Err(OpError::message(format!(
-                "{} can't take a {} spot. That option is limited to {}.",
-                user.name, option.name, role.name
+            return Err(OpError::from(crate::msg!(
+                "err-option-limited",
+                name = &user.name,
+                option = &option.name,
+                role = &role.name,
             )));
         }
     }
@@ -96,7 +95,7 @@ fn signup_tx(
         } else if store::settings(conn, event.guild_id)?.waitlist {
             "waitlisted"
         } else {
-            return Err(OpError::message(format!("{} is full.", option.name)));
+            return Err(OpError::from(crate::msg!("err-option-full", option = &option.name)));
         }
     } else {
         "confirmed"
@@ -113,13 +112,13 @@ fn signup_tx(
     fill_all(conn, &event)?;
     sync_access(conn, event.id)?;
     let notice = if moved && state == "confirmed" {
-        format!("{} moved to {}.", user.name, option.name)
+        crate::msg!("notice-moved", name = &user.name, option = &option.name)
     } else if state == "waitlisted" {
-        format!("{} is waiting for a {} spot.", user.name, option.name)
+        crate::msg!("notice-waiting", name = &user.name, option = &option.name)
     } else {
-        format!("{} signed up as {}.", user.name, option.name)
+        crate::msg!("notice-signed-up", name = &user.name, option = &option.name)
     };
-    log(conn, event.guild_id, Some(event.id), &notice)?;
+    log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
     Ok(notice)
 }
 
@@ -130,19 +129,17 @@ pub fn editor_response(
     target_id: i64,
     option_id: i64,
     action: &str,
-) -> Result<String, OpError> {
+) -> Result<crate::i18n::Msg, OpError> {
     store::with_tx(conn, |tx| {
         let event = must_event(tx, event_id)?;
         let actor = must_membership(tx, actor_id)?;
         let settings = store::settings(tx, event.guild_id)?;
         let roles = store::membership_role_ids(tx, &actor)?;
         if !can_edit(&actor, &event, &settings, &roles) {
-            return Err(OpError::message("You can't change these responses."));
+            return Err(OpError::from(crate::msg!("err-cant-change-responses")));
         }
         if event.status != "posted" {
-            return Err(OpError::message(
-                "Post the event before editing its responses.",
-            ));
+            return Err(OpError::from(crate::msg!("err-responses-unposted")));
         }
         let target = must_membership(tx, target_id)?;
         let option = must_option(tx, option_id)?;
@@ -152,14 +149,14 @@ pub fn editor_response(
         match action {
             "remove" => {
                 let Some(existing) = find_signup(tx, option.id, target.id)? else {
-                    return Ok(format!("{} wasn't on {}.", target.name, option.name));
+                    return Ok(crate::msg!("notice-was-not-on", name = &target.name, option = &option.name));
                 };
                 diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
                     .execute(tx)?;
                 fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
-                let notice = format!("Removed {} from {}.", target.name, option.name);
-                log(tx, event.guild_id, Some(event.id), &notice)?;
+                let notice = crate::msg!("notice-removed", name = &target.name, option = &option.name);
+                log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
                 Ok(notice)
             }
             "add" | "move" => {
@@ -176,7 +173,7 @@ pub fn editor_response(
                 if find_signup(tx, option.id, target.id)?.is_some() {
                     fill_all(tx, &event)?;
                     sync_access(tx, event.id)?;
-                    return Ok(format!("{} is already on {}.", target.name, option.name));
+                    return Ok(crate::msg!("notice-already-on", name = &target.name, option = &option.name));
                 }
                 diesel::insert_into(schema::signups::table)
                     .values(&NewSignup {
@@ -189,11 +186,11 @@ pub fn editor_response(
                     .execute(tx)?;
                 fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
-                let notice = format!("Added {} to {}.", target.name, option.name);
-                log(tx, event.guild_id, Some(event.id), &notice)?;
+                let notice = crate::msg!("notice-added", name = &target.name, option = &option.name);
+                log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
                 Ok(notice)
             }
-            _ => Err(OpError::message("Use add, remove, or move.")),
+            _ => Err(OpError::from(crate::msg!("err-response-action"))),
         }
     })
 }
@@ -332,7 +329,8 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
 
     let mut role_id = event.attendee_role_id;
     if role_id.is_none() && settings.temp_roles && !reminding.is_empty() {
-        let name: String = format!("{} attendee", event.title)
+        let lang = crate::i18n::lang_of(conn, event.guild_id);
+        let name: String = crate::tr!(lang, "role-attendee", title = &event.title)
             .chars()
             .take(80)
             .collect();

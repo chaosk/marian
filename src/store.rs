@@ -58,6 +58,7 @@ struct SettingsRow {
     digest: String,
     waitlist: bool,
     default_preset_id: Option<i64>,
+    language: String,
 }
 
 /// A server's settings. Each `role_*` list names the roles that may do one
@@ -88,6 +89,8 @@ pub struct Settings {
     pub waitlist: bool,
     /// The preset a new event starts with.
     pub default_preset_id: Option<i64>,
+    /// The language Marian writes in on Discord: "en" or "pl".
+    pub language: String,
 }
 
 /// The permission names stored with each role, and the matching settings field.
@@ -133,6 +136,7 @@ impl Settings {
             digest: self.digest.clone(),
             waitlist: self.waitlist,
             default_preset_id: self.default_preset_id,
+            language: self.language.clone(),
         }
     }
 }
@@ -162,6 +166,7 @@ impl From<SettingsRow> for Settings {
             digest: row.digest,
             waitlist: row.waitlist,
             default_preset_id: row.default_preset_id,
+            language: row.language,
         }
     }
 }
@@ -1143,6 +1148,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         digest: "off".into(),
         waitlist: false,
         default_preset_id: None,
+        language: "en".into(),
     }
 }
 
@@ -1267,24 +1273,24 @@ impl TypeUsage {
 
     /// "3 events and 1 preset", for a refusal.
     pub fn describe(&self) -> String {
-        let part = |count: i64, one: &str, many: &str| match count {
-            0 => None,
-            1 => Some(format!("1 {one}")),
-            n => Some(format!("{n} {many}")),
-        };
-        let parts: Vec<String> = [
-            part(self.events, "event", "events"),
-            part(self.presets, "preset", "presets"),
-            part(self.templates, "series or routine", "series and routines"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        match parts.as_slice() {
-            [] => "nothing".into(),
-            [one] => one.clone(),
-            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        self.describe_in(crate::i18n::Lang::En)
+    }
+
+    pub fn describe_in(&self, lang: crate::i18n::Lang) -> String {
+        let mut parts = Vec::new();
+        if self.events > 0 {
+            parts.push(crate::tr!(lang, "usage-events", count = self.events));
         }
+        if self.presets > 0 {
+            parts.push(crate::tr!(lang, "usage-presets", count = self.presets));
+        }
+        if self.templates > 0 {
+            parts.push(crate::tr!(lang, "usage-templates", count = self.templates));
+        }
+        if parts.is_empty() {
+            return crate::tr!(lang, "usage-nothing");
+        }
+        crate::i18n::list(lang, &parts)
     }
 }
 
@@ -2446,6 +2452,7 @@ mod tests {
                 "20261026100000".to_string(),
                 "20261026110000".to_string(),
                 "20261102090000".to_string(),
+                "20261109090000".to_string(),
             ]
         );
     }

@@ -157,7 +157,7 @@ mod tests {
         let option = store::options_for(&mut conn, &event).unwrap()[0].id;
         signup(&mut conn, id, option, 2).unwrap();
         let waiting = signup(&mut conn, id, option, 3).unwrap();
-        assert!(waiting.contains("waiting"));
+        assert!(waiting.to_string().contains("waiting"));
         signup(&mut conn, id, option, 2).unwrap();
         let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
@@ -316,6 +316,7 @@ mod tests {
         assert!(err.contains("limited"), "{err}");
         assert!(signup(&mut conn, gated_id, gated_option, 2)
             .unwrap()
+            .to_string()
             .contains("signed up"));
 
         let mut closed = input("Late", Utc::now() + Duration::hours(4), SaveAction::Publish);
@@ -431,7 +432,7 @@ mod tests {
         let options = store::options_for(&mut conn, &event).unwrap();
         signup(&mut conn, id, options[0].id, 2).unwrap();
         let moved = signup(&mut conn, id, options[1].id, 2).unwrap();
-        assert!(moved.contains("moved"));
+        assert!(moved.to_string().contains("moved"));
         let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
@@ -482,6 +483,7 @@ mod tests {
     fn a_reminder_links_the_event_and_says_how_to_opt_out() {
         let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
         let card = reminder_card(
+            crate::i18n::Lang::En,
             "BotC #135",
             start.timestamp(),
             (start + Duration::minutes(105)).timestamp(),
@@ -503,15 +505,15 @@ mod tests {
     fn a_thread_is_named_with_the_event_date() {
         let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
         assert_eq!(
-            event_thread_name("BotC #135", start, "UTC"),
+            event_thread_name(crate::i18n::Lang::En, "BotC #135", start, "UTC"),
             "BotC #135 -- Wed, Oct 14"
         );
         assert_eq!(
-            event_thread_name("  ", start, "Europe/Paris"),
+            event_thread_name(crate::i18n::Lang::En, "  ", start, "Europe/Paris"),
             "Event -- Wed, Oct 14"
         );
         let long = "A".repeat(120);
-        let name = event_thread_name(&long, start, "UTC");
+        let name = event_thread_name(crate::i18n::Lang::En, &long, start, "UTC");
         assert!(name.ends_with(" -- Wed, Oct 14"), "{name}");
         assert!(name.chars().count() <= 100, "{name}");
     }

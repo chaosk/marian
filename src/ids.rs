@@ -64,7 +64,7 @@ pub mod public {
                 .optional()?,
             None => None,
         };
-        found.ok_or_else(|| OpError::message("Pick a channel."))
+        found.ok_or_else(|| OpError::from(crate::msg!("err-pick-channel")))
     }
 
     /// Roles by key, as public ids in the same order. A role gone since is left out.
@@ -119,7 +119,7 @@ pub mod public {
     }
 
     fn missing_role() -> OpError {
-        OpError::message("That role isn't in this server.")
+        OpError::from(crate::msg!("err-role-elsewhere"))
     }
 
     pub fn member_id(conn: &mut Connection, guild_id: i64, public: &str) -> Result<i64, OpError> {
