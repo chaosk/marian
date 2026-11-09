@@ -1,10 +1,11 @@
 name: Tag
 
-# A merged release pull request lands on main as "Release X.Y.Z (#N)". This
-# tags that commit and starts CI for the tag, which publishes the image, the
-# chart and the GitHub release.
+# A merged pull request labelled "release" is tagged with the version in its
+# merge commit's Cargo.toml, and CI is started for the tag, which publishes the
+# image, the chart and the GitHub release.
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [main]
 
 permissions:
@@ -14,31 +15,26 @@ permissions:
 jobs:
   tag:
     name: Tag release
-    if: startsWith(github.event.head_commit.message, 'Release ')
+    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'release')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
       - name: Tag
         env:
           GH_TOKEN: ${{ github.token }}
-          SUBJECT: ${{ github.event.head_commit.message }}
+          COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          subject="${SUBJECT%%$'\n'*}"
-          if [[ ! "$subject" =~ ^Release\ ([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
-            echo "Not a release commit: $subject"
-            exit 0
-          fi
-          version="${BASH_REMATCH[1]}"
-          # The tag has to name the version the commit builds.
-          built=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [[ "$built" != "$version" ]]; then
-            echo "::error::The commit says $version, but Cargo.toml says $built."
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml has no release version: '$version'."
             exit 1
           fi
           if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
-            echo "::error::Tag $version already exists."
+            echo "::error::Tag $version already exists. Bump the version in the release pull request."
             exit 1
           fi
-          git tag "$version" "$GITHUB_SHA"
+          git tag "$version" "$COMMIT"
           git push origin "refs/tags/$version"
           gh workflow run ci.yml --ref "$version"
