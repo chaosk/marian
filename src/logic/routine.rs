@@ -13,11 +13,18 @@ use super::template::{self, Spawn};
 use uuid::Uuid;
 
 use crate::clock;
-pub use marian_types::{DayCheck, PollChoice, RoutineSummary, RoutineView, RunHistory, RunView};
+pub use marian_types::{ApprovalView, DayCheck, PollChoice, RoutineStep, RoutineSummary, RoutineView, RunHistory, RunView};
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::schema;
 use crate::store::{self, Connection};
+
+mod steps;
+pub use steps::{
+    approval_post, can_decide, decide_run, default_steps, load_steps, remember_approval_message, waiting_run_id,
+    ApprovalPost, Step, StepKind,
+};
+use steps::{clean_steps, proceed, store_steps, waiting_run};
 
 #[derive(Debug, Clone)]
 pub struct RoutineEffect {
@@ -28,6 +35,7 @@ pub struct RoutineEffect {
 pub struct PollButton {
     pub custom_id: String,
     pub label: String,
+    pub tone: super::model::ButtonTone,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +105,11 @@ struct Run {
     discord_message_id: Option<String>,
     public_id: uuid::Uuid,
     results_message_id: Option<String>,
+    /// The position of the routine step the run is on.
+    step: i64,
+    approval_message_id: Option<String>,
+    decide_by: Option<DateTime<Utc>>,
+    decided_by: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -213,6 +226,7 @@ pub fn create_routine(
             })
             .returning(schema::routines::id)
             .get_result(tx)?;
+        store_steps(tx, id, &default_steps())?;
         log(tx, guild_id, None, &format!("Saved the {title} routine."))?;
         let jobs = progress_one(tx, id, now)?;
         Ok((id, public_id.to_string(), jobs))
@@ -308,6 +322,31 @@ pub fn save_routine(
             &format!("Saved the {} routine.", routine.title),
         )?;
         Ok(RoutineEffect { jobs })
+    })
+}
+
+/// Checks steps for a routine of `guild_id` before anything is saved.
+pub fn check_steps(conn: &mut Connection, guild_id: i64, steps: &[Step]) -> Result<(), OpError> {
+    clean_steps(conn, guild_id, steps).map(|_| ())
+}
+
+/// Replaces a routine's steps. A request already waiting keeps going.
+pub fn save_steps(
+    conn: &mut Connection,
+    routine_id: i64,
+    actor_id: i64,
+    steps: &[Step],
+) -> Result<RoutineEffect, OpError> {
+    store::with_tx(conn, |tx| {
+        let routine = must_routine(tx, routine_id)?;
+        require_owner(tx, &routine, actor_id)?;
+        let steps = clean_steps(tx, routine.guild_id, steps)?;
+        if load_steps(tx, routine.id)? == steps {
+            return Ok(RoutineEffect { jobs: Vec::new() });
+        }
+        store_steps(tx, routine.id, &steps)?;
+        log(tx, routine.guild_id, None, &format!("Changed the steps of the {} routine.", routine.title))?;
+        Ok(RoutineEffect { jobs: Vec::new() })
     })
 }
 
@@ -522,16 +561,21 @@ pub fn routine_post(
         })
         .collect();
     let locked = run.status == "locked";
-    let body = if locked {
+    let picked = || {
         let day = run.winner_weekday.unwrap_or(run.days[0]);
         let when = event_start(run.locks_at, day, routine.start_minutes, tz);
+        (day, poll_day_label(lang, when.with_timezone(&tz).date_naive()))
+    };
+    let body = if locked {
+        let (day, label) = picked();
         let votes = names.get(&day).map(Vec::len).unwrap_or(0);
-        crate::tr!(
-            lang,
-            "poll-won",
-            day = poll_day_label(lang, when.with_timezone(&tz).date_naive()),
-            count = votes,
-        )
+        crate::tr!(lang, "poll-won", day = label, count = votes)
+    } else if run.status == "approval" {
+        crate::tr!(lang, "poll-waiting", day = picked().1)
+    } else if run.status == "skipped" {
+        crate::tr!(lang, "poll-skipped")
+    } else if run.status == "expired" {
+        crate::tr!(lang, "poll-expired", day = picked().1)
     } else if settings.localize_time {
         // Discord shows it counting down, and the full time in each member's zone on hover.
         crate::tr!(lang, "poll-locks", when = format!("<t:{}:R>", run.locks_at.timestamp()))
@@ -542,11 +586,12 @@ pub fn routine_post(
             when = crate::i18n::format_when(lang, run.locks_at, tz, settings.hour_24)
         )
     };
-    // The results reply only reports; editing the routine is for the open poll.
-    let body = if locked {
-        body
-    } else {
+    // The results reply only reports; editing the routine is for the poll
+    // until it is settled.
+    let body = if matches!(run.status.as_str(), "open" | "approval") {
         with_edit_link(body, public_url, guild.discord_id.as_deref(), routine.public_id, lang)
+    } else {
+        body
     };
     let buttons = if run.status == "open" {
         run.days
@@ -556,13 +601,15 @@ pub fn routine_post(
                 PollButton {
                     custom_id: format!("marian:w:{}:{day}", run.public_id),
                     label: poll_day_label(lang, when.with_timezone(&tz).date_naive()),
+                    tone: super::model::ButtonTone::Secondary,
                 }
             })
             .collect()
     } else {
         Vec::new()
     };
-    let (mention_everyone, mention_roles) = if locked {
+    // Only the open poll mentions anyone.
+    let (mention_everyone, mention_roles) = if run.status != "open" {
         (false, Vec::new())
     } else {
         let template = template::load(conn, routine.template_id)?;
@@ -759,6 +806,69 @@ pub fn routine_page_data(
         }),
         history,
         upcoming,
+        steps: step_views(conn, routine.id)?,
+        approval: approval_view(conn, &routine, tz, settings.hour_24)?,
+    }))
+}
+
+/// A routine's steps with public ids, as its page shows them.
+fn step_views(conn: &mut Connection, routine_id: i64) -> Result<Vec<RoutineStep>, OpError> {
+    let mut views = Vec::new();
+    for step in load_steps(conn, routine_id)? {
+        views.push(RoutineStep {
+            kind: step.kind.code().to_string(),
+            channel_id: step
+                .channel_id
+                .map(|id| crate::ids::public::channel(conn, id))
+                .transpose()?,
+            role_ids: crate::ids::public::roles(conn, &step.role_ids)?,
+        });
+    }
+    Ok(views)
+}
+
+/// The approval a closed poll waits on, for the routine's page.
+fn approval_view(conn: &mut Connection, routine: &Routine, tz: Tz, hour24: bool) -> Result<Option<ApprovalView>, OpError> {
+    let Some(run) = waiting_run(conn, routine.id)? else {
+        return Ok(None);
+    };
+    let channel = load_steps(conn, routine.id)?
+        .into_iter()
+        .nth(run.step as usize)
+        .and_then(|step| step.channel_id)
+        .map(|id| store::channel(conn, id))
+        .transpose()?
+        .flatten()
+        .map(|channel| channel.name)
+        .unwrap_or_default();
+    let counts = vote_counts(conn, run.id)?;
+    let winner = run.winner_weekday.unwrap_or(run.days[0]);
+    let now = Utc::now();
+    let mut days: Vec<(DateTime<Utc>, DayCheck)> = run
+        .days
+        .iter()
+        .map(|day| {
+            let start = event_start(run.locks_at, *day, routine.start_minutes, tz);
+            (
+                start,
+                DayCheck {
+                    n: *day,
+                    name: clock::weekday_name(*day).to_string(),
+                    on: start > now,
+                    votes: counts.get(day).copied().unwrap_or(0),
+                    date: clock::format_day(start.with_timezone(&tz).date_naive()),
+                    voters: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    days.sort_by_key(|(start, _)| *start);
+    Ok(Some(ApprovalView {
+        channel,
+        winner,
+        lapses: clock::format_when(run.decide_by.unwrap_or(run.locks_at), tz, hour24),
+        days: days.into_iter().map(|(_, day)| day).collect(),
+        can_decide: false,
     }))
 }
 
@@ -778,7 +888,15 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
         let routine = must_routine(conn, id)?;
         let channel = store::channel(conn, routine.channel_id)?;
         let run = editable_run(conn, routine.id)?;
+        let waiting = waiting_run(conn, routine.id)?;
         let (badge, poll) = match &run {
+            _ if waiting.is_some() => {
+                let day = waiting.as_ref().and_then(|run| run.winner_weekday).unwrap_or(0);
+                (
+                    "Approval".to_string(),
+                    format!("{} won · waiting for approval", clock::weekday_name(day)),
+                )
+            }
             Some(run) if run.status == "open" => (
                 "Voting".to_string(),
                 format!(
@@ -951,13 +1069,16 @@ fn advance(
 ) -> Result<Vec<DiscordJob>, OpError> {
     let mut jobs = Vec::new();
     for run in &mut runs {
-        if run.status == "open" && run.locks_at <= now {
+        if run.status == "approval" && run.decide_by.is_some_and(|lapses| lapses <= now) {
+            jobs.extend(steps::expire(conn, routine, run)?);
+            run.status = "expired".to_string();
+        } else if run.status == "open" && run.locks_at <= now {
             jobs.extend(lock_run(conn, routine, run, now)?);
-            run.status = "locked".to_string();
+            run.status = must_run(conn, run.id)?.status;
         } else if run.status == "scheduled" && run.opens_at <= now {
             if run.locks_at <= now {
                 jobs.extend(lock_run(conn, routine, run, now)?);
-                run.status = "locked".to_string();
+                run.status = must_run(conn, run.id)?.status;
             } else {
                 diesel::update(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
@@ -985,12 +1106,14 @@ fn advance(
             routine.lock_weekday,
             routine.lock_minutes,
         );
-        // An open poll is this week's, even when the schedule has moved since it
-        // opened: its window no longer matches, but a second poll would post a
-        // second event.
-        let already = runs.iter().any(|run| {
-            run.status == "open" || (run.opens_at == opens && run.status != "locked")
-        });
+        // An open poll, or one waiting for approval, is this week's, even when
+        // the schedule has moved since it opened: its window no longer matches,
+        // but a second poll would post a second event. A poll for this window
+        // that already locked is this week's too, even if it locked early; a
+        // second one would break the unique window and stop the clock.
+        let already = runs
+            .iter()
+            .any(|run| matches!(run.status.as_str(), "open" | "approval") || run.opens_at == opens);
         if !already && locks > now {
             let days_json = days_json(&routine.days);
             let status = if opens <= now { "open" } else { "scheduled" };
@@ -1032,6 +1155,18 @@ fn lock_run(
         .copied()
         .max_by_key(|day| (counts.get(day).copied().unwrap_or(0), -i16::from(*day)))
         .unwrap_or(run.days[0]);
+    // The poll is the first step; what follows decides when the event posts.
+    proceed(conn, routine, run, winner, 0, now)
+}
+
+/// Posts the event on `winner`'s day, taking over the poll's message.
+fn post_run(
+    conn: &mut Connection,
+    routine: &Routine,
+    run: &Run,
+    winner: u8,
+    now: DateTime<Utc>,
+) -> Result<Vec<DiscordJob>, OpError> {
     let guild = must_guild(conn, routine.guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
     let start = event_start(
@@ -1511,6 +1646,10 @@ fn run_from_stored(row: store::RoutineRun) -> Run {
         discord_message_id: row.discord_message_id,
         public_id: row.public_id,
         results_message_id: row.results_message_id,
+        step: row.step,
+        approval_message_id: row.approval_message_id,
+        decide_by: row.decide_by,
+        decided_by: row.decided_by,
     }
 }
 
@@ -1782,6 +1921,181 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Late night");
         assert_eq!(rows[0].id, public_id);
+    }
+
+    /// A Tuesday-locking routine for Thursday or Friday whose closed poll asks
+    /// the Officers in #officers before it posts.
+    fn approved_routine(conn: &mut Connection) -> i64 {
+        conn.batch_execute(
+            "
+            UPDATE channels SET discord_id = '77' WHERE id = 1;
+            INSERT INTO channels (id, guild_id, name, kind, position, discord_id) VALUES (2, 1, 'officers', 'text', 1, '88');
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES (501, 1, 'Officers', '#000000', '501501');
+            INSERT INTO users (discord_id) VALUES ('ollie');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            SELECT 3, id, 1, 'Ollie', 'ollie', '#112233', true, false FROM users WHERE discord_id = 'ollie';
+            INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 501);
+            ",
+        )
+        .unwrap();
+        let (id, _, _) = create_routine(
+            conn,
+            1,
+            1,
+            1,
+            "Game night",
+            "",
+            120,
+            19 * 60,
+            6,
+            10 * 60,
+            1,
+            18 * 60,
+            &[3, 4],
+            Some(EventExtras {
+                color: "#2f6b4f".into(),
+                options: vec![OptionInput::of_type(301)],
+                ..Default::default()
+            }),
+            at(2026, 10, 12, 12, 0),
+        )
+        .unwrap();
+        let approval = Step {
+            kind: StepKind::Approval,
+            channel_id: Some(2),
+            role_ids: vec![501],
+        };
+        save_steps(conn, id, 1, &[Step::of(StepKind::Poll), approval, Step::of(StepKind::Post)]).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_closed_poll_waits_for_an_officer_to_confirm_a_day() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+        cast_run(&mut conn, run, 2, 4).unwrap();
+
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })), "nothing posts yet: {jobs:?}");
+        let waiting = must_run(&mut conn, run).unwrap();
+        assert_eq!((waiting.status.as_str(), waiting.winner_weekday, waiting.step), ("approval", Some(4), 1));
+        assert_eq!(waiting.decide_by, Some(at(2026, 10, 16, 0, 0)), "lapses as Friday begins");
+
+        let poll = routine_post(&mut conn, run, "").unwrap().unwrap();
+        assert!(poll.body.contains("waiting for confirmation"), "{}", poll.body);
+        assert!(poll.buttons.is_empty() && poll.mention_roles.is_empty());
+
+        let ask = approval_post(&mut conn, run, "", at(2026, 10, 14, 9, 0)).unwrap().unwrap();
+        assert_eq!(ask.channel_discord_id, "88");
+        assert_eq!(ask.mention_roles, ["501501"]);
+        let ids: Vec<&str> = ask.buttons.iter().map(|button| button.custom_id.rsplit(':').next().unwrap()).collect();
+        assert_eq!(ids, ["3", "4", "skip"], "each day in date order, then skip");
+        assert_eq!(ask.buttons[1].tone, crate::logic::ButtonTone::Primary, "the winner stands out");
+
+        let rows = list_routines(&mut conn, 1).unwrap();
+        assert_eq!((rows[0].badge.as_str(), rows[0].poll.as_str()), ("Approval", "Friday won · waiting for approval"));
+        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let approval = shown.approval.unwrap();
+        assert_eq!((approval.channel.as_str(), approval.winner), ("officers", 4));
+        assert_eq!(shown.steps.iter().map(|step| step.kind.as_str()).collect::<Vec<_>>(), ["poll", "approval", "post"]);
+
+        assert!(!can_decide(&mut conn, id, 3).unwrap());
+        let refused = decide_run(&mut conn, run, 3, Some(3), at(2026, 10, 14, 9, 0)).unwrap_err();
+        assert!(refused.to_string().contains("Only the roles"), "{refused}");
+
+        assert!(can_decide(&mut conn, id, 2).unwrap());
+        let effect = decide_run(&mut conn, run, 2, Some(3), at(2026, 10, 14, 9, 0)).unwrap();
+        let event_id = effect
+            .jobs
+            .iter()
+            .find_map(|job| match job {
+                DiscordJob::Sync { event_id, .. } => Some(*event_id),
+                _ => None,
+            })
+            .expect("the event posts");
+        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        assert_eq!(event.starts_at, at(2026, 10, 15, 19, 0), "on the day June picked, not the winner");
+        let done = must_run(&mut conn, run).unwrap();
+        assert_eq!((done.status.as_str(), done.winner_weekday, done.event_id), ("locked", Some(3), Some(event_id)));
+
+        conn.batch_execute("UPDATE routine_runs SET approval_message_id = '900'").unwrap();
+        let answered = approval_post(&mut conn, run, "", at(2026, 10, 14, 9, 0)).unwrap().unwrap();
+        assert!(answered.body.starts_with("June confirmed **Thursday"), "{}", answered.body);
+        assert!(answered.buttons.is_empty() && answered.mention_roles.is_empty());
+        let again = decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap_err();
+        assert_eq!(again.to_string(), "This request has already been answered.");
+    }
+
+    #[test]
+    fn an_approval_can_skip_the_week_or_lapse() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let early = decide_run(&mut conn, run, 1, Some(9), at(2026, 10, 14, 9, 0)).unwrap_err();
+        assert_eq!(early.to_string(), "That day isn't on this poll.");
+        decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "skipped");
+        let poll = routine_post(&mut conn, run, "").unwrap().unwrap();
+        assert_eq!(poll.body, "There's no event this week.");
+        assert_eq!(must_run(&mut conn, run).unwrap().event_id, None, "no event was made");
+
+        // Next week nobody answers, so the request lapses as the winning day begins.
+        maintain(&mut conn, 1, at(2026, 10, 18, 10, 0)).unwrap();
+        let next = open_run_id(&mut conn, id).unwrap().unwrap();
+        cast_run(&mut conn, next, 2, 3).unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 20, 18, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, next).unwrap().status, "approval");
+        let late = decide_run(&mut conn, next, 1, Some(3), at(2026, 10, 22, 20, 0)).unwrap_err();
+        assert_eq!(late.to_string(), "That day has already started. Pick a later one.");
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 22, 0, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, next).unwrap().status, "expired");
+        assert!(jobs.iter().any(|job| matches!(job, DiscordJob::Routine { run_id, .. } if *run_id == next)));
+        assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })));
+        let poll = routine_post(&mut conn, next, "").unwrap().unwrap();
+        assert!(poll.body.starts_with("No one confirmed **Thursday"), "{}", poll.body);
+    }
+
+    #[test]
+    fn a_poll_that_locked_before_its_window_closed_is_still_this_weeks() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+        // The lock moved earlier after the poll opened, as an edit to the routine can do.
+        conn.batch_execute("UPDATE routine_runs SET locks_at = '2026-10-12 13:00:00+00'").unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 12, 14, 0)).unwrap();
+        decide_run(&mut conn, run, 1, Some(4), at(2026, 10, 12, 14, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "locked");
+        // Before Tuesday's lock, the week's window still matches the locked poll.
+        maintain(&mut conn, 1, at(2026, 10, 12, 15, 0)).unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 13, 9, 0)).unwrap();
+        assert_eq!(runs_for(&mut conn, id).unwrap().len(), 1, "no second poll for the same week");
+    }
+
+    #[test]
+    fn a_routine_polls_first_and_posts_last() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let poll = Step::of(StepKind::Poll);
+        let post = Step::of(StepKind::Post);
+        let ask = |channel_id| Step {
+            kind: StepKind::Approval,
+            channel_id,
+            role_ids: vec![501, 999],
+        };
+        for wrong in [
+            vec![post.clone(), poll.clone()],
+            vec![poll.clone()],
+            vec![poll.clone(), ask(Some(2)), ask(Some(2)), post.clone()],
+            vec![poll.clone(), ask(None), post.clone()],
+        ] {
+            assert!(save_steps(&mut conn, id, 1, &wrong).is_err(), "{wrong:?}");
+        }
+        save_steps(&mut conn, id, 1, &[poll.clone(), ask(Some(2)), post.clone()]).unwrap();
+        assert_eq!(load_steps(&mut conn, id).unwrap()[1].role_ids, [501], "a role from elsewhere is dropped");
+        save_steps(&mut conn, id, 1, &default_steps()).unwrap();
+        assert_eq!(load_steps(&mut conn, id).unwrap(), default_steps());
     }
 
     #[test]

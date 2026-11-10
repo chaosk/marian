@@ -419,6 +419,21 @@ diesel::table! {
         created_at -> Timestamptz,
         public_id -> Uuid,
         results_message_id -> Nullable<Text>,
+        step -> BigInt,
+        approval_message_id -> Nullable<Text>,
+        decide_by -> Nullable<Timestamptz>,
+        decided_by -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    routine_steps (id) {
+        id -> BigInt,
+        routine_id -> BigInt,
+        position -> BigInt,
+        kind -> Text,
+        channel_id -> Nullable<BigInt>,
+        role_ids -> Array<BigInt>,
     }
 }
 
@@ -507,6 +522,7 @@ diesel::joinable!(routine_runs -> routines (routine_id));
 diesel::joinable!(routine_runs -> events (event_id));
 diesel::joinable!(routine_votes -> routine_runs (run_id));
 diesel::joinable!(routine_votes -> memberships (membership_id));
+diesel::joinable!(routine_steps -> routines (routine_id));
 
 diesel::joinable!(permission_roles -> guilds (guild_id));
 diesel::joinable!(permission_roles -> roles (role_id));
@@ -536,6 +552,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     role_grants,
     roles,
     routine_runs,
+    routine_steps,
     routine_votes,
     routines,
     series,

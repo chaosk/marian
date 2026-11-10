@@ -506,6 +506,11 @@ pub mod path {
     pub fn routine_stop(server: &str, routine: &str) -> String {
         format!("{}/stop", self::routine(server, routine))
     }
+
+    /// Answers the approval a routine's closed poll waits on.
+    pub fn routine_decide(server: &str, routine: &str) -> String {
+        format!("{}/decide", self::routine(server, routine))
+    }
 }
 
 /// Marian's own call on the server; the REST resource at `$url` in the browser.

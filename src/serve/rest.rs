@@ -72,6 +72,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/routines/{id}/days", put(routine_days))
         .route("/servers/{server}/routines/{id}/vote", post(vote))
         .route("/servers/{server}/routines/{id}/stop", post(stop_routine))
+        .route("/servers/{server}/routines/{id}/decide", post(decide_routine))
         .fallback(missing)
 }
 
@@ -762,6 +763,15 @@ async fn vote(
     Json(vote): Json<dto::Vote>,
 ) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| api::vote(db, v, &id, &vote))
+}
+
+async fn decide_routine(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(decision): Json<dto::Decision>,
+) -> Reply<dto::Done> {
+    change(&state, &headers, &server, |db, v| api::decide_routine(db, v, &id, &decision))
 }
 
 async fn stop_routine(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {

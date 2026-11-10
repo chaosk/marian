@@ -5,6 +5,7 @@ use leptos::prelude::*;
 use marian_types as dto;
 
 use super::inline::{escape, focus_when_shown, pencil, LocalDraft};
+use super::RoleCombo;
 use crate::format::{human_duration, weekday_name};
 use crate::{api, cache, client};
 
@@ -409,6 +410,101 @@ pub fn UsualDays(edit: RoutineEdit) -> impl IntoView {
         })
         .collect_view();
     view! { <div class="day-chips">{chips}</div> }
+}
+
+/// What happens each week after the poll closes: an optional approval, which
+/// asks some roles in a channel to confirm the day, and then the event's post.
+#[component]
+pub fn RoutineSteps(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<dto::Role>) -> impl IntoView {
+    let channels = StoredValue::new(channels);
+    let roles = StoredValue::new(roles);
+    let approval = move || {
+        edit.draft.with(|draft| {
+            draft
+                .steps
+                .as_ref()
+                .and_then(|steps| steps.iter().find(|step| step.kind == "approval").cloned())
+        })
+    };
+    // Applies a change to the approval step, adding or dropping it.
+    let set_approval = move |next: Option<dto::RoutineStep>| {
+        edit.change(|draft| {
+            let mut steps = vec![step("poll")];
+            steps.extend(next);
+            steps.push(step("post"));
+            draft.steps = Some(steps);
+        })
+    };
+    let add = move |_| {
+        let first = channels.with_value(|list| list.first().map(|channel| channel.id.clone()).unwrap_or_default());
+        set_approval(Some(dto::RoutineStep {
+            kind: "approval".into(),
+            channel_id: Some(first).filter(|id| !id.is_empty()),
+            role_ids: Vec::new(),
+        }));
+    };
+    let middle = move || match approval() {
+        None => view! {
+            <li class="routine-step">
+                <button type="button" class="link-button" on:click=add>"Add an approval step"</button>
+                <p class="settings-note">"Someone confirms the day, or picks another, before the event posts."</p>
+            </li>
+        }
+        .into_any(),
+        Some(current) => {
+            let picked = current.channel_id.clone().unwrap_or_default();
+            let options = channels.with_value(|list| {
+                list.iter()
+                    .map(|channel| {
+                        view! { <option value=channel.id.clone() selected=channel.id == picked>"#"{channel.name.clone()}</option> }
+                    })
+                    .collect_view()
+            });
+            let chosen = RwSignal::new(current.role_ids.clone());
+            let keep = StoredValue::new(current);
+            let on_roles = Callback::new(move |now: Vec<String>| {
+                let mut next = keep.get_value();
+                next.role_ids = now;
+                set_approval(Some(next));
+            });
+            view! {
+                <li class="routine-step">
+                    <p class="kicker">"Approval"</p>
+                    <p class="settings-note">"Marian asks in this channel and mentions these roles. They, server managers, and whoever made the routine can confirm the winning day, pick another, or skip the week. Unanswered, it lapses as the winning day begins."</p>
+                    <label class="field">"Ask in"
+                        <select on:change=move |ev| {
+                            let mut next = keep.get_value();
+                            next.channel_id = Some(event_target_value(&ev));
+                            set_approval(Some(next));
+                        }>{options}</select>
+                    </label>
+                    <RoleCombo label="Who confirms" roles=roles.get_value() chosen enabled=true empty="Server managers only" on_change=on_roles/>
+                    <button type="button" class="link-button" on:click=move |_| set_approval(None)>"Remove the approval step"</button>
+                </li>
+            }
+            .into_any()
+        }
+    };
+    view! {
+        <ol class="routine-steps">
+            <li class="routine-step">
+                <p class="kicker">"Date poll"</p>
+                <p class="settings-note">"People vote for a day until the poll locks."</p>
+            </li>
+            {middle}
+            <li class="routine-step">
+                <p class="kicker">"Post the event"</p>
+                <p class="settings-note">"The event takes over the poll's message."</p>
+            </li>
+        </ol>
+    }
+}
+
+fn step(kind: &str) -> dto::RoutineStep {
+    dto::RoutineStep {
+        kind: kind.into(),
+        ..Default::default()
+    }
 }
 
 /// One day on a poll: its date, its votes, and who cast them when known.

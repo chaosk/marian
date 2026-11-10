@@ -139,3 +139,6 @@ err-cant-end-series = You can't end this series.
 err-manage-channels = Marian needs the Manage Channels permission. Give it to Marian's role in Server Settings, then try again.
 err-channel-not-created = Discord didn't create the channel.
 err-unknown-language = Pick English or Polski.
+err-approval-closed = This request has already been answered.
+err-approval-not-yours = Only the roles this request names, server managers, or the routine's creator can answer it.
+err-approval-day-passed = That day has already started. Pick a later one.

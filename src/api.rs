@@ -1632,7 +1632,35 @@ pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Routi
 
 pub fn routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::RoutineView, OpError> {
     let id = routine_here(conn, viewer, public_id)?;
-    logic::routine_page_data(conn, id)?.ok_or(OpError::NotFound)
+    let mut view = logic::routine_page_data(conn, id)?.ok_or(OpError::NotFound)?;
+    if let Some(approval) = view.approval.as_mut() {
+        approval.can_decide = logic::can_decide(conn, id, viewer.membership_id)?;
+    }
+    Ok(view)
+}
+
+/// A routine form's steps, with public ids turned into keys.
+fn routine_steps(conn: &mut Connection, viewer: &Viewer, steps: &[dto::RoutineStep]) -> Result<Vec<logic::Step>, OpError> {
+    let roles: std::collections::HashMap<String, i64> = store::list_roles(conn, viewer.guild_id)?
+        .into_iter()
+        .map(|role| (role.public_id.to_string(), role.id))
+        .collect();
+    steps
+        .iter()
+        .map(|step| {
+            let kind = logic::StepKind::from_code(&step.kind)
+                .ok_or_else(|| OpError::message("That step isn't one a routine has."))?;
+            let channel_id = match step.channel_id.as_deref().filter(|id| !id.is_empty()) {
+                Some(id) => Some(channel_seen(conn, viewer, id)?),
+                None => None,
+            };
+            Ok(logic::Step {
+                kind,
+                channel_id,
+                role_ids: step.role_ids.iter().filter_map(|id| roles.get(id).copied()).collect(),
+            })
+        })
+        .collect()
 }
 
 /// A routine form's channel and event details, with public ids turned into keys.
@@ -1671,7 +1699,15 @@ fn weekday(day: u8) -> Result<u8, OpError> {
 
 pub fn create_routine(conn: &mut Connection, viewer: &Viewer, draft: &dto::RoutineDraft) -> Result<Outcome, OpError> {
     let (channel_id, extras) = routine_parts(conn, viewer, draft)?;
-    let (_id, public_id, jobs) = logic::create_routine(
+    let steps = match &draft.steps {
+        Some(steps) => {
+            let steps = routine_steps(conn, viewer, steps)?;
+            logic::check_steps(conn, viewer.guild_id, &steps)?;
+            Some(steps)
+        }
+        None => None,
+    };
+    let (id, public_id, jobs) = logic::create_routine(
         conn,
         viewer.guild_id,
         viewer.membership_id,
@@ -1688,6 +1724,9 @@ pub fn create_routine(conn: &mut Connection, viewer: &Viewer, draft: &dto::Routi
         extras,
         Utc::now(),
     )?;
+    if let Some(steps) = steps {
+        logic::save_steps(conn, id, viewer.membership_id, &steps)?;
+    }
     let location = path(conn, viewer, &format!("/routines/{public_id}"))?;
     Ok(Outcome {
         jobs,
@@ -1720,6 +1759,26 @@ pub fn update_routine(
         extras,
         Utc::now(),
     )?;
+    if let Some(steps) = &draft.steps {
+        let steps = routine_steps(conn, viewer, steps)?;
+        logic::save_steps(conn, id, viewer.membership_id, &steps)?;
+    }
+    Ok(Outcome {
+        jobs: effect.jobs,
+        ..Outcome::ok()
+    })
+}
+
+/// Answers the approval a routine's closed poll waits on.
+pub fn decide_routine(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    decision: &dto::Decision,
+) -> Result<Outcome, OpError> {
+    let id = routine_here(conn, viewer, public_id)?;
+    let run = logic::waiting_run_id(conn, id)?.ok_or_else(|| OpError::from(crate::msg!("err-approval-closed")))?;
+    let effect = logic::decide_run(conn, run, viewer.membership_id, decision.day, Utc::now())?;
     Ok(Outcome {
         jobs: effect.jobs,
         ..Outcome::ok()
@@ -1878,6 +1937,7 @@ mod tests {
         let mut next = settings(&mut conn, &viewer).unwrap();
         next.role_event = roles(&mut conn, &viewer).unwrap().into_iter().map(|role| role.id).collect();
         put_settings(&mut conn, &viewer, &next).unwrap();
+        let routine_id = approved_routine(&mut conn, &viewer);
 
         let answers = [
             ("event", serde_json::to_value(event(&mut conn, &viewer, &public).unwrap()).unwrap()),
@@ -1887,6 +1947,7 @@ mod tests {
             ("members", serde_json::to_value(members(&mut conn, &viewer).unwrap()).unwrap()),
             ("channels", serde_json::to_value(channels(&mut conn, &viewer).unwrap()).unwrap()),
             ("membership", serde_json::to_value(membership(&mut conn, &viewer).unwrap()).unwrap()),
+            ("routine", serde_json::to_value(routine(&mut conn, &viewer, &routine_id).unwrap()).unwrap()),
         ];
         for (name, answer) in &answers {
             assert_public_ids(answer, name);
@@ -2400,6 +2461,87 @@ mod tests {
 
         let err = patch_event(&mut conn, &viewer, &public, &weekly).unwrap_err().to_string();
         assert!(err.contains("already belongs to a series"), "{err}");
+    }
+
+    /// A routine made on the web whose closed poll asks the Raiders in #elsewhere.
+    fn approved_routine(conn: &mut Connection, viewer: &Viewer) -> String {
+        let channels = channels(conn, viewer).unwrap();
+        let channel = |name: &str| channels.iter().find(|channel| channel.name == name).unwrap().id.clone();
+        let raider = roles(conn, viewer).unwrap()[0].id.clone();
+        let step = |kind: &str| dto::RoutineStep { kind: kind.into(), ..Default::default() };
+        let draft = dto::RoutineDraft {
+            channel_id: channel("events"),
+            title: "Raid night".into(),
+            duration_minutes: 120,
+            start_time: "19:00".into(),
+            poll_weekday: 0,
+            poll_time: "00:00".into(),
+            lock_weekday: 6,
+            lock_time: "23:59".into(),
+            days: (0..7).collect(),
+            steps: Some(vec![
+                step("poll"),
+                dto::RoutineStep {
+                    kind: "approval".into(),
+                    channel_id: Some(channel("elsewhere")),
+                    role_ids: vec![raider],
+                },
+                step("post"),
+            ]),
+            ..Default::default()
+        };
+        let made = create_routine(conn, viewer, &draft).unwrap();
+        made.done.location.unwrap().rsplit('/').next().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_routine_made_on_the_web_waits_for_its_approval_there() {
+        let (mut conn, viewer) = world();
+        let id = approved_routine(&mut conn, &viewer);
+        let shown = routine(&mut conn, &viewer, &id).unwrap();
+        let kinds: Vec<&str> = shown.steps.iter().map(|step| step.kind.as_str()).collect();
+        assert_eq!(kinds, ["poll", "approval", "post"]);
+        assert!(shown.approval.is_none());
+
+        // The poll closes now.
+        conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'").unwrap();
+        logic::maintain_routines(&mut conn, 1, Utc::now()).unwrap();
+        let shown = routine(&mut conn, &viewer, &id).unwrap();
+        let approval = shown.approval.expect("the poll waits for approval");
+        assert_eq!(approval.channel, "elsewhere");
+        assert!(approval.can_decide, "a server manager may answer");
+
+        let mut june = viewer.clone();
+        june.membership_id = 2;
+        assert!(!routine(&mut conn, &june, &id).unwrap().approval.unwrap().can_decide);
+        assert!(decide_routine(&mut conn, &june, &id, &dto::Decision { day: None }).is_err());
+
+        decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap();
+        assert!(routine(&mut conn, &viewer, &id).unwrap().approval.is_none());
+        let again = decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap_err();
+        assert_eq!(again.to_string(), "This request has already been answered.");
+
+        // Saving the routine without its steps keeps them; sending two steps drops the approval.
+        let mut draft = dto::RoutineDraft {
+            channel_id: shown.channel_id.clone(),
+            title: shown.title.clone(),
+            duration_minutes: shown.duration_minutes,
+            start_time: shown.start_time.clone(),
+            poll_weekday: shown.poll_weekday.parse().unwrap(),
+            poll_time: shown.poll_time.clone(),
+            lock_weekday: shown.lock_weekday.parse().unwrap(),
+            lock_time: shown.lock_time.clone(),
+            days: (0..7).collect(),
+            ..Default::default()
+        };
+        update_routine(&mut conn, &viewer, &id, &draft).unwrap();
+        assert_eq!(routine(&mut conn, &viewer, &id).unwrap().steps.len(), 3);
+        draft.steps = Some(vec![
+            dto::RoutineStep { kind: "poll".into(), ..Default::default() },
+            dto::RoutineStep { kind: "post".into(), ..Default::default() },
+        ]);
+        update_routine(&mut conn, &viewer, &id, &draft).unwrap();
+        assert_eq!(routine(&mut conn, &viewer, &id).unwrap().steps.len(), 2);
     }
 
     #[test]

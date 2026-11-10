@@ -1282,6 +1282,12 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 .poll-cycle .kicker { margin-bottom: 4px; }
 .poll-cycle li:last-child .popover { left: auto; right: 0; }
 .poll-cycle-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+/* What happens after the poll closes, one step under the other. */
+.routine-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.routine-step { position: relative; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fffdf7; display: grid; gap: 8px; justify-items: start; }
+.routine-step + .routine-step::before { content: "↓"; position: absolute; left: 50%; top: -12px; transform: translateX(-50%); line-height: 12px; color: #b9a988; }
+.routine-step .kicker, .routine-step .settings-note { margin: 0; }
+.approval-answers { justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
 .poll-history summary { cursor: pointer; font-weight: 700; }
 .poll-history[open] summary { margin-bottom: 10px; }
 @media (max-width: 720px) {

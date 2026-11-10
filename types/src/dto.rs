@@ -623,6 +623,48 @@ pub struct RoutineView {
     /// The event the last poll picked, while it is still ahead.
     #[serde(default)]
     pub upcoming: Option<RunHistory>,
+    /// What happens each week, in order: the poll, any approval, the post.
+    #[serde(default)]
+    pub steps: Vec<RoutineStep>,
+    /// A closed poll waiting for someone to confirm its day.
+    #[serde(default)]
+    pub approval: Option<ApprovalView>,
+}
+
+/// One step of a routine: "poll", "approval" or "post".
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutineStep {
+    pub kind: String,
+    /// Where an approval asks.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Who an approval mentions and lets answer, besides server managers and
+    /// the routine's creator.
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+}
+
+/// A closed poll waiting for its day to be confirmed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalView {
+    /// The channel the request is in.
+    pub channel: String,
+    /// The day that got the most votes.
+    pub winner: u8,
+    /// When the request lapses with no event.
+    pub lapses: String,
+    /// The poll's days with their votes, in date order. Days already begun are off.
+    pub days: Vec<DayCheck>,
+    /// Whether the person looking may answer.
+    #[serde(default)]
+    pub can_decide: bool,
+}
+
+/// An answer to an approval: post on `day`, or skip the week with none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Decision {
+    #[serde(default)]
+    pub day: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -711,6 +753,9 @@ pub struct RoutineDraft {
     /// The rest of the event's details; unset keeps what the routine has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<RoutineEvent>,
+    /// The routine's steps; unset keeps what the routine has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<RoutineStep>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

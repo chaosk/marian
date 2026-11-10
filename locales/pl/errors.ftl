@@ -142,3 +142,6 @@ err-cant-end-series = Nie możesz zakończyć tej serii.
 err-manage-channels = Marian potrzebuje uprawnienia Zarządzanie kanałami. Nadaj je roli Mariana w ustawieniach serwera i spróbuj ponownie.
 err-channel-not-created = Discord nie utworzył kanału.
 err-unknown-language = Wybierz English albo Polski.
+err-approval-closed = Ta prośba ma już odpowiedź.
+err-approval-not-yours = Na tę prośbę mogą odpowiedzieć tylko osoby z wymienionymi rolami, osoby zarządzające serwerem albo autor rutyny.
+err-approval-day-passed = Ten dzień już się zaczął. Wybierz późniejszy.

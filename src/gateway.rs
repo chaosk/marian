@@ -25,6 +25,8 @@ struct Data {
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
     registered: Mutex<HashSet<u64>>,
+    /// The job queue, for work a button leaves behind.
+    jobs: UnboundedSender<DiscordJob>,
 }
 
 pub fn start(
@@ -39,6 +41,7 @@ pub fn start(
     let data_db = db.clone();
     let data_http = http.clone();
     let jobs_url = public_url.clone();
+    let queue = retry.clone();
     tokio::spawn(async move {
         job_loop(data_db, jobs, retry, data_http, jobs_url).await;
     });
@@ -52,6 +55,7 @@ pub fn start(
                 public_url.clone(),
                 status.clone(),
                 members,
+                queue.clone(),
             )
             .await;
             if let Ok(mut slot) = http.lock() {
@@ -171,6 +175,7 @@ async fn connect(
     public_url: String,
     status: String,
     members: bool,
+    queue: UnboundedSender<DiscordJob>,
 ) -> Result<(), Error> {
     let presence = presence_line(&status);
     let framework = poise::Framework::builder()
@@ -195,6 +200,7 @@ async fn connect(
                     http,
                     public_url,
                     registered: Mutex::new(HashSet::new()),
+                    jobs: queue,
                 })
             })
         })
@@ -716,6 +722,9 @@ async fn handle_button(
             ButtonAction::Routine { run, day } => {
                 logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Routine(run_id, day))
             }
+            ButtonAction::Decide { run, day } => {
+                logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Decide(run_id, day))
+            }
         }
     };
     let Some(found) = found else {
@@ -730,6 +739,7 @@ async fn handle_button(
             signup_from_button(ctx, component, data, event_id, option_id).await
         }
         Found::Routine(run_id, day) => routine_from_button(ctx, component, data, run_id, day).await,
+        Found::Decide(run_id, day) => decide_from_button(ctx, component, data, run_id, day).await,
     }
 }
 
@@ -740,6 +750,35 @@ enum Found {
     ConfirmDelete(i64),
     Signup(i64, i64),
     Routine(i64, u8),
+    /// An approval's answer: a day, or none to skip the week.
+    Decide(i64, Option<u8>),
+}
+
+async fn decide_from_button(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    run_id: i64,
+    day: Option<u8>,
+) -> Result<(), Error> {
+    let Some(click) = click_context(ctx, component) else {
+        followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
+        return Ok(());
+    };
+    let (decided, lang) = {
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        (logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()), lang)
+    };
+    match decided {
+        Ok(effect) => {
+            for job in effect.jobs {
+                let _ = data.jobs.send(job);
+            }
+            Ok(())
+        }
+        Err(err) => followup(ctx, component, &err.localized(lang)).await,
+    }
 }
 
 async fn routine_from_button(
@@ -1119,6 +1158,8 @@ enum ButtonAction {
     Delete { event: uuid::Uuid },
     ConfirmDelete { event: uuid::Uuid },
     Routine { run: uuid::Uuid, day: u8 },
+    /// An approval's answer; no day skips the week.
+    Decide { run: uuid::Uuid, day: Option<u8> },
 }
 
 /// A button on an event's post. Its id names the event, and the option, by
@@ -1161,6 +1202,14 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
         let run = uuid::Uuid::parse_str(parts.next()?).ok()?;
         let day = parts.next()?.parse().ok()?;
         return Some(ButtonAction::Routine { run, day });
+    }
+    if head == "a" {
+        let run = uuid::Uuid::parse_str(parts.next()?).ok()?;
+        let day = match parts.next()? {
+            "skip" => None,
+            day => Some(day.parse().ok()?),
+        };
+        return Some(ButtonAction::Decide { run, day });
     }
     let event = uuid::Uuid::parse_str(head).ok()?;
     match parts.next()? {
@@ -1360,7 +1409,63 @@ async fn purge_event_channel(
     Ok(())
 }
 
+/// Brings a week's poll up to date in Discord, and its approval request when
+/// it has one.
 async fn push_routine(
+    db: &store::Db,
+    http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    public_url: &str,
+    run_id: i64,
+) -> Result<(), Error> {
+    push_poll(db, http, public_url, run_id).await?;
+    push_approval(db, http, public_url, run_id).await
+}
+
+/// The request an approval step posts in its channel, edited once answered.
+async fn push_approval(
+    db: &store::Db,
+    http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    public_url: &str,
+    run_id: i64,
+) -> Result<(), Error> {
+    let post = {
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        logic::approval_post(&mut conn, run_id, public_url, chrono::Utc::now())?
+    };
+    let Some(post) = post else {
+        return Ok(());
+    };
+    let http = http
+        .lock()
+        .map_err(|_| "http lock")?
+        .clone()
+        .ok_or("Discord is not connected")?;
+    let channel_id = serenity::ChannelId::new(post.channel_discord_id.parse()?);
+    let mut embed = serenity::CreateEmbed::new()
+        .title(clip(&post.title, 250))
+        .description(clip(&post.body, 4000))
+        .color(serenity::Colour::new(0x1e3a_6e));
+    for field in &post.fields {
+        embed = embed.field(clip(&field.name, 256), clip(&field.value, 1024), field.inline);
+    }
+    let sent = upsert_message(
+        &http,
+        channel_id,
+        post.message_id.as_deref(),
+        logic::mention_line(false, &post.mention_roles),
+        event_mentions(false, &post.mention_roles),
+        embed,
+        button_rows(&post.buttons),
+    )
+    .await?;
+    if let Some(message) = sent {
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        logic::remember_approval_message(&mut conn, run_id, &message.id.get().to_string())?;
+    }
+    Ok(())
+}
+
+async fn push_poll(
     db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: &str,
@@ -1463,9 +1568,14 @@ fn button_rows(buttons: &[logic::PollButton]) -> Vec<serenity::CreateActionRow> 
         } else {
             label
         };
+        let style = match button.tone {
+            logic::ButtonTone::Primary => serenity::ButtonStyle::Primary,
+            logic::ButtonTone::Danger => serenity::ButtonStyle::Danger,
+            logic::ButtonTone::Secondary => serenity::ButtonStyle::Secondary,
+        };
         built.push(
             serenity::CreateButton::new(button.custom_id.clone())
-                .style(serenity::ButtonStyle::Secondary)
+                .style(style)
                 .label(label),
         );
         if built.len() == 5 {
@@ -3197,6 +3307,14 @@ mod tests {
         assert_eq!(parse_button("marian:12:34"), None);
         assert_eq!(parse_button("marian:12:edit"), None);
         assert_eq!(parse_button("marian:w:5:3"), None);
+        assert_eq!(
+            parse_button(&format!("marian:a:{option}:4")),
+            Some(ButtonAction::Decide { run: option, day: Some(4) })
+        );
+        assert_eq!(
+            parse_button(&format!("marian:a:{option}:skip")),
+            Some(ButtonAction::Decide { run: option, day: None })
+        );
         assert!(format!("marian:{event}:{option}").len() <= 100, "Discord's limit on a button id");
     }
     use crate::commands::DmReply;
