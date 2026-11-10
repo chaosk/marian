@@ -154,6 +154,9 @@ pub struct Settings {
     /// A full option takes more signups onto a waitlist that moves up as spots open.
     #[serde(default)]
     pub waitlist: bool,
+    /// The language Marian writes in on Discord: "en" or "pl". Empty keeps it.
+    #[serde(default)]
+    pub language: String,
 }
 
 /// How full one option is.

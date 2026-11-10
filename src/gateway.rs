@@ -107,6 +107,7 @@ async fn job_loop(
                 DiscordJob::Routine { run_id, .. } => {
                     push_routine(&db, &http, &public_url, *run_id).await
                 }
+                DiscordJob::Commands { guild_id, .. } => push_commands(&db, &http, *guild_id).await,
             }
         }
         .instrument(span)
@@ -124,7 +125,28 @@ fn job_kind(job: &DiscordJob) -> (&'static str, i64) {
         DiscordJob::Remind { event_id, .. } => ("remind", *event_id),
         DiscordJob::Attend { event_id, .. } => ("attend", *event_id),
         DiscordJob::Routine { run_id, .. } => ("routine", *run_id),
+        DiscordJob::Commands { guild_id, .. } => ("commands", *guild_id),
     }
+}
+
+/// Registers a server's slash commands again, after its language changed on
+/// the web.
+async fn push_commands(
+    db: &store::Db,
+    http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    guild_id: i64,
+) -> Result<(), Error> {
+    let (discord, lang) = {
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        let guild = store::guild(&mut conn, guild_id)?;
+        (guild.and_then(|guild| guild.discord_id), i18n::lang_of(&mut conn, guild_id))
+    };
+    let Some(discord) = discord.and_then(|id| id.parse::<u64>().ok()) else {
+        return Ok(());
+    };
+    let http = http.lock().ok().and_then(|slot| slot.clone()).ok_or("the bot is not connected")?;
+    register_commands(&http, serenity::GuildId::new(discord), lang).await?;
+    Ok(())
 }
 
 fn requeue(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {

@@ -326,6 +326,7 @@ pub fn settings(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Settings,
         temp_roles: s.temp_roles,
         waitlist: s.waitlist,
         calendar_auto_sync: s.calendar_auto_sync,
+        language: s.language,
     })
 }
 
@@ -373,9 +374,19 @@ pub fn put_settings(
     s.temp_roles = next.temp_roles;
     s.waitlist = next.waitlist;
     s.calendar_auto_sync = next.calendar_auto_sync;
+    let mut outcome = Outcome::ok();
+    if !next.language.is_empty() {
+        let picked = crate::i18n::Lang::from_code(&next.language)
+            .ok_or_else(|| OpError::message("That language isn't one Marian writes in."))?;
+        if picked.code() != s.language {
+            s.language = picked.code().to_string();
+            // The slash commands are described in the server's language.
+            outcome.jobs.push(DiscordJob::commands(viewer.guild_id));
+        }
+    }
     store::set_guild_timezone(conn, viewer.guild_id, &next.timezone)?;
     store::update_settings(conn, &s)?;
-    Ok(Outcome::ok())
+    Ok(outcome)
 }
 
 fn bounded(label: &str, value: i64, min: i64, max: i64) -> Result<i64, OpError> {
@@ -2531,5 +2542,31 @@ mod tests {
         ]);
         update_routine(&mut conn, &viewer, &id, &draft).unwrap();
         assert_eq!(routine(&mut conn, &viewer, &id).unwrap().steps.len(), 2);
+    }
+
+    #[test]
+    fn the_settings_page_picks_the_discord_language() {
+        let (mut conn, viewer) = world();
+        let mut next = settings(&mut conn, &viewer).unwrap();
+        assert_eq!(next.language, "en");
+
+        next.language = "pl".into();
+        let changed = put_settings(&mut conn, &viewer, &next).unwrap();
+        assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl");
+        assert!(
+            matches!(changed.jobs.as_slice(), [DiscordJob::Commands { guild_id: 1, .. }]),
+            "the commands are described again in Polish"
+        );
+
+        let same = put_settings(&mut conn, &viewer, &next).unwrap();
+        assert!(same.jobs.is_empty(), "nothing to register when the language stays");
+
+        next.language = String::new();
+        put_settings(&mut conn, &viewer, &next).unwrap();
+        assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl", "an empty language keeps it");
+
+        next.language = "de".into();
+        assert!(put_settings(&mut conn, &viewer, &next).is_err());
+        assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl");
     }
 }
