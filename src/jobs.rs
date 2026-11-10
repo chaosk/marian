@@ -19,6 +19,11 @@ pub enum DiscordJob {
         run_id: i64,
         tries: u8,
     },
+    /// Register a server's slash commands again, in its language.
+    Commands {
+        guild_id: i64,
+        tries: u8,
+    },
 }
 
 impl DiscordJob {
@@ -43,12 +48,16 @@ impl DiscordJob {
         Self::Routine { run_id, tries: 0 }
     }
 
+    pub fn commands(guild_id: i64) -> Self {
+        Self::Commands { guild_id, tries: 0 }
+    }
+
     pub fn event_id(&self) -> i64 {
         match self {
             Self::Sync { event_id, .. }
             | Self::Remind { event_id, .. }
             | Self::Attend { event_id, .. } => *event_id,
-            Self::Routine { .. } => 0,
+            Self::Routine { .. } | Self::Commands { .. } => 0,
         }
     }
 
@@ -75,6 +84,10 @@ impl DiscordJob {
             }),
             Self::Routine { run_id, tries } if tries < 8 => Some(Self::Routine {
                 run_id,
+                tries: tries + 1,
+            }),
+            Self::Commands { guild_id, tries } if tries < 8 => Some(Self::Commands {
+                guild_id,
                 tries: tries + 1,
             }),
             _ => None,
