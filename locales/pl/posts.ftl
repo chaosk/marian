@@ -36,3 +36,18 @@ poll-won = **{ $day }** wygrywa z { $count } { $count ->
 }. Wydarzenie jest w poście powyżej.
 # Nazwa roli, którą Marian nadaje uczestnikom wydarzenia.
 role-attendee = { $title } – uczestnicy
+# Ankieta, która się zamknęła i czeka na zatwierdzenie.
+poll-waiting = Głosowanie zakończone. **{ $day }** ma najwięcej głosów i czeka na potwierdzenie.
+poll-skipped = W tym tygodniu nie ma wydarzenia.
+poll-expired = Nikt nie potwierdził terminu **{ $day }** na czas, więc w tym tygodniu nie ma wydarzenia.
+# Prośba, którą krok zatwierdzenia wysyła na swój kanał.
+approval-title = Potwierdź: { $title }
+approval-ask = Ankieta wybrała **{ $day }** ({ $count } { $count ->
+    [one] głos
+    [few] głosy
+   *[other] głosów
+}). Opublikuj wydarzenie w tym dniu, wybierz inny dzień albo pomiń ten tydzień. Prośba wygasa { $when }.
+approval-posted = { $name } potwierdza **{ $day }**. Wydarzenie jest opublikowane.
+approval-skipped = { $name } pomija ten tydzień.
+approval-expired = Nikt nie odpowiedział na czas, więc w tym tygodniu nie ma wydarzenia.
+approval-skip = Pomiń ten tydzień

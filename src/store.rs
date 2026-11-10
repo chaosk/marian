@@ -365,6 +365,14 @@ pub struct RoutineRun {
     pub public_id: uuid::Uuid,
     /// The reply with the results, once the poll has locked.
     pub results_message_id: Option<String>,
+    /// The position of the routine step this run is on.
+    pub step: i64,
+    /// The request an approval step posted.
+    pub approval_message_id: Option<String>,
+    /// When an approval that nobody answered lapses.
+    pub decide_by: Option<DateTime<Utc>>,
+    /// Who answered the approval.
+    pub decided_by: Option<i64>,
 }
 
 /// An event's signup option as stored: which library type it is, and what this
@@ -2453,6 +2461,7 @@ mod tests {
                 "20261026110000".to_string(),
                 "20261102090000".to_string(),
                 "20261109090000".to_string(),
+                "20261110090000".to_string(),
             ]
         );
     }

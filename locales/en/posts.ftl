@@ -32,3 +32,17 @@ poll-won = **{ $day }** won with { $count } { $count ->
 }. The event is in the post above.
 # The name of the role Marian gives an event's attendees.
 role-attendee = { $title } attendee
+# A poll that closed and waits for an approval step.
+poll-waiting = Voting has closed. **{ $day }** got the most votes and is waiting for confirmation.
+poll-skipped = There's no event this week.
+poll-expired = No one confirmed **{ $day }** in time, so there's no event this week.
+# The request an approval step posts in its channel.
+approval-title = Confirm { $title }
+approval-ask = The poll picked **{ $day }** with { $count } { $count ->
+    [one] vote
+   *[other] votes
+}. Post the event on that day, pick another day, or skip this week. This request lapses { $when }.
+approval-posted = { $name } confirmed **{ $day }**. The event is posted.
+approval-skipped = { $name } skipped this week.
+approval-expired = No one answered in time, so there's no event this week.
+approval-skip = Skip this week

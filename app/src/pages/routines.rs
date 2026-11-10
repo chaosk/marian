@@ -6,7 +6,7 @@ use crate::pages::event::role_cells;
 use crate::widgets::{
     numbered, routine_problems, tally, template_event, TallyRow, unsaved_signups, ActionButton, EventColor, EventCutoff,
     EventLocation, EventReminders, LeaveGuard, LocalDraft, MultipleToggle, PollMoment, PollTally, RoutineChannel,
-    RoutineDescription, RoutineEdit, RoutineTime, RoutineTitle, SignupPanel, ThreadToggle, UsualDays,
+    RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, SignupPanel, ThreadToggle, UsualDays,
 };
 use crate::cache::{self, ask, when, Ready};
 use crate::{base, client, title, A};
@@ -77,7 +77,7 @@ pub fn Routines() -> impl IntoView {
 /// The badge colour for a routine's state.
 fn state_class(state: &str) -> &'static str {
     match state {
-        "Voting" => "state-voting",
+        "Voting" | "Approval" => "state-voting",
         "Stopped" => "state-stopped",
         _ => "state-waiting",
     }
@@ -97,6 +97,7 @@ fn draft_from(routine: &dto::RoutineView) -> dto::RoutineDraft {
         lock_time: routine.lock_time.clone(),
         days: routine.usual.iter().filter(|day| day.on).map(|day| day.n).collect(),
         event: None,
+        steps: Some(routine.steps.clone()).filter(|steps| !steps.is_empty()),
     }
 }
 
@@ -247,6 +248,64 @@ fn poll_schedule(edit: RoutineEdit) -> impl IntoView {
     }
 }
 
+/// What happens after the poll closes, as its own part of the poll panel.
+fn after_poll(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<dto::Role>) -> impl IntoView {
+    view! {
+        <div class="poll-part">
+            <h3>"After the poll"</h3>
+            <RoutineSteps edit channels roles/>
+        </div>
+    }
+}
+
+/// A closed poll waiting for its day to be confirmed, with the answers for
+/// whoever may give them.
+fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> impl IntoView {
+    let server = cache::server_now();
+    let url = crate::api::path::routine_decide(&server, &routine.id);
+    let winner = approval.days.iter().find(|day| day.n == approval.winner).map(|day| day.date.clone()).unwrap_or_default();
+    let rows = tally(
+        approval
+            .days
+            .iter()
+            .map(|day| TallyRow { label: day.date.clone(), votes: day.votes, voters: Vec::new() })
+            .collect(),
+    );
+    let answers = if approval.can_decide {
+        let days = approval
+            .days
+            .iter()
+            .filter(|day| day.on)
+            .map(|day| {
+                let class = if day.n == approval.winner { "primary" } else { "ghost" };
+                view! {
+                    <ActionButton method="POST" url=url.clone() body=format!("{{\"day\":{}}}", day.n)
+                        label=format!("Post on {}", day.date) class=class done=format!("Posting on {}.", day.date)/>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="inline-actions approval-answers">
+                {days}
+                <ActionButton method="POST" url=url.clone() body="{}" label="Skip this week" class="danger"
+                    confirm="Skip this week? No event posts." done="Skipped this week."/>
+            </div>
+        }
+        .into_any()
+    } else {
+        view! { <p class="muted">"Only the roles the approval names, server managers, and whoever made the routine can answer."</p> }.into_any()
+    };
+    let channel = (!approval.channel.is_empty()).then(|| format!(" Asked in #{}.", approval.channel)).unwrap_or_default();
+    view! {
+        <div class="poll-part">
+            <h3>"Waiting for approval"</h3>
+            <p>{format!("{winner} got the most votes.{channel} Lapses {}.", approval.lapses)}</p>
+            {rows}
+            {answers}
+        </div>
+    }
+}
+
 /// The poll section's heading, with where the poll stands.
 fn poll_head(state: &'static str, note: String) -> impl IntoView {
     view! {
@@ -284,6 +343,12 @@ pub fn NewRoutine() -> impl IntoView {
             lock_time: "18:00".into(),
             days: (0..7).collect(),
             event: None,
+            steps: Some(
+                ["poll", "post"]
+                    .into_iter()
+                    .map(|kind| dto::RoutineStep { kind: kind.into(), ..Default::default() })
+                    .collect(),
+            ),
         };
         let starting = dto::RoutineEvent {
             color: "#1e3a6e".into(),
@@ -355,10 +420,13 @@ pub fn NewRoutine() -> impl IntoView {
                 </div>
             </div>
             <p class="notice info">"Not saved yet. Nothing goes to Discord until you create it."</p>
-            {routine_layout(edit, local, channels, roles, view! {
+            {routine_layout(edit, local, channels.clone(), roles.clone(), view! {
                 <section>
                     <div class="section-head"><h2>"Poll"</h2></div>
-                    <div class="panel poll">{poll_schedule(edit)}</div>
+                    <div class="panel poll">
+                        {poll_schedule(edit)}
+                        {after_poll(edit, channels, roles)}
+                    </div>
                 </section>
             }.into_any())}
         }
@@ -378,6 +446,7 @@ pub fn RoutinePage() -> impl IntoView {
         let edit = RoutineEdit::new(draft_from(&routine), Some(crate::api::path::routine(&server_id, &routine.id)));
         let local = event_draft(edit, &routine.event, &channels, clock_of(&server), true);
         let (state, note) = match &routine.run {
+            _ if routine.approval.is_some() => ("Approval", String::new()),
             _ if !routine.active => ("Stopped", String::new()),
             Some(run) if run.open => ("Voting", format!("Locks {}", run.locks)),
             Some(run) => ("Waiting", format!("Opens {}", run.opens)),
@@ -416,13 +485,17 @@ pub fn RoutinePage() -> impl IntoView {
                 </details>
             }
         });
+        let waiting = routine.approval.clone().map(|approval| approval_panel(&routine, approval));
+        let steps = after_poll(edit, channels.clone(), roles.clone());
         let poll = view! {
             <section>
                 {poll_head(state, note)}
                 <div class="panel poll">
+                    {waiting}
                     {current}
                     {upcoming}
                     {poll_schedule(edit)}
+                    {steps}
                     {history}
                 </div>
             </section>

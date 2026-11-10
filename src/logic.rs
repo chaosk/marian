@@ -43,6 +43,8 @@ pub use routine::{
     cast_run, count_active, create_routine, event_from as routine_event_from, open_run_id, run_by_public, list_routines, maintain as maintain_routines,
     remember_results_message, remember_routine_message, routine_in_guild, routine_page_data, routine_post, save_routine,
     save_run_days, save_usual_days, stop_routine, DayCheck, PollButton, RoutineEffect, RoutinePost,
+    approval_post, can_decide, check_steps, decide_run, remember_approval_message, save_steps, waiting_run_id,
+    ApprovalPost, Step, StepKind,
     RoutineSummary, RoutineView, RunHistory, RunView,
 };
 pub use signup::{editor_response, signup};

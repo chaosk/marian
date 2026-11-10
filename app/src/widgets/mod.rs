@@ -15,7 +15,7 @@ pub use inline::{
     EventRestrictions, EventTitle, EventWhen, MultipleToggle,
 };
 pub use routine::{
-    routine_problems, template_event, PollMoment, RoutineChannel, RoutineDescription, RoutineEdit, RoutineTime, RoutineTitle, PollTally, UsualDays, tally, TallyRow,
+    routine_problems, template_event, PollMoment, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, PollTally, UsualDays, tally, TallyRow,
 };
 pub use signups::{numbered, unsaved_signups, SignupPanel};
 
