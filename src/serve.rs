@@ -13,6 +13,7 @@ use axum::Router;
 use chrono::Utc;
 use diesel::prelude::*;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::Instrument;
 
 use crate::assets;
 use crate::auth;
@@ -102,33 +103,39 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let span = tracing::info_span!("tick");
-                let _enter = span.enter();
-                let report = {
-                    let mut guard = db.get().expect("database");
-                    logic::tick(&mut guard, Utc::now())
-                };
-                match report {
-                    Ok(report) => {
-                        for note in report.notes {
-                            tracing::info!("{note}");
+                // Instrumented, not entered: a guard held across the await below
+                // stayed entered on the thread, and other tasks' spans joined this
+                // trace until it ran past Tempo's size limit.
+                let span = tracing::info_span!(parent: None, "tick");
+                async {
+                    let report = {
+                        let mut guard = db.get().expect("database");
+                        logic::tick(&mut guard, Utc::now())
+                    };
+                    match report {
+                        Ok(report) => {
+                            for note in report.notes {
+                                tracing::info!("{note}");
+                            }
+                            for job in report.jobs {
+                                enqueue(&discord, job);
+                            }
+                            for guild_id in report.guilds {
+                                crate::live::server(guild_id);
+                            }
                         }
-                        for job in report.jobs {
-                            enqueue(&discord, job);
-                        }
-                        for guild_id in report.guilds {
-                            crate::live::server(guild_id);
-                        }
+                        Err(err) => tracing::warn!("tick failed: {err}"),
                     }
-                    Err(err) => tracing::warn!("tick failed: {err}"),
+                    sync_google(
+                        &db,
+                        &http,
+                        &google_client_id,
+                        &google_client_secret,
+                        &calendar_base,
+                    )
+                    .await;
                 }
-                sync_google(
-                    &db,
-                    &http,
-                    &google_client_id,
-                    &google_client_secret,
-                    &calendar_base,
-                )
+                .instrument(span)
                 .await;
             }
         });
@@ -190,6 +197,7 @@ impl<B> tower_http::trace::MakeSpan<B> for HttpSpan {
         let user_agent = user_agent(request.headers());
         let client_ip = client_ip(request.headers(), peer);
         let span = tracing::info_span!(
+            parent: None,
             "http",
             otel.name = name.as_str(),
             otel.kind = "server",

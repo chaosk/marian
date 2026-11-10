@@ -221,7 +221,20 @@ async fn connect(
     Ok(())
 }
 
+/// Each event is a trace of its own. Serenity runs the handler in a fresh task,
+/// and `parent: None` keeps it from joining whatever span that task's thread
+/// happens to have entered.
 async fn on_event(
+    ctx: &serenity::Context,
+    event: &serenity::FullEvent,
+    framework: poise::FrameworkContext<'_, Data, Error>,
+    data: &Data,
+) -> Result<(), Error> {
+    let span = tracing::info_span!(parent: None, "discord_event", event = event.snake_case_name());
+    handle_event(ctx, event, framework, data).instrument(span).await
+}
+
+async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
     _framework: poise::FrameworkContext<'_, Data, Error>,
