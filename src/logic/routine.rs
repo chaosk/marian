@@ -1106,12 +1106,14 @@ fn advance(
             routine.lock_weekday,
             routine.lock_minutes,
         );
-        // An open poll is this week's, even when the schedule has moved since it
-        // opened: its window no longer matches, but a second poll would post a
-        // second event.
-        let already = runs.iter().any(|run| {
-            run.status == "open" || (run.opens_at == opens && run.status != "locked")
-        });
+        // An open poll, or one waiting for approval, is this week's, even when
+        // the schedule has moved since it opened: its window no longer matches,
+        // but a second poll would post a second event. A poll for this window
+        // that already locked is this week's too, even if it locked early; a
+        // second one would break the unique window and stop the clock.
+        let already = runs
+            .iter()
+            .any(|run| matches!(run.status.as_str(), "open" | "approval") || run.opens_at == opens);
         if !already && locks > now {
             let days_json = days_json(&routine.days);
             let status = if opens <= now { "open" } else { "scheduled" };
@@ -2053,6 +2055,22 @@ mod tests {
         assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })));
         let poll = routine_post(&mut conn, next, "").unwrap().unwrap();
         assert!(poll.body.starts_with("No one confirmed **Thursday"), "{}", poll.body);
+    }
+
+    #[test]
+    fn a_poll_that_locked_before_its_window_closed_is_still_this_weeks() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+        // The lock moved earlier after the poll opened, as an edit to the routine can do.
+        conn.batch_execute("UPDATE routine_runs SET locks_at = '2026-10-12 13:00:00+00'").unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 12, 14, 0)).unwrap();
+        decide_run(&mut conn, run, 1, Some(4), at(2026, 10, 12, 14, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "locked");
+        // Before Tuesday's lock, the week's window still matches the locked poll.
+        maintain(&mut conn, 1, at(2026, 10, 12, 15, 0)).unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 13, 9, 0)).unwrap();
+        assert_eq!(runs_for(&mut conn, id).unwrap().len(), 1, "no second poll for the same week");
     }
 
     #[test]
