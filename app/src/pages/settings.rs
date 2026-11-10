@@ -124,6 +124,12 @@ fn settings_form(
         .into_iter()
         .map(|(id, label)| view! { <option value=id selected=digest == id>{label}</option> })
         .collect_view();
+    // Each language by its own name.
+    let language = settings.language.clone();
+    let languages = [("en", "English"), ("pl", "Polski")]
+        .into_iter()
+        .map(|(id, label)| view! { <option value=id selected=language == id>{label}</option> })
+        .collect_view();
     view! {
         {head("Settings")}
         {(!server_manager).then(|| view! { <p class="notice info">"Only people who can manage this Discord server can change these."</p> })}
@@ -141,6 +147,10 @@ fn settings_form(
             </section>
             <section class="panel settings-group">
                 <h2>"Discord posts"</h2>
+                <label class="setting-row">
+                    <span class="setting-text"><strong>"Language"</strong><span class="muted">"Marian writes in this language on Discord: posts, reminders, replies, and command descriptions. This site stays in English."</span></span>
+                    <select name="language" disabled=!server_manager>{languages}</select>
+                </label>
                 {post_switches}
                 {lead}
                 <label class="setting-row">
