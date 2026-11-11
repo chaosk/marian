@@ -51,4 +51,4 @@ approval-posted = { $name } potwierdza **{ $day }**. Wydarzenie jest opublikowan
 approval-skipped = { $name } pomija ten tydzień.
 approval-expired = Nikt nie odpowiedział na czas, więc w tym tygodniu nie ma wydarzenia.
 approval-skip = Pomiń ten tydzień
-post-guests = + goście
+post-guests = +X

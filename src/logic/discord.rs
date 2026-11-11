@@ -1267,7 +1267,7 @@ mod tests {
             [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_), ButtonRole::Edit, ButtonRole::Delete]
         ));
         assert_eq!(view.buttons[1].emoji, "✅");
-        assert_eq!(view.buttons[1].label, "+ guests");
+        assert_eq!(view.buttons[1].label, "+X");
     }
 
     #[test]
