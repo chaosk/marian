@@ -501,6 +501,22 @@ mod tests {
     }
 
     #[test]
+    fn guests_read_naturally_in_both_languages() {
+        let signed = |lang, guests: i64| tr!(lang, "notice-signed-up-guests", name = "Ola", option = "Tak", guests = guests);
+        assert_eq!(signed(Lang::Pl, 1), "Zapisano Ola na opcję Tak z 1 gościem.");
+        assert_eq!(signed(Lang::Pl, 3), "Zapisano Ola na opcję Tak z 3 gośćmi.");
+        assert_eq!(signed(Lang::En, 1), "Ola signed up as Tak, bringing one guest.");
+        let left = |left: i64| tr!(Lang::Pl, "err-party-too-big", option = "Tak", left = left);
+        assert_eq!(left(1), "W opcji Tak zostało tylko jedno miejsce.");
+        assert_eq!(left(3), "W opcji Tak zostały tylko 3 miejsca.");
+        assert_eq!(left(5), "W opcji Tak zostało tylko 5 miejsc.");
+        let most = |most: i64| tr!(Lang::Pl, "err-guests-most", option = "Tak", most = most);
+        assert_eq!(most(1), "W opcji Tak można przyprowadzić najwyżej 1 gościa.");
+        assert_eq!(most(4), "W opcji Tak można przyprowadzić najwyżej 4 gości.");
+        assert_eq!(tr!(Lang::En, "notice-guests", name = "Ola", option = "Yes", guests = 0), "Ola now brings no guests to Yes.");
+    }
+
+    #[test]
     fn dates_read_in_the_server_language() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 13).unwrap();
         assert_eq!(format_day(Lang::En, date), "Tue, Oct 13");

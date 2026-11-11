@@ -462,12 +462,21 @@ async fn signups(State(state): S, headers: HeaderMap, Path((server, id)): Two) -
     read(&state, &headers, &server, |db, v| api::signups(db, v, &id))
 }
 
+/// `?guests=N` on a signup: the guests the person brings.
+#[derive(Deserialize)]
+struct GuestsQuery {
+    guests: Option<i64>,
+}
+
 async fn join(
     State(state): S,
     headers: HeaderMap,
     Path((server, id, option)): Path<(String, String, String)>,
+    Query(query): Query<GuestsQuery>,
 ) -> Reply<dto::Done> {
-    change_signups(&state, &headers, &server, &id, |db, v| api::set_my_signup(db, v, &id, &option, true))
+    change_signups(&state, &headers, &server, &id, |db, v| {
+        api::set_my_signup(db, v, &id, &option, true, query.guests)
+    })
 }
 
 async fn leave(
@@ -475,16 +484,17 @@ async fn leave(
     headers: HeaderMap,
     Path((server, id, option)): Path<(String, String, String)>,
 ) -> Reply<dto::Done> {
-    change_signups(&state, &headers, &server, &id, |db, v| api::set_my_signup(db, v, &id, &option, false))
+    change_signups(&state, &headers, &server, &id, |db, v| api::set_my_signup(db, v, &id, &option, false, None))
 }
 
 async fn add_member(
     State(state): S,
     headers: HeaderMap,
     Path((server, id, member, option)): Path<(String, String, String, String)>,
+    Query(query): Query<GuestsQuery>,
 ) -> Reply<dto::Done> {
     change_signups(&state, &headers, &server, &id, |db, v| {
-        api::set_signup(db, v, &id, &member, &option, true)
+        api::set_signup(db, v, &id, &member, &option, true, query.guests)
     })
 }
 
@@ -494,7 +504,7 @@ async fn remove_member(
     Path((server, id, member, option)): Path<(String, String, String, String)>,
 ) -> Reply<dto::Done> {
     change_signups(&state, &headers, &server, &id, |db, v| {
-        api::set_signup(db, v, &id, &member, &option, false)
+        api::set_signup(db, v, &id, &member, &option, false, None)
     })
 }
 

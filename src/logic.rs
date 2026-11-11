@@ -47,7 +47,7 @@ pub use routine::{
     ApprovalPost, Step, StepKind,
     RoutineSummary, RoutineView, RunHistory, RunView,
 };
-pub use signup::{editor_response, signup};
+pub use signup::{editor_response, guests_form, signup, signup_guests, GuestsForm};
 pub use template::series_template;
 pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
 
@@ -185,6 +185,125 @@ mod tests {
         assert_eq!(store::signups_for(&mut conn, &event).unwrap().len(), 1);
     }
 
+    /// A posted event with one option of `capacity` that takes up to
+    /// `max_guests`, and the option's id.
+    fn party_event(conn: &mut Connection, capacity: i64, max_guests: i64, waitlist: bool) -> (i64, i64) {
+        let mut settings = store::settings(conn, 1).unwrap();
+        settings.waitlist = waitlist;
+        store::update_settings(conn, &settings).unwrap();
+        let mut event = input("Dinner", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.options = vec![OptionInput {
+            capacity: Some(capacity),
+            max_guests,
+            ..OptionInput::of_type(YES)
+        }];
+        let id = save_event(conn, event).unwrap();
+        let event = store::event(conn, id).unwrap().unwrap();
+        (id, store::options_for(conn, &event).unwrap()[0].id)
+    }
+
+    /// Each person's state and guests on an event, by membership id.
+    fn parties(conn: &mut Connection, id: i64) -> Vec<(i64, String, i64)> {
+        let event = store::event(conn, id).unwrap().unwrap();
+        let mut rows: Vec<_> = store::signups_for(conn, &event)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.membership_id, s.state, s.guests))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn a_party_takes_a_place_for_each_guest() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 4, 3, false);
+        let notice = signup_guests(&mut conn, id, option, 2, 2).unwrap().to_string();
+        assert_eq!(notice, "June signed up as Yes, bringing 2 guests.");
+        // One place left: a party of two doesn't fit, and nothing is waiting.
+        let err = signup_guests(&mut conn, id, option, 3, 1).unwrap_err().to_string();
+        assert_eq!(err, "Yes has only one spot left.");
+        signup(&mut conn, id, option, 3).unwrap();
+        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 2), (3, "confirmed".into(), 0)]);
+        // A plain click on the option takes June off it, guests and all.
+        signup(&mut conn, id, option, 2).unwrap();
+        assert_eq!(parties(&mut conn, id), [(3, "confirmed".into(), 0)]);
+    }
+
+    #[test]
+    fn a_party_bigger_than_the_option_is_refused_even_with_a_waitlist() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 3, 5, true);
+        let err = signup_guests(&mut conn, id, option, 2, 4).unwrap_err().to_string();
+        assert_eq!(err, "Yes has 3 spots, too few for a party of 5.");
+        assert!(parties(&mut conn, id).is_empty());
+    }
+
+    #[test]
+    fn guests_need_an_option_that_takes_them() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 10, 0, false);
+        let err = signup_guests(&mut conn, id, option, 2, 1).unwrap_err().to_string();
+        assert_eq!(err, "Yes doesn't take guests.");
+        let (id, option) = party_event(&mut conn, 10, 2, false);
+        let err = signup_guests(&mut conn, id, option, 2, 3).unwrap_err().to_string();
+        assert_eq!(err, "Yes lets each person bring at most 2 guests.");
+        // Zero is a plain signup.
+        signup_guests(&mut conn, id, option, 2, 0).unwrap();
+        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 0)]);
+    }
+
+    #[test]
+    fn the_waitlist_keeps_its_order_for_parties() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 3, 3, true);
+        signup_guests(&mut conn, id, option, 2, 1).unwrap();
+        // Two places are taken; Samir's party of three waits.
+        let notice = signup_guests(&mut conn, id, option, 3, 2).unwrap().to_string();
+        assert_eq!(notice, "Samir and 2 guests are waiting for Yes spots.");
+        // Nell alone would fit in the last place, but Samir's party is ahead.
+        let notice = signup(&mut conn, id, option, 1).unwrap().to_string();
+        assert!(notice.contains("waiting"), "{notice}");
+        assert_eq!(
+            parties(&mut conn, id),
+            [(1, "waitlisted".into(), 0), (2, "confirmed".into(), 1), (3, "waitlisted".into(), 2)]
+        );
+        // June leaves: Samir's party fits and moves up; Nell still waits.
+        signup(&mut conn, id, option, 2).unwrap();
+        assert_eq!(parties(&mut conn, id), [(1, "waitlisted".into(), 0), (3, "confirmed".into(), 2)]);
+    }
+
+    #[test]
+    fn changing_guests_keeps_the_place_while_the_party_fits() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 3, 3, true);
+        signup(&mut conn, id, option, 2).unwrap();
+        signup(&mut conn, id, option, 3).unwrap();
+        let notice = signup_guests(&mut conn, id, option, 2, 1).unwrap().to_string();
+        assert_eq!(notice, "June now brings one guest to Yes.");
+        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 1), (3, "confirmed".into(), 0)]);
+        // A third would need four places with Samir's; June's party waits.
+        let notice = signup_guests(&mut conn, id, option, 2, 2).unwrap().to_string();
+        assert_eq!(notice, "June's party of 3 no longer fits on Yes and is waiting for spots.");
+        assert_eq!(parties(&mut conn, id), [(2, "waitlisted".into(), 2), (3, "confirmed".into(), 0)]);
+        // Back to one guest: the party fits again and moves up.
+        signup_guests(&mut conn, id, option, 2, 1).unwrap();
+        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 1), (3, "confirmed".into(), 0)]);
+    }
+
+    #[test]
+    fn an_editor_sets_a_partys_size_wherever_it_stands() {
+        let mut conn = world();
+        let (id, option) = party_event(&mut conn, 2, 3, false);
+        editor_response(&mut conn, id, 1, 2, option, "add", Some(1)).unwrap();
+        // An editor's change can go past capacity, as an editor's add can.
+        let notice = editor_response(&mut conn, id, 1, 2, option, "add", Some(3)).unwrap().to_string();
+        assert_eq!(notice, "June now brings 3 guests to Yes.");
+        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 3)]);
+        let err = editor_response(&mut conn, id, 1, 2, option, "add", Some(4)).unwrap_err().to_string();
+        assert!(err.contains("at most 3"), "{err}");
+    }
+
     #[test]
     fn a_posted_event_gains_reorders_and_drops_options() {
         let mut conn = world();
@@ -197,6 +316,7 @@ mod tests {
             id: Some(opt.id),
             type_id: opt.type_id,
             capacity: opt.capacity,
+            max_guests: opt.max_guests,
             role_id: opt.role_id,
         };
         let mut next = vec![keep(&options[1]), keep(&options[0])];

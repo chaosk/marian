@@ -104,6 +104,8 @@ pub fn unsaved_signups(options: &[dto::SignupOption]) -> dto::Signups {
                 role_id: opt.role_id.clone(),
                 role: None,
                 attending: opt.attending,
+                max_guests: opt.max_guests,
+                my_guests: 0,
                 confirmed_count: 0,
                 waiting_count: 0,
                 confirmed: Vec::new(),
@@ -130,6 +132,7 @@ fn apply_sent(now: &mut dto::Signups, list: &[dto::SignupOption]) {
             continue;
         };
         opt.capacity = sent.capacity;
+        opt.max_guests = sent.max_guests;
         opt.role_id = sent.role_id.clone();
     }
     now.options
@@ -144,6 +147,7 @@ fn wire(opt: &dto::OptionSignups) -> dto::SignupOption {
         emoji: opt.emoji.clone(),
         attending: opt.attending,
         capacity: opt.capacity,
+        max_guests: opt.max_guests,
         role_id: opt.role_id.clone(),
     }
 }
@@ -157,6 +161,7 @@ fn from_library(item: &dto::LibraryItem) -> dto::SignupOption {
         emoji: item.emoji.clone(),
         attending: item.attending,
         capacity: None,
+        max_guests: 0,
         role_id: None,
     }
 }
@@ -434,13 +439,15 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
                     </div>
                     {move || (panel.picking.get() == Some(id.get_value())).then(|| view! { <MemberPicker panel option=id.get_value()/> })}
                     {move || opt.get().map(|opt| {
-                        let confirmed = opt.confirmed.into_iter().map(|person| view! {
-                            <div class="person">
-                                <span>{person.name}</span>
-                            </div>
+                        // Guests can be changed here only where the option takes them,
+                        // and only once the event is posted, as on Discord.
+                        let stepper = manage() && opt.max_guests > 0 && panel.state.with_untracked(|now| now.posted);
+                        let most = opt.max_guests;
+                        let confirmed = opt.confirmed.into_iter().map(|person| {
+                            person_row(panel, id.get_value(), person, false, stepper.then_some(most))
                         }).collect_view();
-                        let waiting = opt.waiting.into_iter().map(|person| view! {
-                            <div class="person"><span>{person.name}" · waiting"</span></div>
+                        let waiting = opt.waiting.into_iter().map(|person| {
+                            person_row(panel, id.get_value(), person, true, stepper.then_some(most))
                         }).collect_view();
                         view! {
                             <div class="attend-people">
@@ -457,11 +464,77 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
     }
 }
 
+/// One person on an option: their name, the guests they bring, and for someone
+/// who can edit the event, a control to change that count up to `most`.
+fn person_row(panel: Panel, option: String, person: dto::Person, waiting: bool, most: Option<i64>) -> impl IntoView {
+    let label = match (person.guests, waiting) {
+        (0, false) => person.name.clone(),
+        (0, true) => format!("{} · waiting", person.name),
+        (guests, false) => format!("{} (+{guests})", person.name),
+        (guests, true) => format!("{} (+{guests}) · waiting", person.name),
+    };
+    let stepper = most.map(|most| {
+        let guests = person.guests;
+        let name = person.name.clone();
+        let set = guest_setter(panel, option, person.id.clone());
+        let (fewer, more) = (set.clone(), set);
+        view! {
+            <span class="guest-step" role="group" aria-label=format!("Guests {name} brings")>
+                <button type="button" class="icon-btn" title="One guest fewer" aria-label="One guest fewer"
+                    disabled={guests == 0} on:click=move |_| fewer(guests - 1)>"−"</button>
+                <button type="button" class="icon-btn" title="One guest more" aria-label="One guest more"
+                    disabled={guests >= most} on:click=move |_| more(guests + 1)>"+"</button>
+            </span>
+        }
+    });
+    view! {
+        <div class="person">
+            <span>{label}</span>
+            {stepper}
+        </div>
+    }
+}
+
+/// Sets how many guests someone brings on an option. The card shows the new
+/// count at once; the server's answer, and any refusal, follow with the refetch.
+fn guest_setter(panel: Panel, option: String, member: String) -> impl Fn(i64) + Clone + 'static {
+    let toasts = client::toast_list();
+    let queries = cache::client();
+    let (server, event) = panel.ids.get_value();
+    move |guests: i64| {
+        panel.state.update(|now| {
+            if let Some(opt) = now.options.iter_mut().find(|opt| opt.id == option) {
+                let mut change = 0;
+                for person in opt.confirmed.iter_mut().filter(|person| person.id == member) {
+                    change = guests - person.guests;
+                    person.guests = guests;
+                }
+                for person in opt.waiting.iter_mut().filter(|person| person.id == member) {
+                    person.guests = guests;
+                }
+                opt.confirmed_count += change;
+            }
+        });
+        let url = format!("{}?guests={guests}", api::path::member_signup(&server, &event, &member, &option));
+        let server = server.clone();
+        client::spawn(async move {
+            if let Err(failure) = api::send::<dto::Done, ()>("PUT", &url, None).await {
+                if let Some(list) = toasts {
+                    client::push_toast(list, failure.message);
+                }
+            }
+            cache::refresh_in(queries, &server);
+        });
+    }
+}
+
 /// The edit face of a card: what this event sets for the type. Its name, emoji,
 /// and attending belong to the library, on the Presets page.
 fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
     let id = StoredValue::new(opt.id.clone());
     let capacity = RwSignal::new(opt.capacity.map(|n| n.to_string()).unwrap_or_default());
+    let guests_on = RwSignal::new(opt.max_guests > 0);
+    let guests_most = RwSignal::new(if opt.max_guests > 0 { opt.max_guests } else { 3 }.to_string());
     let limit = RwSignal::new(opt.role_id.clone());
     let removable = panel.state.with_untracked(|now| now.options.len() > 1);
     let held = opt.confirmed_count + opt.waiting_count;
@@ -489,10 +562,22 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
                 }
             },
         };
+        let most = if guests_on.get_untracked() {
+            match guests_most.get_untracked().trim().parse::<i64>() {
+                Ok(n) if (1..=10).contains(&n) => n,
+                _ => {
+                    panel.problem.set("Guests each is a number from 1 to 10.".into());
+                    return;
+                }
+            }
+        } else {
+            0
+        };
         let id = id.get_value();
         let mut list = panel.wire();
         if let Some(slot) = list.iter_mut().find(|opt| opt.id.as_ref() == Some(&id)) {
             slot.capacity = cap;
+            slot.max_guests = most;
             slot.role_id = limit.get_untracked();
         }
         panel.save(list, None);
@@ -531,6 +616,24 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
                 <input node_ref=input type="number" min="1" max="500" inputmode="numeric" placeholder="Unlimited"
                     prop:value=move || capacity.get() on:input=move |ev| capacity.set(event_target_value(&ev))/>
             </label>
+            <div class="attend-edit-row">
+                <span>"Guests"</span>
+                <span class="attend-guests">
+                    <label class="checks">
+                        <input type="checkbox" prop:checked=move || guests_on.get()
+                            on:change=move |ev| guests_on.set(event_target_checked(&ev))/>
+                        " "<span>"Allow guests"</span>
+                    </label>
+                    {move || guests_on.get().then(|| view! {
+                        <label class="attend-guests-most">
+                            "up to "
+                            <input type="number" min="1" max="10" inputmode="numeric" aria-label="Guests each person may bring"
+                                prop:value=move || guests_most.get() on:input=move |ev| guests_most.set(event_target_value(&ev))/>
+                            " each"
+                        </label>
+                    })}
+                </span>
+            </div>
             <label class="attend-edit-row">
                 <span>"Who can pick"</span>
                 <select on:change=move |ev| limit.set(Some(event_target_value(&ev)).filter(|id| !id.is_empty()))>
@@ -846,6 +949,7 @@ fn people(panel: Panel) -> Vec<dto::Person> {
             id: member.id.clone(),
             name: member.name.clone(),
             color: member.color.clone(),
+            guests: 0,
         }));
     });
     let mut seen = std::collections::HashSet::new();
@@ -936,6 +1040,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
                             id: member.id,
                             name: member.name,
                             color: member.color,
+                            guests: 0,
                         })
                         .collect();
                     found.try_set(people.iter().map(|person| person.id.clone()).collect());
@@ -1108,6 +1213,8 @@ mod tests {
             role_id: None,
             role: None,
             attending: true,
+            max_guests: 0,
+            my_guests: 0,
             confirmed_count: 0,
             waiting_count: 0,
             confirmed: Vec::new(),
@@ -1143,6 +1250,7 @@ mod tests {
             emoji: String::new(),
             attending: true,
             capacity: None,
+            max_guests: 0,
             role_id: None,
         };
         let list = numbered(vec![named(None), named(Some("new-1")), named(None)]);

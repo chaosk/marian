@@ -352,10 +352,18 @@ async fn handle_event(
             }
         }
         serenity::FullEvent::InteractionCreate { interaction } => {
-            if let serenity::Interaction::Component(component) = interaction {
-                if let Err(err) = handle_button(ctx, component, data).await {
-                    tracing::warn!("button failed: {err}");
+            match interaction {
+                serenity::Interaction::Component(component) => {
+                    if let Err(err) = handle_button(ctx, component, data).await {
+                        tracing::warn!("button failed: {err}");
+                    }
                 }
+                serenity::Interaction::Modal(form) => {
+                    if let Err(err) = guests_from_form(ctx, form, data).await {
+                        tracing::warn!("guests form failed: {err}");
+                    }
+                }
+                _ => {}
             }
         }
         _ => {}
@@ -713,6 +721,10 @@ async fn handle_button(
     let Some(action) = parse_button(&component.data.custom_id) else {
         return Ok(());
     };
+    // The form is the answer to the click, so this one isn't acknowledged first.
+    if let ButtonAction::Guests { event, option } = action {
+        return open_guests_form(ctx, component, data, event, option).await;
+    }
     component
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
@@ -726,6 +738,8 @@ async fn handle_button(
             ButtonAction::Edit { event } => event_key(&mut conn, event)?.map(Found::Edit),
             ButtonAction::Delete { event } => event_key(&mut conn, event)?.map(Found::Delete),
             ButtonAction::ConfirmDelete { event } => event_key(&mut conn, event)?.map(Found::ConfirmDelete),
+            // Opened as a form above, before the click was acknowledged.
+            ButtonAction::Guests { .. } => None,
             ButtonAction::Signup { event, option } => match event_key(&mut conn, event)? {
                 Some(event_id) => crate::ids::public::option_id(&mut conn, event_id, &option.to_string())
                     .ok()
@@ -845,6 +859,138 @@ async fn signup_from_button(
     if let Err(err) = push_attendance(&data.db, &data.http, event_id).await {
         tracing::warn!("could not update attendance on Discord: {err}");
     }
+    Ok(())
+}
+
+/// "+X": a form asking how many guests, filled with the count the person
+/// already brings when they're on the option.
+async fn open_guests_form(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    event: uuid::Uuid,
+    option: uuid::Uuid,
+) -> Result<(), Error> {
+    let Some(click) = click_context(ctx, component) else {
+        component
+            .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+            .await?;
+        return followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await;
+    };
+    let found = {
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let option_id = store::event_by_public(&mut conn, &event.to_string())?
+            .and_then(|event| crate::ids::public::option_id(&mut conn, event.id, &option.to_string()).ok());
+        let form = match option_id {
+            Some(option_id) => Some(logic::guests_form(&mut conn, option_id, membership_id)?),
+            None => None,
+        };
+        (form, lang)
+    };
+    let (form, lang) = found;
+    let refusal = match &form {
+        None => Some(tr!(lang, "reply-gone")),
+        Some(form) if form.max_guests == 0 => {
+            Some(crate::msg!("err-guests-off", option = &form.option).render(lang))
+        }
+        Some(_) => None,
+    };
+    let Some(form) = form.filter(|_| refusal.is_none()) else {
+        component
+            .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+            .await?;
+        return followup(ctx, component, &refusal.unwrap_or_default()).await;
+    };
+    let mut input = serenity::CreateInputText::new(
+        serenity::InputTextStyle::Short,
+        clip(&tr!(lang, "guests-form-label", most = form.max_guests), 45),
+        "guests",
+    )
+    .min_length(1)
+    .max_length(2)
+    .required(true);
+    if let Some(current) = form.current {
+        input = input.value(current.to_string());
+    }
+    let modal = serenity::CreateModal::new(
+        format!("marian:{event}:{option}:g"),
+        clip(&tr!(lang, "guests-form-title", option = form.option.as_str()), 45),
+    )
+    .components(vec![serenity::CreateActionRow::InputText(input)]);
+    component
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Modal(modal))
+        .await?;
+    Ok(())
+}
+
+/// The "+X" form sent back: signs the person up with that many guests, or
+/// changes the count when they're already on the option.
+async fn guests_from_form(
+    ctx: &serenity::Context,
+    form: &serenity::ModalInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let Some(ButtonAction::Guests { event, option }) = parse_button(&form.data.custom_id) else {
+        return Ok(());
+    };
+    form.create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await?;
+    let typed = form
+        .data
+        .components
+        .iter()
+        .flat_map(|row| row.components.iter())
+        .find_map(|component| match component {
+            serenity::ActionRowComponent::InputText(input) if input.custom_id == "guests" => input.value.clone(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let Some(click) = click_of(ctx, form.guild_id, &form.user, form.member.as_ref()) else {
+        return form_followup(ctx, form, &tr!(Lang::En, "reply-button-outside")).await;
+    };
+    let (outcome, lang) = {
+        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let found = store::event_by_public(&mut conn, &event.to_string())?.and_then(|event| {
+            crate::ids::public::option_id(&mut conn, event.id, &option.to_string())
+                .ok()
+                .map(|option_id| (event.id, option_id))
+        });
+        let outcome = match (found, typed.trim().parse::<i64>()) {
+            (None, _) => Err(None),
+            (Some(_), Err(_)) => Err(Some(crate::error::OpError::from(crate::msg!("err-guests-number")))),
+            (Some((event_id, option_id)), Ok(guests)) => {
+                logic::signup_guests(&mut conn, event_id, option_id, membership_id, guests)
+                    .map(|_| event_id)
+                    .map_err(Some)
+            }
+        };
+        (outcome, lang)
+    };
+    let event_id = match outcome {
+        Ok(event_id) => event_id,
+        Err(None) => return form_followup(ctx, form, &tr!(lang, "reply-gone")).await,
+        Err(Some(err)) => return form_followup(ctx, form, &err.localized(lang)).await,
+    };
+    tell_pages(&data.db, event_id, true);
+    if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
+        tracing::warn!("could not refresh the Discord post: {err}");
+    }
+    if let Err(err) = push_attendance(&data.db, &data.http, event_id).await {
+        tracing::warn!("could not update attendance on Discord: {err}");
+    }
+    Ok(())
+}
+
+async fn form_followup(ctx: &serenity::Context, form: &serenity::ModalInteraction, text: &str) -> Result<(), Error> {
+    form.create_followup(
+        &ctx.http,
+        serenity::CreateInteractionResponseFollowup::new()
+            .content(clip(text, 1800))
+            .ephemeral(true),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1041,23 +1187,32 @@ fn click_context(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
 ) -> Option<Click> {
-    let guild_id = component.guild_id?;
+    click_of(ctx, component.guild_id, &component.user, component.member.as_ref())
+}
+
+/// The member behind a click or a submitted form.
+fn click_of(
+    ctx: &serenity::Context,
+    guild_id: Option<serenity::GuildId>,
+    user: &serenity::User,
+    member: Option<&serenity::Member>,
+) -> Option<Click> {
+    let guild_id = guild_id?;
     let guild_name = ctx
         .cache
         .guild(guild_id)
         .map(|guild| guild.name.clone())
         .unwrap_or_default();
-    let display = component
-        .user
+    let display = user
         .global_name
         .clone()
-        .unwrap_or_else(|| component.user.name.clone());
-    let manage = component.member.as_ref().and_then(|member| {
+        .unwrap_or_else(|| user.name.clone());
+    let manage = member.and_then(|member| {
         member
             .permissions
             .map(|permissions| permissions.manage_guild() || permissions.administrator())
     });
-    let roles = component.member.as_ref().map(|member| {
+    let roles = member.map(|member| {
         member
             .roles
             .iter()
@@ -1077,7 +1232,7 @@ fn click_context(
     Some(Click {
         guild_discord: guild_id.get().to_string(),
         guild_name,
-        user_discord: component.user.id.get().to_string(),
+        user_discord: user.id.get().to_string(),
         display,
         manage,
         roles,
@@ -1167,6 +1322,8 @@ async fn followup(
 #[derive(Debug, PartialEq)]
 enum ButtonAction {
     Signup { event: uuid::Uuid, option: uuid::Uuid },
+    /// "+X": a form asking how many guests, and the same id on the form.
+    Guests { event: uuid::Uuid, option: uuid::Uuid },
     Edit { event: uuid::Uuid },
     Delete { event: uuid::Uuid },
     ConfirmDelete { event: uuid::Uuid },
@@ -1180,6 +1337,7 @@ enum ButtonAction {
 fn action_button(event: uuid::Uuid, button: &logic::DiscordButton) -> serenity::CreateButton {
     let custom_id = match button.role {
         logic::ButtonRole::Signup(option) => format!("marian:{event}:{option}"),
+        logic::ButtonRole::Guests(option) => format!("marian:{event}:{option}:g"),
         logic::ButtonRole::Edit => format!("marian:{event}:edit"),
         logic::ButtonRole::Delete => format!("marian:{event}:delete"),
     };
@@ -1229,10 +1387,14 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
         "edit" => Some(ButtonAction::Edit { event }),
         "delete" => Some(ButtonAction::Delete { event }),
         "confirm-delete" => Some(ButtonAction::ConfirmDelete { event }),
-        option => Some(ButtonAction::Signup {
-            event,
-            option: uuid::Uuid::parse_str(option).ok()?,
-        }),
+        option => {
+            let option = uuid::Uuid::parse_str(option).ok()?;
+            match parts.next() {
+                None => Some(ButtonAction::Signup { event, option }),
+                Some("g") => Some(ButtonAction::Guests { event, option }),
+                Some(_) => None,
+            }
+        }
     }
 }
 
@@ -2346,8 +2508,12 @@ async fn response_add(
     #[description = "The signup option"]
     #[autocomplete = "complete_option"]
     option: String,
+    #[description = "Guests they bring, when the option takes guests"]
+    #[min = 0]
+    #[max = 10]
+    guests: Option<i64>,
 ) -> Result<(), Error> {
-    run_response(ctx, "add", &event, &user, &option).await
+    run_response(ctx, "add", &event, &user, &option, guests).await
 }
 
 #[poise::command(
@@ -2366,7 +2532,7 @@ async fn response_remove(
     #[autocomplete = "complete_option"]
     option: String,
 ) -> Result<(), Error> {
-    run_response(ctx, "remove", &event, &user, &option).await
+    run_response(ctx, "remove", &event, &user, &option, None).await
 }
 
 #[poise::command(
@@ -2384,8 +2550,12 @@ async fn response_move(
     #[description = "The option to move them to"]
     #[autocomplete = "complete_option"]
     option: String,
+    #[description = "Guests they bring, when the option takes guests"]
+    #[min = 0]
+    #[max = 10]
+    guests: Option<i64>,
 ) -> Result<(), Error> {
-    run_response(ctx, "move", &event, &user, &option).await
+    run_response(ctx, "move", &event, &user, &option, guests).await
 }
 
 async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
@@ -2448,6 +2618,7 @@ async fn run_response(
     event: &str,
     user: &serenity::User,
     option: &str,
+    guests: Option<i64>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(actor) = remember_actor(&ctx).await? else {
@@ -2464,7 +2635,7 @@ async fn run_response(
             &user.id.get().to_string(),
             &name,
         )?;
-        commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action, actor.lang)
+        commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action, guests, actor.lang)
     };
     match outcome {
         Ok((reply, event_id)) => {
@@ -3307,6 +3478,12 @@ mod tests {
             parse_button(&format!("marian:{event}:{option}")),
             Some(ButtonAction::Signup { event, option })
         );
+        assert_eq!(
+            parse_button(&format!("marian:{event}:{option}:g")),
+            Some(ButtonAction::Guests { event, option })
+        );
+        assert_eq!(parse_button(&format!("marian:{event}:{option}:x")), None);
+        assert!(format!("marian:{event}:{option}:g").len() <= 100, "Discord's limit on a button id");
         assert_eq!(parse_button(&format!("marian:{event}:edit")), Some(ButtonAction::Edit { event }));
         assert_eq!(
             parse_button(&format!("marian:{event}:confirm-delete")),

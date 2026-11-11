@@ -103,6 +103,7 @@ fn write_types(conn: &mut Connection, template_id: i64, options: &[OptionInput])
                 schema::template_options::position.eq(position as i64),
                 schema::template_options::capacity.eq(opt.capacity),
                 schema::template_options::role_id.eq(opt.role_id),
+                schema::template_options::max_guests.eq(opt.max_guests),
             )
         })
         .collect();
@@ -118,6 +119,7 @@ fn read_types(conn: &mut Connection, template_id: i64) -> Result<Vec<OptionInput
             schema::template_options::type_id,
             schema::template_options::capacity,
             schema::template_options::role_id,
+            schema::template_options::max_guests,
         ))
         .load(conn)?;
     Ok(rows.into_iter().map(super::library::listed).collect())

@@ -1750,7 +1750,7 @@ fn cmd_response(
         .cloned()
         .or_else(|| pos.get(3).cloned())
         .ok_or_else(|| OpError::from(crate::msg!("err-name-option")))?;
-    Ok(roster_action(conn, actor_id, token, user.id, &option_name, &action, Lang::En)?.0)
+    Ok(roster_action(conn, actor_id, token, user.id, &option_name, &action, None, Lang::En)?.0)
 }
 
 pub struct Choice {
@@ -1843,13 +1843,14 @@ pub fn roster_action(
     target_id: i64,
     option_token: &str,
     action: &str,
+    guests: Option<i64>,
     lang: Lang,
 ) -> Result<(String, i64), OpError> {
     let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
     let sight = logic::sight(conn, &actor)?;
     let event = find_event(conn, actor.guild_id, &sight, event_token)?;
     let option = resolve_option(conn, &event, option_token)?;
-    let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action)?;
+    let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action, guests)?;
     Ok((notice.render(lang), event.id))
 }
 
@@ -2451,6 +2452,7 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
                 id: Some(opt.id),
                 type_id: opt.type_id,
                 capacity: opt.capacity,
+                max_guests: opt.max_guests,
                 role_id: opt.role_id,
             })
             .collect(),
@@ -2575,11 +2577,11 @@ mod tests {
         assert_eq!(choices.len(), 1);
         let picked = &choices[0].value;
         assert_eq!(uuid::Uuid::parse_str(picked).unwrap().get_version_num(), 7, "not a row number");
-        roster_action(&mut conn, 1, &token, 2, picked, "add", Lang::En).unwrap();
+        roster_action(&mut conn, 1, &token, 2, picked, "add", None, Lang::En).unwrap();
         let healer = store::options_for(&mut conn, &event).unwrap().into_iter().find(|opt| opt.name == "Healer").unwrap();
         assert!(store::signups_for(&mut conn, &event).unwrap().iter().any(|s| s.option_id == healer.id && s.membership_id == 2));
         // A typed name still works.
-        roster_action(&mut conn, 1, &token, 2, "tank", "add", Lang::En).unwrap();
+        roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En).unwrap();
     }
 
     #[test]

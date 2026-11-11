@@ -124,6 +124,7 @@ pub fn duplicate_event(
                 id: None,
                 type_id: opt.type_id,
                 capacity: opt.capacity,
+                max_guests: opt.max_guests,
                 role_id: opt.role_id,
             })
             .collect(),

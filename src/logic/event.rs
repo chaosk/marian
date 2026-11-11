@@ -472,6 +472,7 @@ pub(super) fn sync_options(conn: &mut Connection, event_id: i64, options: &[Opti
                 .set((
                     schema::signup_options::type_id.eq(opt.type_id),
                     schema::signup_options::capacity.eq(opt.capacity),
+                    schema::signup_options::max_guests.eq(opt.max_guests),
                     schema::signup_options::role_id.eq(opt.role_id),
                     schema::signup_options::position.eq(position),
                 ))
@@ -483,6 +484,7 @@ pub(super) fn sync_options(conn: &mut Connection, event_id: i64, options: &[Opti
                         schema::signup_options::event_id.eq(event_id),
                         schema::signup_options::type_id.eq(opt.type_id),
                         schema::signup_options::capacity.eq(opt.capacity),
+                        schema::signup_options::max_guests.eq(opt.max_guests),
                         schema::signup_options::role_id.eq(opt.role_id),
                         schema::signup_options::position.eq(position),
                     ))

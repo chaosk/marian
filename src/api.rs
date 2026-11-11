@@ -587,18 +587,12 @@ fn spots(options: &[store::SignupOption], signups: &[store::Signup]) -> Vec<dto:
     options
         .iter()
         .map(|opt| {
-            let count = |state: &str| {
-                signups
-                    .iter()
-                    .filter(|s| s.option_id == opt.id && s.state == state)
-                    .count() as i64
-            };
             dto::Spot {
                 emoji: opt.emoji.clone(),
                 name: opt.name.clone(),
                 capacity: opt.capacity,
-                confirmed: count("confirmed"),
-                waiting: count("waitlisted"),
+                confirmed: places(signups, opt.id, "confirmed"),
+                waiting: places(signups, opt.id, "waitlisted"),
             }
         })
         .collect()
@@ -739,24 +733,24 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
         signups
             .iter()
             .filter(|s| s.option_id == option_id && s.state == state)
-            .filter_map(|s| people.iter().find(|p| p.id == s.membership_id))
-            .map(|p| dto::Person {
+            .filter_map(|s| people.iter().find(|p| p.id == s.membership_id).map(|p| (p, s.guests)))
+            .map(|(p, guests)| dto::Person {
                 id: p.public_id.to_string(),
                 name: p.name.clone(),
                 color: p.color.clone(),
+                guests,
             })
             .collect()
     };
     let rows = options
         .iter()
         .map(|opt| {
-            let confirmed = signups
+            let confirmed = places(&signups, opt.id, "confirmed");
+            let my_signup = signups
                 .iter()
-                .filter(|s| s.option_id == opt.id && s.state == "confirmed")
-                .count();
-            let mine = signups
-                .iter()
-                .any(|s| s.option_id == opt.id && s.membership_id == user.id);
+                .find(|s| s.option_id == opt.id && s.membership_id == user.id);
+            let mine = my_signup.is_some();
+            let queue = places(&signups, opt.id, "waitlisted") > 0;
             let gate = Gate {
                 event: &event,
                 user: &user,
@@ -765,7 +759,7 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
                 closed,
                 waitlist: settings.waitlist,
             };
-            let (open, reason, waitlist_next) = gate.button(opt, mine, confirmed);
+            let (open, reason, waitlist_next) = gate.button(opt, mine, confirmed, queue);
             let role = opt.role_id.and_then(|id| role_rows.iter().find(|r| r.id == id));
             dto::OptionSignups {
                 id: opt.public_id.to_string(),
@@ -776,11 +770,10 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
                 role_id: role.map(|r| r.public_id.to_string()),
                 role: role.map(|r| r.name.clone()),
                 attending: opt.reminders_enabled,
-                confirmed_count: confirmed as i64,
-                waiting_count: signups
-                    .iter()
-                    .filter(|s| s.option_id == opt.id && s.state == "waitlisted")
-                    .count() as i64,
+                max_guests: opt.max_guests,
+                my_guests: my_signup.map(|s| s.guests).unwrap_or(0),
+                confirmed_count: confirmed,
+                waiting_count: places(&signups, opt.id, "waitlisted"),
                 confirmed: named("confirmed", opt.id),
                 waiting: named("waitlisted", opt.id),
                 mine,
@@ -812,7 +805,7 @@ struct Gate<'a> {
 
 impl Gate<'_> {
     /// Whether the person can press this option's button, why not, and whether it waitlists.
-    fn button(&self, opt: &store::SignupOption, mine: bool, confirmed: usize) -> (bool, String, bool) {
+    fn button(&self, opt: &store::SignupOption, mine: bool, confirmed: i64, queue: bool) -> (bool, String, bool) {
         if mine {
             return (self.event.status == "posted", String::new(), false);
         }
@@ -834,7 +827,7 @@ impl Gate<'_> {
             }
         }
         if let Some(cap) = opt.capacity {
-            if confirmed as i64 >= cap {
+            if confirmed >= cap || queue {
                 if self.waitlist {
                     return (true, String::new(), true);
                 }
@@ -889,11 +882,7 @@ fn signup_notes(
             }
         }
         if let Some(cap) = opt.capacity {
-            let confirmed = signups
-                .iter()
-                .filter(|s| s.option_id == opt.id && s.state == "confirmed")
-                .count() as i64;
-            if confirmed >= cap && !waitlist {
+            if places(signups, opt.id, "confirmed") >= cap && !waitlist {
                 notes.push(format!("{} is full.", opt.name));
             }
         }
@@ -902,6 +891,15 @@ fn signup_notes(
         notes.retain(|note| note != "Signups open once the event is posted.");
     }
     notes
+}
+
+/// Places an option's signups in `state` take: each person and their guests.
+fn places(signups: &[store::Signup], option_id: i64, state: &str) -> i64 {
+    signups
+        .iter()
+        .filter(|s| s.option_id == option_id && s.state == state)
+        .map(|s| 1 + s.guests)
+        .sum()
 }
 
 fn cutoff_passed(event: &store::Event, now: DateTime<Utc>) -> bool {
@@ -914,16 +912,22 @@ fn signed_up(conn: &mut Connection, event: &store::Event, option_id: i64, member
         .any(|s| s.option_id == option_id && s.membership_id == membership_id))
 }
 
-/// Signs the viewer up for an option, or takes them off it.
+/// Signs the viewer up for an option, or takes them off it. With `guests`,
+/// signs them up bringing that many, or changes the count when they're on it.
 pub fn set_my_signup(
     conn: &mut Connection,
     viewer: &Viewer,
     public_id: &str,
     option: &str,
     on: bool,
+    guests: Option<i64>,
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let option_id = ids::public::option_id(conn, event.id, option)?;
+    if let Some(guests) = guests.filter(|_| on) {
+        logic::signup_guests(conn, event.id, option_id, viewer.membership_id, guests)?;
+        return Ok(Outcome::ok().synced(event.id));
+    }
     if signed_up(conn, &event, option_id, viewer.membership_id)? == on {
         return Ok(Outcome::ok());
     }
@@ -931,7 +935,8 @@ pub fn set_my_signup(
     Ok(Outcome::ok().synced(event.id))
 }
 
-/// Someone who can edit the event adding a person to an option, or taking them off it.
+/// Someone who can edit the event adding a person to an option, or taking them
+/// off it. With `guests`, sets how many guests that person brings.
 pub fn set_signup(
     conn: &mut Connection,
     viewer: &Viewer,
@@ -939,6 +944,7 @@ pub fn set_signup(
     member: &str,
     option: &str,
     on: bool,
+    guests: Option<i64>,
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let member_id = ids::public::member_id(conn, viewer.guild_id, member)?;
@@ -950,6 +956,7 @@ pub fn set_signup(
         member_id,
         option_id,
         if on { "add" } else { "remove" },
+        guests,
     )?;
     Ok(Outcome::ok().synced(event.id))
 }
@@ -1230,6 +1237,7 @@ fn save_stored(
             id: Some(opt.id),
             type_id: opt.type_id,
             capacity: opt.capacity,
+            max_guests: opt.max_guests,
             role_id: opt.role_id,
         })
         .collect();
@@ -1431,6 +1439,7 @@ fn option_inputs(
                 id: opt.id.as_ref().and_then(|id| known.get(id).copied()),
                 type_id,
                 capacity: opt.capacity,
+                max_guests: opt.max_guests,
                 role_id: ids::public::role_id(conn, guild_id, opt.role_id.as_deref())?,
             })
         })
@@ -1452,6 +1461,7 @@ fn option_dto(
         emoji: kind.emoji.clone(),
         attending: kind.attending,
         capacity: opt.capacity,
+        max_guests: opt.max_guests,
         role_id: ids::public::role(conn, opt.role_id)?,
     })
 }
@@ -1933,7 +1943,7 @@ mod tests {
         let public = store::event(&mut conn, id).unwrap().unwrap().public_id.to_string();
         let option = signups(&mut conn, &viewer, &public).unwrap().options[0].id.clone();
         let june = members(&mut conn, &viewer).unwrap().into_iter().find(|m| m.name == "June").unwrap().id;
-        set_signup(&mut conn, &viewer, &public, &june, &option, true).unwrap();
+        set_signup(&mut conn, &viewer, &public, &june, &option, true, None).unwrap();
         let mut next = settings(&mut conn, &viewer).unwrap();
         next.role_event = roles(&mut conn, &viewer).unwrap().into_iter().map(|role| role.id).collect();
         put_settings(&mut conn, &viewer, &next).unwrap();

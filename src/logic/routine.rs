@@ -1356,6 +1356,7 @@ pub fn event_dto(conn: &mut Connection, extras: EventExtras) -> Result<marian_ty
                 emoji: kind.emoji,
                 attending: kind.attending,
                 capacity: opt.capacity,
+                max_guests: opt.max_guests,
                 role_id: public::role(conn, opt.role_id)?,
             })
         })
@@ -1401,6 +1402,7 @@ pub fn event_from(
                 id: None,
                 type_id: kind.id,
                 capacity: opt.capacity,
+                max_guests: opt.max_guests,
                 role_id: public::role_id(conn, guild_id, opt.role_id.as_deref())?,
             })
         })

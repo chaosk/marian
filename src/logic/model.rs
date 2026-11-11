@@ -19,6 +19,9 @@ pub struct RepeatSpec {
     pub max_occurrences: Option<i64>,
 }
 
+/// The most guests an option may let one signup bring.
+pub const MAX_GUESTS: i64 = 10;
+
 /// One attendance type on an event, preset, or template: a type from the
 /// server's library, with this use's capacity and role limit. Name, emoji, and
 /// attending come from the library.
@@ -29,6 +32,8 @@ pub struct OptionInput {
     /// The library type.
     pub type_id: i64,
     pub capacity: Option<i64>,
+    /// Guests one signup may bring; 0 lets none.
+    pub max_guests: i64,
     pub role_id: Option<i64>,
 }
 
@@ -38,6 +43,7 @@ impl OptionInput {
             id: None,
             type_id,
             capacity: None,
+            max_guests: 0,
             role_id: None,
         }
     }
@@ -133,6 +139,8 @@ pub struct EventExtras {
 pub enum ButtonRole {
     /// A signup option, by its public id.
     Signup(uuid::Uuid),
+    /// The same option with guests: opens a form asking how many.
+    Guests(uuid::Uuid),
     Edit,
     Delete,
 }

@@ -388,6 +388,7 @@ struct SignupOptionRow {
     position: i64,
     public_id: uuid::Uuid,
     type_id: i64,
+    max_guests: i64,
 }
 
 /// An event's signup option, with its type's name, emoji, and attending read
@@ -402,6 +403,8 @@ pub struct SignupOption {
     pub name: String,
     pub emoji: String,
     pub capacity: Option<i64>,
+    /// Guests one signup may bring; 0 lets none.
+    pub max_guests: i64,
     pub role_id: Option<i64>,
     /// Whether the type counts as attending: reminders and the attendee role.
     pub reminders_enabled: bool,
@@ -424,6 +427,8 @@ pub struct Signup {
     pub membership_id: i64,
     pub state: String,
     pub created_at: DateTime<Utc>,
+    /// Guests this person brings. The signup takes 1 + guests places.
+    pub guests: i64,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -1692,6 +1697,7 @@ fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOp
             name,
             emoji,
             capacity: row.capacity,
+            max_guests: row.max_guests,
             role_id: row.role_id,
             reminders_enabled: attending,
             position: row.position,
@@ -2462,6 +2468,7 @@ mod tests {
                 "20261102090000".to_string(),
                 "20261109090000".to_string(),
                 "20261110090000".to_string(),
+                "20261111100000".to_string(),
             ]
         );
     }

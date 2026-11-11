@@ -13,7 +13,7 @@ use diesel::prelude::*;
 use super::access::{can_create, can_edit, holds_any};
 use super::db::{log, must_event, must_membership, must_role};
 use super::event::sync_options;
-use super::model::{OptionInput, PresetInput, TypeInput};
+use super::model::{OptionInput, PresetInput, TypeInput, MAX_GUESTS};
 use super::signup::{fill_all, sync_access};
 use crate::error::OpError;
 use crate::schema;
@@ -27,6 +27,7 @@ pub struct ListedType {
     pub type_id: i64,
     pub capacity: Option<i64>,
     pub role_id: Option<i64>,
+    pub max_guests: i64,
 }
 
 #[derive(Insertable)]
@@ -46,6 +47,7 @@ struct NewPresetOption {
     position: i64,
     capacity: Option<i64>,
     role_id: Option<i64>,
+    max_guests: i64,
 }
 
 /// The library type with this name, made if the server doesn't have it yet.
@@ -213,6 +215,7 @@ fn insert_preset_options(conn: &mut Connection, preset_id: i64, options: &[Optio
             position: index as i64,
             capacity: opt.capacity,
             role_id: opt.role_id,
+            max_guests: opt.max_guests,
         })
         .collect();
     diesel::insert_into(schema::preset_options::table).values(&rows).execute(conn)?;
@@ -245,6 +248,7 @@ pub fn preset_types(conn: &mut Connection, preset_id: i64) -> Result<Vec<OptionI
             schema::preset_options::type_id,
             schema::preset_options::capacity,
             schema::preset_options::role_id,
+            schema::preset_options::max_guests,
         ))
         .load(conn)?;
     Ok(rows.into_iter().map(listed).collect())
@@ -255,6 +259,7 @@ pub(super) fn listed(row: ListedType) -> OptionInput {
         id: None,
         type_id: row.type_id,
         capacity: row.capacity,
+        max_guests: row.max_guests,
         role_id: row.role_id,
     }
 }
@@ -352,6 +357,9 @@ pub(super) fn clean_types(
             if !(1..=500).contains(&cap) {
                 return Err(OpError::from(crate::msg!("err-capacity")));
             }
+        }
+        if !(0..=MAX_GUESTS).contains(&opt.max_guests) {
+            return Err(OpError::from(crate::msg!("err-max-guests", most = MAX_GUESTS)));
         }
         if let Some(role_id) = opt.role_id {
             if must_role(conn, role_id)?.guild_id != guild_id {

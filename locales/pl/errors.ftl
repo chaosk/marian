@@ -62,6 +62,7 @@ err-date-closed = Ten termin jest już zamknięty. Zduplikuj go, jeśli potrzebu
 err-preset-empty = Ten szablon nie ma typów obecności.
 err-type-twice = Każdy typ obecności może być na liście tylko raz.
 err-capacity = Limit miejsc musi wynosić co najmniej 1 albo zostać pusty.
+err-max-guests = Opcja może pozwolić każdemu przyprowadzić najwyżej { $most } gości.
 err-type-role-elsewhere = Typ jest ograniczony do roli z innego serwera.
 err-types-none = Dodaj co najmniej jeden typ obecności.
 err-types-many = Możesz użyć najwyżej 8 typów obecności.
@@ -118,6 +119,21 @@ err-signups-closed = Zapisy na { $title } są zamknięte.
 err-event-limited = Na to wydarzenie mogą się zapisać tylko osoby z rolą { $roles }.
 err-option-limited = { $name } nie może wybrać opcji { $option }. Ta opcja jest tylko dla roli { $role }.
 err-option-full = Opcja { $option } jest pełna.
+err-guests-off = Opcja { $option } nie przyjmuje gości.
+err-guests-most = W opcji { $option } można przyprowadzić najwyżej { $most } { $most ->
+    [one] gościa
+   *[other] gości
+}.
+err-party-too-big = W opcji { $option } { $left ->
+    [one] zostało tylko jedno miejsce
+    [few] zostały tylko { $left } miejsca
+   *[other] zostało tylko { $left } miejsc
+}.
+err-party-over-capacity = Opcja { $option } ma { $cap } { $cap ->
+    [one] miejsce
+    [few] miejsca
+   *[other] miejsc
+}, za mało dla grupy { $size } osób.
 err-channel-exists = Kanał #{ $name } już istnieje.
 usage-events = { $count ->
     [one] { $count } wydarzenie
@@ -145,3 +161,4 @@ err-unknown-language = Wybierz English albo Polski.
 err-approval-closed = Ta prośba ma już odpowiedź.
 err-approval-not-yours = Na tę prośbę mogą odpowiedzieć tylko osoby z wymienionymi rolami, osoby zarządzające serwerem albo autor rutyny.
 err-approval-day-passed = Ten dzień już się zaczął. Wybierz późniejszy.
+err-guests-number = Wpisz liczbę gości.
