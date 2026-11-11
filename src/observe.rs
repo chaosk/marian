@@ -125,12 +125,19 @@ fn traces_endpoint(endpoint: &str) -> String {
     }
 }
 
+/// What becomes a span in the exported traces. Serenity's client, shard
+/// manager and shard runner each hold a span for as long as the gateway stays
+/// connected, and every heartbeat and received event lands inside it, so one
+/// trace would grow for days. Only its REST calls are kept; each Discord event
+/// gets its own root span in the gateway instead.
 fn trace_filter() -> EnvFilter {
     EnvFilter::new("info")
         .add_directive("hyper=off".parse().expect("hyper filter"))
         .add_directive("h2=off".parse().expect("h2 filter"))
         .add_directive("reqwest=off".parse().expect("reqwest filter"))
         .add_directive("tonic=off".parse().expect("tonic filter"))
+        .add_directive("serenity=off".parse().expect("serenity filter"))
+        .add_directive("serenity::http=info".parse().expect("serenity http filter"))
 }
 
 /// The trace a page was rendered in, as a W3C `traceparent`. The page carries
@@ -327,7 +334,7 @@ fn push_limited(out: &mut String, c: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_from, statement_shape, traceparent, traces_endpoint, EXPORT};
+    use super::{parent_from, statement_shape, trace_filter, traceparent, traces_endpoint, EXPORT};
 
     #[test]
     fn statement_shape_hides_values() {
@@ -409,5 +416,39 @@ mod tests {
             traces_endpoint("http://tempo:4318/v1/traces/"),
             "http://tempo:4318/v1/traces"
         );
+    }
+
+    #[test]
+    fn the_gateway_connection_is_not_a_trace() {
+        use opentelemetry::trace::TracerProvider;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("test"))
+                .with_filter(trace_filter()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            // Serenity's shard runner, entered for as long as the gateway is up.
+            let runner = tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "run");
+            let _runner = runner.enter();
+            tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "recv_event").in_scope(|| {});
+            let event = tracing::info_span!(parent: None, "discord_event");
+            event.in_scope(|| {
+                tracing::info_span!(target: "serenity::http::ratelimiting", "perform").in_scope(|| {});
+            });
+        });
+        let spans = exporter.get_finished_spans().expect("spans");
+        let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+        assert_eq!(names, ["perform", "discord_event"]);
+        let event = &spans[1];
+        assert_eq!(event.parent_span_id, opentelemetry::trace::SpanId::INVALID);
+        assert_eq!(spans[0].parent_span_id, event.span_context.span_id());
     }
 }
