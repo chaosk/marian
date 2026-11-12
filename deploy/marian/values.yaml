@@ -1,4 +1,4 @@
-# The reminder clock runs in this process. Keep this at 1.
+# The Discord gateway and the task worker run in this process. Keep this at 1.
 replicaCount: 1
 
 image:

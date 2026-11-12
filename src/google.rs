@@ -350,10 +350,14 @@ pub fn queue_event(
     Ok(())
 }
 
-pub fn ready_revokes(conn: &mut Connection) -> Result<Vec<RemoteAccess>, OpError> {
-    let users = Account::query()
+pub fn ready_revokes(conn: &mut Connection, only: Option<i64>) -> Result<Vec<RemoteAccess>, OpError> {
+    let mut accounts = Account::query()
         .filter(schema::google_accounts::revoking.eq(true))
-        .load(conn)?;
+        .into_boxed();
+    if let Some(user_id) = only {
+        accounts = accounts.filter(schema::google_accounts::user_id.eq(user_id));
+    }
+    let users = accounts.load(conn)?;
     let mut ready = Vec::new();
     for account in users {
         let pending: i64 = schema::google_events::table
@@ -410,10 +414,39 @@ pub fn delete_account(conn: &mut Connection, user_id: i64) -> Result<(), OpError
     Ok(())
 }
 
-pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpError> {
+/// One person's calendar work, and when to look again: now when there was
+/// more than one batch, or when the soonest failed event may be retried.
+pub fn plan_user(
+    conn: &mut Connection,
+    public_base: &str,
+    user_id: i64,
+) -> Result<(Vec<Job>, Option<DateTime<Utc>>), OpError> {
+    let jobs = plan_for(conn, public_base, Some(user_id))?;
     let now = Utc::now();
-    let users = Account::query()
-        .load(conn)?;
+    let again = if jobs.len() >= BATCH {
+        Some(now)
+    } else {
+        links_for(conn, user_id)?
+            .iter()
+            .filter_map(|link| link.retry_at.filter(|at| *at > now))
+            .min()
+    };
+    Ok((jobs, again))
+}
+
+/// Every account's calendar work, as the tests look at it.
+#[cfg(test)]
+fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpError> {
+    plan_for(conn, public_base, None)
+}
+
+fn plan_for(conn: &mut Connection, public_base: &str, only: Option<i64>) -> Result<Vec<Job>, OpError> {
+    let now = Utc::now();
+    let mut accounts = Account::query().into_boxed();
+    if let Some(user_id) = only {
+        accounts = accounts.filter(schema::google_accounts::user_id.eq(user_id));
+    }
+    let users = accounts.load(conn)?;
     let mut jobs = Vec::new();
     for account in users {
         if jobs.len() >= BATCH {

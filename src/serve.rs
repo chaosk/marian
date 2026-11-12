@@ -100,43 +100,84 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         let google_client_id = state.google_client_id.clone();
         let google_client_secret = state.google_client_secret.clone();
         let calendar_base = state.public_url.clone();
+        let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+        if let Ok(url) = store::database_url() {
+            listen_for_tasks(url, wake.clone());
+        }
         tokio::spawn(async move {
+            let google = crate::google::configured(&google_client_id, &google_client_secret);
+            if google {
+                if let Ok(mut guard) = db.get() {
+                    if let Err(err) = logic::mark_all_google(&mut guard) {
+                        tracing::warn!("tasks: {err}");
+                    }
+                }
+            }
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                // Instrumented, not entered: a guard held across the await below
-                // stayed entered on the thread, and other tasks' spans joined this
-                // trace until it ran past Tempo's size limit.
-                let span = tracing::info_span!(parent: None, "tick");
-                async {
-                    let report = {
-                        let mut guard = db.get().expect("database");
-                        logic::tick(&mut guard, Utc::now())
+                // One trace per pass: the tasks it ran and how long to sleep.
+                // Instrumented, not entered: a guard held across an await stays
+                // entered on the thread, and other tasks' spans join the trace.
+                let span = tracing::info_span!(parent: None, "tasks");
+                let delay = async {
+                    let pass = match db.get() {
+                        Ok(mut guard) => logic::run_due(&mut guard, Utc::now(), google, 16),
+                        Err(err) => Err(crate::error::OpError::message(err.to_string())),
                     };
-                    match report {
-                        Ok(report) => {
-                            for note in report.notes {
+                    let busy = match pass {
+                        Ok(pass) => {
+                            let busy = !pass.report.notes.is_empty()
+                                || !pass.report.jobs.is_empty()
+                                || !pass.google_users.is_empty();
+                            for note in pass.report.notes {
                                 tracing::info!("{note}");
                             }
-                            for job in report.jobs {
+                            for job in pass.report.jobs {
                                 enqueue(&discord, job);
                             }
-                            for guild_id in report.guilds {
+                            for guild_id in pass.report.guilds {
                                 crate::live::server(guild_id);
                             }
+                            for user_id in pass.google_users {
+                                let again = sync_google_user(
+                                    &db,
+                                    &http,
+                                    &google_client_id,
+                                    &google_client_secret,
+                                    &calendar_base,
+                                    user_id,
+                                )
+                                .await;
+                                if let Ok(mut guard) = db.get() {
+                                    if let Err(err) = logic::finish_google(&mut guard, user_id, again, Utc::now()) {
+                                        tracing::warn!("google calendar: {err}");
+                                    }
+                                }
+                            }
+                            busy
                         }
-                        Err(err) => tracing::warn!("tick failed: {err}"),
+                        Err(err) => {
+                            tracing::warn!("tasks failed: {err}");
+                            false
+                        }
+                    };
+                    if busy {
+                        return std::time::Duration::ZERO;
                     }
-                    sync_google(
-                        &db,
-                        &http,
-                        &google_client_id,
-                        &google_client_secret,
-                        &calendar_base,
-                    )
-                    .await;
+                    // Asleep until the next task, a change (NOTIFY), or a minute at most.
+                    let next = db.get().ok().and_then(|mut guard| logic::next_wake(&mut guard, google).ok().flatten());
+                    next.and_then(|at| (at - Utc::now()).to_std().ok())
+                        .unwrap_or(std::time::Duration::from_secs(60))
+                        .min(std::time::Duration::from_secs(60))
                 }
                 .instrument(span)
                 .await;
+                if delay.is_zero() {
+                    continue;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = wake.notified() => {}
+                }
             }
         });
 
@@ -865,25 +906,58 @@ async fn auth_callback(
     response
 }
 
-async fn sync_google(
+/// Wakes the worker when a trigger marks a change, over a connection that
+/// LISTENs for it. Reconnects when the database goes away.
+fn listen_for_tasks(url: String, wake: std::sync::Arc<tokio::sync::Notify>) {
+    std::thread::spawn(move || loop {
+        let mut conn = match store::open(&url) {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!("task listen: {err}");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        // Untraced: it polls twice a second, and outside any span each poll
+        // would be a trace of its own.
+        diesel::Connection::set_instrumentation(&mut conn, |_: diesel::connection::InstrumentationEvent<'_>| {});
+        if let Err(err) = diesel::sql_query("LISTEN marian_tasks").execute(&mut conn) {
+            tracing::warn!("task listen: {err}");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // A query reads what arrived; failing means the connection is gone.
+            if diesel::sql_query("SELECT 1").execute(&mut conn).is_err() {
+                break;
+            }
+            if conn.notifications_iter().filter(Result::is_ok).count() > 0 {
+                wake.notify_one();
+            }
+        }
+    });
+}
+
+/// Brings one person's Google Calendar up to date. Returns when to look
+/// again sooner than the usual check, if at all.
+async fn sync_google_user(
     db: &store::Db,
     http: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
     public_base: &str,
-) {
-    if !crate::google::configured(client_id, client_secret) {
-        return;
-    }
-    let jobs = {
-        let mut guard = db.get().expect("database");
-        crate::google::plan(&mut guard, public_base)
+    user_id: i64,
+) -> Option<chrono::DateTime<Utc>> {
+    let planned = {
+        let mut guard = db.get().ok()?;
+        crate::google::plan_user(&mut guard, public_base, user_id)
     };
-    let jobs = match jobs {
-        Ok(jobs) => jobs,
+    let (jobs, mut again) = match planned {
+        Ok(planned) => planned,
         Err(err) => {
             tracing::warn!("google calendar: {err}");
-            return;
+            return Some(Utc::now() + chrono::Duration::minutes(5));
         }
     };
     for job in jobs {
@@ -901,7 +975,7 @@ async fn sync_google(
     }
     let revokes = {
         let mut guard = db.get().expect("database");
-        match crate::google::ready_revokes(&mut guard) {
+        match crate::google::ready_revokes(&mut guard, Some(user_id)) {
             Ok(rows) => rows,
             Err(err) => {
                 tracing::warn!("google calendar: {err}");
@@ -918,8 +992,11 @@ async fn sync_google(
             }
         } else {
             tracing::warn!("google calendar disconnect for {user_id} will retry");
+            let retry = Utc::now() + chrono::Duration::minutes(5);
+            again = Some(again.map_or(retry, |at| at.min(retry)));
         }
     }
+    again
 }
 
 async fn google_start(

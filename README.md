@@ -108,7 +108,7 @@ helm upgrade --install marian ./deploy/marian \
 
 `discord.token` or `discord.existingSecret` is required. Use `existingSecret` and `discord.secretKey` when the token already lives in the cluster. `discord.clientSecret` is the OAuth secret when the chart creates the Secret. With `existingSecret`, set `discord.clientSecretKey` to the key that already holds it. `imagePullSecrets` is a list of `{name: ...}` objects.
 
-The image is a static binary. Postgres TLS reads Debian's CA bundle from `SSL_CERT_FILE`. The Deployment is a single replica with `strategy: Recreate`. The reminder clock runs in this process, so keep the replica count at 1. `database.url` is the Postgres connection string when the chart creates the Secret. With `discord.existingSecret`, put that string in the same secret under `database.secretKey` (`databaseUrl`). The root filesystem is read-only. `persistence` still creates the old sqlite volume and the pod does not mount it. Copy the file out, then set `persistence.enabled` to false.
+The image is a static binary. Postgres TLS reads Debian's CA bundle from `SSL_CERT_FILE`. The Deployment is a single replica with `strategy: Recreate`. The Discord gateway and the task worker, which posts, reminds, archives and moves routines on at their times, run in this process, so keep the replica count at 1. `database.url` is the Postgres connection string when the chart creates the Secret. With `discord.existingSecret`, put that string in the same secret under `database.secretKey` (`databaseUrl`). The root filesystem is read-only. `persistence` still creates the old sqlite volume and the pod does not mount it. Copy the file out, then set `persistence.enabled` to false.
 
 Probes call `/healthz` and `/readyz`. The pod runs as uid 65532.
 

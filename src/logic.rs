@@ -9,6 +9,7 @@ mod library;
 mod lifecycle;
 mod model;
 mod routine;
+mod schedule;
 mod series;
 mod signup;
 mod template;
@@ -49,6 +50,7 @@ pub use routine::{
 };
 pub use signup::{editor_response, guests_form, signup, signup_guests, GuestsForm};
 pub use template::series_template;
+pub use schedule::{finish_google, mark_all_google, next_wake, run_due, Pass};
 pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
 
 /// An option of the named type, put in the server's library if it isn't there.
@@ -558,6 +560,159 @@ mod tests {
         let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
+    }
+
+    /// A time as Postgres keeps it, to the second.
+    fn secs(at: DateTime<Utc>) -> DateTime<Utc> {
+        Utc.timestamp_opt(at.timestamp(), 0).unwrap()
+    }
+
+    /// When the task for `kind` and `subject` is due, once marks are turned into tasks.
+    fn task(conn: &mut Connection, now: DateTime<Utc>, kind: &str, subject: i64) -> Option<DateTime<Utc>> {
+        run_due(conn, now, true, 0).unwrap();
+        schema::tasks::table
+            .filter(schema::tasks::kind.eq(kind))
+            .filter(schema::tasks::subject_id.eq(subject))
+            .select(schema::tasks::run_at)
+            .first(conn)
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_events_tasks_follow_it_whichever_way_it_changes() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let start = now + Duration::days(2);
+        let cutoff = now + Duration::days(1);
+        let mut event = input("Raid", start, SaveAction::Publish);
+        event.cutoff_at = Some(cutoff);
+        event.reminders = vec![ReminderInput {
+            offset_minutes: 60,
+            message: String::new(),
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        assert_eq!(task(&mut conn, now, "remind", reminder), Some(start - Duration::minutes(60)));
+        assert_eq!(task(&mut conn, now, "close_signups", id), Some(cutoff));
+        assert_eq!(task(&mut conn, now, "archive", id), Some(start + Duration::minutes(60) + Duration::hours(12)));
+
+        // A write from anywhere moves them, even one no code path knows about.
+        conn.batch_execute("UPDATE events SET starts_at = starts_at + interval '1 day'").unwrap();
+        let later = start + Duration::days(1);
+        assert_eq!(task(&mut conn, now, "remind", reminder), Some(later - Duration::minutes(60)));
+        assert_eq!(task(&mut conn, now, "archive", id), Some(later + Duration::minutes(60) + Duration::hours(12)));
+        conn.batch_execute("UPDATE settings SET auto_archive = false").unwrap();
+        assert_eq!(task(&mut conn, now, "archive", id), None, "the server stopped archiving");
+        conn.batch_execute("UPDATE settings SET auto_archive = true, auto_archive_hours = 2").unwrap();
+        assert_eq!(task(&mut conn, now, "archive", id), Some(later + Duration::minutes(60) + Duration::hours(2)));
+
+        conn.batch_execute(&format!("DELETE FROM events WHERE id = {id}")).unwrap();
+        assert_eq!(task(&mut conn, now, "remind", reminder), None);
+        assert_eq!(task(&mut conn, now, "close_signups", id), None);
+        assert_eq!(task(&mut conn, now, "archive", id), None);
+    }
+
+    #[test]
+    fn a_scheduled_event_posts_on_time_and_then_reminds() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let start = now + Duration::hours(3);
+        let mut event = input("Dock", start, SaveAction::Schedule);
+        event.post_at = Some(now + Duration::hours(1));
+        event.reminders = vec![ReminderInput {
+            offset_minutes: 30,
+            message: String::new(),
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        assert_eq!(task(&mut conn, now, "post", id), Some(now + Duration::hours(1)));
+        assert_eq!(task(&mut conn, now, "remind", reminder), None, "nothing to remind of before it posts");
+
+        tick(&mut conn, now + Duration::minutes(30)).unwrap();
+        assert_eq!(store::event(&mut conn, id).unwrap().unwrap().status, "scheduled");
+        let report = tick(&mut conn, now + Duration::hours(1)).unwrap();
+        assert_eq!(store::event(&mut conn, id).unwrap().unwrap().status, "posted");
+        assert!(report.guilds.contains(&1), "open pages hear about it");
+        assert_eq!(task(&mut conn, now, "post", id), None);
+        assert_eq!(task(&mut conn, now, "remind", reminder), Some(start - Duration::minutes(30)));
+
+        tick(&mut conn, start - Duration::minutes(30)).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        assert!(store::reminders_for(&mut conn, &stored).unwrap()[0].sent_at.is_some());
+        assert_eq!(task(&mut conn, now, "remind", reminder), None);
+    }
+
+    #[test]
+    fn the_digest_and_series_fills_keep_their_own_clock() {
+        let mut conn = world();
+        let noon = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
+        conn.batch_execute("UPDATE settings SET digest = 'daily'").unwrap();
+        assert_eq!(task(&mut conn, noon, "digest", 1), Some(noon), "today's is late, so now");
+        let report = tick(&mut conn, noon).unwrap();
+        assert!(report.notes.iter().any(|note| note.starts_with("Daily digest")), "{:?}", report.notes);
+        let tomorrow = Utc.with_ymd_and_hms(2026, 12, 2, 9, 0, 0).unwrap();
+        assert_eq!(task(&mut conn, noon, "digest", 1), Some(tomorrow));
+        conn.batch_execute("UPDATE settings SET digest = 'weekly'").unwrap();
+        let monday = Utc.with_ymd_and_hms(2026, 12, 7, 9, 0, 0).unwrap();
+        assert_eq!(task(&mut conn, noon, "digest", 1), Some(monday));
+        conn.batch_execute("UPDATE settings SET digest = 'off'").unwrap();
+        assert_eq!(task(&mut conn, noon, "digest", 1), None);
+
+        let now = secs(Utc::now());
+        let mut event = input("Raid", now + Duration::hours(1), SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: "daily".into(),
+            end_on: None,
+            max_occurrences: None,
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        assert_eq!(task(&mut conn, now, "fill_series", 1), Some(now), "a new series fills now");
+        tick(&mut conn, now).unwrap();
+        assert_eq!(task(&mut conn, now, "fill_series", 1), Some(now + Duration::hours(1)), "then hourly");
+        let series_id = store::event(&mut conn, id).unwrap().unwrap().series_id.unwrap();
+        for date in store::events_in_series(&mut conn, series_id).unwrap() {
+            let due = match date.status.as_str() {
+                "scheduled" => task(&mut conn, now, "post", date.id),
+                _ => task(&mut conn, now, "archive", date.id),
+            };
+            assert!(due.is_some(), "each date has its own tasks: {} {}", date.id, date.status);
+        }
+        conn.batch_execute("UPDATE series SET active = false").unwrap();
+        assert_eq!(task(&mut conn, now, "fill_series", 1), None);
+    }
+
+    #[test]
+    fn calendars_follow_signups_and_changes_to_their_events() {
+        let mut conn = world();
+        conn.batch_execute(
+            "INSERT INTO google_accounts (user_id, refresh_token, email, connected_at, last_error, auto_sync, revoking)
+             SELECT user_id, 'token', 'june@example.com', now(), '', true, false FROM memberships WHERE id = 2",
+        )
+        .unwrap();
+        let june: i64 = schema::memberships::table.find(2).select(schema::memberships::user_id).first(&mut conn).unwrap();
+        let now = secs(Utc::now());
+        // Without Google set up, a due sync is let go.
+        run_due(&mut conn, now, false, 0).unwrap();
+        assert_eq!(task(&mut conn, now, "google_sync", june), Some(now), "connecting marks a sync");
+        run_due(&mut conn, now, false, 1).unwrap();
+        let left: i64 = schema::tasks::table.filter(schema::tasks::kind.eq("google_sync")).count().get_result(&mut conn).unwrap();
+        assert_eq!(left, 0);
+
+        let id = save_event(&mut conn, input("Raid", now + Duration::days(1), SaveAction::Publish)).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!(task(&mut conn, now, "google_sync", june), None, "June isn't on it yet");
+        let option = store::options_for(&mut conn, &stored).unwrap()[0].id;
+        signup(&mut conn, id, option, 2).unwrap();
+        assert_eq!(task(&mut conn, now, "google_sync", june), Some(now), "her signup puts it in her calendar");
+        conn.batch_execute("DELETE FROM tasks").unwrap();
+        conn.batch_execute(&format!("UPDATE events SET title = 'Raid night' WHERE id = {id}")).unwrap();
+        assert_eq!(task(&mut conn, now, "google_sync", june), Some(now), "a renamed event changes her calendar");
+        conn.batch_execute("DELETE FROM tasks").unwrap();
+        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2").unwrap();
+        assert_eq!(task(&mut conn, now, "google_sync", june), Some(now), "what she can see changed");
     }
 
     #[test]
