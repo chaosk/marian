@@ -289,8 +289,10 @@ fn close_menu(_: &leptos::ev::MouseEvent) {}
 #[component]
 fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
     use crate::pages::lists::Filters;
-    let pathname = use_location().pathname;
-    let query = leptos_router::hooks::use_query_map();
+    // Both from the router's location. `use_query_map` would make a memo owned
+    // by this sidebar, which a link could still read after the sidebar is gone.
+    let location = use_location();
+    let (pathname, query) = (location.pathname, location.query);
     let events_href = format!("{base}/events");
     let shortcut = |path: &str| match path {
         "upcoming" => Some(Filters::upcoming()),
