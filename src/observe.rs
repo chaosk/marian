@@ -235,6 +235,9 @@ fn finish_query() {
     if !EXPORT.load(Ordering::Relaxed) {
         return;
     }
+    let Some(parent) = query_parent() else {
+        return;
+    };
     let tracer = global::tracer("marian");
     let name = if pending.statement.is_empty() {
         pending.system.to_string()
@@ -251,9 +254,18 @@ fn finish_query() {
             KeyValue::new("db.statement", pending.statement),
             KeyValue::new("db.duration_ms", millis),
         ])
-        .start_with_context(&tracer, &Context::current());
+        .start_with_context(&tracer, &parent);
     let end = pending.start.checked_add(duration).unwrap_or(pending.start);
     span.end_with_timestamp(end);
+}
+
+/// The span a query belongs to. A query outside any span, such as the
+/// readiness probe's or the pool's check before handing out a connection,
+/// would be a trace of its own, so it is only logged.
+fn query_parent() -> Option<Context> {
+    use opentelemetry::trace::TraceContextExt;
+    let current = Context::current();
+    current.has_active_span().then_some(current)
 }
 
 fn operation(sql: &str) -> String {
@@ -416,6 +428,26 @@ mod tests {
             traces_endpoint("http://tempo:4318/v1/traces/"),
             "http://tempo:4318/v1/traces"
         );
+    }
+
+    #[test]
+    fn a_query_outside_any_span_is_not_a_trace() {
+        use opentelemetry::trace::TracerProvider;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(InMemorySpanExporter::default())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(super::query_parent().is_none());
+            tracing::info_span!("tick").in_scope(|| {
+                assert!(super::query_parent().is_some(), "a query in a span joins it");
+            });
+            assert!(super::query_parent().is_none());
+        });
     }
 
     #[test]
