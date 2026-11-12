@@ -48,6 +48,22 @@ notice-left-waitlist = Wypisano { $name } z listy oczekujących na opcję { $opt
 notice-added = Dodano { $name } do opcji { $option }.
 notice-removed = Usunięto { $name } z opcji { $option }.
 notice-already-on = { $name } jest już w opcji { $option }.
+notice-signed-up-guests = Zapisano { $name } na opcję { $option } z { $guests } { $guests ->
+    [one] gościem
+   *[other] gośćmi
+}.
+notice-moved-guests = Przeniesiono { $name } do opcji { $option } z { $guests } { $guests ->
+    [one] gościem
+   *[other] gośćmi
+}.
+notice-waiting-guests = { $name } z { $guests } { $guests ->
+    [one] gościem
+   *[other] gośćmi
+} czeka na miejsca w opcji { $option }.
+notice-guests = Liczba gości { $name } w opcji { $option }: { $guests }.
+notice-guests-waiting = Grupa { $name } ({ $size } os.) nie mieści się już w opcji { $option } i czeka na miejsca.
 notice-was-not-on = W opcji { $option } nie było { $name }.
 notice-deleted = Usunięto { $title }.
 notice-cancelled = Odwołano { $title }.
+guests-form-title = Goście: { $option }
+guests-form-label = Ilu gości? (0–{ $most })

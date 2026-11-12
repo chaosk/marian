@@ -8,7 +8,7 @@
 <p>Turns your reminders on or off. Leave the choice empty to see whether you get them.</p>
 
 <h2><code>/response</code></h2>
-<p>Adds, removes, or moves a person’s signup. Each one asks for the event, the person, and the signup option, and lists the choices.</p>
+<p>Adds, removes, or moves a person’s signup. Each one asks for the event, the person, and the signup option, and lists the choices. Adding or moving can also set how many guests the person brings, on an option that takes guests.</p>
 
 <h2><code>/settings</code></h2>
 <p>Changes one server setting. A server manager picks the setting. Each one has its own fields: the default reminder, a 24-hour clock, archiving, event threads, names on the Discord post, a temporary attendee role, the waitlist, the digest (off, daily, or weekly), how early a series date is posted, which role may create, edit, delete, manage channels, or manage signup options, and the language Marian writes in on Discord (English or Polski). The language covers posts, polls, reminders, DMs, replies, and the commands’ descriptions; DM answers such as “jutro o 19” work in either language.</p>
@@ -17,7 +17,10 @@
 <p>Lists the server’s attendance types, adds one with a name and an emoji, or removes one nothing uses. A new type counts as attending unless you say otherwise. Renaming and the attending switch are on the Presets page.</p>
 
 <h2><code>/signup_presets</code></h2>
-<p>Lists presets, saves one from type names separated by commas (a name the library doesn’t have is added to it), or removes one. The Presets page also sets capacities, role limits, and the default preset.</p>
+<p>Lists presets, saves one from type names separated by commas (a name the library doesn’t have is added to it), or removes one. The Presets page also sets capacities, guests, role limits, and the default preset.</p>
+
+<h2>Guests</h2>
+<p>An option can let each person bring guests, up to a limit set on the Presets page or on the event. Its Discord post then has a second button for that option with “+X”, which asks how many. Pressing it again changes the count; the plain button still takes you off the option, guests and all. A person and their guests take a place each. A party that doesn’t fit waits together on the waitlist, and nobody passes it there: when places free up, the party at the front moves up first. A party bigger than the whole option can’t sign up.</p>
 
 <h2><code>/channel</code></h2>
 <p>Creates an event channel in Discord. You give the name. An event channel is a Discord channel Marian keeps for events. With purge on, posting or deleting an event removes other messages, and pinned messages stay. Other Discord channels arrive from the server as text channels.</p>

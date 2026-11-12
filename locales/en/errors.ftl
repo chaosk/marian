@@ -62,6 +62,7 @@ err-date-closed = That date is already closed. Duplicate it if you need another 
 err-preset-empty = That preset has no attendance types.
 err-type-twice = Each attendance type can be on the list once.
 err-capacity = Capacity has to be at least 1, or left open.
+err-max-guests = An option can let each person bring at most { $most } guests.
 err-type-role-elsewhere = A type is limited to a role from another server.
 err-types-none = Add at least one attendance type.
 err-types-many = Use up to 8 attendance types.
@@ -118,6 +119,16 @@ err-signups-closed = Signups for { $title } are closed.
 err-event-limited = This event is limited to { $roles }.
 err-option-limited = { $name } can't take a { $option } spot. That option is limited to { $role }.
 err-option-full = { $option } is full.
+err-guests-off = { $option } doesn't take guests.
+err-guests-most = { $option } lets each person bring at most { $most ->
+    [one] one guest
+   *[other] { $most } guests
+}.
+err-party-too-big = { $option } has only { $left ->
+    [one] one spot
+   *[other] { $left } spots
+} left.
+err-party-over-capacity = { $option } has { $cap } spots, too few for a party of { $size }.
 err-channel-exists = #{ $name } already exists.
 usage-events = { $count ->
     [one] { $count } event
@@ -142,3 +153,4 @@ err-unknown-language = Pick English or Polski.
 err-approval-closed = This request has already been answered.
 err-approval-not-yours = Only the roles this request names, server managers, or the routine's creator can answer it.
 err-approval-day-passed = That day has already started. Pick a later one.
+err-guests-number = Type how many guests you bring, as a number.

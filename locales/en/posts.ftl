@@ -46,3 +46,4 @@ approval-posted = { $name } confirmed **{ $day }**. The event is posted.
 approval-skipped = { $name } skipped this week.
 approval-expired = No one answered in time, so there's no event this week.
 approval-skip = Skip this week
+post-guests = +X

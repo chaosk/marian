@@ -47,6 +47,26 @@ notice-left-waitlist = { $name } left the { $option } waitlist.
 notice-added = Added { $name } to { $option }.
 notice-removed = Removed { $name } from { $option }.
 notice-already-on = { $name } is already on { $option }.
+notice-signed-up-guests = { $name } signed up as { $option }, bringing { $guests ->
+    [one] one guest
+   *[other] { $guests } guests
+}.
+notice-moved-guests = { $name } moved to { $option }, bringing { $guests ->
+    [one] one guest
+   *[other] { $guests } guests
+}.
+notice-waiting-guests = { $name } and { $guests ->
+    [one] one guest are
+   *[other] { $guests } guests are
+} waiting for { $option } spots.
+notice-guests = { $name } now brings { $guests ->
+    [0] no guests
+    [one] one guest
+   *[other] { $guests } guests
+} to { $option }.
+notice-guests-waiting = { $name }'s party of { $size } no longer fits on { $option } and is waiting for spots.
 notice-was-not-on = { $name } wasn't on { $option }.
 notice-deleted = Deleted { $title }.
 notice-cancelled = Cancelled { $title }.
+guests-form-title = Guests for { $option }
+guests-form-label = How many guests? (0–{ $most })

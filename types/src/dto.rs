@@ -306,6 +306,9 @@ pub struct SignupOption {
     pub attending: bool,
     #[serde(default)]
     pub capacity: Option<i64>,
+    /// Guests one signup may bring; 0 lets none.
+    #[serde(default)]
+    pub max_guests: i64,
     #[serde(default)]
     pub role_id: Option<String>,
 }
@@ -331,6 +334,9 @@ pub struct Person {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// Guests they bring on this option.
+    #[serde(default)]
+    pub guests: i64,
 }
 
 /// One option's signups, and whether the signed-in person can use it.
@@ -345,7 +351,13 @@ pub struct OptionSignups {
     pub role_id: Option<String>,
     pub role: Option<String>,
     pub attending: bool,
+    /// Guests one signup may bring; 0 lets none.
+    pub max_guests: i64,
+    /// Guests the signed-in person brings, when they're on this option.
+    pub my_guests: i64,
+    /// Places taken: each person and their guests.
     pub confirmed_count: i64,
+    /// Places the waiting parties need.
     pub waiting_count: i64,
     /// Names, when the server shows them to this person.
     pub confirmed: Vec<Person>,

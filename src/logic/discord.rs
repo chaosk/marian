@@ -286,22 +286,25 @@ pub fn discord_view(
             .iter()
             .filter(|signup| signup.option_id == opt.id && signup.state == "confirmed")
             .collect();
-        let waiting = signups
+        // Places: each person and the guests they bring.
+        let waiting: i64 = signups
             .iter()
             .filter(|signup| signup.option_id == opt.id && signup.state == "waitlisted")
-            .count();
+            .map(|signup| 1 + signup.guests)
+            .sum();
+        let taken: i64 = confirmed.iter().map(|signup| 1 + signup.guests).sum();
         let count = match opt.capacity {
-            Some(cap) => format!("{}/{}", confirmed.len(), cap),
-            None => confirmed.len().to_string(),
+            Some(cap) => format!("{taken}/{cap}"),
+            None => taken.to_string(),
         };
         let mut lines = Vec::new();
         if settings.show_attendees {
-            lines.extend(
-                confirmed
-                    .iter()
-                    .filter_map(|signup| names.get(&signup.membership_id))
-                    .cloned(),
-            );
+            lines.extend(confirmed.iter().filter_map(|signup| {
+                names.get(&signup.membership_id).map(|name| match signup.guests {
+                    0 => name.clone(),
+                    guests => format!("{name} (+{guests})"),
+                })
+            }));
         }
         if waiting > 0 {
             lines.push(tr!(lang, "post-waiting", count = waiting));
@@ -328,6 +331,15 @@ pub fn discord_view(
             tone: ButtonTone::Secondary,
             disabled: closed,
         });
+        if opt.max_guests > 0 {
+            buttons.push(DiscordButton {
+                role: ButtonRole::Guests(opt.public_id),
+                label: tr!(lang, "post-guests"),
+                emoji: opt.emoji.clone(),
+                tone: ButtonTone::Secondary,
+                disabled: closed,
+            });
+        }
     }
     buttons.push(DiscordButton {
         role: ButtonRole::Edit,
@@ -1212,6 +1224,50 @@ mod tests {
             mention_line(view.mention_everyone, &view.mention_roles),
             "@everyone <@&111> <@&333>"
         );
+    }
+
+    #[test]
+    fn the_post_counts_guests_and_offers_a_guests_button() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
+            INSERT INTO users (discord_id) VALUES ('nell'), ('june');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'nell'
+            UNION ALL
+            SELECT 2, id, 1, 'June', 'june', '#223344' FROM users WHERE discord_id = 'june';
+            INSERT INTO option_library (id, guild_id, name, emoji, attending) VALUES
+              (101, 1, 'Yes', '✅', true),
+              (102, 1, 'No', '❌', false);
+            INSERT INTO events (
+              public_id, guild_id, channel_id, title, starts_at, status,
+              created_by, created_at, updated_at
+            ) VALUES (
+              '01900000-0000-7000-8000-000000000010', 1, 1, 'Dinner',
+              '2026-10-14T18:00:00Z', 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z'
+            );
+            INSERT INTO signup_options (id, event_id, type_id, position, capacity, max_guests) VALUES
+              (1, 1, 101, 0, 10, 3),
+              (2, 1, 102, 1, NULL, 0);
+            INSERT INTO signups (event_id, option_id, membership_id, state, created_at, guests) VALUES
+              (1, 1, 1, 'confirmed', '2026-10-13T00:00:00Z', 2),
+              (1, 1, 2, 'confirmed', '2026-10-13T00:00:00Z', 0);
+            ",
+        )
+        .unwrap();
+        store::insert_default_settings(&mut conn, 1).unwrap();
+        let view = discord_view(&mut conn, 1, "https://marian.example.com").unwrap().unwrap();
+        assert_eq!(view.fields[0].name, "✅ **Yes** (4/10)");
+        assert_eq!(view.fields[0].value, "Nell (+2)\nJune");
+        let roles: Vec<&ButtonRole> = view.buttons.iter().map(|button| &button.role).collect();
+        assert!(matches!(
+            roles.as_slice(),
+            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_), ButtonRole::Edit, ButtonRole::Delete]
+        ));
+        assert_eq!(view.buttons[1].emoji, "✅");
+        assert_eq!(view.buttons[1].label, "+X");
     }
 
     #[test]

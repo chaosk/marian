@@ -201,6 +201,7 @@ diesel::table! {
         position -> BigInt,
         public_id -> Uuid,
         type_id -> BigInt,
+        max_guests -> BigInt,
     }
 }
 
@@ -212,6 +213,7 @@ diesel::table! {
         membership_id -> BigInt,
         state -> Text,
         created_at -> Timestamptz,
+        guests -> BigInt,
     }
 }
 
@@ -455,6 +457,7 @@ diesel::table! {
         position -> BigInt,
         capacity -> Nullable<BigInt>,
         role_id -> Nullable<BigInt>,
+        max_guests -> BigInt,
     }
 }
 
@@ -466,6 +469,7 @@ diesel::table! {
         position -> BigInt,
         capacity -> Nullable<BigInt>,
         role_id -> Nullable<BigInt>,
+        max_guests -> BigInt,
     }
 }
 

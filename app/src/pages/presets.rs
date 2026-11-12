@@ -67,6 +67,9 @@ fn preset_card(preset: dto::Preset, editing: RwSignal<Option<String>>) -> impl I
             if let Some(cap) = opt.capacity {
                 extra.push(format!("{cap} spots"));
             }
+            if opt.max_guests > 0 {
+                extra.push(format!("+{} guests", opt.max_guests));
+            }
             if opt.role_id.is_some() {
                 extra.push("role only".to_string());
             }
@@ -167,6 +170,7 @@ fn PresetForm(
                 emoji: item.emoji,
                 attending: item.attending,
                 capacity: None,
+                max_guests: 0,
                 role_id: None,
             }));
         }
@@ -182,6 +186,7 @@ fn PresetForm(
                     <span></span>
                     <span role="columnheader">"Type"</span>
                     <span role="columnheader" title="How many people can pick it. Empty means no limit.">"Capacity"</span>
+                    <span role="columnheader" title="How many guests each person may bring, with its own +X button on Discord. Empty lets none.">"Guests each"</span>
                     <span role="columnheader">"Who can pick"</span>
                     <span></span>
                 </div>
@@ -315,6 +320,13 @@ fn PresetTypeRow(rows: Rows, type_id: String) -> impl IntoView {
                 on:change=move |ev| {
                     let value = event_target_value(&ev).trim().parse::<i64>().ok();
                     key.with_value(|key| rows.change(key, |opt| opt.capacity = value));
+                }/>
+            <input role="cell" type="number" min="0" max="10" inputmode="numeric" placeholder="None"
+                aria-label=move || format!("Guests each person may bring to {}", label())
+                prop:value=move || row.with(|row| row.as_ref().map(|opt| opt.max_guests).filter(|n| *n > 0).map(|n| n.to_string()).unwrap_or_default())
+                on:change=move |ev| {
+                    let value = event_target_value(&ev).trim().parse::<i64>().unwrap_or(0).clamp(0, 10);
+                    key.with_value(|key| rows.change(key, |opt| opt.max_guests = value));
                 }/>
             <span role="cell">
                 <Choice options=role_choices chosen=role placeholder="Anyone" none="Anyone"
