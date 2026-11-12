@@ -1045,6 +1045,23 @@ fn align_schedule(
     Ok(jobs)
 }
 
+/// Moves one routine on to `now`: opens or locks its poll, lapses an
+/// approval, and starts next week's poll when it is time.
+pub(super) fn kick(conn: &mut Connection, routine_id: i64, now: DateTime<Utc>) -> Result<Vec<DiscordJob>, OpError> {
+    progress_one(conn, routine_id, now)
+}
+
+/// When this week's poll window closes, after which next week's poll starts.
+pub(super) fn window_end(conn: &mut Connection, routine_id: i64, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, OpError> {
+    let Some(routine) = load_routine(conn, routine_id)? else {
+        return Ok(None);
+    };
+    let tz = clock::zone(&must_guild(conn, routine.guild_id)?.timezone)?;
+    Ok(Some(
+        window(now, tz, routine.poll_weekday, routine.poll_minutes, routine.lock_weekday, routine.lock_minutes).1,
+    ))
+}
+
 fn progress_one(
     conn: &mut Connection,
     routine_id: i64,
@@ -2073,6 +2090,37 @@ mod tests {
         maintain(&mut conn, 1, at(2026, 10, 12, 15, 0)).unwrap();
         maintain(&mut conn, 1, at(2026, 10, 13, 9, 0)).unwrap();
         assert_eq!(runs_for(&mut conn, id).unwrap().len(), 1, "no second poll for the same week");
+    }
+
+    #[test]
+    fn a_routine_moves_on_by_its_tasks_alone() {
+        let mut conn = world();
+        let id = approved_routine(&mut conn);
+        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+        cast_run(&mut conn, run, 2, 4).unwrap();
+
+        crate::logic::tick(&mut conn, at(2026, 10, 13, 17, 59)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "open", "not before the lock");
+        crate::logic::tick(&mut conn, at(2026, 10, 13, 18, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "approval");
+        let next: DateTime<Utc> = schema::tasks::table
+            .filter(schema::tasks::kind.eq("routine"))
+            .filter(schema::tasks::subject_id.eq(id))
+            .select(schema::tasks::run_at)
+            .first(&mut conn)
+            .unwrap();
+        assert_eq!(next, at(2026, 10, 13, 19, 0), "the hourly check comes before the lapse");
+
+        crate::logic::tick(&mut conn, at(2026, 10, 15, 23, 59)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "approval");
+        crate::logic::tick(&mut conn, at(2026, 10, 16, 0, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, run).unwrap().status, "expired", "lapses as Friday begins");
+        let runs = runs_for(&mut conn, id).unwrap();
+        assert_eq!(runs.len(), 2, "next week's poll is on its way");
+        assert_eq!((runs[1].status.as_str(), runs[1].opens_at), ("scheduled", at(2026, 10, 18, 10, 0)));
+
+        crate::logic::tick(&mut conn, at(2026, 10, 18, 10, 0)).unwrap();
+        assert_eq!(must_run(&mut conn, runs[1].id).unwrap().status, "open", "and opens on time");
     }
 
     #[test]

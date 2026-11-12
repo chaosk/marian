@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use diesel::prelude::*;
 
-use super::db::{log, must_event, must_guild, must_membership};
+use super::db::{log, must_guild, must_membership};
 use super::lifecycle::archive_tx;
 use super::model::*;
 use super::series::{fill_series, mark_posted};
@@ -24,182 +24,181 @@ struct NewThreadMessage<'a> {
     created_at: DateTime<Utc>,
 }
 
+/// Brings everything up to `now`: moves the tasks for whatever changed, then
+/// runs every task that is due, until nothing is left. The worker does the
+/// same a step at a time; tests and catch-up use this.
 pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpError> {
-    let mut report = TickReport {
+    super::schedule::catch_up(conn, now)
+}
+
+fn empty_report() -> TickReport {
+    TickReport {
         notes: Vec::new(),
         jobs: Vec::new(),
         guilds: Vec::new(),
+    }
+}
+
+/// Posts a scheduled event whose time has come, or counts a failed try when
+/// its channel is gone.
+pub(super) fn post_one(conn: &mut Connection, event_id: i64, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    let mut report = empty_report();
+    let Some(event) = store::event(conn, event_id)? else {
+        return Ok(report);
     };
-    let guilds = store::list_guilds(conn)?;
-    for guild in guilds {
-        let piece = store::with_tx(conn, |tx| tick_guild(tx, guild.id, now))?;
-        if !piece.notes.is_empty() || !piece.jobs.is_empty() {
-            report.guilds.push(guild.id);
+    if event.status != "scheduled" || event.post_attempts >= 3 || event.post_at.is_none_or(|at| at > now) {
+        return Ok(report);
+    }
+    if store::channel(conn, event.channel_id)?.is_none() {
+        fail_post(conn, &event)?;
+        report.notes.push(format!("Post failed for {}", event.title));
+    } else {
+        mark_posted(conn, event.id, now)?;
+        report.jobs.push(DiscordJob::sync(event.id));
+        report.jobs.push(DiscordJob::attend(event.id));
+        report.notes.push(format!("Posted {}", event.title));
+    }
+    report.guilds.push(event.guild_id);
+    Ok(report)
+}
+
+/// Sends one reminder that is due, or notes that it came too late or had
+/// nobody to ping.
+pub(super) fn remind_one(conn: &mut Connection, reminder_id: i64, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    let mut report = empty_report();
+    let Some((rem, event)) = schema::reminders::table
+        .find(reminder_id)
+        .inner_join(schema::events::table)
+        .select((store::Reminder::as_select(), Event::as_select()))
+        .first::<(store::Reminder, Event)>(conn)
+        .optional()?
+    else {
+        return Ok(report);
+    };
+    if rem.sent_at.is_some() || event.status != "posted" {
+        return Ok(report);
+    }
+    let start = event.starts_at;
+    let due = start - Duration::minutes(rem.offset_minutes);
+    if now < due {
+        return Ok(report);
+    }
+    let guild_id = event.guild_id;
+    report.guilds.push(guild_id);
+    diesel::update(schema::reminders::table.filter(schema::reminders::id.eq(rem.id)))
+        .set(schema::reminders::sent_at.eq(now))
+        .execute(conn)?;
+    if now > start + Duration::minutes(30) {
+        let note = format!("Missed the reminder window for {}.", event.title);
+        log(conn, guild_id, Some(event.id), &note)?;
+        report.notes.push(note);
+        return Ok(report);
+    }
+    let settings = store::settings(conn, guild_id)?;
+    let posted = [event.clone()];
+    let options = store::options_by_event(conn, &posted)?.remove(0);
+    let signups = store::signups_by_event(conn, &posted)?.remove(0);
+    let mut people = None;
+    let cached = guild_people(conn, guild_id, &mut people)?;
+    match reminder_text(conn, cached, &options, &signups)? {
+        Some(text) => {
+            let place = if event.thread_enabled && settings.thread_reminders {
+                "thread"
+            } else {
+                "channel"
+            };
+            let mut body = format!(
+                "{text}\nREMINDER: {} starts in {}.",
+                event.title,
+                clock::human_offset(rem.offset_minutes)
+            );
+            if !rem.message.trim().is_empty() {
+                body.push('\n');
+                body.push_str(rem.message.trim());
+            }
+            diesel::insert_into(schema::thread_messages::table)
+                .values(&NewThreadMessage {
+                    event_id: event.id,
+                    body: &body,
+                    place,
+                    created_at: now,
+                })
+                .execute(conn)?;
+            let note = format!(
+                "Reminder sent for {}: {} before.",
+                event.title,
+                clock::human_offset(rem.offset_minutes)
+            );
+            log(conn, guild_id, Some(event.id), &note)?;
+            report.jobs.push(DiscordJob::remind(event.id, text, rem.message.clone()));
+            report.notes.push(note);
         }
-        report.notes.extend(piece.notes);
-        report.jobs.extend(piece.jobs);
+        None => {
+            let note = format!(
+                "Skipped the {} reminder for {} — nobody to ping.",
+                clock::human_offset(rem.offset_minutes),
+                event.title
+            );
+            log(conn, guild_id, Some(event.id), &note)?;
+            report.notes.push(note);
+        }
     }
     Ok(report)
 }
 
-fn tick_guild(
-    conn: &mut Connection,
-    guild_id: i64,
-    now: DateTime<Utc>,
-) -> Result<TickReport, OpError> {
-    let mut report = TickReport {
-        notes: Vec::new(),
-        jobs: Vec::new(),
-        guilds: Vec::new(),
+/// Closes signups once an event's cutoff passes.
+pub(super) fn close_one(conn: &mut Connection, event_id: i64, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    let mut report = empty_report();
+    let Some(event) = store::event(conn, event_id)? else {
+        return Ok(report);
     };
-    let settings = store::settings(conn, guild_id)?;
+    if event.status != "posted" || event.signups_closed || !cutoff_passed(&event, now) {
+        return Ok(report);
+    }
+    diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+        .set((
+            schema::events::signups_closed.eq(true),
+            schema::events::updated_at.eq(now),
+        ))
+        .execute(conn)?;
+    let note = format!("Signups for {} are closed.", event.title);
+    log(conn, event.guild_id, Some(event.id), &note)?;
+    report.notes.push(note);
+    report.jobs.push(DiscordJob::sync(event.id));
+    report.jobs.push(DiscordJob::attend(event.id));
+    report.guilds.push(event.guild_id);
+    Ok(report)
+}
+
+/// When a posted event is archived, if the server archives on its own.
+pub(super) fn archive_at(event: &Event, settings: &store::Settings) -> Option<DateTime<Utc>> {
+    settings.auto_archive.then(|| {
+        event.starts_at + Duration::minutes(event.duration_minutes) + Duration::hours(settings.auto_archive_hours)
+    })
+}
+
+/// Archives a posted event once it has ended and the server's wait has passed.
+pub(super) fn archive_one(conn: &mut Connection, event_id: i64, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    let mut report = empty_report();
+    let Some(event) = store::event(conn, event_id)? else {
+        return Ok(report);
+    };
+    let settings = store::settings(conn, event.guild_id)?;
+    if event.status != "posted" || archive_at(&event, &settings).is_none_or(|at| now < at) {
+        return Ok(report);
+    }
+    archive_tx(conn, &event)?;
+    report.jobs.push(DiscordJob::sync(event.id));
+    report.jobs.push(DiscordJob::attend(event.id));
+    report.notes.push(format!("Archived {}", event.title));
+    report.guilds.push(event.guild_id);
+    Ok(report)
+}
+
+/// Adds the next dates of a server's active series.
+pub(super) fn fill_guild(conn: &mut Connection, guild_id: i64, now: DateTime<Utc>) -> Result<(), OpError> {
     let guild = must_guild(conn, guild_id)?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
-    let events = store::list_events(conn, guild_id)?;
-
-    let mut posted_this_pass = 0;
-    for event in &events {
-        if posted_this_pass >= 3 {
-            break;
-        }
-        if event.status != "scheduled" || event.post_attempts >= 3 {
-            continue;
-        }
-        let Some(post_at) = event.post_at else {
-            continue;
-        };
-        if post_at > now {
-            continue;
-        }
-        if store::channel(conn, event.channel_id)?.is_none() {
-            fail_post(conn, event)?;
-            report
-                .notes
-                .push(format!("Post failed for {}", event.title));
-        } else {
-            mark_posted(conn, event.id, now)?;
-            report.jobs.push(DiscordJob::sync(event.id));
-            report.jobs.push(DiscordJob::attend(event.id));
-            report.notes.push(format!("Posted {}", event.title));
-            posted_this_pass += 1;
-        }
-    }
-
-    report
-        .jobs
-        .extend(super::routine::maintain(conn, guild_id, now)?);
-
-    let mut people = None;
-    let events = store::list_events(conn, guild_id)?;
-    let posted: Vec<Event> = events
-        .iter()
-        .filter(|event| event.status == "posted")
-        .cloned()
-        .collect();
-    let reminder_groups = store::reminders_by_event(conn, &posted)?;
-    let option_groups = store::options_by_event(conn, &posted)?;
-    let signup_groups = store::signups_by_event(conn, &posted)?;
-    for (index, event) in posted.iter().enumerate() {
-        let start = event.starts_at;
-        for rem in &reminder_groups[index] {
-            if rem.sent_at.is_some() {
-                continue;
-            }
-            let due = start - Duration::minutes(rem.offset_minutes);
-            if now < due {
-                continue;
-            }
-            diesel::update(schema::reminders::table.filter(schema::reminders::id.eq(rem.id)))
-                .set(schema::reminders::sent_at.eq(now))
-                .execute(conn)?;
-            if now > start + Duration::minutes(30) {
-                let note = format!("Missed the reminder window for {}.", event.title);
-                log(conn, guild_id, Some(event.id), &note)?;
-                report.notes.push(note);
-                continue;
-            }
-            let cached = guild_people(conn, guild_id, &mut people)?;
-            let text = reminder_text(
-                conn,
-                cached,
-                &option_groups[index],
-                &signup_groups[index],
-            )?;
-            match text {
-                Some(text) => {
-                    let place = if event.thread_enabled && settings.thread_reminders {
-                        "thread"
-                    } else {
-                        "channel"
-                    };
-                    let mut body = format!(
-                        "{text}\nREMINDER: {} starts in {}.",
-                        event.title,
-                        clock::human_offset(rem.offset_minutes)
-                    );
-                    if !rem.message.trim().is_empty() {
-                        body.push('\n');
-                        body.push_str(rem.message.trim());
-                    }
-                    diesel::insert_into(schema::thread_messages::table)
-                        .values(&NewThreadMessage {
-                            event_id: event.id,
-                            body: &body,
-                            place,
-                            created_at: now,
-                        })
-                        .execute(conn)?;
-                    let note = format!(
-                        "Reminder sent for {}: {} before.",
-                        event.title,
-                        clock::human_offset(rem.offset_minutes)
-                    );
-                    log(conn, guild_id, Some(event.id), &note)?;
-                    report.jobs.push(DiscordJob::remind(
-                        event.id,
-                        text,
-                        rem.message.clone(),
-                    ));
-                    report.notes.push(note);
-                }
-                None => {
-                    let note = format!(
-                        "Skipped the {} reminder for {} — nobody to ping.",
-                        clock::human_offset(rem.offset_minutes),
-                        event.title
-                    );
-                    log(conn, guild_id, Some(event.id), &note)?;
-                    report.notes.push(note);
-                }
-            }
-        }
-        if !event.signups_closed && cutoff_passed(event, now) {
-            diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
-                .set((
-                    schema::events::signups_closed.eq(true),
-                    schema::events::updated_at.eq(now),
-                ))
-                .execute(conn)?;
-            let note = format!("Signups for {} are closed.", event.title);
-            log(conn, guild_id, Some(event.id), &note)?;
-            report.notes.push(note);
-            report.jobs.push(DiscordJob::sync(event.id));
-            report.jobs.push(DiscordJob::attend(event.id));
-        }
-        if settings.auto_archive {
-            let end = start + Duration::minutes(event.duration_minutes);
-            if now >= end + Duration::hours(settings.auto_archive_hours) {
-                let fresh = must_event(conn, event.id)?;
-                if fresh.status == "posted" {
-                    archive_tx(conn, &fresh)?;
-                    report.jobs.push(DiscordJob::sync(event.id));
-                    report.jobs.push(DiscordJob::attend(event.id));
-                    report.notes.push(format!("Archived {}", event.title));
-                }
-            }
-        }
-    }
-
     let dates = grouped(store::events_in_active_series(conn, guild_id)?, |event| {
         event.series_id.unwrap_or(0)
     });
@@ -209,40 +208,57 @@ fn tick_guild(
             fill_series(conn, &series, existing, tz, now)?;
         }
     }
+    Ok(())
+}
 
-    if settings.digest == "daily" || settings.digest == "weekly" {
-        let local = now.with_timezone(&tz);
-        let due_day = settings.digest == "daily" || local.weekday() == chrono::Weekday::Mon;
-        if due_day && local.time().hour() >= 9 {
-            let key = format!("digest:{guild_id}:{}", local.date_naive());
-            if store::meta(conn, &key)?.is_none() {
-                let events = store::list_events(conn, guild_id)?;
-                let mut names = Vec::new();
-                for event in &events {
-                    if event.status != "posted" {
-                        continue;
-                    }
-                    let start = event.starts_at;
-                    if start.with_timezone(&tz).date_naive() == local.date_naive() {
-                        names.push(format!(
-                            "{} at {}",
-                            event.title,
-                            clock::format_clock(start.with_timezone(&tz), settings.hour_24)
-                        ));
-                    }
-                }
-                let note = if names.is_empty() {
-                    "Daily digest: nothing scheduled today.".to_string()
-                } else {
-                    format!("Daily digest: {}.", names.join(", "))
-                };
-                log(conn, guild_id, None, &note)?;
-                store::set_meta(conn, &key, "1")?;
-                report.notes.push(note);
-            }
+/// Whether a server's digest goes out on `local`'s day.
+pub(super) fn digest_day(digest: &str, local: DateTime<Tz>) -> bool {
+    digest == "daily" || (digest == "weekly" && local.weekday() == chrono::Weekday::Mon)
+}
+
+/// The day's digest, once a day from 9:00 in the server's zone.
+pub(super) fn digest_one(conn: &mut Connection, guild_id: i64, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    let mut report = empty_report();
+    let settings = store::settings(conn, guild_id)?;
+    let guild = must_guild(conn, guild_id)?;
+    let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
+    let local = now.with_timezone(&tz);
+    if !digest_day(&settings.digest, local) || local.time().hour() < 9 {
+        return Ok(report);
+    }
+    let key = digest_key(guild_id, local.date_naive());
+    if store::meta(conn, &key)?.is_some() {
+        return Ok(report);
+    }
+    let mut names = Vec::new();
+    for event in store::list_events(conn, guild_id)? {
+        if event.status != "posted" {
+            continue;
+        }
+        let start = event.starts_at;
+        if start.with_timezone(&tz).date_naive() == local.date_naive() {
+            names.push(format!(
+                "{} at {}",
+                event.title,
+                clock::format_clock(start.with_timezone(&tz), settings.hour_24)
+            ));
         }
     }
+    let note = if names.is_empty() {
+        "Daily digest: nothing scheduled today.".to_string()
+    } else {
+        format!("Daily digest: {}.", names.join(", "))
+    };
+    log(conn, guild_id, None, &note)?;
+    store::set_meta(conn, &key, "1")?;
+    report.notes.push(note);
+    report.guilds.push(guild_id);
     Ok(report)
+}
+
+/// The key that marks a server's digest for a day as sent.
+pub(super) fn digest_key(guild_id: i64, day: chrono::NaiveDate) -> String {
+    format!("digest:{guild_id}:{day}")
 }
 
 fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {

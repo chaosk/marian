@@ -429,6 +429,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    tasks (id) {
+        id -> BigInt,
+        kind -> Text,
+        subject_id -> BigInt,
+        run_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    task_marks (kind, subject_id) {
+        kind -> Text,
+        subject_id -> BigInt,
+    }
+}
+
+diesel::table! {
     routine_steps (id) {
         id -> BigInt,
         routine_id -> BigInt,
@@ -557,6 +573,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     roles,
     routine_runs,
     routine_steps,
+    task_marks,
+    tasks,
     routine_votes,
     routines,
     series,
@@ -576,3 +594,4 @@ diesel::allow_tables_to_appear_in_same_query!(
 use diesel::sql_types::Text;
 
 diesel::define_sql_function!(fn lower(value: Text) -> Text);
+diesel::define_sql_function!(fn least(a: diesel::sql_types::Timestamptz, b: diesel::sql_types::Timestamptz) -> diesel::sql_types::Timestamptz);
