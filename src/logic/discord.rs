@@ -341,20 +341,6 @@ pub fn discord_view(
             });
         }
     }
-    buttons.push(DiscordButton {
-        role: ButtonRole::Edit,
-        label: tr!(lang, "post-edit"),
-        emoji: String::new(),
-        tone: ButtonTone::Primary,
-        disabled: false,
-    });
-    buttons.push(DiscordButton {
-        role: ButtonRole::Delete,
-        label: tr!(lang, "post-delete"),
-        emoji: String::new(),
-        tone: ButtonTone::Danger,
-        disabled: false,
-    });
     if finished {
         buttons.clear();
     }
@@ -1178,7 +1164,7 @@ mod tests {
         assert_eq!(view.fields[0].value, "Nell\nJune");
         assert_eq!(view.fields[1].name, "❌ **Declined** (0)");
         assert_eq!(view.fields[1].value, "1 waiting");
-        assert_eq!(view.buttons.len(), 4);
+        assert_eq!(view.buttons.len(), 2);
         assert!(!view.mention_everyone);
         assert!(view.mention_roles.is_empty());
     }
@@ -1264,7 +1250,7 @@ mod tests {
         let roles: Vec<&ButtonRole> = view.buttons.iter().map(|button| &button.role).collect();
         assert!(matches!(
             roles.as_slice(),
-            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_), ButtonRole::Edit, ButtonRole::Delete]
+            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_)]
         ));
         assert_eq!(view.buttons[1].emoji, "✅");
         assert_eq!(view.buttons[1].label, "+X");

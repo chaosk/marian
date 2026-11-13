@@ -1338,8 +1338,6 @@ fn action_button(event: uuid::Uuid, button: &logic::DiscordButton) -> serenity::
     let custom_id = match button.role {
         logic::ButtonRole::Signup(option) => format!("marian:{event}:{option}"),
         logic::ButtonRole::Guests(option) => format!("marian:{event}:{option}:g"),
-        logic::ButtonRole::Edit => format!("marian:{event}:edit"),
-        logic::ButtonRole::Delete => format!("marian:{event}:delete"),
     };
     let style = match button.tone {
         logic::ButtonTone::Secondary => serenity::ButtonStyle::Secondary,
@@ -1384,6 +1382,8 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
     }
     let event = uuid::Uuid::parse_str(head).ok()?;
     match parts.next()? {
+        // Posts no longer carry Edit and Delete, but ones sent before still
+        // do until they're next redrawn.
         "edit" => Some(ButtonAction::Edit { event }),
         "delete" => Some(ButtonAction::Delete { event }),
         "confirm-delete" => Some(ButtonAction::ConfirmDelete { event }),

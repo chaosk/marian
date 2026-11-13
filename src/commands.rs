@@ -2682,7 +2682,6 @@ mod tests {
         assert!(view.body.contains("**Czas**"), "{}", view.body);
         assert!(view.body.contains("[Zobacz w przeglądarce]("), "{}", view.body);
         assert_eq!(view.footer, "Utworzone przez Nell");
-        assert!(view.buttons.iter().any(|button| button.label == "Edytuj"));
 
         let mut sent = posted;
         link_created_event(&mut sent, "https://discord.com/channels/4242/99/555");
@@ -2815,11 +2814,8 @@ mod tests {
                 && button.emoji == "✅"
                 && button.tone == logic::ButtonTone::Secondary
         }));
-        assert!(view.buttons.iter().any(|button| {
-            button.role == logic::ButtonRole::Edit && button.tone == logic::ButtonTone::Primary
-        }));
-        assert!(view.buttons.iter().any(|button| {
-            button.role == logic::ButtonRole::Delete && button.tone == logic::ButtonTone::Danger
+        assert!(view.buttons.iter().all(|button| {
+            matches!(button.role, logic::ButtonRole::Signup(_) | logic::ButtonRole::Guests(_))
         }));
         assert_eq!(
             posted[1].title.as_deref(),
