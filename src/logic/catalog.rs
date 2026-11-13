@@ -102,12 +102,14 @@ struct NewChannel<'a> {
     position: i64,
 }
 
+/// A channel's name as Discord writes it: lower case, with a dash for each run
+/// of spaces and ASCII punctuation. Letters like "ę", and emoji, stay.
 pub fn slug_channel(name: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
     for ch in name.trim().trim_start_matches('#').chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
+        if ch.is_alphanumeric() || !(ch.is_ascii() || ch.is_whitespace()) {
+            out.extend(ch.to_lowercase());
             dash = false;
         } else if !dash && !out.is_empty() {
             out.push('-');

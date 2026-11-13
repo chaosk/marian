@@ -1050,6 +1050,17 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_keeps_letters_and_emoji_outside_ascii() {
+        let mut conn = one_channel();
+        let channel = sync_discord_channel(&mut conn, 1, "100", "wybierz-rolę").unwrap();
+        assert_eq!((channel.id, channel.name.as_str()), (41, "wybierz-rolę"));
+
+        let emoji = sync_discord_channel(&mut conn, 1, "200", "📢┃Ogłoszenia").unwrap();
+        assert_eq!(emoji.name, "📢┃ogłoszenia");
+        assert_eq!(slug_channel("#Gry i zabawy!"), "gry-i-zabawy");
+    }
+
+    #[test]
     fn a_deleted_channel_leaves_the_list_and_frees_its_name() {
         let mut conn = one_channel();
         discord_channel_gone(&mut conn, 1, "100").unwrap();
