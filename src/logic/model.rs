@@ -141,8 +141,6 @@ pub enum ButtonRole {
     Signup(uuid::Uuid),
     /// The same option with guests: opens a form asking how many.
     Guests(uuid::Uuid),
-    Edit,
-    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
