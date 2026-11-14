@@ -101,6 +101,7 @@ diesel::table! {
         reminders_enabled -> Bool,
         server_manager -> Bool,
         public_id -> Uuid,
+        avatar -> Nullable<Text>,
     }
 }
 

@@ -78,6 +78,9 @@ pub struct Google {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Membership {
     pub name: String,
+    /// Their Discord picture's URL, if they have one.
+    #[serde(default)]
+    pub avatar: Option<String>,
     pub server_manager: bool,
     pub reminders_enabled: bool,
     pub calendar_url: String,
@@ -97,6 +100,9 @@ pub struct Member {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// Their Discord picture's URL; without one, show their initial on `color`.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -334,6 +340,9 @@ pub struct Person {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// Their Discord picture's URL; without one, show their initial on `color`.
+    #[serde(default)]
+    pub avatar: Option<String>,
     /// Guests they bring on this option.
     #[serde(default)]
     pub guests: i64,

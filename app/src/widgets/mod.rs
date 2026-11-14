@@ -571,6 +571,27 @@ fn membership_said(change: &dto::MembershipPatch) -> String {
     "Saved.".into()
 }
 
+/// A member's Discord picture, or their initial on their colour when they have
+/// none or it won't load (an old URL after they change it, until the next
+/// refetch). Decorative: their name always sits beside it.
+#[component]
+pub fn Avatar(name: String, color: String, avatar: Option<String>, #[prop(optional)] small: bool) -> impl IntoView {
+    let class = if small { "avatar small" } else { "avatar" };
+    let broken = RwSignal::new(false);
+    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+    move || match avatar.clone().filter(|_| !broken.get()) {
+        Some(url) => view! {
+            <img class=class src=url alt="" aria-hidden="true" loading="lazy" decoding="async"
+                referrerpolicy="no-referrer" on:error=move |_| broken.set(true)/>
+        }
+        .into_any(),
+        None => view! {
+            <span class=class style=format!("background: {color}") aria-hidden="true">{initial.clone()}</span>
+        }
+        .into_any(),
+    }
+}
+
 /// The signed-in person's menu: reminders, Google Calendar, the feed, and sign out.
 #[component]
 pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
@@ -653,6 +674,9 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
     view! {
         <details class="switcher account-menu">
             <summary>
+                {membership.avatar.clone().map(|url| view! {
+                    <img class="avatar small" src=url alt="" aria-hidden="true" referrerpolicy="no-referrer"/>
+                })}
                 <strong>{membership.name}</strong>
                 <span class="switcher-chevron" aria-hidden="true"></span>
             </summary>

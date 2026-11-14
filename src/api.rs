@@ -262,6 +262,7 @@ pub fn membership(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Members
     let token = store::ensure_calendar_token(conn, user.user_id)?;
     Ok(dto::Membership {
         name: user.name,
+        avatar: user.avatar,
         server_manager: user.server_manager,
         reminders_enabled: user.reminders_enabled,
         calendar_url: format!("/calendar/{token}.ics"),
@@ -419,8 +420,17 @@ pub fn members(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Member
             id: person.public_id.to_string(),
             name: person.name,
             color: person.color,
+            avatar: person.avatar,
         })
         .collect())
+}
+
+/// Someone a search of the Discord server found: their Discord id, the name
+/// and the picture they show there.
+pub struct FoundMember {
+    pub discord_id: String,
+    pub name: String,
+    pub avatar: Option<String>,
 }
 
 /// People found in the Discord server, as members here. Anyone new gets the
@@ -429,17 +439,19 @@ pub fn members(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Member
 pub fn remember_members(
     conn: &mut Connection,
     viewer: &Viewer,
-    found: &[(String, String)],
+    found: &[FoundMember],
 ) -> Result<(Vec<dto::Member>, Vec<i64>), OpError> {
     let mut members = Vec::new();
     let mut redraw = Vec::new();
-    for (discord_id, name) in found {
-        let (person, renamed) = logic::ensure_discord_user(conn, viewer.guild_id, discord_id, name)?;
+    for found in found {
+        let (person, renamed) = logic::ensure_discord_user(conn, viewer.guild_id, &found.discord_id, &found.name)?;
         redraw.extend(renamed);
+        logic::follow_discord_avatar(conn, &person, found.avatar.as_deref())?;
         members.push(dto::Member {
             id: person.public_id.to_string(),
             name: person.name,
             color: person.color,
+            avatar: found.avatar.clone(),
         });
     }
     Ok((members, redraw))
@@ -740,6 +752,7 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
                 id: p.public_id.to_string(),
                 name: p.name.clone(),
                 color: p.color.clone(),
+                avatar: p.avatar.clone(),
                 guests,
             })
             .collect()

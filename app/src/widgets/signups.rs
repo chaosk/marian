@@ -489,7 +489,10 @@ fn person_row(panel: Panel, option: String, person: dto::Person, waiting: bool, 
     });
     view! {
         <div class="person">
-            <span>{label}</span>
+            <span class="person-name">
+                <super::Avatar name=person.name.clone() color=person.color.clone() avatar=person.avatar.clone() small=true/>
+                <span>{label}</span>
+            </span>
             {stepper}
         </div>
     }
@@ -949,6 +952,7 @@ fn people(panel: Panel) -> Vec<dto::Person> {
             id: member.id.clone(),
             name: member.name.clone(),
             color: member.color.clone(),
+            avatar: member.avatar.clone(),
             guests: 0,
         }));
     });
@@ -1040,6 +1044,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
                             id: member.id,
                             name: member.name,
                             color: member.color,
+                            avatar: member.avatar,
                             guests: 0,
                         })
                         .collect();
@@ -1136,12 +1141,11 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
                             .map(|(_, name)| name.as_str())
                             .collect();
                         let toggle = toggle.clone();
-                        let initial = person.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                         view! {
                             <button type="button" class="pick-row" role="option"
                                 aria-selected=if on { "true" } else { "false" }
                                 on:click=move |_| toggle(id.clone())>
-                                <span class="avatar" style=format!("background: {}", person.color) aria-hidden="true">{initial}</span>
+                                <super::Avatar name=person.name.clone() color=person.color.clone() avatar=person.avatar.clone()/>
                                 <span class="pick-name">{person.name.clone()}</span>
                                 {(!on && !elsewhere.is_empty()).then(|| view! { <span class="pick-note">{elsewhere.join(", ")}</span> })}
                                 {on.then(|| view! {

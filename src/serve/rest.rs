@@ -297,14 +297,16 @@ async fn search_members(
 }
 
 /// Asks Discord for up to 25 people in the server whose username or nickname
-/// starts with `needle`. Bots are left out. Pairs are Discord id and name.
-async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<Vec<(String, String)>, Problem> {
+/// starts with `needle`. Bots are left out.
+async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<Vec<api::FoundMember>, Problem> {
     #[derive(Deserialize)]
     struct User {
         id: String,
         username: String,
         #[serde(default)]
         global_name: Option<String>,
+        #[serde(default)]
+        avatar: Option<String>,
         #[serde(default)]
         bot: bool,
     }
@@ -313,6 +315,8 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
         user: User,
         #[serde(default)]
         nick: Option<String>,
+        #[serde(default)]
+        avatar: Option<String>,
     }
     let unavailable = || Problem(StatusCode::BAD_GATEWAY, "Discord didn't answer the search. Try again.".into());
     let request = state
@@ -338,7 +342,13 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
                 found.user.global_name.as_deref(),
                 &found.user.username,
             );
-            (found.user.id, name)
+            let avatar =
+                crate::auth::discord_avatar_url(server, &found.user.id, found.avatar.as_deref(), found.user.avatar.as_deref());
+            api::FoundMember {
+                discord_id: found.user.id,
+                name,
+                avatar,
+            }
         })
         .collect())
 }

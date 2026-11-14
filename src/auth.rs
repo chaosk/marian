@@ -30,6 +30,21 @@ pub fn discord_display_name(nick: Option<&str>, global_name: Option<&str>, usern
     picked.chars().take(80).collect()
 }
 
+/// The picture a person shows in a server, as Discord shows it: their server
+/// avatar, else their account's. `None` for someone with neither, who gets
+/// their initial instead of Discord's stock picture.
+pub fn discord_avatar_url(guild: &str, user: &str, member_hash: Option<&str>, user_hash: Option<&str>) -> Option<String> {
+    const CDN: &str = "https://cdn.discordapp.com";
+    fn clean(hash: Option<&str>) -> Option<&str> {
+        hash.map(str::trim).filter(|hash| !hash.is_empty())
+    }
+    match (clean(member_hash), clean(user_hash)) {
+        (Some(hash), _) => Some(format!("{CDN}/guilds/{guild}/users/{user}/avatars/{hash}.webp?size=64")),
+        (None, Some(hash)) => Some(format!("{CDN}/avatars/{user}/{hash}.webp?size=64")),
+        (None, None) => None,
+    }
+}
+
 /// Owner, Administrator, or Manage Server on the guild list Discord returns at sign-in.
 pub fn manages_guild(owner: bool, permissions: &str) -> bool {
     owner || permissions.parse::<u64>().is_ok_and(manages)
@@ -206,6 +221,19 @@ fn personal_calendar(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_avatar_comes_before_the_account_one() {
+        assert_eq!(
+            discord_avatar_url("1", "2", Some("abc"), Some("def")).as_deref(),
+            Some("https://cdn.discordapp.com/guilds/1/users/2/avatars/abc.webp?size=64")
+        );
+        assert_eq!(
+            discord_avatar_url("1", "2", None, Some("def")).as_deref(),
+            Some("https://cdn.discordapp.com/avatars/2/def.webp?size=64")
+        );
+        assert_eq!(discord_avatar_url("1", "2", Some(" "), None), None);
+    }
 
     #[test]
     fn next_stays_on_this_site() {
