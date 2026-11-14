@@ -88,6 +88,7 @@ async fn job_loop(
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
 ) {
+    JOB_METRICS.report_zeros();
     while let Some(job) = jobs.recv().await {
         JOB_METRICS.waiting.record(jobs.len() as u64, &[]);
         // While the gateway reconnects, the job waits for it without spending
@@ -147,9 +148,16 @@ struct JobMetrics {
     retrying: UpDownCounter<i64>,
 }
 
-static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
-    let meter = opentelemetry::global::meter("marian");
-    JobMetrics {
+static JOB_METRICS: LazyLock<JobMetrics> =
+    LazyLock::new(|| JobMetrics::new(&opentelemetry::global::meter("marian")));
+
+/// Every `kind` a job can have, as `job_kind` names them.
+const JOB_KINDS: [&str; 5] = ["sync", "remind", "attend", "routine", "commands"];
+const JOB_OUTCOMES: [&str; 3] = ["done", "failed", "dropped"];
+
+impl JobMetrics {
+    fn new(meter: &opentelemetry::metrics::Meter) -> Self {
+        Self {
         runs: meter
             .u64_counter("marian.discord.jobs")
             .with_description("Discord jobs run, by job kind and outcome: done, failed (to be tried again) or dropped.")
@@ -170,8 +178,24 @@ static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
             .i64_up_down_counter("marian.discord.queue.retrying")
             .with_description("Failed Discord jobs waiting out the pause before they go back in the queue.")
             .build(),
+        }
     }
-});
+
+    /// Reports zero for every job count and for the queue at startup. Jobs
+    /// are rare, and a series that first appears with the first job shows
+    /// as "No data" until then, after every restart, and can't be alerted on.
+    /// The duration histogram is left alone: a zero there would be a run.
+    fn report_zeros(&self) {
+        for kind in JOB_KINDS {
+            for outcome in JOB_OUTCOMES {
+                self.runs
+                    .add(0, &[KeyValue::new("kind", kind), KeyValue::new("outcome", outcome)]);
+            }
+        }
+        self.waiting.record(0, &[]);
+        self.retrying.add(0, &[]);
+    }
+}
 
 fn job_kind(job: &DiscordJob) -> (&'static str, i64) {
     match job {
@@ -3730,5 +3754,48 @@ mod tests {
         let polish = dm_blocked(Lang::Pl, true, "https://marian.example.com", Some(4242));
         assert!(polish.starts_with("Nie udało się wysłać wiadomości prywatnej."), "{polish}");
         assert!(polish.ends_with("https://marian.example.com/servers/4242/events/new."), "{polish}");
+    }
+
+    #[test]
+    fn every_job_kind_gets_a_zero_count_at_startup() {
+        use super::{job_kind, DiscordJob, JobMetrics, JOB_KINDS, JOB_OUTCOMES};
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+        for job in [
+            DiscordJob::sync(1),
+            DiscordJob::remind(1, String::new(), String::new()),
+            DiscordJob::attend(1),
+            DiscordJob::routine(1),
+            DiscordJob::commands(1),
+        ] {
+            assert!(JOB_KINDS.contains(&job_kind(&job).0), "{job:?} has a kind outside JOB_KINDS");
+        }
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        JobMetrics::new(&opentelemetry::metrics::MeterProvider::meter(&provider, "marian")).report_zeros();
+        provider.force_flush().unwrap();
+
+        let exported = exporter.get_finished_metrics().unwrap();
+        let metrics: Vec<_> = exported
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        let names: Vec<_> = metrics.iter().map(|metric| metric.name()).collect();
+        assert!(names.contains(&"marian.discord.queue.waiting"), "{names:?}");
+        assert!(names.contains(&"marian.discord.queue.retrying"), "{names:?}");
+        assert!(!names.contains(&"marian.discord.job.duration"), "a zero duration would count as a run");
+
+        let runs = metrics.iter().find(|metric| metric.name() == "marian.discord.jobs").unwrap();
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = runs.data() else {
+            panic!("marian.discord.jobs is not a u64 sum");
+        };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), JOB_KINDS.len() * JOB_OUTCOMES.len());
+        assert!(points.iter().all(|point| point.value() == 0));
     }
 }
