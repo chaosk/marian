@@ -1,7 +1,6 @@
 # Co Marian publikuje na kanałach: wydarzenia, ankiety, przypomnienia.
 post-location = Miejsce
 post-time = Czas
-post-view-on-web = Zobacz w przeglądarce
 post-waiting = { $count ->
     [one] { $count } osoba czeka
     [few] { $count } osoby czekają

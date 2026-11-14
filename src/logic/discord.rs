@@ -260,14 +260,7 @@ pub fn discord_view(
         end.timestamp()
     ));
     let plus = crate::ics::calendar_template(&event)?;
-    let web = web_event_url(public_url, guild.discord_id.as_deref(), &event.public_id);
-    match web.as_deref() {
-        Some(url) => body.push_str(&format!(
-            "[+]({plus}) · [{}]({url})\n",
-            tr!(lang, "post-view-on-web"),
-        )),
-        None => body.push_str(&format!("[+]({plus})\n")),
-    }
+    body.push_str(&format!("[+]({plus})\n"));
     body.push_str(&format!("🕐 <t:{}:R>", start.timestamp()));
     if event.status != "posted" {
         body.push_str(&format!("\n\n_{}_", status_text(lang, &event.status)));
@@ -343,6 +336,17 @@ pub fn discord_view(
     }
     if finished {
         buttons.clear();
+    }
+    // The event's page on the web, after the signup buttons. It's a link, not
+    // an action, so a finished event keeps it.
+    if let Some(url) = web_event_url(public_url, guild.discord_id.as_deref(), &event.public_id) {
+        buttons.push(DiscordButton {
+            role: ButtonRole::Web(url),
+            label: "↗".into(),
+            emoji: String::new(),
+            tone: ButtonTone::Secondary,
+            disabled: false,
+        });
     }
     let mention_roles = mention_discord_roles(conn, &event)?;
     let creator = match event.created_by {
@@ -1270,13 +1274,8 @@ mod tests {
             "{}",
             view.body
         );
-        assert!(
-            view.body.contains(
-                "[View on web](https://marian.example.com/servers/4242/events/01900000-0000-7000-8000-000000000010)"
-            ),
-            "{}",
-            view.body
-        );
+        assert!(view.body.contains("[+](http://www.google.com/calendar/event"), "{}", view.body);
+        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
         assert!(view.body.contains("🕐 <t:"), "{}", view.body);
         assert!(!view.body.contains("**Location**"), "{}", view.body);
         conn.batch_execute("UPDATE events SET location = 'The dock' WHERE id = 1")
@@ -1295,7 +1294,18 @@ mod tests {
         assert_eq!(view.fields[0].value, "Nell\nJune");
         assert_eq!(view.fields[1].name, "❌ **Declined** (0)");
         assert_eq!(view.fields[1].value, "1 waiting");
-        assert_eq!(view.buttons.len(), 2);
+        assert_eq!(view.buttons.len(), 3, "two options and the link to the web");
+        assert_eq!(
+            view.buttons[2].role,
+            ButtonRole::Web("https://marian.example.com/servers/4242/events/01900000-0000-7000-8000-000000000010".into())
+        );
+        conn.batch_execute("UPDATE events SET status = 'archived', discord_message_id = '55' WHERE id = 1").unwrap();
+        let finished = discord_view(&mut conn, 1, "https://marian.example.com").unwrap().unwrap();
+        assert!(
+            matches!(finished.buttons.as_slice(), [DiscordButton { role: ButtonRole::Web(_), .. }]),
+            "a finished event keeps only the link: {:?}",
+            finished.buttons
+        );
         assert!(!view.mention_everyone);
         assert!(view.mention_roles.is_empty());
     }
@@ -1381,7 +1391,7 @@ mod tests {
         let roles: Vec<&ButtonRole> = view.buttons.iter().map(|button| &button.role).collect();
         assert!(matches!(
             roles.as_slice(),
-            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_)]
+            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_), ButtonRole::Web(_)]
         ));
         assert_eq!(view.buttons[1].emoji, "✅");
         assert_eq!(view.buttons[1].label, "+X");

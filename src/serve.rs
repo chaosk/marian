@@ -39,6 +39,8 @@ struct AppState {
     google_client_secret: String,
     bot_token: String,
     member_roles: Arc<Mutex<MemberRoles>>,
+    /// The bot's member list, when it can vouch for members' roles.
+    members: crate::gateway::MemberView,
 }
 
 use crate::api::{cookie, Viewer as Session};
@@ -84,6 +86,7 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         google_client_secret,
         bot_token: token.clone(),
         member_roles: member_roles_cache(),
+        members: crate::gateway::MemberView::default(),
     };
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
@@ -93,7 +96,7 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
             oauth_ready: oauth_ready(&state),
         };
         let app = router(state.clone(), pages(web));
-        crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status);
+        crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status, state.members.clone());
         let db = state.db.clone();
         let discord = state.discord.clone();
         let http = state.http.clone();
@@ -481,6 +484,17 @@ impl MemberRoles {
         self.fetched.insert(member_key(guild, user), now);
     }
 
+    /// Whether this request should ask Discord: the first one in a window
+    /// claims it at once, so the other requests a page fires alongside it, and
+    /// any retry after a failure (a 429 above all), wait for the next window.
+    fn claim(&mut self, guild: &str, user: &str, now: std::time::Instant) -> bool {
+        if self.fresh(guild, user, now) {
+            return false;
+        }
+        self.remember(guild, user, now);
+        true
+    }
+
     fn forget_user(&mut self, user: &str) {
         self.fetched.retain(|(_, id), _| id != user);
     }
@@ -502,12 +516,17 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
     let Some(target) = load_role_target(state, path, headers) else {
         return;
     };
-    if state
+    if !state
         .member_roles
         .lock()
         .expect("member roles")
-        .fresh(&target.guild_discord, &target.user_discord, std::time::Instant::now())
+        .claim(&target.guild_discord, &target.user_discord, std::time::Instant::now())
     {
+        return;
+    }
+    // The bot's member list already has them while the gateway follows members.
+    if let Some(roles) = state.members.roles(&target.guild_discord, &target.user_discord) {
+        store_member_roles(state, &target, &roles);
         return;
     }
     let Some((status, body)) =
@@ -522,15 +541,6 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
         return;
     };
     store_member_roles(state, &target, &roles);
-    state
-        .member_roles
-        .lock()
-        .expect("member roles")
-        .remember(
-            &target.guild_discord,
-            &target.user_discord,
-            std::time::Instant::now(),
-        );
 }
 
 fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
@@ -1701,6 +1711,17 @@ mod tests {
     }
 
     #[test]
+    fn only_the_first_request_in_a_window_asks_discord() {
+        let now = std::time::Instant::now();
+        let mut roles = MemberRoles::default();
+        assert!(roles.claim("99", "42", now), "the first request asks");
+        assert!(!roles.claim("99", "42", now), "a request fired alongside it waits");
+        assert!(!roles.claim("99", "42", now + std::time::Duration::from_secs(29)), "so does a retry");
+        assert!(roles.claim("99", "42", now + MEMBER_ROLES_TTL), "the next window asks again");
+        assert!(roles.claim("7", "42", now), "each server is its own lookup");
+    }
+
+    #[test]
     fn notice_round_trip_and_event_ids() {
         let encoded = percent_encode("Posted Shore supper.");
         assert_eq!(percent_decode(&encoded), "Posted Shore supper.");
@@ -1785,6 +1806,7 @@ mod tests {
             google_client_secret: String::new(),
             bot_token: String::new(),
             member_roles: member_roles_cache(),
+            members: crate::gateway::MemberView::default(),
         };
         let app = router(state, Router::new().nest_service("/pkg", site_files(&dir)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1895,6 +1917,7 @@ mod tests {
             google_client_secret: String::new(),
             bot_token: String::new(),
             member_roles: member_roles_cache(),
+            members: crate::gateway::MemberView::default(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2097,6 +2120,7 @@ mod tests {
             google_client_secret: "google-secret".into(),
             bot_token: String::new(),
             member_roles: member_roles_cache(),
+            members: crate::gateway::MemberView::default(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

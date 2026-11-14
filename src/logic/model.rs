@@ -141,6 +141,8 @@ pub enum ButtonRole {
     Signup(uuid::Uuid),
     /// The same option with guests: opens a form asking how many.
     Guests(uuid::Uuid),
+    /// A link to the event's page on the web.
+    Web(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
