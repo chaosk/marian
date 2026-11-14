@@ -525,7 +525,9 @@ pub fn tally(rows: Vec<TallyRow>) -> impl IntoView {
             let width = if most > 0 { row.votes * 100 / most } else { 0 };
             let line = view! {
                 <span class="tally-day">{row.label}</span>
-                <span class="tally-track"><span class="tally-bar" style=format!("width: {width}%")></span></span>
+                <svg class="tally-track" aria-hidden="true" focusable="false">
+                    <rect class="tally-bar" width=format!("{width}%") height="100%" rx="5"/>
+                </svg>
                 <span class="tally-votes">{row.votes}</span>
             };
             let body = if row.voters.is_empty() {

@@ -65,15 +65,18 @@ fn send_page_policy() {
 
 /// What a page may load. Scripts run only with this response's nonce:
 /// Leptos's hydration loader carries it, and `'strict-dynamic'` lets the code
-/// it imports run, WebAssembly included. Styles may be inline because the app
-/// sets colours in `style` attributes. Pictures come from Discord's CDN.
+/// it imports run, WebAssembly included. Styles come only from stylesheets:
+/// colours are SVG fills (see [`paint`]), never `style` attributes. Under
+/// `cargo leptos watch` the reload script injects styles and opens a websocket.
+/// Pictures come from Discord's CDN.
 #[cfg(feature = "ssr")]
 fn page_policy(nonce: &str, watch: bool) -> String {
     let reload = if watch { " ws: wss:" } else { "" };
+    let inline = if watch { " 'unsafe-inline'" } else { "" };
     [
         "default-src 'self'".to_string(),
         format!("script-src 'nonce-{nonce}' 'strict-dynamic' 'wasm-unsafe-eval'"),
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com".to_string(),
+        format!("style-src 'self'{inline} https://fonts.googleapis.com"),
         "font-src 'self' https://fonts.gstatic.com".to_string(),
         "img-src 'self' data: https://cdn.discordapp.com".to_string(),
         format!("connect-src 'self'{reload}"),
@@ -96,7 +99,10 @@ mod policy_tests {
         assert!(!policy.contains("unsafe-inline' 'nonce") && !policy.contains("script-src 'self'"), "{policy}");
         assert!(policy.contains("connect-src 'self';"), "{policy}");
         assert!(policy.contains("frame-ancestors 'none'"), "{policy}");
-        assert!(page_policy("abc", true).contains("connect-src 'self' ws: wss:;"));
+        assert!(policy.contains("style-src 'self' https://fonts.googleapis.com;"), "no inline styles: {policy}");
+        let watching = page_policy("abc", true);
+        assert!(watching.contains("connect-src 'self' ws: wss:;"));
+        assert!(watching.contains("style-src 'self' 'unsafe-inline' "), "{watching}");
     }
 }
 
@@ -211,8 +217,16 @@ fn status(code: u16) {
     let _ = code;
 }
 
-fn border(color: &str) -> String {
-    format!("border-left-color: {color}")
+/// A colour as an SVG fill that fills whatever holds it: an event's stripe
+/// down the left of its card or row (`class` "stripe"), or the face of a dot,
+/// swatch or avatar ("paint"). SVG attributes aren't styles, so the
+/// Content-Security-Policy needs no inline styles for colours of any value.
+pub(crate) fn paint(class: &'static str, color: String) -> impl IntoView {
+    view! {
+        <svg class=class aria-hidden="true" focusable="false">
+            <rect width="100%" height="100%" fill=color/>
+        </svg>
+    }
 }
 
 fn md(source: &str) -> impl IntoView {

@@ -102,7 +102,7 @@ fn server_picker(me: dto::Me) -> impl IntoView {
     };
     view! {
         <div class="gate">
-            <main class="gate-card" style:visibility=move || if decided.get() { "visible" } else { "hidden" }>
+            <main class="gate-card" class:undecided=move || !decided.get()>
                 <Brand/>
                 <Flash/>
                 <h1>"Pick a server."</h1>

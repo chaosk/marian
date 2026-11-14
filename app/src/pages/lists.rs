@@ -7,7 +7,7 @@ use marian_types as dto;
 use crate::format::{self, clock_of, status_label, window};
 use crate::widgets::Finder;
 use crate::cache::{self, show, when, Ready};
-use crate::{api, base, border, head, query, title, A};
+use crate::{api, base, head, query, title, A};
 
 /// Statuses an event can have, in the order the Status filter lists them.
 const STATUSES: &[&str] = &["draft", "scheduled", "failed", "posted", "archived", "cancelled", "skipped"];
@@ -191,12 +191,12 @@ pub fn AllEvents() -> impl IntoView {
             .cloned()
             .map(|event| {
                 let href = format!("{base}/events/{}", event.id);
-                let style = border(&event.color);
+                let stripe = crate::paint("stripe", event.color.clone());
                 let when = clock.when(event.starts_at);
                 let status = status_label(&event.status);
                 view! {
                     <tr>
-                        <td class="event-title" style=style>
+                        <td class="event-title">{stripe}
                             <A href=href>{event.title}</A>
                         </td>
                         <td class="fit">{when}</td>
@@ -450,12 +450,12 @@ fn event_list(
                 .cloned()
                 .map(|event| {
                     let href = format!("{base}/events/{}", event.id);
-                    let style = border(&event.color);
+                    let stripe = crate::paint("stripe", event.color.clone());
                     let when = clock.when(event.starts_at);
                     let status = status_label(&event.status);
                     view! {
                         <tr>
-                            <td class="event-title" style=style>
+                            <td class="event-title">{stripe}
                                 <A href=href>{event.title}</A>
                             </td>
                             <td class="fit">{when}</td>

@@ -1318,7 +1318,7 @@ pub fn EventColor(key: (String, String), event: dto::Event) -> impl IntoView {
     let face = {
         let color = color.clone();
         move || view! {
-            <span class="color-face"><i class="dot" style=format!("background: {color}")></i>{color_name(&color)}</span>
+            <span class="color-face"><i class="dot">{crate::paint("paint", color.clone())}</i>{color_name(&color)}</span>
         }
     };
     if !editable(&event) {
@@ -1362,11 +1362,10 @@ pub fn EventColor(key: (String, String), event: dto::Event) -> impl IntoView {
                 view! {
                     <button type="button" title=*label aria-label=*label
                         class=move || if chosen.get() == mine { "swatch on" } else { "swatch" }
-                        style=format!("background: {value}")
                         on:click=move |_| {
                             chosen.set(pick.clone());
                             typed.set(pick.clone());
-                        }></button>
+                        }>{crate::paint("paint", value.to_string())}</button>
                 }
             })
             .collect_view()
@@ -1384,7 +1383,11 @@ pub fn EventColor(key: (String, String), event: dto::Event) -> impl IntoView {
                     <p class="popover-title">"Color"</p>
                     <div class="swatches">{swatches}</div>
                     <div class="hex-row">
-                        <span class="swatch-preview" style=move || format!("background: {}", chosen.get())></span>
+                        <span class="swatch-preview">
+                            <svg class="paint" aria-hidden="true" focusable="false">
+                                <rect width="100%" height="100%" fill=move || chosen.get()/>
+                            </svg>
+                        </span>
                         <input class="hex-input" maxlength="7" aria-label="Color code" spellcheck="false"
                             prop:value=move || typed.get()
                             on:input=move |ev| {

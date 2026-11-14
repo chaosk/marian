@@ -239,7 +239,7 @@ pub fn CommandDesk(server: String, log: Vec<dto::CommandLog>) -> impl IntoView {
                 let text = problem.get();
                 (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
             }}
-            <form style="margin-top:12px" on:submit=move |ev| { ev.prevent_default(); send(()); }>
+            <form class="command-form" on:submit=move |ev| { ev.prevent_default(); send(()); }>
                 <label class="field">"Command"
                     <input id="command-line" prop:value=move || line.get() placeholder="/event"
                         on:input=move |ev| line.set(event_target_value(&ev))/>
@@ -586,7 +586,7 @@ pub fn Avatar(name: String, color: String, avatar: Option<String>, #[prop(option
         }
         .into_any(),
         None => view! {
-            <span class=class style=format!("background: {color}") aria-hidden="true">{initial.clone()}</span>
+            <span class=class aria-hidden="true">{crate::paint("paint", color.clone())}{initial.clone()}</span>
         }
         .into_any(),
     }

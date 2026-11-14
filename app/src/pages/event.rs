@@ -10,7 +10,7 @@ use crate::widgets::{
     LocalDraft, MultipleToggle, PostButtons, SignupPanel, ThreadToggle,
 };
 use crate::cache::{self, show, when, Ready};
-use crate::{base, border, title, A};
+use crate::{base, title, A};
 
 /// What differs between a saved event's page and a new one. The layout around
 /// these is the same, so a new event looks the way it will once saved.
@@ -464,7 +464,8 @@ fn embed_view(
                         {mentions.iter().map(|mention| view! { <span class="d-mention">{mention.clone()}</span>" " }).collect_view()}
                     </p>
                 })}
-                <div class="embed" style=border(&color)>
+                <div class="embed">
+                    {crate::paint("stripe", color.clone())}
                     <h3>{event.title.clone()}</h3>
                     {(!description.is_empty()).then(|| view! { <div class="d-desc md" inner_html=crate::markdown::render(&description)></div> })}
                     {(!location.is_empty()).then(|| view! {
