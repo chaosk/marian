@@ -41,7 +41,7 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
 | `GOOGLE_CLIENT_ID` | empty | Google OAuth client id. Empty leaves Google Calendar disconnected |
 | `GOOGLE_CLIENT_SECRET` | empty | Google OAuth client secret. The redirect URI is `MARIAN_PUBLIC_URL` plus `/auth/google/callback` |
-| `MARIAN_PUBLIC_URL` | empty | Dashboard URL. Discord embeds link here, and it is the OAuth redirect base |
+| `MARIAN_PUBLIC_URL` | empty | Dashboard URL. Discord embeds link here, it is the OAuth redirect base, and its origin is the only one CORS lets call the API |
 | `MARIAN_STATUS` | empty | Custom status under the bot's name, up to 128 characters. Empty leaves it unset |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Base URL of an OTLP/HTTP collector, such as `http://tempo:4318`. Empty leaves traces off and keeps logs on stderr. Do not append `/v1/traces` |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | empty | Full OTLP/HTTP URL for metrics, such as `http://mimir:9009/otlp/v1/metrics`, used as given. Empty leaves metrics off. Separate from the traces endpoint because a trace store like Tempo takes no metrics. Metrics are listed below |

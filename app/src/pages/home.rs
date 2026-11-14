@@ -3,7 +3,7 @@ use marian_types as dto;
 
 use crate::format::{self, clock_of, spot_count, status_label};
 use crate::cache::{self, show, when, Ready};
-use crate::{base, border, md, title, A};
+use crate::{base, md, title, A};
 
 #[component]
 pub fn Schedule() -> impl IntoView {
@@ -127,7 +127,8 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
             .collect::<Vec<_>>()
             .join(" · ");
         view! {
-            <section class="hero" style=border(&event.color)>
+            <section class="hero">
+                {crate::paint("stripe", event.color.clone())}
                 <div>
                     <p class="kicker">"Next up · "{format::format_rel(event.starts_at, now)}</p>
                     <h2><A href=format!("{base}/events/{}", event.id.clone())>{event.title.clone()}</A></h2>
@@ -153,10 +154,10 @@ fn wrapped_cell(server: &dto::Server, wrapped: dto::Paged<dto::EventSummary>, _n
             .into_iter()
             .map(|event| {
                 let href = format!("{base}/events/{}", event.id);
-                let style = border(&event.color);
+                let stripe = crate::paint("stripe", event.color.clone());
                 let label = format!("{} · {}", event.title, clock.when(event.starts_at));
                 view! {
-                    <A href=href attr:class="card" attr:style=style>{label}</A>
+                    <A href=href attr:class="card">{stripe}{label}</A>
                 }
             })
             .collect_view();
@@ -217,13 +218,14 @@ fn card(
         })
         .collect_view();
     let href = format!("{base}/events/{}", event.id);
-    let style = border(&event.color);
+    let stripe = crate::paint("stripe", event.color.clone());
     let when = clock.when(event.starts_at);
     let end = clock.end(event.starts_at, event.duration_minutes);
     let rel = format::format_rel(event.starts_at, now);
     let status = status_label(&event.status);
     view! {
-        <A href=href attr:class="card" attr:style=style>
+        <A href=href attr:class="card">
+            {stripe}
             <div class="card-top">
                 <h3>{event.title}</h3>
                 <span class="badge">{status}</span>

@@ -406,9 +406,20 @@ button:disabled,
 .day h2 { font-size: 22px; margin-bottom: 10px; }
 .day.today h2 { color: var(--blue); }
 .stack { display: flex; flex-direction: column; gap: 10px; }
-.card, .hero { border-left-width: 4px; border-left-style: solid; border-left-color: var(--blue); }
+/* An event's colour runs down the left as an SVG stripe (see `paint`): the
+   page's CSP allows no inline styles. The card's rounded corners clip it. */
+.card, .hero, .embed { position: relative; overflow: hidden; border-left: 0; }
+.card, .hero { padding-left: 22px; }
+.stripe { position: absolute; left: 0; top: 0; width: 4px; height: 100%; fill: var(--blue); }
+/* A colour filling its holder behind the holder's own content, like an avatar's initial. */
+.paint { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
+.avatar, .dot, .swatch, .swatch-preview { position: relative; overflow: hidden; isolation: isolate; }
+/* The thin ring these had, back on top of the fill. */
+.dot::after, .swatch::after, .swatch-preview::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inherit; }
+.command-form { margin-top: 12px; }
+.gate-card.undecided { visibility: hidden; }
 .card { display: block; text-decoration: none; color: inherit; }
-.sheet td.event-title { border-left: 4px solid var(--blue); }
+.sheet td.event-title { position: relative; padding-left: 20px; }
 .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .card-top h3 { min-width: 0; }
 .card-top .badge { flex: none; margin-top: 3px; }
@@ -537,7 +548,7 @@ button:disabled,
   width: 34px;
   height: 34px;
   padding: 0;
-  border: 2px solid transparent;
+  border: 0;
   border-radius: 50%;
   cursor: pointer;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
@@ -752,7 +763,7 @@ img.avatar { object-fit: cover; background: rgba(28, 25, 21, 0.08); }
 .google-cal p:last-child { margin-bottom: 0; }
 .google-cal form { margin: 0; }
 .discord { background: #313338; color: #dbdee1; border: 0; }
-.embed { background: #2b2d31; border-left: 4px solid var(--blue); border-radius: 4px; padding: 12px 14px; }
+.embed { background: #2b2d31; border-radius: 4px; padding: 12px 14px 12px 18px; }
 .embed h3 { margin: 0 0 8px; color: white; font-size: 16px; }
 .d-desc { white-space: pre-wrap; color: #dbdee1; margin: 0 0 8px; }
 .d-kicker { margin: 8px 0 2px; font-weight: 700; }
@@ -1260,11 +1271,11 @@ summary.tally-line:hover .tally-day { color: var(--ink); }
 summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .tally-voters { margin: 4px 0 6px calc(7.5rem + 12px); font-size: 14px; color: var(--muted); }
 .tally-day { color: var(--muted); white-space: nowrap; }
-.tally-track { height: 10px; border-radius: 999px; background: #efe8da; overflow: hidden; }
-.tally-bar { display: block; height: 100%; border-radius: inherit; background: #c9b896; }
+.tally-track { display: block; width: 100%; height: 10px; border-radius: 999px; background: #efe8da; overflow: hidden; }
+.tally-bar { fill: #c9b896; }
 .tally-votes { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 .tally-row.leads .tally-day, .tally-row.leads .tally-votes { color: var(--ink); font-weight: 700; }
-.tally-row.leads .tally-bar { background: var(--blue); }
+.tally-row.leads .tally-bar { fill: var(--blue); }
 
 .poll-state { display: flex; align-items: center; gap: 10px; margin: 0; }
 .panel.poll { padding: 0; }

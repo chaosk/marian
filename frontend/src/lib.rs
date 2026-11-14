@@ -25,24 +25,31 @@ pub fn hydrate() {
 /// Leptos explains a hydration mismatch in a `console.error` just before it
 /// panics: the view that failed and the node it found instead. The panic
 /// message only says to read that, so the wrapper keeps a copy for the report.
+/// It's a module wasm-bindgen ships beside the glue, not a string turned into
+/// code, so the page's Content-Security-Policy needs no `'unsafe-eval'`.
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+export function keep_last_console_error(key) {
+  const original = console.error;
+  console.error = function (...args) {
+    try {
+      window[key] = args
+        .map((arg) => arg instanceof Node
+          ? (arg.outerHTML ?? arg.textContent ?? arg.nodeName).slice(0, 600)
+          : String(arg))
+        .join(" ")
+        .slice(0, 4000);
+    } catch (_) {}
+    return original.apply(this, args);
+  };
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = keep_last_console_error)]
+    fn wrap_console_error(key: &str);
+}
+
 fn keep_last_console_error() {
-    let install = js_sys::Function::new_no_args(&format!(
-        r#"
-        const original = console.error;
-        console.error = function (...args) {{
-          try {{
-            window.{LAST_ERROR} = args
-              .map((arg) => arg instanceof Node
-                ? (arg.outerHTML ?? arg.textContent ?? arg.nodeName).slice(0, 600)
-                : String(arg))
-              .join(" ")
-              .slice(0, 4000);
-          }} catch (_) {{}}
-          return original.apply(this, args);
-        }};
-        "#
-    ));
-    let _ = install.call0(&JsValue::NULL);
+    wrap_console_error(LAST_ERROR);
 }
 
 fn last_console_error() -> String {
