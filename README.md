@@ -44,9 +44,21 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 | `MARIAN_PUBLIC_URL` | empty | Dashboard URL. Discord embeds link here, and it is the OAuth redirect base |
 | `MARIAN_STATUS` | empty | Custom status under the bot's name, up to 128 characters. Empty leaves it unset |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Base URL of an OTLP/HTTP collector, such as `http://tempo:4318`. Empty leaves traces off and keeps logs on stderr. Do not append `/v1/traces` |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | empty | Full OTLP/HTTP URL for metrics, such as `http://mimir:9009/otlp/v1/metrics`, used as given. Empty leaves metrics off. Separate from the traces endpoint because a trace store like Tempo takes no metrics. Metrics are listed below |
 | `OTEL_SERVICE_NAME` | `marian` | Service name on exported spans. `service.version` is the image version |
 
 `/healthz` and `/readyz` report the process and the database. Readiness does not wait for Discord.
+
+Metrics, once a minute:
+
+| Metric | Kind | Attributes | Meaning |
+| --- | --- | --- | --- |
+| `marian.discord.jobs` | counter | `job`, `outcome` | Each run of a Discord job: `done`, `failed` (tried again in 2 s, up to 8 times) or `dropped` (out of tries, also logged as an error). `job` is `sync`, `remind`, `attend`, `routine` or `commands` |
+| `marian.discord.job.duration` | histogram, s | `job`, `outcome` | How long a run took, waits for Discord's rate limits included |
+| `marian.discord.queue.waiting` | gauge | | Jobs left in the queue when the last one was taken |
+| `marian.discord.queue.retrying` | up-down counter | | Failed jobs in their 2 s pause before going back in the queue. With `waiting`, the whole backlog |
+
+While the gateway reconnects, the queue waits for it, and jobs don't spend their tries.
 
 ## Discord
 

@@ -1,5 +1,7 @@
 //! Logs always go to stderr. Traces leave the process only when
-//! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and metrics only when
+//! `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is: a trace store like Tempo takes no
+//! metrics, so they don't follow the traces on their own.
 
 use std::cell::RefCell;
 use std::env;
@@ -9,6 +11,7 @@ use std::time::SystemTime;
 use diesel::connection::{Connection, Instrumentation, InstrumentationEvent};
 use opentelemetry::trace::{Span, SpanKind, Tracer, TracerProvider};
 use opentelemetry::{global, Context, KeyValue};
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing::Instrument;
@@ -34,6 +37,7 @@ thread_local! {
 
 pub struct Telemetry {
     provider: Option<SdkTracerProvider>,
+    meters: Option<SdkMeterProvider>,
 }
 
 impl Drop for Telemetry {
@@ -41,6 +45,11 @@ impl Drop for Telemetry {
         if let Some(provider) = self.provider.take() {
             if let Err(err) = provider.shutdown() {
                 eprintln!("OpenTelemetry shutdown failed: {err}");
+            }
+        }
+        if let Some(meters) = self.meters.take() {
+            if let Err(err) = meters.shutdown() {
+                eprintln!("OpenTelemetry metrics shutdown failed: {err}");
             }
         }
     }
@@ -56,6 +65,15 @@ pub fn init() -> Telemetry {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let provider = endpoint.as_deref().and_then(exporter);
+    let meters = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .as_deref()
+        .and_then(metric_exporter);
+    if let Some(meters) = &meters {
+        global::set_meter_provider(meters.clone());
+    }
 
     let traces = provider.as_ref().map(|provider| {
         tracing_opentelemetry::layer()
@@ -74,7 +92,7 @@ pub fn init() -> Telemetry {
         .with(logs)
         .with(traces)
         .init();
-    Telemetry { provider }
+    Telemetry { provider, meters }
 }
 
 fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
@@ -95,6 +113,40 @@ fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
             return None;
         }
     };
+    Some(
+        SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource())
+            .build(),
+    )
+}
+
+/// Metrics are posted once a minute to the endpoint as given, as OTLP does
+/// with a signal's own endpoint: a full URL, like `http://mimir/otlp/v1/metrics`.
+fn metric_exporter(endpoint: &str) -> Option<SdkMeterProvider> {
+    use opentelemetry_otlp::WithExportConfig;
+
+    let built = opentelemetry_otlp::MetricExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
+        .build();
+    let exporter = match built {
+        Ok(exporter) => exporter,
+        Err(err) => {
+            eprintln!("OpenTelemetry metrics export is off: {err}");
+            return None;
+        }
+    };
+    Some(
+        SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter).build())
+            .with_resource(resource())
+            .build(),
+    )
+}
+
+fn resource() -> Resource {
     let mut resource = Resource::builder();
     if env::var("OTEL_SERVICE_NAME")
         .ok()
@@ -103,15 +155,9 @@ fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
         resource = resource.with_service_name("marian");
     }
     // Compiled in by build.rs: a release number from a tag, or the commit from a branch.
-    let resource = resource
+    resource
         .with_attribute(KeyValue::new("service.version", env!("MARIAN_VERSION")))
-        .build();
-    Some(
-        SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(resource)
-            .build(),
-    )
+        .build()
 }
 
 /// OTLP/HTTP traces are posted to `{base}/v1/traces`. A value that already

@@ -64,6 +64,8 @@ spec:
               value: {{ ((.Values.tracing).endpoint) | default "" | quote }}
             - name: OTEL_SERVICE_NAME
               value: {{ ((.Values.tracing).serviceName) | default "marian" | quote }}
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: {{ ((.Values.metrics).endpoint) | default "" | quote }}
             - name: DISCORD_CLIENT_ID
               value: {{ .Values.discord.clientId | quote }}
             {{ if and .Values.discord.existingSecret .Values.discord.clientSecretKey }}

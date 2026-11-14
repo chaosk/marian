@@ -53,6 +53,11 @@ tracing:
   endpoint: ""
   serviceName: marian
 
+# Full OTLP/HTTP URL for metrics, such as http://mimir:9009/otlp/v1/metrics.
+# Empty leaves metrics off.
+metrics:
+  endpoint: ""
+
 # Dashboard URL linked from Discord embeds. Empty is fine.
 # When ingress is on and this is empty, the chart uses https://<ingress.host>.
 publicUrl: ""

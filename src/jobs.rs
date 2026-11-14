@@ -61,6 +61,17 @@ impl DiscordJob {
         }
     }
 
+    /// How many times the job has failed so far.
+    pub fn tries(&self) -> u8 {
+        match self {
+            Self::Sync { tries, .. }
+            | Self::Remind { tries, .. }
+            | Self::Attend { tries, .. }
+            | Self::Routine { tries, .. }
+            | Self::Commands { tries, .. } => *tries,
+        }
+    }
+
     pub fn bump(self) -> Option<Self> {
         match self {
             Self::Sync { event_id, tries } if tries < 8 => Some(Self::Sync {
@@ -92,5 +103,23 @@ impl DiscordJob {
             }),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiscordJob;
+
+    #[test]
+    fn a_job_is_tried_nine_times_then_dropped() {
+        let mut job = Some(DiscordJob::sync(7));
+        let mut runs = 0;
+        while let Some(current) = job {
+            assert_eq!(current.tries(), runs);
+            assert_eq!(current.event_id(), 7);
+            runs += 1;
+            job = current.bump();
+        }
+        assert_eq!(runs, 9, "the first run and eight more");
     }
 }
