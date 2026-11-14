@@ -196,6 +196,8 @@ pub struct Membership {
     pub server_manager: bool,
     /// The id the API shows. The sequential `id` never leaves the server.
     pub public_id: uuid::Uuid,
+    /// Their Discord picture's URL, if they have one.
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -2475,6 +2477,7 @@ mod tests {
                 "20261109090000".to_string(),
                 "20261110090000".to_string(),
                 "20261111100000".to_string(),
+                "20261114090000".to_string(),
             ]
         );
     }

@@ -694,6 +694,10 @@ button:disabled,
   font-size: 13px;
   font-weight: 700;
 }
+img.avatar { object-fit: cover; background: rgba(28, 25, 21, 0.08); }
+.avatar.small { width: 22px; height: 22px; font-size: 11px; }
+.account-menu summary strong { flex: 1; min-width: 0; }
+.person-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .pick-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick-note { color: var(--muted); font-size: 14px; white-space: nowrap; }
 .pick-check { margin-left: auto; flex: none; width: 20px; height: 20px; fill: var(--gold); }
