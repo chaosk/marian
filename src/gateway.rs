@@ -1,10 +1,12 @@
 //! Outbound Discord gateway. The cluster does not need a public interactions URL.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use diesel::prelude::*;
+use opentelemetry::metrics::{Counter, Gauge, Histogram};
+use opentelemetry::KeyValue;
 use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::Instrument;
@@ -85,13 +87,15 @@ async fn job_loop(
     public_url: String,
 ) {
     while let Some(job) = jobs.recv().await {
-        let ready = http.lock().map(|slot| slot.is_some()).unwrap_or(false);
-        if !ready {
-            requeue(retry.clone(), job);
-            continue;
+        JOB_METRICS.waiting.record(jobs.len() as u64, &[]);
+        // While the gateway reconnects, the job waits for it without spending
+        // a try: nothing could reach Discord anyway.
+        while !http.lock().map(|slot| slot.is_some()).unwrap_or(false) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let (kind, id) = job_kind(&job);
-        let span = tracing::info_span!("discord_job", job = kind, id);
+        let span = tracing::info_span!("discord_job", job = kind, id, tries = job.tries());
+        let started = Instant::now();
         let result = async {
             match &job {
                 DiscordJob::Sync { event_id, .. } => {
@@ -110,14 +114,54 @@ async fn job_loop(
                 DiscordJob::Commands { guild_id, .. } => push_commands(&db, &http, *guild_id).await,
             }
         }
-        .instrument(span)
+        .instrument(span.clone())
         .await;
-        if let Err(err) = result {
-            tracing::warn!("Discord job failed: {err}");
-            requeue(retry.clone(), job);
-        }
+        let outcome = match result {
+            Ok(()) => "done",
+            Err(err) => match job.bump() {
+                Some(next) => {
+                    span.in_scope(|| tracing::warn!("Discord job failed, trying again: {err}"));
+                    retry_later(retry.clone(), next);
+                    "failed"
+                }
+                None => {
+                    span.in_scope(|| tracing::error!("Discord job dropped after its last try: {err}"));
+                    "dropped"
+                }
+            },
+        };
+        let attributes = [KeyValue::new("job", kind), KeyValue::new("outcome", outcome)];
+        JOB_METRICS.runs.add(1, &attributes);
+        JOB_METRICS.duration.record(started.elapsed().as_secs_f64(), &attributes);
     }
 }
+
+/// The Discord queue's metrics. Each run of a job counts once, as `done`,
+/// `failed` (to be tried again) or `dropped` (out of tries).
+struct JobMetrics {
+    runs: Counter<u64>,
+    duration: Histogram<f64>,
+    waiting: Gauge<u64>,
+}
+
+static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
+    let meter = opentelemetry::global::meter("marian");
+    JobMetrics {
+        runs: meter
+            .u64_counter("marian.discord.jobs")
+            .with_description("Discord jobs run, by job kind and outcome: done, failed (to be tried again) or dropped.")
+            .build(),
+        duration: meter
+            .f64_histogram("marian.discord.job.duration")
+            .with_unit("s")
+            .with_description("How long a Discord job took, waits for Discord's rate limits included.")
+            .build(),
+        waiting: meter
+            .u64_gauge("marian.discord.queue.waiting")
+            .with_description("Discord jobs left waiting in the queue when the last one was taken.")
+            .build(),
+    }
+});
 
 fn job_kind(job: &DiscordJob) -> (&'static str, i64) {
     match job {
@@ -149,13 +193,11 @@ async fn push_commands(
     Ok(())
 }
 
-fn requeue(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
-    if let Some(next) = job.bump() {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let _ = retry.send(next);
-        });
-    }
+fn retry_later(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ = retry.send(job);
+    });
 }
 
 /// Whether Discord closed the gateway because the bot may not ask for members.

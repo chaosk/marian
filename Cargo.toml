@@ -39,8 +39,8 @@ diesel = { version = "2.3.14", default-features = false, features = ["postgres",
 diesel_migrations = { version = "2.3.2", default-features = false, features = ["postgres"] }
 marian-types = { workspace = true }
 opentelemetry = "0.33"
-opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
-opentelemetry_sdk = { version = "0.33", features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics"] }
 openssl-sys = { version = "0.9.93", optional = true }
 poise = "0.6"
 pq-sys = { version = "0.7.6", optional = true }
@@ -59,7 +59,7 @@ fluent-bundle = "0.16"
 unic-langid = { version = "0.9", features = ["macros"] }
 
 [dev-dependencies]
-opentelemetry_sdk = { version = "0.33", features = ["trace", "testing"] }
+opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics", "testing"] }
 
 # Line tables are enough for file and line in panics and backtraces, and full
 # debug info for every dependency, host and wasm, is most of what fills target/.
