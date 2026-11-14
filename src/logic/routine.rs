@@ -522,11 +522,7 @@ pub fn maintain(
     Ok(jobs)
 }
 
-pub fn routine_post(
-    conn: &mut Connection,
-    run_id: i64,
-    public_url: &str,
-) -> Result<Option<RoutinePost>, OpError> {
+pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<RoutinePost>, OpError> {
     let run = must_run(conn, run_id)?;
     let routine = must_routine(conn, run.routine_id)?;
     let Some(channel) = store::channel(conn, routine.channel_id)? else {
@@ -586,13 +582,6 @@ pub fn routine_post(
             "poll-locks",
             when = crate::i18n::format_when(lang, run.locks_at, tz, settings.hour_24)
         )
-    };
-    // The results reply only reports; editing the routine is for the poll
-    // until it is settled.
-    let body = if matches!(run.status.as_str(), "open" | "approval") {
-        with_edit_link(body, public_url, guild.discord_id.as_deref(), routine.public_id, lang)
-    } else {
-        body
     };
     let buttons = if run.status == "open" {
         run.days
@@ -1775,7 +1764,7 @@ mod tests {
         .unwrap();
         let open = editable_run(&mut conn, id).unwrap().unwrap();
 
-        let post = routine_post(&mut conn, open.id, "https://marian.test").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         assert!(post.mention_everyone);
         assert_eq!(post.mention_roles, vec!["502502".to_string()]);
 
@@ -1985,7 +1974,7 @@ mod tests {
         assert_eq!((waiting.status.as_str(), waiting.winner_weekday, waiting.step), ("approval", Some(4), 1));
         assert_eq!(waiting.decide_by, Some(at(2026, 10, 16, 0, 0)), "lapses as Friday begins");
 
-        let poll = routine_post(&mut conn, run, "").unwrap().unwrap();
+        let poll = routine_post(&mut conn, run).unwrap().unwrap();
         assert!(poll.body.contains("waiting for confirmation"), "{}", poll.body);
         assert!(poll.buttons.is_empty() && poll.mention_roles.is_empty());
 
@@ -2040,7 +2029,7 @@ mod tests {
         assert_eq!(early.to_string(), "That day isn't on this poll.");
         decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap();
         assert_eq!(must_run(&mut conn, run).unwrap().status, "skipped");
-        let poll = routine_post(&mut conn, run, "").unwrap().unwrap();
+        let poll = routine_post(&mut conn, run).unwrap().unwrap();
         assert_eq!(poll.body, "There's no event this week.");
         assert_eq!(must_run(&mut conn, run).unwrap().event_id, None, "no event was made");
 
@@ -2056,7 +2045,7 @@ mod tests {
         assert_eq!(must_run(&mut conn, next).unwrap().status, "expired");
         assert!(jobs.iter().any(|job| matches!(job, DiscordJob::Routine { run_id, .. } if *run_id == next)));
         assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })));
-        let poll = routine_post(&mut conn, next, "").unwrap().unwrap();
+        let poll = routine_post(&mut conn, next).unwrap().unwrap();
         assert!(poll.body.starts_with("No one confirmed **Thursday"), "{}", poll.body);
     }
 
@@ -2194,7 +2183,7 @@ mod tests {
         let results = jobs.iter().position(|job| matches!(job, DiscordJob::Routine { .. })).unwrap();
         assert!(sync < results, "the event goes up before the results reply: {jobs:?}");
 
-        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         assert!(post.results);
         assert_eq!(post.reply_to.as_deref(), Some("555"));
         assert_eq!(post.message_id, None, "no reply yet, so one is sent");
@@ -2206,23 +2195,23 @@ mod tests {
         assert_eq!(post.fields[1].value, "> June");
 
         remember_results_message(&mut conn, open.id, "777").unwrap();
-        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         assert_eq!(post.message_id.as_deref(), Some("777"), "a second run edits the reply instead of posting again");
 
         // With a thread on the event, the results go in it rather than under the post.
         conn.batch_execute(&format!("UPDATE events SET thread_enabled = false WHERE id = {event_id}"))
             .unwrap();
-        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         assert_eq!(post.thread, None, "no thread, so the results reply to the post");
         conn.batch_execute(&format!("UPDATE events SET thread_enabled = true WHERE id = {event_id}"))
             .unwrap();
-        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         let thread = post.thread.expect("the event's thread");
         assert_eq!(thread.event_id, event_id);
         assert_eq!(thread.discord_id, None, "not open yet, so the results open it");
         assert!(thread.name.starts_with("Game night -- "), "{}", thread.name);
         store::set_thread_discord_id(&mut conn, event_id, &thread.name, "888").unwrap();
-        let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
         assert_eq!(post.thread.unwrap().discord_id.as_deref(), Some("888"));
     }
 
@@ -2231,7 +2220,7 @@ mod tests {
         let mut conn = world();
         conn.batch_execute("UPDATE channels SET discord_id = '123' WHERE id = 1")
             .unwrap();
-        let (id, public_id, _) = create_routine(
+        let (id, _, _) = create_routine(
             &mut conn,
             1,
             1,
@@ -2264,7 +2253,7 @@ mod tests {
         assert_eq!(rows[0].choices[0].votes, 2);
         assert_eq!(rows[0].choices[1].label, "Fri, Oct 16");
         assert_eq!(rows[0].choices[1].votes, 0);
-        let post = routine_post(&mut conn, open.id, "https://marian.example")
+        let post = routine_post(&mut conn, open.id)
             .unwrap()
             .unwrap();
         assert_eq!(post.title, "Next event: Game night");
@@ -2273,19 +2262,14 @@ mod tests {
         let mut settings = store::settings(&mut conn, 1).unwrap();
         settings.localize_time = false;
         store::update_settings(&mut conn, &settings).unwrap();
-        let post = routine_post(&mut conn, open.id, "https://marian.example")
+        let post = routine_post(&mut conn, open.id)
             .unwrap()
             .unwrap();
         assert!(
             post.body.starts_with("Locks Tue, Oct 13 · 6:00 PM."),
             "without localized times the server's zone is spelled out: {post:?}"
         );
-        assert!(
-            post.body.contains(&format!(
-                "[Edit](https://marian.example/servers/99/routines/{public_id})"
-            )),
-            "{post:?}"
-        );
+        assert!(!post.body.contains("[Edit]"), "the poll has no edit link: {post:?}");
         assert!(!post.body.contains("Thursday"), "{post:?}");
         assert_eq!(post.fields.len(), 2);
         assert_eq!(post.fields[0].name, "**Thursday, Oct 15** (2)");

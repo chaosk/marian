@@ -1794,7 +1794,7 @@ async fn push_routine(
     public_url: &str,
     run_id: i64,
 ) -> Result<(), Error> {
-    push_poll(db, http, public_url, run_id).await?;
+    push_poll(db, http, run_id).await?;
     push_approval(db, http, public_url, run_id).await
 }
 
@@ -1845,12 +1845,11 @@ async fn push_approval(
 async fn push_poll(
     db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
-    public_url: &str,
     run_id: i64,
 ) -> Result<(), Error> {
     let post = {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::routine_post(&mut conn, run_id, public_url)?
+        logic::routine_post(&mut conn, run_id)?
     };
     let Some(post) = post else {
         return Ok(());
