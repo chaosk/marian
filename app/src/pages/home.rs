@@ -33,7 +33,7 @@ pub fn Schedule() -> impl IntoView {
         )
     });
     let pending = cache::listen(cache::pending_reminders_scope(), cache::server_key);
-    let activity = cache::listen(cache::activity_scope(), || (cache::server_key(), 1, 8));
+    let membership = cache::listen(cache::membership_scope(), cache::server_key);
     let now = format::now();
     title("This week");
     view! {
@@ -54,10 +54,20 @@ pub fn Schedule() -> impl IntoView {
                 <h3>"Reminders still out"</h3>
                 {show(pending, pending_cell)}
             </section>
-            <section class="panel">
-                <h3>"Activity"</h3>
-                {show(activity, move |rows| activity_cell(rows.items, now))}
-            </section>
+            // The server's log is for those who manage it, so only they ask for
+            // it. Read inside the Transition, so the server waits for the answer
+            // and draws what the browser will.
+            <Transition fallback=|| ()>
+                {move || membership.get().and_then(Result::ok).filter(|m| m.server_manager).map(|_| {
+                    let activity = cache::listen(cache::activity_scope(), || (cache::server_key(), 1, 8));
+                    view! {
+                        <section class="panel">
+                            <h3>"Activity"</h3>
+                            {show(activity, move |rows| activity_cell(rows.items, now))}
+                        </section>
+                    }
+                })}
+            </Transition>
         </div>
     }
 }

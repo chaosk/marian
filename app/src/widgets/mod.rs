@@ -1512,3 +1512,27 @@ fn nudge(editor: &web_sys::Element) {
     let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(done.unchecked_ref(), 600);
 }
 
+
+/// A page only someone who can manage the server sees. Everyone else reads
+/// why, and the page's own reads never start. It decides once, so a later
+/// change to their membership, like turning reminders off, never remounts
+/// the page under them.
+#[component]
+pub fn ManagersOnly(heading: &'static str, children: ChildrenFn) -> impl IntoView {
+    let membership = crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
+    let children = StoredValue::new(children);
+    crate::cache::when_once(
+        move || membership.get().map(|read| read.map(|m| m.server_manager)),
+        move |manager| {
+            if manager {
+                children.with_value(|children| children()).into_any()
+            } else {
+                view! {
+                    {crate::head(heading)}
+                    <p class="notice info">"Only people who can manage this Discord server can see this page."</p>
+                }
+                .into_any()
+            }
+        },
+    )
+}

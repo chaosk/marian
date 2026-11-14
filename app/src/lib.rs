@@ -18,6 +18,7 @@ mod cache;
 mod shell;
 
 use api::Failure;
+use widgets::ManagersOnly;
 
 pub(crate) use leptos_router::components::A;
 
@@ -163,16 +164,16 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("drafts") view=pages::lists::Drafts/>
                     <Route path=path!("scheduled") view=pages::lists::Scheduled/>
                     <Route path=path!("archive") view=pages::lists::Archive/>
-                    <Route path=path!("activity") view=pages::lists::ActivityLog/>
-                    <Route path=path!("recurring") view=pages::series::Recurring/>
+                    <Route path=path!("activity") view=|| view! { <ManagersOnly heading="Activity"><pages::lists::ActivityLog/></ManagersOnly> }/>
+                    <Route path=path!("recurring") view=|| view! { <ManagersOnly heading="Recurring"><pages::series::Recurring/></ManagersOnly> }/>
                     <Route path=path!("recurring/:id") view=pages::series::SeriesPage/>
-                    <Route path=path!("routines") view=pages::routines::Routines/>
-                    <Route path=path!("routines/new") view=pages::routines::NewRoutine/>
+                    <Route path=path!("routines") view=|| view! { <ManagersOnly heading="Routines"><pages::routines::Routines/></ManagersOnly> }/>
+                    <Route path=path!("routines/new") view=|| view! { <ManagersOnly heading="New routine"><pages::routines::NewRoutine/></ManagersOnly> }/>
                     <Route path=path!("routines/:id") view=pages::routines::RoutinePage/>
-                    <Route path=path!("presets") view=pages::presets::Presets/>
-                    <Route path=path!("channels") view=pages::channels::Channels/>
-                    <Route path=path!("commands") view=pages::commands::Commands/>
-                    <Route path=path!("settings") view=pages::settings::Settings/>
+                    <Route path=path!("presets") view=|| view! { <ManagersOnly heading="Presets"><pages::presets::Presets/></ManagersOnly> }/>
+                    <Route path=path!("channels") view=|| view! { <ManagersOnly heading="Channels"><pages::channels::Channels/></ManagersOnly> }/>
+                    <Route path=path!("commands") view=|| view! { <ManagersOnly heading="Command desk"><pages::commands::Commands/></ManagersOnly> }/>
+                    <Route path=path!("settings") view=|| view! { <ManagersOnly heading="Settings"><pages::settings::Settings/></ManagersOnly> }/>
                     <Route path=path!("google") view=pages::settings::Google/>
                 </ParentRoute>
             </Routes>

@@ -24,6 +24,10 @@ const NAV: &[(&str, &str, bool)] = &[
     ("/settings", "Settings", false),
 ];
 
+/// Pages only someone who can manage the server sees; everyone else gets the
+/// events they have access to.
+const MANAGERS_ONLY: &[&str] = &["/recurring", "/routines", "/presets", "/channels", "/commands", "/activity", "/settings"];
+
 /// The logo and name, linking to the server in the address. Away from a
 /// server, it links to the one this browser opened last, once the page has
 /// read that, and to the front page before then. `front` always links to the
@@ -184,7 +188,7 @@ fn shell(
                             let base = format!("/servers/{}", server.id);
                             view! {
                                 <Switcher me server=server.clone()/>
-                                <Nav base=base.clone() counts=server.counts/>
+                                <Nav base=base.clone() counts=server.counts manager=membership.server_manager/>
                                 <AccountMenu base membership/>
                             }
                         },
@@ -287,7 +291,7 @@ fn close_menu(ev: &leptos::ev::MouseEvent) {
 fn close_menu(_: &leptos::ev::MouseEvent) {}
 
 #[component]
-fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
+fn Nav(base: String, counts: marian_types::Counts, manager: bool) -> impl IntoView {
     use crate::pages::lists::Filters;
     // Both from the router's location. `use_query_map` would make a memo owned
     // by this sidebar, which a link could still read after the sidebar is gone.
@@ -321,6 +325,7 @@ fn Nav(base: String, counts: marian_types::Counts) -> impl IntoView {
     });
     let links = NAV
         .iter()
+        .filter(|(path, _, _)| manager || !MANAGERS_ONLY.contains(path))
         .map(|(path, label, sub)| {
             let filters = shortcut(path);
             let href = match &filters {
