@@ -294,8 +294,8 @@ async fn handle_event(
             }
         }
         serenity::FullEvent::GuildMemberUpdate { event, .. } => {
-            if let Err(err) = follow_member_roles(data, event.guild_id, &event.user, &event.roles) {
-                tracing::warn!("could not follow a member's roles: {err}");
+            if let Err(err) = follow_member(data, event.guild_id, &event.user, event.nick.as_deref(), &event.roles) {
+                tracing::warn!("could not follow a member's name and roles: {err}");
             }
         }
         serenity::FullEvent::GuildMemberAddition { new_member } => {
@@ -483,6 +483,11 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
         .map(|role| (role.id.get().to_string(), role.name.clone(), role.colour.hex()))
         .collect();
     logic::sync_discord_roles(&mut conn, stored.id, &roles)?;
+    // Discord sends the members only with the members intent, and only all
+    // of them in smaller servers; the rest catch up when they next act.
+    for member in guild.members.values() {
+        logic::follow_discord_name(&mut conn, stored.id, &member.user.id.get().to_string(), &server_name(member))?;
+    }
     let guild_discord = guild.id.get().to_string();
     for role in guild.roles.values() {
         logic::sync_discord_permissions(
@@ -563,19 +568,26 @@ fn role_deleted(data: &Data, guild: serenity::GuildId, role: serenity::RoleId) -
     Ok(())
 }
 
-/// Keeps a member's roles as Discord has them. Only members Marian already
-/// knows are kept; the rest are picked up when they first use Marian.
-fn follow_member_roles(
+/// The name a member goes by in their server: nickname first.
+fn server_name(member: &serenity::Member) -> String {
+    crate::auth::discord_display_name(member.nick.as_deref(), member.user.global_name.as_deref(), &member.user.name)
+}
+
+/// Keeps a member's name and roles as Discord has them. Only members Marian
+/// already knows are kept; the rest are picked up when they first use Marian.
+fn follow_member(
     data: &Data,
     guild: serenity::GuildId,
     user: &serenity::User,
+    nick: Option<&str>,
     roles: &[serenity::RoleId],
 ) -> Result<(), Error> {
     let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
     let Some(guild) = stored_guild(&mut conn, guild)? else {
         return Ok(());
     };
-    let Some(member) = store::membership_by_discord(&mut conn, guild.id, &user.id.get().to_string())? else {
+    let name = crate::auth::discord_display_name(nick, user.global_name.as_deref(), &user.name);
+    let Some(member) = logic::follow_discord_name(&mut conn, guild.id, &user.id.get().to_string(), &name)? else {
         return Ok(());
     };
     let roles: Vec<String> = roles.iter().map(|role| role.get().to_string()).collect();
@@ -591,10 +603,10 @@ fn member_joined(data: &Data, member: &serenity::Member) -> Result<(), Error> {
     };
     let user = member.user.id.get().to_string();
     let sessions = store::sessions_without_guild(&mut conn, guild.id, Some(&user))?;
-    let Some((_, _, name)) = sessions.first() else {
+    if sessions.is_empty() {
         return Ok(());
-    };
-    logic::ensure_discord_user(&mut conn, guild.id, &user, name)?;
+    }
+    logic::ensure_discord_user(&mut conn, guild.id, &user, &server_name(member))?;
     for (token, _, _) in &sessions {
         store::add_session_guild(&mut conn, token, guild.id)?;
     }
@@ -641,14 +653,14 @@ async fn admit_signed_in(
             return;
         }
     };
-    let mut members: Vec<(String, String, Vec<String>)> = Vec::new();
-    for (token, user, name) in sessions {
+    let mut members: Vec<(String, Vec<String>)> = Vec::new();
+    for (token, user, _) in sessions {
         match members.last_mut() {
-            Some((last, _, tokens)) if *last == user => tokens.push(token),
-            _ => members.push((user, name, vec![token])),
+            Some((last, tokens)) if *last == user => tokens.push(token),
+            _ => members.push((user, vec![token])),
         }
     }
-    for (user, name, tokens) in members {
+    for (user, tokens) in members {
         let Ok(user_id) = user.parse::<u64>() else {
             continue;
         };
@@ -672,6 +684,7 @@ async fn admit_signed_in(
         let everyone = roles.get(&guild.get()).copied().unwrap_or(0);
         let manages = crate::auth::manages_member(member.user.id == owner, everyone, &held);
         let role_ids: Vec<String> = member.roles.iter().map(|role| role.get().to_string()).collect();
+        let name = server_name(&member);
         let admitted = || -> Result<(), Error> {
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             let membership = logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
@@ -1203,10 +1216,11 @@ fn click_of(
         .guild(guild_id)
         .map(|guild| guild.name.clone())
         .unwrap_or_default();
-    let display = user
-        .global_name
-        .clone()
-        .unwrap_or_else(|| user.name.clone());
+    let display = crate::auth::discord_display_name(
+        member.and_then(|member| member.nick.as_deref()),
+        user.global_name.as_deref(),
+        &user.name,
+    );
     let manage = member.and_then(|member| {
         member
             .permissions
@@ -2153,16 +2167,17 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
         return Ok(None);
     };
     let author = ctx.author();
-    let display = author
-        .global_name
-        .clone()
-        .unwrap_or_else(|| author.name.clone());
     let discord_user = author.id.get().to_string();
     let guild_name = ctx
         .guild_id()
         .and_then(|id| ctx.cache().guild(id).map(|guild| guild.name.clone()))
         .unwrap_or_default();
     let member = ctx.author_member().await;
+    let display = crate::auth::discord_display_name(
+        member.as_ref().and_then(|member| member.nick.as_deref()),
+        author.global_name.as_deref(),
+        &author.name,
+    );
     let manage = member.as_ref().and_then(|member| {
         member
             .permissions
@@ -2625,7 +2640,15 @@ async fn run_response(
         ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
-    let name = crate::auth::discord_display_name(user.global_name.as_deref(), &user.name);
+    let member = match ctx.guild_id() {
+        Some(guild) => guild.member(ctx, user.id).await.ok(),
+        None => None,
+    };
+    let name = crate::auth::discord_display_name(
+        member.as_ref().and_then(|member| member.nick.as_deref()),
+        user.global_name.as_deref(),
+        &user.name,
+    );
     let data = ctx.data();
     let outcome = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;

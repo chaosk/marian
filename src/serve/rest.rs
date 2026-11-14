@@ -307,6 +307,8 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
     #[derive(Deserialize)]
     struct Found {
         user: User,
+        #[serde(default)]
+        nick: Option<String>,
     }
     let unavailable = || Problem(StatusCode::BAD_GATEWAY, "Discord didn't answer the search. Try again.".into());
     let request = state
@@ -327,7 +329,11 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
         .into_iter()
         .filter(|found| !found.user.bot)
         .map(|found| {
-            let name = crate::auth::discord_display_name(found.user.global_name.as_deref(), &found.user.username);
+            let name = crate::auth::discord_display_name(
+                found.nick.as_deref(),
+                found.user.global_name.as_deref(),
+                &found.user.username,
+            );
             (found.user.id, name)
         })
         .collect())

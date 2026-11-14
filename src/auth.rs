@@ -13,10 +13,14 @@ pub fn random_token() -> Result<String, OpError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-pub fn discord_display_name(global_name: Option<&str>, username: &str) -> String {
-    let picked = global_name
+/// The name a person goes by in a server, as Discord shows it: their server
+/// nickname, else their global display name, else their username.
+pub fn discord_display_name(nick: Option<&str>, global_name: Option<&str>, username: &str) -> String {
+    let picked = [nick, global_name]
+        .into_iter()
+        .flatten()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .find(|name| !name.is_empty())
         .unwrap_or_else(|| username.trim());
     let picked = if picked.is_empty() {
         "Discord member"
@@ -235,8 +239,10 @@ mod tests {
         let guilds = vec![(1, "10".into()), (2, "20".into()), (3, "30".into())];
         let member = vec!["30".into(), "10".into(), "99".into()];
         assert_eq!(guilds_in_common(&guilds, &member), vec![1, 3]);
-        assert_eq!(discord_display_name(Some("Nell"), "nell"), "Nell");
-        assert_eq!(discord_display_name(None, "nell"), "nell");
+        assert_eq!(discord_display_name(Some("Nellie"), Some("Nell"), "nell"), "Nellie");
+        assert_eq!(discord_display_name(Some(" "), Some("Nell"), "nell"), "Nell");
+        assert_eq!(discord_display_name(None, Some("Nell"), "nell"), "Nell");
+        assert_eq!(discord_display_name(None, None, "nell"), "nell");
         assert!(manages_guild(true, "0"));
         assert!(manages_guild(false, "8"));
         assert!(manages_guild(false, "32"));

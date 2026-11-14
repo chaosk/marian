@@ -563,7 +563,7 @@ fn role_target(conn: &mut Connection, headers: &HeaderMap, server: &str) -> Opti
     if !session.allowed.contains(&guild.id) {
         return None;
     }
-    let user = logic::ensure_discord_user(
+    let user = logic::admit_discord_user(
         conn,
         guild.id,
         &session.discord_user_id,
@@ -642,7 +642,7 @@ fn admit_guilds(
             .find(|(id, _)| *id == guild_id)
             .map(|(_, discord_id)| discord_id.as_str())
             .unwrap_or("");
-        let user = logic::ensure_discord_user(db, guild_id, discord_user, name)?;
+        let user = logic::admit_discord_user(db, guild_id, discord_user, name)?;
         let manages = member_of
             .iter()
             .find(|guild| guild.id == discord_id)
@@ -811,7 +811,7 @@ async fn auth_callback(
         Ok(ids) => ids,
         Err(err) => return nav_redirect("/", &err),
     };
-    let name = auth::discord_display_name(me.global_name.as_deref(), &me.username);
+    let name = auth::discord_display_name(None, me.global_name.as_deref(), &me.username);
     let mut db = state.db.get().expect("database");
     let admitted = match admit_guilds(&mut db, &me.id, &name, &member_of) {
         Ok(admitted) => admitted,

@@ -510,21 +510,62 @@ struct NewMembership<'a> {
     server_manager: bool,
 }
 
+/// The member's membership, made if it's new, under `name`: the name they go
+/// by in this server, which replaces the one stored.
 pub fn ensure_discord_user(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Membership, OpError> {
-    let user_id = store::ensure_user(conn, discord_id)?;
-    if let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? {
-        if user.name != name && !name.is_empty() {
-            diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
-                .set(schema::memberships::name.eq(name))
-                .execute(conn)?;
-        }
-        return store::membership(conn, user.id)?.ok_or(OpError::NotFound);
+    match follow_discord_name(conn, guild_id, discord_id, name)? {
+        Some(user) => Ok(user),
+        None => new_discord_user(conn, guild_id, discord_id, name),
     }
+}
+
+/// The member's membership, made under `name` if it's new. For a name that
+/// may not be the one they go by here, like the global name the web sign-in
+/// gets: a stored name, perhaps a server nickname, is kept.
+pub fn admit_discord_user(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Membership, OpError> {
+    match store::membership_by_discord(conn, guild_id, discord_id)? {
+        Some(user) => Ok(user),
+        None => new_discord_user(conn, guild_id, discord_id, name),
+    }
+}
+
+/// Renames a member Marian already knows to the name they go by in this
+/// server. Nobody new is added.
+pub fn follow_discord_name(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Option<Membership>, OpError> {
+    let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? else {
+        return Ok(None);
+    };
+    if user.name == name || name.is_empty() {
+        return Ok(Some(user));
+    }
+    diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
+        .set(schema::memberships::name.eq(name))
+        .execute(conn)?;
+    store::membership(conn, user.id)
+}
+
+fn new_discord_user(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Membership, OpError> {
+    let user_id = store::ensure_user(conn, discord_id)?;
     let handle = unique_handle(conn, guild_id, name, discord_id)?;
     let color = [
         "#1e3a6e", "#2f6b4f", "#8a6232", "#6b3a6b", "#8d3a32", "#243038",
@@ -1304,6 +1345,26 @@ mod tests {
         assert!(store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
         set_server_manager(&mut conn, first.id, false).unwrap();
         assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
+    }
+
+    #[test]
+    fn a_server_nickname_stays_through_a_web_sign_in() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
+        )
+        .unwrap();
+        assert!(follow_discord_name(&mut conn, 1, "100", "Nellie").unwrap().is_none(), "nobody new is added");
+        let signed_in = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert_eq!(signed_in.name, "Nell", "a new member starts with the name they signed in with");
+
+        let clicked = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
+        assert_eq!((clicked.id, clicked.name.as_str()), (signed_in.id, "Nellie"));
+        let again = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert_eq!(again.name, "Nellie", "the global name doesn't replace the nickname");
+
+        let renamed = follow_discord_name(&mut conn, 1, "100", "Nells").unwrap().unwrap();
+        assert_eq!(renamed.name, "Nells");
     }
 
     #[test]

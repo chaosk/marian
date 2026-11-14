@@ -104,7 +104,7 @@ pub fn bind_guild(conn: &mut Connection, viewer: &mut Viewer, guild_id: i64) -> 
     if guild_id <= 0 || !viewer.allowed.contains(&guild_id) || store::guild(conn, guild_id)?.is_none() {
         return Err(OpError::NotFound);
     }
-    let user = logic::ensure_discord_user(
+    let user = logic::admit_discord_user(
         conn,
         guild_id,
         &viewer.discord_user_id,
