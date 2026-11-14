@@ -53,10 +53,12 @@ Metrics, once a minute:
 
 | Metric | Kind | Attributes | Meaning |
 | --- | --- | --- | --- |
-| `marian.discord.jobs` | counter | `job`, `outcome` | Each run of a Discord job: `done`, `failed` (tried again in 2 s, up to 8 times) or `dropped` (out of tries, also logged as an error). `job` is `sync`, `remind`, `attend`, `routine` or `commands` |
-| `marian.discord.job.duration` | histogram, s | `job`, `outcome` | How long a run took, waits for Discord's rate limits included |
+| `marian.discord.jobs` | counter | `kind`, `outcome` | Each run of a Discord job: `done`, `failed` (tried again in 2 s, up to 8 times) or `dropped` (out of tries, also logged as an error). `kind` is `sync`, `remind`, `attend`, `routine` or `commands` |
+| `marian.discord.job.duration` | histogram, s | `kind`, `outcome` | How long a run took, waits for Discord's rate limits included. Buckets from 50 ms to 60 s |
 | `marian.discord.queue.waiting` | gauge | | Jobs left in the queue when the last one was taken |
 | `marian.discord.queue.retrying` | up-down counter | | Failed jobs in their 2 s pause before going back in the queue. With `waiting`, the whole backlog |
+
+The job kind is `kind`, not `job`: Prometheus sets `job` from the service name on OTLP metrics and would overwrite it.
 
 While the gateway reconnects, the queue waits for it, and jobs don't spend their tries.
 

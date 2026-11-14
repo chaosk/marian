@@ -130,7 +130,7 @@ async fn job_loop(
                 }
             },
         };
-        let attributes = [KeyValue::new("job", kind), KeyValue::new("outcome", outcome)];
+        let attributes = [KeyValue::new("kind", kind), KeyValue::new("outcome", outcome)];
         JOB_METRICS.runs.add(1, &attributes);
         JOB_METRICS.duration.record(started.elapsed().as_secs_f64(), &attributes);
     }
@@ -156,6 +156,9 @@ static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
             .f64_histogram("marian.discord.job.duration")
             .with_unit("s")
             .with_description("How long a Discord job took, waits for Discord's rate limits included.")
+            // The SDK's default buckets (0, 5, 10, 25 … 10000) suit milliseconds;
+            // most runs take well under a second, and rate-limit waits a few.
+            .with_boundaries(vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0])
             .build(),
         waiting: meter
             .u64_gauge("marian.discord.queue.waiting")
