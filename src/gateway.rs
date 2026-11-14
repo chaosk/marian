@@ -33,6 +33,33 @@ struct Data {
     members: bool,
 }
 
+/// The bot's view of each server's members, for the web to read roles from
+/// instead of asking Discord. It is there only while the gateway is connected
+/// with the Server Members intent, when Discord keeps every member current:
+/// the full member list on connect, then each change as it happens.
+#[derive(Clone, Default)]
+pub struct MemberView(Arc<Mutex<Option<Arc<serenity::Cache>>>>);
+
+impl MemberView {
+    /// The member's Discord role ids as the bot sees them, or `None` when it
+    /// can't vouch for them: not connected, no members intent, or the member
+    /// hasn't arrived in the member list yet.
+    pub fn roles(&self, guild: &str, user: &str) -> Option<Vec<String>> {
+        let id = |text: &str| text.parse::<u64>().ok().filter(|id| *id != 0);
+        let (guild, user) = (serenity::GuildId::new(id(guild)?), serenity::UserId::new(id(user)?));
+        let cache = self.0.lock().ok()?.clone()?;
+        let guild = cache.guild(guild)?;
+        let member = guild.members.get(&user)?;
+        Some(member.roles.iter().map(|role| role.get().to_string()).collect())
+    }
+
+    fn set(&self, cache: Option<Arc<serenity::Cache>>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = cache;
+        }
+    }
+}
+
 pub fn start(
     token: String,
     db: store::Db,
@@ -40,6 +67,7 @@ pub fn start(
     retry: UnboundedSender<DiscordJob>,
     public_url: String,
     status: String,
+    view: MemberView,
 ) {
     let http = Arc::new(Mutex::new(None));
     let data_db = db.clone();
@@ -60,11 +88,15 @@ pub fn start(
                 status.clone(),
                 members,
                 queue.clone(),
+                view.clone(),
             )
             .await;
             if let Ok(mut slot) = http.lock() {
                 *slot = None;
             }
+            // Changes made while disconnected never arrive; the web asks
+            // Discord until the next connection brings the member list again.
+            view.set(None);
             match stopped {
                 Err(err) if members && members_refused(&err) => {
                     tracing::warn!(
@@ -256,6 +288,7 @@ async fn connect(
     status: String,
     members: bool,
     queue: UnboundedSender<DiscordJob>,
+    view: MemberView,
 ) -> Result<(), Error> {
     let presence = presence_line(&status);
     let framework = poise::Framework::builder()
@@ -273,6 +306,11 @@ async fn connect(
             Box::pin(async move {
                 if let Ok(mut slot) = http.lock() {
                     *slot = Some(ctx.http.clone());
+                }
+                // Without the intent no member changes arrive, so the cache's
+                // roles could be any age.
+                if members {
+                    view.set(Some(ctx.cache.clone()));
                 }
                 tracing::info!("Discord gateway ready as {}", ready.user.name);
                 Ok(Data {
@@ -656,8 +694,8 @@ fn role_deleted(data: &Data, guild: serenity::GuildId, role: serenity::RoleId) -
     Ok(())
 }
 
-/// Brings the names of members Marian knows up to date, as a chunk of the
-/// server's member list has them, and redraws each post that changes once.
+/// Brings the names and roles of members Marian knows up to date, as a chunk
+/// of the server's member list has them, and redraws each post that changes once.
 fn follow_names<'a>(
     data: &Data,
     guild: serenity::GuildId,
@@ -670,8 +708,10 @@ fn follow_names<'a>(
     let mut events = std::collections::BTreeSet::new();
     for member in members {
         let user = member.user.id.get().to_string();
-        if let Some((_, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
+        if let Some((known, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
             events.extend(renamed);
+            let roles: Vec<String> = member.roles.iter().map(|role| role.get().to_string()).collect();
+            store::replace_discord_roles(&mut conn, stored.id, known.id, &roles)?;
         }
     }
     redraw(&data.jobs, events.into_iter().collect());
@@ -3616,7 +3656,38 @@ async fn help(ctx: Context<'_>) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dm_blocked, embed_parts, parse_button, presence_line, ButtonAction, Lang};
+    use super::{dm_blocked, embed_parts, parse_button, presence_line, serenity, ButtonAction, Lang, MemberView};
+    use std::sync::Arc;
+
+    #[test]
+    fn the_member_view_vouches_only_for_members_it_holds() {
+        let view = MemberView::default();
+        assert_eq!(view.roles("1", "2"), None, "not connected");
+
+        let cache = Arc::new(serenity::Cache::new());
+        let mut event: serenity::GuildCreateEvent = serde_json::from_value(serde_json::json!({
+            "id": "1", "name": "Guild", "owner_id": "9", "roles": [], "emojis": [], "features": [],
+            "afk_timeout": 300, "verification_level": 0, "default_message_notifications": 0,
+            "explicit_content_filter": 0, "mfa_level": 0, "nsfw_level": 0, "premium_tier": 0,
+            "preferred_locale": "en-US", "system_channel_flags": 0, "stickers": [],
+            "premium_progress_bar_enabled": false, "joined_at": "2026-01-01T00:00:00Z",
+            "large": false, "member_count": 1, "unavailable": false, "voice_states": [],
+            "channels": [], "threads": [], "presences": [], "stage_instances": [],
+            "guild_scheduled_events": [],
+            "members": [{
+                "user": { "id": "2", "username": "nell", "discriminator": "0" },
+                "roles": ["3", "4"], "joined_at": "2026-01-01T00:00:00Z", "deaf": false, "mute": false, "flags": 0,
+            }],
+        }))
+        .unwrap();
+        cache.update(&mut event);
+        view.set(Some(cache));
+        assert_eq!(view.roles("1", "2"), Some(vec!["3".to_string(), "4".to_string()]));
+        assert_eq!(view.roles("1", "5"), None, "a member not loaded yet");
+        assert_eq!(view.roles("0", "2"), None, "an id Discord never gives");
+        view.set(None);
+        assert_eq!(view.roles("1", "2"), None, "disconnected again");
+    }
 
     #[test]
     fn a_button_names_its_rows_by_public_id() {
