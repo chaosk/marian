@@ -58,6 +58,8 @@ Metrics, once a minute:
 | `marian.discord.queue.waiting` | gauge | | Jobs left in the queue when the last one was taken |
 | `marian.discord.queue.retrying` | up-down counter | | Failed jobs in their 2 s pause before going back in the queue. With `waiting`, the whole backlog |
 
+Each count starts at zero for every kind and outcome, and the queue at zero, when Marian starts, so the series exist before the first job runs. The duration has no data until a job has run.
+
 The job kind is `kind`, not `job`: Prometheus sets `job` from the service name on OTLP metrics and would overwrite it.
 
 While the gateway reconnects, the queue waits for it, and jobs don't spend their tries.
