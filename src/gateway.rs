@@ -382,7 +382,7 @@ async fn handle_event(
             }
         }
         serenity::FullEvent::GuildMemberUpdate { event, .. } => {
-            if let Err(err) = follow_member(data, event.guild_id, &event.user, event.nick.as_deref(), &event.roles) {
+            if let Err(err) = follow_member(data, event.guild_id, &event.user, event.nick.as_deref(), event.avatar.as_ref(), &event.roles) {
                 tracing::warn!("could not follow a member's name and roles: {err}");
             }
         }
@@ -670,8 +670,9 @@ fn follow_names<'a>(
     let mut events = std::collections::BTreeSet::new();
     for member in members {
         let user = member.user.id.get().to_string();
-        if let Some((_, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
+        if let Some((known, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
             events.extend(renamed);
+            logic::follow_discord_avatar(&mut conn, &known, server_avatar(guild, &member.user, member.avatar.as_ref()).as_deref())?;
         }
     }
     redraw(&data.jobs, events.into_iter().collect());
@@ -690,15 +691,33 @@ fn server_name(member: &serenity::Member) -> String {
     crate::auth::discord_display_name(member.nick.as_deref(), member.user.global_name.as_deref(), &member.user.name)
 }
 
-/// Keeps a member's name and roles as Discord has them. Only members Marian
+/// The picture a member shows in their server: their server avatar first.
+fn server_avatar(
+    guild: serenity::GuildId,
+    user: &serenity::User,
+    member_avatar: Option<&serenity::ImageHash>,
+) -> Option<String> {
+    let member_hash = member_avatar.map(ToString::to_string);
+    let user_hash = user.avatar.as_ref().map(ToString::to_string);
+    crate::auth::discord_avatar_url(
+        &guild.get().to_string(),
+        &user.id.get().to_string(),
+        member_hash.as_deref(),
+        user_hash.as_deref(),
+    )
+}
+
+/// Keeps a member's name, picture and roles as Discord has them. Only members Marian
 /// already knows are kept; the rest are picked up when they first use Marian.
 fn follow_member(
     data: &Data,
     guild: serenity::GuildId,
     user: &serenity::User,
     nick: Option<&str>,
+    avatar: Option<&serenity::ImageHash>,
     roles: &[serenity::RoleId],
 ) -> Result<(), Error> {
+    let avatar = server_avatar(guild, user, avatar);
     let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
     let Some(guild) = stored_guild(&mut conn, guild)? else {
         return Ok(());
@@ -708,6 +727,7 @@ fn follow_member(
         return Ok(());
     };
     redraw(&data.jobs, renamed);
+    logic::follow_discord_avatar(&mut conn, &member, avatar.as_deref())?;
     let roles: Vec<String> = roles.iter().map(|role| role.get().to_string()).collect();
     store::replace_discord_roles(&mut conn, guild.id, member.id, &roles)?;
     Ok(())
@@ -724,8 +744,10 @@ fn member_joined(data: &Data, member: &serenity::Member) -> Result<(), Error> {
     if sessions.is_empty() {
         return Ok(());
     }
-    let (_, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &user, &server_name(member))?;
+    let (known, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &user, &server_name(member))?;
     redraw(&data.jobs, renamed);
+    let avatar = server_avatar(member.guild_id, &member.user, member.avatar.as_ref());
+    logic::follow_discord_avatar(&mut conn, &known, avatar.as_deref())?;
     for (token, _, _) in &sessions {
         store::add_session_guild(&mut conn, token, guild.id)?;
     }
@@ -1313,6 +1335,7 @@ struct Click {
     guild_name: String,
     user_discord: String,
     display: String,
+    avatar: Option<String>,
     manage: Option<bool>,
     roles: Option<Vec<(String, String, String)>>,
 }
@@ -1369,6 +1392,7 @@ fn click_of(
         guild_name,
         user_discord: user.id.get().to_string(),
         display,
+        avatar: server_avatar(guild_id, user, member.and_then(|member| member.avatar.as_ref())),
         manage,
         roles,
     })
@@ -1379,6 +1403,7 @@ fn bind_clicker(conn: &mut Connection, jobs: &UnboundedSender<DiscordJob>, click
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
     let (user, renamed) = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
     redraw(jobs, renamed);
+    logic::follow_discord_avatar(conn, &user, click.avatar.as_deref())?;
     if let Some(manage) = click.manage {
         logic::set_server_manager(conn, user.id, manage)?;
     }
@@ -2300,6 +2325,7 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
         author.global_name.as_deref(),
         &author.name,
     );
+    let avatar = server_avatar(guild_id, author, member.as_ref().and_then(|member| member.avatar.as_ref()));
     let manage = member.as_ref().and_then(|member| {
         member
             .permissions
@@ -2326,6 +2352,9 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
     let (user, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
     redraw(&ctx.data().jobs, renamed);
+    if member.is_some() {
+        logic::follow_discord_avatar(&mut conn, &user, avatar.as_deref())?;
+    }
     if let Some(manage) = manage {
         logic::set_server_manager(&mut conn, user.id, manage)?;
     }
@@ -2782,6 +2811,10 @@ async fn run_response(
             &name,
         )?;
         redraw(&data.jobs, renamed);
+        if let (Some(guild), Some(member)) = (ctx.guild_id(), &member) {
+            let avatar = server_avatar(guild, user, member.avatar.as_ref());
+            logic::follow_discord_avatar(&mut conn, &target, avatar.as_deref())?;
+        }
         commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action, guests, actor.lang)
     };
     match outcome {

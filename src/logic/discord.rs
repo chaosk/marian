@@ -564,6 +564,18 @@ pub fn follow_discord_name(
     Ok(Some((user, redraw)))
 }
 
+/// Keeps a member's picture as Discord has it; `None` clears one they took
+/// down. Posts don't show pictures, so nothing needs redrawing.
+pub fn follow_discord_avatar(conn: &mut Connection, member: &Membership, avatar: Option<&str>) -> Result<(), OpError> {
+    if member.avatar.as_deref() == avatar {
+        return Ok(());
+    }
+    diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(member.id)))
+        .set(schema::memberships::avatar.eq(avatar))
+        .execute(conn)?;
+    Ok(())
+}
+
 /// Events whose Discord post lists the member among the people signed up and
 /// hasn't ended. A post for an event that's over keeps the names it was last
 /// drawn with, even while it still takes signups.
@@ -1432,6 +1444,28 @@ mod tests {
 
         let (renamed, _) = follow_discord_name(&mut conn, 1, "100", "Nells").unwrap().unwrap();
         assert_eq!(renamed.name, "Nells");
+    }
+
+    #[test]
+    fn a_member_picture_follows_discord_and_can_be_taken_down() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
+        )
+        .unwrap();
+        let (member, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert_eq!(member.avatar, None, "a new member shows their initial");
+
+        let url = "https://cdn.discordapp.com/avatars/100/abc.webp?size=64";
+        follow_discord_avatar(&mut conn, &member, Some(url)).unwrap();
+        let member = store::membership(&mut conn, member.id).unwrap().unwrap();
+        assert_eq!(member.avatar.as_deref(), Some(url));
+
+        let (renamed, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
+        assert_eq!(renamed.avatar.as_deref(), Some(url), "a rename keeps the picture");
+
+        follow_discord_avatar(&mut conn, &renamed, None).unwrap();
+        assert_eq!(store::membership(&mut conn, member.id).unwrap().unwrap().avatar, None);
     }
 
     #[test]
