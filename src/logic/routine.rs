@@ -540,21 +540,25 @@ pub fn routine_post(
     let settings = store::settings(conn, routine.guild_id)?;
     let lang = crate::i18n::Lang::from_code(&settings.language).unwrap_or_default();
     let names = vote_names(conn, run.id)?;
-    // Every day on the poll with who voted for it, open or final.
+    // Every day on the poll with who voted for it, open or final. Discord
+    // always bolds a field's name, so the day goes in the value, in normal
+    // weight with its count bold, and the name is left blank (a zero-width
+    // space: Discord wants one). The voters follow as a quote, which Discord
+    // dims beside the day.
     let fields = run
         .days
         .iter()
         .map(|day| {
             let people = names.get(day).cloned().unwrap_or_default();
-            let value = if people.is_empty() {
-                "-".to_string()
-            } else {
-                people.join("\n")
-            };
             let when = event_start(run.locks_at, *day, routine.start_minutes, tz);
             let label = poll_day_label(lang, when.with_timezone(&tz).date_naive());
+            let mut value = format!("{label} **({})**", people.len());
+            for person in &people {
+                value.push_str("\n> ");
+                value.push_str(person);
+            }
             DiscordField {
-                name: format!("**{label}** ({})", people.len()),
+                name: "\u{200b}".to_string(),
                 value,
                 inline: true,
             }
@@ -2201,8 +2205,8 @@ mod tests {
         assert!(post.body.starts_with("**Thursday, Oct 15** won with 2 votes."), "{}", post.body);
         assert!(post.buttons.is_empty());
         assert!(!post.body.contains("[Edit]"), "no edit link on the results: {}", post.body);
-        assert_eq!(post.fields[0].value, "Nell\nJune");
-        assert_eq!(post.fields[1].value, "June");
+        assert_eq!(post.fields[0].value, "Thursday, Oct 15 **(2)**\n> Nell\n> June");
+        assert_eq!(post.fields[1].value.split_once('\n').map(|(_, voters)| voters), Some("> June"));
 
         remember_results_message(&mut conn, open.id, "777").unwrap();
         let post = routine_post(&mut conn, open.id, "https://marian.example").unwrap().unwrap();
@@ -2287,11 +2291,11 @@ mod tests {
         );
         assert!(!post.body.contains("Thursday"), "{post:?}");
         assert_eq!(post.fields.len(), 2);
-        assert_eq!(post.fields[0].name, "**Thursday, Oct 15** (2)");
-        assert_eq!(post.fields[0].value, "Nell\nJune");
+        assert_eq!(post.fields[0].name, "\u{200b}", "Discord bolds names, so the day is in the value");
+        assert_eq!(post.fields[0].value, "Thursday, Oct 15 **(2)**\n> Nell\n> June");
         assert!(post.fields[0].inline);
-        assert_eq!(post.fields[1].name, "**Friday, Oct 16** (0)");
-        assert_eq!(post.fields[1].value, "-");
+        assert_eq!(post.fields[1].name, "\u{200b}");
+        assert_eq!(post.fields[1].value, "Friday, Oct 16 **(0)**", "nobody to quote");
         assert!(post.fields[1].inline);
         assert_eq!(post.buttons[0].label, "Thursday, Oct 15");
         // The button names the poll by its public id, which leads back to the poll.
