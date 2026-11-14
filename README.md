@@ -56,6 +56,7 @@ Metrics, once a minute:
 | `marian.discord.jobs` | counter | `job`, `outcome` | Each run of a Discord job: `done`, `failed` (tried again in 2 s, up to 8 times) or `dropped` (out of tries, also logged as an error). `job` is `sync`, `remind`, `attend`, `routine` or `commands` |
 | `marian.discord.job.duration` | histogram, s | `job`, `outcome` | How long a run took, waits for Discord's rate limits included |
 | `marian.discord.queue.waiting` | gauge | | Jobs left in the queue when the last one was taken |
+| `marian.discord.queue.retrying` | up-down counter | | Failed jobs in their 2 s pause before going back in the queue. With `waiting`, the whole backlog |
 
 While the gateway reconnects, the queue waits for it, and jobs don't spend their tries.
 

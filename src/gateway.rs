@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use diesel::prelude::*;
-use opentelemetry::metrics::{Counter, Gauge, Histogram};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
 use opentelemetry::KeyValue;
 use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -142,6 +142,7 @@ struct JobMetrics {
     runs: Counter<u64>,
     duration: Histogram<f64>,
     waiting: Gauge<u64>,
+    retrying: UpDownCounter<i64>,
 }
 
 static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
@@ -159,6 +160,10 @@ static JOB_METRICS: LazyLock<JobMetrics> = LazyLock::new(|| {
         waiting: meter
             .u64_gauge("marian.discord.queue.waiting")
             .with_description("Discord jobs left waiting in the queue when the last one was taken.")
+            .build(),
+        retrying: meter
+            .i64_up_down_counter("marian.discord.queue.retrying")
+            .with_description("Failed Discord jobs waiting out the pause before they go back in the queue.")
             .build(),
     }
 });
@@ -193,9 +198,13 @@ async fn push_commands(
     Ok(())
 }
 
+/// Puts a failed job back in the queue after a pause. Until then it's counted
+/// in `retrying`, since the queue's own length can't see it.
 fn retry_later(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
+    JOB_METRICS.retrying.add(1, &[]);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        JOB_METRICS.retrying.add(-1, &[]);
         let _ = retry.send(job);
     });
 }
