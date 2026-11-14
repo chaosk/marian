@@ -1,7 +1,6 @@
 # What Marian posts in channels: events, polls, reminders.
 post-location = Location
 post-time = Time
-post-view-on-web = View on web
 post-waiting = { $count } waiting
 post-option-fallback = Option
 post-edit = Edit

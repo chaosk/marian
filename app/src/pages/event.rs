@@ -154,7 +154,7 @@ pub fn EventPage() -> impl IntoView {
                 attendance: signups_cell(signups, members, roles).into_any(),
                 reminders: reminders_cell(key.clone(), event.clone(), reminders).into_any(),
                 roles: roles_cell(key.clone(), event.clone(), roles).into_any(),
-                embed: embed_cell(signups, roles, event.clone(), clock, here, at(path::event), localize, now).into_any(),
+                embed: embed_cell(signups, roles, event.clone(), clock, here, localize, now).into_any(),
                 channel: channel_cell(key.clone(), event.clone(), channels).into_any(),
                 status,
                 activity: Some(view! { <p><A href=format!("{}/events/{}/activity", base(), event.id)>"See what happened"</A></p> }.into_any()),
@@ -265,7 +265,7 @@ pub fn NewEvent() -> impl IntoView {
                     .into_any(),
                     reminders: view! { <EventReminders key=key.clone() event=event.clone() reminders/> }.into_any(),
                     roles: role_cells(key.clone(), &event, roles.get_value()).into_any(),
-                    embed: embed_view(&signups, &roles.get_value(), &event, clock, String::new(), String::new(), localize, now).into_any(),
+                    embed: embed_view(&signups, &roles.get_value(), &event, clock, String::new(), localize, now).into_any(),
                     channel: view! { <EventChannel key=key.clone() event=event.clone() channels=channels.get_value()/> }.into_any(),
                     status: view! { <p>"Not saved yet"</p> }.into_any(),
                     activity: None,
@@ -365,25 +365,22 @@ fn embed_cell(
     event: dto::Event,
     clock: format::Clock,
     here: String,
-    delete_at: String,
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
     when(move || (signups.get(), roles.get()).ready(), move |(signups, roles)| {
-        embed_view(&signups, &roles, &event, clock, here.clone(), delete_at.clone(), localize, now)
+        embed_view(&signups, &roles, &event, clock, here.clone(), localize, now)
     })
 }
 
-/// The Discord post as it reads. `here` (the event's page) and `delete_at`
-/// (its API path) are empty for an event not saved yet.
-#[allow(clippy::too_many_arguments)]
+/// The Discord post as it reads. `here`, the event's page, is empty for an
+/// event not saved yet.
 fn embed_view(
     signups: &dto::Signups,
     roles: &[dto::Role],
     event: &dto::Event,
     clock: format::Clock,
     here: String,
-    delete_at: String,
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
@@ -392,8 +389,7 @@ fn embed_view(
     let location = event.location.clone();
     let image = event.image_url.clone();
     let color = event.color.clone();
-    let can = event.can.clone();
-    // A finished event's post has no buttons, as on Discord.
+    // A finished event's post keeps only its link to the web, as on Discord.
     let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
     // The message text above the embed, as the post words it: @everyone, then each role.
     let mentions: Vec<String> = event
@@ -419,7 +415,10 @@ fn embed_view(
                 let lines: Vec<String> = opt
                     .confirmed
                     .iter()
-                    .map(|person| person.name.clone())
+                    .map(|person| match person.guests {
+                        0 => person.name.clone(),
+                        guests => format!("{} (+{guests})", person.name),
+                    })
                     .chain((opt.waiting_count > 0).then(|| format!("{} waiting", opt.waiting_count)))
                     .collect();
                 let value = if lines.is_empty() {
@@ -444,11 +443,18 @@ fn embed_view(
                 }
             })
             .collect_view();
+        // Each option's button, then "+X" right after it where the option takes guests.
         let buttons = signups
             .options
             .iter()
             .map(|opt| {
-                view! { <button class="d-btn" type="button" disabled>{opt.emoji.clone()}</button> }
+                let label = if opt.emoji.trim().is_empty() { "Option".to_string() } else { opt.emoji.clone() };
+                view! {
+                    <button class="d-btn" type="button" disabled>{label}</button>
+                    {(opt.max_guests > 0).then(|| view! {
+                        <button class="d-btn" type="button" disabled>{opt.emoji.clone()}" +X"</button>
+                    })}
+                }
             })
             .collect_view();
         view! {
@@ -467,34 +473,21 @@ fn embed_view(
                     })}
                     <p class="d-kicker">"Time"</p>
                     <p class="d-desc"><span class="d-time">{start_full}</span>" - "<span class="d-time">{end_time}</span></p>
-                    <p class="d-links">
-                        {event.calendar_url.clone().map(|url| view! { <a href=url>"+"</a> })}
-                        {(!here.is_empty()).then(|| view! { " · "<A href=here.clone()>"View on web"</A> })}
-                    </p>
+                    {event.calendar_url.clone().map(|url| view! { <p class="d-links"><a href=url>"+"</a></p> })}
                     <p class="d-desc">"🕐 "<span class="d-time">{format::format_rel(event.starts_at, now)}</span></p>
                     {(event.status != "posted").then(|| view! { <p class="d-desc"><em>{status_label(&event.status)}</em></p> })}
                     <div class="d-fields">{fields}</div>
                     {image.as_ref().map(|url| view! { <img class="d-image" src=url.clone() alt=""/> })}
                     <p class="d-foot">"Created by "{event.creator.clone()}</p>
                 </div>
-                {(!finished).then(|| view! {
-                    <div class="btn-row">
-                        {buttons}
-                        {if can.edit && !here.is_empty() {
-                            view! { <A href=here.clone() attr:class="d-btn primary">"Edit"</A> }.into_any()
-                        } else {
-                            view! { <button class="d-btn primary" type="button" disabled>"Edit"</button> }.into_any()
-                        }}
-                        {if can.delete && !delete_at.is_empty() {
-                            view! {
-                                <ActionButton method="DELETE" url=delete_at.clone() label="Delete" class="d-btn danger" confirm="Remove this event?"/>
-                            }
-                            .into_any()
-                        } else {
-                            view! { <button class="d-btn danger" type="button" disabled>"Delete"</button> }.into_any()
-                        }}
-                    </div>
-                })}
+                <div class="btn-row">
+                    {(!finished).then(|| buttons)}
+                    {if here.is_empty() {
+                        view! { <button class="d-btn" type="button" disabled>"↗"</button> }.into_any()
+                    } else {
+                        view! { <A href=here.clone() attr:class="d-btn" attr:title="The event's page">"↗"</A> }.into_any()
+                    }}
+                </div>
                 <p class="why">"Times as they read on this site. "{localize}</p>
             </div>
         }

@@ -2680,7 +2680,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(view.body.contains("**Czas**"), "{}", view.body);
-        assert!(view.body.contains("[Zobacz w przeglądarce]("), "{}", view.body);
+        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
         assert_eq!(view.footer, "Utworzone przez Nell");
 
         let mut sent = posted;
@@ -2789,14 +2789,7 @@ mod tests {
             .unwrap();
         assert_eq!(view.channel_id, "100");
         assert!(view.body.contains("**Time**"), "{}", view.body);
-        assert!(
-            view.body.contains(&format!(
-                "[View on web](https://marian.example.com/servers/4242/events/{})",
-                event.public_id
-            )),
-            "{}",
-            view.body
-        );
+        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
         assert!(view
             .body
             .contains("[+](http://www.google.com/calendar/event"),);
@@ -2814,7 +2807,13 @@ mod tests {
                 && button.emoji == "✅"
                 && button.tone == logic::ButtonTone::Secondary
         }));
-        assert!(view.buttons.iter().all(|button| {
+        let web = format!("https://marian.example.com/servers/4242/events/{}", event.public_id);
+        assert_eq!(
+            view.buttons.last().map(|button| (&button.role, button.label.as_str())),
+            Some((&logic::ButtonRole::Web(web), "↗")),
+            "the event's page is the last button"
+        );
+        assert!(view.buttons[..view.buttons.len() - 1].iter().all(|button| {
             matches!(button.role, logic::ButtonRole::Signup(_) | logic::ButtonRole::Guests(_))
         }));
         assert_eq!(
