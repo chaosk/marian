@@ -1571,9 +1571,14 @@ pub fn replace_discord_roles(
         })
         .map(|role| role.id)
         .collect();
-    diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::membership_id.eq(membership_id)))
-        .execute(conn)?;
-    insert_membership_roles(conn, membership_id, &role_ids)
+    // Requests and the gateway may replace the same member's roles at once:
+    // the transaction keeps readers from seeing them roleless in between, and
+    // the insert skips rows another replacement has just written.
+    conn.transaction(|conn| {
+        diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::membership_id.eq(membership_id)))
+            .execute(conn)?;
+        insert_membership_roles(conn, membership_id, &role_ids)
+    })
 }
 
 #[derive(Insertable)]
@@ -1603,6 +1608,7 @@ pub fn insert_membership_roles(
     }
     diesel::insert_into(schema::membership_roles::table)
         .values(&rows)
+        .on_conflict_do_nothing()
         .execute(conn)?;
     Ok(())
 }
@@ -2494,6 +2500,9 @@ mod tests {
         let person = membership(&mut conn, 1).unwrap().unwrap();
         let roles = membership_role_ids(&mut conn, &person).unwrap();
         assert_eq!(roles, vec![2]);
+        // A replacement running alongside writes the same row first.
+        insert_membership_roles(&mut conn, 1, &[2]).unwrap();
+        assert_eq!(membership_role_ids(&mut conn, &person).unwrap(), vec![2]);
         replace_discord_roles(&mut conn, 1, 1, &[]).unwrap();
         let person = membership(&mut conn, 1).unwrap().unwrap();
         assert!(membership_role_ids(&mut conn, &person).unwrap().is_empty());
