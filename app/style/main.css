@@ -408,8 +408,12 @@ button:disabled,
 .stack { display: flex; flex-direction: column; gap: 10px; }
 /* An event's colour runs down the left as an SVG stripe (see `paint`): the
    page's CSP allows no inline styles. The card's rounded corners clip it. */
-.card, .hero, .embed { position: relative; overflow: hidden; border-left: 0; }
-.card, .hero { padding-left: 22px; }
+.card, .hero { border-left: 4px solid var(--blue); }
+/* Only what carries a stripe trades the border for it, and clips it to its
+   corners; routine and preset cards have no colour of their own, keep the
+   plain blue border, and let their popovers out. */
+.card:has(> .stripe), .hero:has(> .stripe), .embed { position: relative; overflow: hidden; border-left: 0; }
+.card:has(> .stripe), .hero:has(> .stripe) { padding-left: 22px; }
 .stripe { position: absolute; left: 0; top: 0; width: 4px; height: 100%; fill: var(--blue); }
 /* A colour filling its holder behind the holder's own content, like an avatar's initial. */
 .paint { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
@@ -419,7 +423,9 @@ button:disabled,
 .command-form { margin-top: 12px; }
 .gate-card.undecided { visibility: hidden; }
 .card { display: block; text-decoration: none; color: inherit; }
-.sheet td.event-title { position: relative; padding-left: 20px; }
+/* A filtered table can't clip at its own edge (its menus spill out), so it
+   rounds its corner cells instead; the cell clips its stripe to that corner. */
+.sheet td.event-title { position: relative; overflow: hidden; padding-left: 20px; }
 .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .card-top h3 { min-width: 0; }
 .card-top .badge { flex: none; margin-top: 3px; }
