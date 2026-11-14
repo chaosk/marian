@@ -1471,9 +1471,10 @@ enum ButtonAction {
 /// A button on an event's post. Its id names the event, and the option, by
 /// public id: anyone can read a button's id in Discord.
 fn action_button(event: uuid::Uuid, button: &logic::DiscordButton) -> serenity::CreateButton {
-    let custom_id = match button.role {
+    let custom_id = match &button.role {
         logic::ButtonRole::Signup(option) => format!("marian:{event}:{option}"),
         logic::ButtonRole::Guests(option) => format!("marian:{event}:{option}:g"),
+        logic::ButtonRole::Web(url) => return serenity::CreateButton::new_link(url).label(clip(&button.label, 80)),
     };
     let style = match button.tone {
         logic::ButtonTone::Secondary => serenity::ButtonStyle::Secondary,
