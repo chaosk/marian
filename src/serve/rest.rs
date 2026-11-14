@@ -289,7 +289,11 @@ async fn search_members(
         return Ok(Json(Vec::new()));
     }
     let found = discord_search(&state, &server, needle).await?;
-    read(&state, &headers, &server, |db, v| api::remember_members(db, v, &found))
+    let (members, redraw) = read(&state, &headers, &server, |db, v| api::remember_members(db, v, &found))?.0;
+    for event_id in redraw {
+        enqueue(&state.discord, DiscordJob::sync(event_id));
+    }
+    Ok(Json(members))
 }
 
 /// Asks Discord for up to 25 people in the server whose username or nickname

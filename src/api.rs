@@ -424,23 +424,25 @@ pub fn members(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Member
 }
 
 /// People found in the Discord server, as members here. Anyone new gets the
-/// membership they would get the first time they pressed a button.
+/// membership they would get the first time they pressed a button. With them
+/// come the events whose posts still show someone's old name.
 pub fn remember_members(
     conn: &mut Connection,
     viewer: &Viewer,
     found: &[(String, String)],
-) -> Result<Vec<dto::Member>, OpError> {
-    found
-        .iter()
-        .map(|(discord_id, name)| {
-            let person = logic::ensure_discord_user(conn, viewer.guild_id, discord_id, name)?;
-            Ok(dto::Member {
-                id: person.public_id.to_string(),
-                name: person.name,
-                color: person.color,
-            })
-        })
-        .collect()
+) -> Result<(Vec<dto::Member>, Vec<i64>), OpError> {
+    let mut members = Vec::new();
+    let mut redraw = Vec::new();
+    for (discord_id, name) in found {
+        let (person, renamed) = logic::ensure_discord_user(conn, viewer.guild_id, discord_id, name)?;
+        redraw.extend(renamed);
+        members.push(dto::Member {
+            id: person.public_id.to_string(),
+            name: person.name,
+            color: person.color,
+        });
+    }
+    Ok((members, redraw))
 }
 
 pub fn channels(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Channel>, OpError> {

@@ -260,6 +260,7 @@ async fn handle_event(
                 .collect();
             tokio::spawn(admit_signed_in(
                 data.db.clone(),
+                data.jobs.clone(),
                 ctx.http.clone(),
                 guild.id,
                 guild.owner_id,
@@ -486,7 +487,10 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
     // Discord sends the members only with the members intent, and only all
     // of them in smaller servers; the rest catch up when they next act.
     for member in guild.members.values() {
-        logic::follow_discord_name(&mut conn, stored.id, &member.user.id.get().to_string(), &server_name(member))?;
+        let user = member.user.id.get().to_string();
+        if let Some((_, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
+            redraw(&data.jobs, renamed);
+        }
     }
     let guild_discord = guild.id.get().to_string();
     for role in guild.roles.values() {
@@ -568,6 +572,13 @@ fn role_deleted(data: &Data, guild: serenity::GuildId, role: serenity::RoleId) -
     Ok(())
 }
 
+/// Redraws the posts that still show someone's old name.
+fn redraw(jobs: &UnboundedSender<DiscordJob>, events: Vec<i64>) {
+    for event_id in events {
+        let _ = jobs.send(DiscordJob::sync(event_id));
+    }
+}
+
 /// The name a member goes by in their server: nickname first.
 fn server_name(member: &serenity::Member) -> String {
     crate::auth::discord_display_name(member.nick.as_deref(), member.user.global_name.as_deref(), &member.user.name)
@@ -587,9 +598,10 @@ fn follow_member(
         return Ok(());
     };
     let name = crate::auth::discord_display_name(nick, user.global_name.as_deref(), &user.name);
-    let Some(member) = logic::follow_discord_name(&mut conn, guild.id, &user.id.get().to_string(), &name)? else {
+    let Some((member, renamed)) = logic::follow_discord_name(&mut conn, guild.id, &user.id.get().to_string(), &name)? else {
         return Ok(());
     };
+    redraw(&data.jobs, renamed);
     let roles: Vec<String> = roles.iter().map(|role| role.get().to_string()).collect();
     store::replace_discord_roles(&mut conn, guild.id, member.id, &roles)?;
     Ok(())
@@ -606,7 +618,8 @@ fn member_joined(data: &Data, member: &serenity::Member) -> Result<(), Error> {
     if sessions.is_empty() {
         return Ok(());
     }
-    logic::ensure_discord_user(&mut conn, guild.id, &user, &server_name(member))?;
+    let (_, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &user, &server_name(member))?;
+    redraw(&data.jobs, renamed);
     for (token, _, _) in &sessions {
         store::add_session_guild(&mut conn, token, guild.id)?;
     }
@@ -633,6 +646,7 @@ fn member_left(data: &Data, guild: serenity::GuildId, user: &serenity::User) -> 
 /// their roles (`roles`: each role's permissions, by Discord id) make them one.
 async fn admit_signed_in(
     db: store::Db,
+    jobs: UnboundedSender<DiscordJob>,
     http: Arc<serenity::Http>,
     guild: serenity::GuildId,
     owner: serenity::UserId,
@@ -687,7 +701,8 @@ async fn admit_signed_in(
         let name = server_name(&member);
         let admitted = || -> Result<(), Error> {
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            let membership = logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
+            let (membership, renamed) = logic::ensure_discord_user(&mut conn, guild_id, &user, &name)?;
+            redraw(&jobs, renamed);
             logic::set_server_manager(&mut conn, membership.id, manages)?;
             store::replace_discord_roles(&mut conn, guild_id, membership.id, &role_ids)?;
             for token in &tokens {
@@ -807,7 +822,7 @@ async fn decide_from_button(
     };
     let (decided, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         (logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()), lang)
     };
     match decided {
@@ -834,7 +849,7 @@ async fn routine_from_button(
     };
     let (saved, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         (logic::cast_run(&mut conn, run_id, membership_id, day), lang)
     };
     if let Err(err) = saved {
@@ -859,7 +874,7 @@ async fn signup_from_button(
     };
     let (signed, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         (logic::signup(&mut conn, event_id, option_id, membership_id), lang)
     };
     if let Err(err) = signed {
@@ -892,7 +907,7 @@ async fn open_guests_form(
     };
     let found = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         let option_id = store::event_by_public(&mut conn, &event.to_string())?
             .and_then(|event| crate::ids::public::option_id(&mut conn, event.id, &option.to_string()).ok());
         let form = match option_id {
@@ -964,7 +979,7 @@ async fn guests_from_form(
     };
     let (outcome, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         let found = store::event_by_public(&mut conn, &event.to_string())?.and_then(|event| {
             crate::ids::public::option_id(&mut conn, event.id, &option.to_string())
                 .ok()
@@ -1019,7 +1034,7 @@ async fn edit_from_button(
     };
     let text = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         match store::event(&mut conn, event_id)? {
             Some(event) if event.created_by == Some(membership_id) => {
                 Some(event_link(&mut conn, &data.public_url, &event, lang)?)
@@ -1046,7 +1061,7 @@ async fn ask_delete(
     };
     let (card, lang) = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         let card = match store::event(&mut conn, event_id)? {
             None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
@@ -1116,7 +1131,7 @@ async fn delete_from_button(
     };
     let removed = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &click)?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         match store::event(&mut conn, event_id)? {
             None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
@@ -1254,9 +1269,10 @@ fn click_of(
 }
 
 /// The member who pressed a button, and their server's language.
-fn bind_clicker(conn: &mut Connection, click: &Click) -> Result<(i64, Lang), Error> {
+fn bind_clicker(conn: &mut Connection, jobs: &UnboundedSender<DiscordJob>, click: &Click) -> Result<(i64, Lang), Error> {
     let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
-    let user = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
+    let (user, renamed) = logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
+    redraw(jobs, renamed);
     if let Some(manage) = click.manage {
         logic::set_server_manager(conn, user.id, manage)?;
     }
@@ -2202,7 +2218,8 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     });
     let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
     let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
-    let user = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
+    let (user, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
+    redraw(&ctx.data().jobs, renamed);
     if let Some(manage) = manage {
         logic::set_server_manager(&mut conn, user.id, manage)?;
     }
@@ -2652,12 +2669,13 @@ async fn run_response(
     let data = ctx.data();
     let outcome = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let target = logic::ensure_discord_user(
+        let (target, renamed) = logic::ensure_discord_user(
             &mut conn,
             actor.guild_id,
             &user.id.get().to_string(),
             &name,
         )?;
+        redraw(&data.jobs, renamed);
         commands::roster_action(&mut conn, actor.membership_id, event, target.id, option, action, guests, actor.lang)
     };
     match outcome {
