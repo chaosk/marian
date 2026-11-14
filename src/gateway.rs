@@ -29,6 +29,8 @@ struct Data {
     registered: Mutex<HashSet<u64>>,
     /// The job queue, for work a button leaves behind.
     jobs: UnboundedSender<DiscordJob>,
+    /// Whether Discord lets Marian see the server's members.
+    members: bool,
 }
 
 pub fn start(
@@ -255,6 +257,7 @@ async fn connect(
                     public_url,
                     registered: Mutex::new(HashSet::new()),
                     jobs: queue,
+                    members,
                 })
             })
         })
@@ -307,6 +310,12 @@ async fn handle_event(
             if let Err(err) = remember_guild(data, guild) {
                 tracing::warn!("could not store {}: {err}", guild.name);
             }
+            // Without the presences intent, the guild comes with almost none of
+            // its members; asking for them all brings everyone's name, nickname
+            // included, in chunks.
+            if data.members {
+                ctx.shard.chunk_guild(guild.id, None, false, serenity::ChunkGuildFilter::None, None);
+            }
             let roles = guild
                 .roles
                 .iter()
@@ -351,6 +360,11 @@ async fn handle_event(
         serenity::FullEvent::GuildMemberUpdate { event, .. } => {
             if let Err(err) = follow_member(data, event.guild_id, &event.user, event.nick.as_deref(), &event.roles) {
                 tracing::warn!("could not follow a member's name and roles: {err}");
+            }
+        }
+        serenity::FullEvent::GuildMembersChunk { chunk } => {
+            if let Err(err) = follow_names(data, chunk.guild_id, chunk.members.values()) {
+                tracing::warn!("could not follow members' names: {err}");
             }
         }
         serenity::FullEvent::GuildMemberAddition { new_member } => {
@@ -538,14 +552,6 @@ fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
         .map(|role| (role.id.get().to_string(), role.name.clone(), role.colour.hex()))
         .collect();
     logic::sync_discord_roles(&mut conn, stored.id, &roles)?;
-    // Discord sends the members only with the members intent, and only all
-    // of them in smaller servers; the rest catch up when they next act.
-    for member in guild.members.values() {
-        let user = member.user.id.get().to_string();
-        if let Some((_, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
-            redraw(&data.jobs, renamed);
-        }
-    }
     let guild_discord = guild.id.get().to_string();
     for role in guild.roles.values() {
         logic::sync_discord_permissions(
@@ -623,6 +629,28 @@ fn role_deleted(data: &Data, guild: serenity::GuildId, role: serenity::RoleId) -
         return Ok(());
     };
     logic::discord_role_gone(&mut conn, guild.id, &role.get().to_string())?;
+    Ok(())
+}
+
+/// Brings the names of members Marian knows up to date, as a chunk of the
+/// server's member list has them, and redraws each post that changes once.
+fn follow_names<'a>(
+    data: &Data,
+    guild: serenity::GuildId,
+    members: impl Iterator<Item = &'a serenity::Member>,
+) -> Result<(), Error> {
+    let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+    let Some(stored) = stored_guild(&mut conn, guild)? else {
+        return Ok(());
+    };
+    let mut events = std::collections::BTreeSet::new();
+    for member in members {
+        let user = member.user.id.get().to_string();
+        if let Some((_, renamed)) = logic::follow_discord_name(&mut conn, stored.id, &user, &server_name(member))? {
+            events.extend(renamed);
+        }
+    }
+    redraw(&data.jobs, events.into_iter().collect());
     Ok(())
 }
 
