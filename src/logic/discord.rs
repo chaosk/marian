@@ -510,21 +510,88 @@ struct NewMembership<'a> {
     server_manager: bool,
 }
 
+/// The member's membership, made if it's new, under `name`: the name they go
+/// by in this server, which replaces the one stored. With it come the events
+/// whose posts still show the old name; see [`follow_discord_name`].
 pub fn ensure_discord_user(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<(Membership, Vec<i64>), OpError> {
+    match follow_discord_name(conn, guild_id, discord_id, name)? {
+        Some(found) => Ok(found),
+        None => Ok((new_discord_user(conn, guild_id, discord_id, name)?, Vec::new())),
+    }
+}
+
+/// The member's membership, made under `name` if it's new. For a name that
+/// may not be the one they go by here, like the global name the web sign-in
+/// gets: a stored name, perhaps a server nickname, is kept.
+pub fn admit_discord_user(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Membership, OpError> {
+    match store::membership_by_discord(conn, guild_id, discord_id)? {
+        Some(user) => Ok(user),
+        None => new_discord_user(conn, guild_id, discord_id, name),
+    }
+}
+
+/// Renames a member Marian already knows to the name they go by in this
+/// server. Nobody new is added. A rename also gives the events whose posts
+/// list the member under the old name and are still to be redrawn: see
+/// [`posts_listing`].
+pub fn follow_discord_name(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+    name: &str,
+) -> Result<Option<(Membership, Vec<i64>)>, OpError> {
+    let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? else {
+        return Ok(None);
+    };
+    if user.name == name || name.is_empty() {
+        return Ok(Some((user, Vec::new())));
+    }
+    diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
+        .set(schema::memberships::name.eq(name))
+        .execute(conn)?;
+    let redraw = posts_listing(conn, user.id, Utc::now())?;
+    let user = store::membership(conn, user.id)?.ok_or(OpError::NotFound)?;
+    Ok(Some((user, redraw)))
+}
+
+/// Events whose Discord post lists the member among the people signed up and
+/// hasn't ended. A post for an event that's over keeps the names it was last
+/// drawn with, even while it still takes signups.
+fn posts_listing(conn: &mut Connection, membership_id: i64, now: DateTime<Utc>) -> Result<Vec<i64>, OpError> {
+    let signed_up = schema::signups::table
+        .filter(schema::signups::membership_id.eq(membership_id))
+        .filter(schema::signups::state.eq("confirmed"))
+        .select(schema::signups::event_id);
+    let events: Vec<(i64, DateTime<Utc>, i64)> = schema::events::table
+        .filter(schema::events::id.eq_any(signed_up))
+        .filter(schema::events::status.eq("posted"))
+        .filter(schema::events::discord_message_id.is_not_null())
+        .select((schema::events::id, schema::events::starts_at, schema::events::duration_minutes))
+        .load(conn)?;
+    Ok(events
+        .into_iter()
+        .filter(|(_, starts_at, minutes)| *starts_at + chrono::Duration::minutes(*minutes) > now)
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
+fn new_discord_user(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Membership, OpError> {
     let user_id = store::ensure_user(conn, discord_id)?;
-    if let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? {
-        if user.name != name && !name.is_empty() {
-            diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
-                .set(schema::memberships::name.eq(name))
-                .execute(conn)?;
-        }
-        return store::membership(conn, user.id)?.ok_or(OpError::NotFound);
-    }
     let handle = unique_handle(conn, guild_id, name, discord_id)?;
     let color = [
         "#1e3a6e", "#2f6b4f", "#8a6232", "#6b3a6b", "#8d3a32", "#243038",
@@ -1111,6 +1178,47 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_redraws_only_posts_of_events_not_over() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO channels (id, guild_id, name, discord_id) VALUES (1, 1, 'social', '100');
+            INSERT INTO users (discord_id) VALUES ('nell');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color)
+            SELECT 1, id, 1, 'Nell', 'nell', '#112233' FROM users WHERE discord_id = 'nell';
+            INSERT INTO events (
+              id, public_id, guild_id, channel_id, title, starts_at, duration_minutes,
+              status, created_at, updated_at, discord_message_id
+            ) VALUES
+              (1, '01900000-0000-7000-8000-000000000051', 1, 1, 'Next week', '2026-10-21T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '51'),
+              (2, '01900000-0000-7000-8000-000000000052', 1, 1, 'Under way', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '52'),
+              (3, '01900000-0000-7000-8000-000000000053', 1, 1, 'Over, still open', '2026-10-13T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '53'),
+              (4, '01900000-0000-7000-8000-000000000054', 1, 1, 'Waiting', '2026-10-21T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '54'),
+              (5, '01900000-0000-7000-8000-000000000055', 1, 1, 'Not out yet', '2026-10-21T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL),
+              (6, '01900000-0000-7000-8000-000000000056', 1, 1, 'Archived', '2026-10-21T18:00:00Z', 60, 'archived', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '56');
+            INSERT INTO option_library (guild_id, name, emoji, attending) VALUES
+              (1, 'Accepted', '✅', true) ON CONFLICT DO NOTHING;
+            INSERT INTO signup_options (id, event_id, type_id, position)
+            SELECT event, event, (SELECT id FROM option_library WHERE guild_id = 1 AND name = 'Accepted'), 0
+            FROM (VALUES (1), (2), (3), (4), (5), (6)) AS ids(event);
+            INSERT INTO signups (event_id, option_id, membership_id, state, created_at) VALUES
+              (1, 1, 1, 'confirmed', '2026-10-13T00:00:00Z'),
+              (2, 2, 1, 'confirmed', '2026-10-13T00:00:00Z'),
+              (3, 3, 1, 'confirmed', '2026-10-13T00:00:00Z'),
+              (4, 4, 1, 'waitlisted', '2026-10-13T00:00:00Z'),
+              (5, 5, 1, 'confirmed', '2026-10-13T00:00:00Z'),
+              (6, 6, 1, 'confirmed', '2026-10-13T00:00:00Z');
+            ",
+        )
+        .unwrap();
+        let now = clock::parse_stamp("2026-10-14T18:30:00Z").unwrap();
+        let mut redraw = posts_listing(&mut conn, 1, now).unwrap();
+        redraw.sort();
+        assert_eq!(redraw, vec![1, 2], "a post that's over keeps its names, even while it takes signups");
+    }
+
+    #[test]
     fn the_channel_card_lists_names_in_columns() {
         let mut conn = store::open_memory().unwrap();
         conn.batch_execute(
@@ -1296,14 +1404,34 @@ mod tests {
             "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
         )
         .unwrap();
-        let first = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        let (first, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
         assert!(!first.server_manager);
-        let second = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
+        let (second, _) = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
         assert!(!second.server_manager);
         set_server_manager(&mut conn, first.id, true).unwrap();
         assert!(store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
         set_server_manager(&mut conn, first.id, false).unwrap();
         assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
+    }
+
+    #[test]
+    fn a_server_nickname_stays_through_a_web_sign_in() {
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
+        )
+        .unwrap();
+        assert!(follow_discord_name(&mut conn, 1, "100", "Nellie").unwrap().is_none(), "nobody new is added");
+        let signed_in = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert_eq!(signed_in.name, "Nell", "a new member starts with the name they signed in with");
+
+        let (clicked, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
+        assert_eq!((clicked.id, clicked.name.as_str()), (signed_in.id, "Nellie"));
+        let again = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        assert_eq!(again.name, "Nellie", "the global name doesn't replace the nickname");
+
+        let (renamed, _) = follow_discord_name(&mut conn, 1, "100", "Nells").unwrap().unwrap();
+        assert_eq!(renamed.name, "Nells");
     }
 
     #[test]

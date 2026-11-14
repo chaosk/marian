@@ -24,9 +24,9 @@ pub use library::{
     set_default_preset, starting_options, update_type,
 };
 pub use discord::{
-    attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
+    admit_discord_user, attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
     discord_channel_gone, discord_role_gone, ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
-    event_thread_name, mark_channel_purged, mention_line, remember_discord_message, set_server_manager,
+    event_thread_name, follow_discord_name, mark_channel_purged, mention_line, remember_discord_message, set_server_manager,
     status_label, sync_channel_overwrites, sync_discord_channel, sync_discord_channels, sync_discord_permissions,
     sync_discord_role, sync_discord_roles, web_event_url, Attendance,
     AttendanceWork, ChannelReverse, EventChannelPurge,

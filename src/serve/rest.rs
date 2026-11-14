@@ -289,7 +289,11 @@ async fn search_members(
         return Ok(Json(Vec::new()));
     }
     let found = discord_search(&state, &server, needle).await?;
-    read(&state, &headers, &server, |db, v| api::remember_members(db, v, &found))
+    let (members, redraw) = read(&state, &headers, &server, |db, v| api::remember_members(db, v, &found))?.0;
+    for event_id in redraw {
+        enqueue(&state.discord, DiscordJob::sync(event_id));
+    }
+    Ok(Json(members))
 }
 
 /// Asks Discord for up to 25 people in the server whose username or nickname
@@ -307,6 +311,8 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
     #[derive(Deserialize)]
     struct Found {
         user: User,
+        #[serde(default)]
+        nick: Option<String>,
     }
     let unavailable = || Problem(StatusCode::BAD_GATEWAY, "Discord didn't answer the search. Try again.".into());
     let request = state
@@ -327,7 +333,11 @@ async fn discord_search(state: &AppState, server: &str, needle: &str) -> Result<
         .into_iter()
         .filter(|found| !found.user.bot)
         .map(|found| {
-            let name = crate::auth::discord_display_name(found.user.global_name.as_deref(), &found.user.username);
+            let name = crate::auth::discord_display_name(
+                found.nick.as_deref(),
+                found.user.global_name.as_deref(),
+                &found.user.username,
+            );
             (found.user.id, name)
         })
         .collect())
