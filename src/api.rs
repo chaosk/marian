@@ -161,6 +161,17 @@ fn must_member(conn: &mut Connection, viewer: &Viewer) -> Result<store::Membersh
     store::membership(conn, viewer.membership_id)?.ok_or(OpError::NotFound)
 }
 
+/// The viewer, if they can manage the server. Everyone else sees only the
+/// events they have access to, not the server's routines, series, activity,
+/// or commands.
+fn must_manager(conn: &mut Connection, viewer: &Viewer) -> Result<store::Membership, OpError> {
+    let user = must_member(conn, viewer)?;
+    if !user.server_manager {
+        return Err(OpError::message("Only someone who runs the server can see this."));
+    }
+    Ok(user)
+}
+
 /// Which of the server's channels the viewer can see in Discord.
 fn sight(conn: &mut Connection, viewer: &Viewer) -> Result<logic::Sight, OpError> {
     let user = must_member(conn, viewer)?;
@@ -1010,6 +1021,7 @@ pub fn activity(
     page: u32,
     limit: i64,
 ) -> Result<dto::Paged<dto::Activity>, OpError> {
+    must_manager(conn, viewer)?;
     activity_of(conn, viewer, None, page, limit)
 }
 
@@ -1385,6 +1397,7 @@ fn series_dto(conn: &mut Connection, series: store::Series) -> Result<dto::Serie
 }
 
 pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Series>, OpError> {
+    must_manager(conn, viewer)?;
     let sight = sight(conn, viewer)?;
     let mut rows = Vec::new();
     for series in store::list_series(conn, viewer.guild_id)? {
@@ -1395,8 +1408,20 @@ pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Se
     Ok(rows)
 }
 
+/// One series, for a manager or someone who can edit one of its dates.
 pub fn series(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Series, OpError> {
     let series = series_here(conn, viewer, public_id)?;
+    let user = must_member(conn, viewer)?;
+    if !user.server_manager {
+        let settings = store::settings(conn, viewer.guild_id)?;
+        let roles = store::membership_role_ids(conn, &user)?;
+        let editable = store::events_in_series(conn, series.id)?
+            .iter()
+            .any(|event| logic::can_edit(&user, event, &settings, &roles));
+        if !editable {
+            return Err(OpError::NotFound);
+        }
+    }
     series_dto(conn, series)
 }
 
@@ -1622,6 +1647,7 @@ pub fn delete_library(conn: &mut Connection, viewer: &Viewer, public_id: &str) -
 }
 
 pub fn commands(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::CommandLog>, OpError> {
+    must_manager(conn, viewer)?;
     let people = store::list_memberships(conn, viewer.guild_id)?;
     Ok(store::list_commands(conn, viewer.guild_id, 30)?
         .into_iter()
@@ -1640,6 +1666,7 @@ pub fn commands(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Comma
 
 pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::RoutineSummary>, OpError> {
     use diesel::prelude::*;
+    must_manager(conn, viewer)?;
     let hidden: Vec<String> = crate::schema::routines::table
         .inner_join(crate::schema::event_templates::table)
         .filter(crate::schema::routines::guild_id.eq(viewer.guild_id))
@@ -1655,11 +1682,24 @@ pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Routi
         .collect())
 }
 
+/// One routine, for a manager, its creator, or someone who can answer its
+/// waiting approval, which Discord links here.
 pub fn routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::RoutineView, OpError> {
+    use diesel::prelude::*;
     let id = routine_here(conn, viewer, public_id)?;
+    let can_decide = logic::can_decide(conn, id, viewer.membership_id)?;
+    if !must_member(conn, viewer)?.server_manager && !can_decide {
+        let creator: Option<i64> = crate::schema::routines::table
+            .find(id)
+            .select(crate::schema::routines::created_by)
+            .first(conn)?;
+        if creator != Some(viewer.membership_id) {
+            return Err(OpError::NotFound);
+        }
+    }
     let mut view = logic::routine_page_data(conn, id)?.ok_or(OpError::NotFound)?;
     if let Some(approval) = view.approval.as_mut() {
-        approval.can_decide = logic::can_decide(conn, id, viewer.membership_id)?;
+        approval.can_decide = can_decide;
     }
     Ok(view)
 }
@@ -2089,7 +2129,7 @@ mod tests {
         assert_eq!(titles(&mut conn, &june), ["Raid"]);
         assert_eq!(channel_names(&mut conn, &june), ["events"]);
         assert!(matches!(event(&mut conn, &june, &officers), Err(OpError::NotFound)));
-        assert_eq!(activity(&mut conn, &june, 1, 25).unwrap().total, 1);
+        assert!(matches!(event_activity(&mut conn, &june, &officers, 1, 25), Err(OpError::NotFound)));
 
         // The server manager sees everything.
         assert_eq!(titles(&mut conn, &nell).len(), 2);
@@ -2099,7 +2139,7 @@ mod tests {
         conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
         assert_eq!(titles(&mut conn, &june).len(), 2);
         assert!(event(&mut conn, &june, &officers).is_ok());
-        assert_eq!(activity(&mut conn, &june, 1, 25).unwrap().total, 2);
+        assert_eq!(event_activity(&mut conn, &june, &officers, 1, 25).unwrap().total, 1);
     }
 
     #[test]
@@ -2486,6 +2526,27 @@ mod tests {
 
         let err = patch_event(&mut conn, &viewer, &public, &weekly).unwrap_err().to_string();
         assert!(err.contains("already belongs to a series"), "{err}");
+
+        // Someone who can't manage the server doesn't get the list, and gets
+        // one series only once they can edit a date in it.
+        let june = Viewer { membership_id: 2, ..viewer.clone() };
+        assert_eq!(series_list(&mut conn, &viewer).unwrap().len(), 1);
+        assert!(series_list(&mut conn, &june).is_err());
+        assert!(matches!(self::series(&mut conn, &june, &series.id), Err(OpError::NotFound)));
+        conn.batch_execute(&format!("UPDATE events SET created_by = 2 WHERE id = {id}")).unwrap();
+        assert!(self::series(&mut conn, &june, &series.id).is_ok());
+    }
+
+    #[test]
+    fn only_a_server_manager_reads_the_server_wide_pages() {
+        let (mut conn, nell) = world();
+        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
+        assert!(activity(&mut conn, &nell, 1, 25).is_ok());
+        assert!(commands(&mut conn, &nell).is_ok());
+        assert!(routines(&mut conn, &nell).is_ok());
+        assert!(activity(&mut conn, &june, 1, 25).is_err());
+        assert!(commands(&mut conn, &june).is_err());
+        assert!(routines(&mut conn, &june).is_err());
     }
 
     /// A routine made on the web whose closed poll asks the Raiders in #elsewhere.
@@ -2538,8 +2599,12 @@ mod tests {
 
         let mut june = viewer.clone();
         june.membership_id = 2;
-        assert!(!routine(&mut conn, &june, &id).unwrap().approval.unwrap().can_decide);
+        assert!(matches!(routine(&mut conn, &june, &id), Err(OpError::NotFound)), "not hers to answer");
         assert!(decide_routine(&mut conn, &june, &id, &dto::Decision { day: None }).is_err());
+        // A Raider may answer, so Discord's link opens the routine for her.
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
+        assert!(routine(&mut conn, &june, &id).unwrap().approval.unwrap().can_decide);
+        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2;").unwrap();
 
         decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap();
         assert!(routine(&mut conn, &viewer, &id).unwrap().approval.is_none());
