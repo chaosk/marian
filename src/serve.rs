@@ -173,10 +173,62 @@ fn router(state: AppState, pages: Router) -> Router {
         .with_state(state.clone())
         .merge(pages)
         .layer(middleware::from_fn(revalidate_site))
-        .layer(middleware::from_fn_with_state(state, require_login))
+        .layer(middleware::from_fn_with_state(state.clone(), require_login))
+        // Outside the login check, so a preflight is answered without a session.
+        .layer(cors(&state.public_url))
+        .layer(middleware::from_fn(lock_down_non_pages))
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(middleware::from_fn(mark_page_trace))
         .layer(http_trace())
+}
+
+/// Only Marian's own pages may call the API from a browser, with the
+/// signed-in person's cookie: the origin of `MARIAN_PUBLIC_URL`. Without one
+/// (local runs) no origin is named, and browsers keep to same-origin.
+fn cors(public_url: &str) -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    let origins: Vec<HeaderValue> = public_origin(public_url)
+        .and_then(|origin| HeaderValue::from_str(&origin).ok())
+        .into_iter()
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_credentials(true)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+        .max_age(std::time::Duration::from_secs(3600))
+}
+
+/// `https://marian.example.com` from `https://marian.example.com/some/path`.
+fn public_origin(public_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(public_url.trim()).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
+}
+
+/// What isn't a page (JSON, calendar feeds, redirects, files) may load and
+/// run nothing, nor be framed. Pages send their own policy from the app shell,
+/// with the nonce their scripts carry.
+const NON_PAGE_POLICY: &str = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+async fn lock_down_non_pages(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let page = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|kind| kind.starts_with("text/html"));
+    if !page && !response.headers().contains_key(header::CONTENT_SECURITY_POLICY) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(NON_PAGE_POLICY));
+    }
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -1782,6 +1834,88 @@ mod tests {
         assert!(hashed_name("/pkg/marian.kcWcuR9ygyaOXPYiW0cpOw.css"));
         assert!(!hashed_name("/pkg/marian.wasm"));
         assert!(!hashed_name("/pkg/marian_bg.wasm"));
+    }
+
+    #[test]
+    fn the_public_url_gives_its_origin() {
+        assert_eq!(public_origin("https://marian.example.com/app/").as_deref(), Some("https://marian.example.com"));
+        assert_eq!(public_origin(" http://localhost:8080 ").as_deref(), Some("http://localhost:8080"));
+        assert_eq!(public_origin(""), None);
+        assert_eq!(public_origin("ftp://marian.example.com"), None);
+    }
+
+    #[tokio::test]
+    async fn only_marian_itself_may_call_the_api_and_non_pages_run_nothing() {
+        let mut conn = store::open_memory().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState {
+            db: store::pool_for(&mut conn).unwrap(),
+            discord: tx,
+            invite_url: String::new(),
+            http: reqwest::Client::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            public_url: "https://marian.example.com/".into(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
+            bot_token: String::new(),
+            member_roles: member_roles_cache(),
+            members: crate::gateway::MemberView::default(),
+        };
+        let pages = Router::new().route(
+            "/page",
+            get(|| async { ([(header::CONTENT_SECURITY_POLICY, "from the shell")], axum::response::Html("<p>hi</p>")) }),
+        );
+        let app = router(state, pages);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let csp = |response: &reqwest::Response| {
+            response.headers().get(header::CONTENT_SECURITY_POLICY).map(|v| v.to_str().unwrap().to_string())
+        };
+        let allowed = |response: &reqwest::Response| {
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).map(|v| v.to_str().unwrap().to_string())
+        };
+
+        let health = client.get(format!("http://{addr}/healthz")).send().await.unwrap();
+        assert_eq!(csp(&health).as_deref(), Some(NON_PAGE_POLICY));
+        let refused = client.get(format!("http://{addr}/api/servers/1/events")).send().await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(csp(&refused).as_deref(), Some(NON_PAGE_POLICY), "JSON errors too");
+        let page = client.get(format!("http://{addr}/page")).send().await.unwrap();
+        assert_eq!(csp(&page).as_deref(), Some("from the shell"), "a page keeps its own policy");
+
+        let own = client
+            .get(format!("http://{addr}/healthz"))
+            .header(header::ORIGIN, "https://marian.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed(&own).as_deref(), Some("https://marian.example.com"));
+        assert_eq!(own.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS).unwrap(), "true");
+        let foreign = client
+            .get(format!("http://{addr}/healthz"))
+            .header(header::ORIGIN, "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed(&foreign), None);
+
+        let preflight = client
+            .request(axum::http::Method::OPTIONS, format!("http://{addr}/api/servers/1/events"))
+            .header(header::ORIGIN, "https://marian.example.com")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+            .send()
+            .await
+            .unwrap();
+        assert!(preflight.status().is_success(), "answered before the login check: {}", preflight.status());
+        assert_eq!(allowed(&preflight).as_deref(), Some("https://marian.example.com"));
     }
 
     #[tokio::test]

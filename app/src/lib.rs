@@ -22,6 +22,8 @@ use api::Failure;
 pub(crate) use leptos_router::components::A;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    #[cfg(feature = "ssr")]
+    send_page_policy();
     let site_json = api::site_json();
     let notice_json = api::notice_json();
     let trace = api::page_trace();
@@ -43,6 +45,58 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <App/>
             </body>
         </html>
+    }
+}
+
+/// Sends the page's Content-Security-Policy with the nonce Leptos puts on
+/// this response's inline scripts. Responses that aren't pages get a stricter
+/// one from the server.
+#[cfg(feature = "ssr")]
+fn send_page_policy() {
+    let (Some(nonce), Some(response)) = (leptos::nonce::use_nonce(), use_context::<leptos_axum::ResponseOptions>()) else {
+        return;
+    };
+    // `cargo leptos watch` reloads the page over a websocket to its own port.
+    let watch = std::env::var("LEPTOS_WATCH").is_ok();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&page_policy(&nonce, watch)) {
+        response.insert_header(axum::http::header::CONTENT_SECURITY_POLICY, value);
+    }
+}
+
+/// What a page may load. Scripts run only with this response's nonce:
+/// Leptos's hydration loader carries it, and `'strict-dynamic'` lets the code
+/// it imports run, WebAssembly included. Styles may be inline because the app
+/// sets colours in `style` attributes. Pictures come from Discord's CDN.
+#[cfg(feature = "ssr")]
+fn page_policy(nonce: &str, watch: bool) -> String {
+    let reload = if watch { " ws: wss:" } else { "" };
+    [
+        "default-src 'self'".to_string(),
+        format!("script-src 'nonce-{nonce}' 'strict-dynamic' 'wasm-unsafe-eval'"),
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com".to_string(),
+        "font-src 'self' https://fonts.gstatic.com".to_string(),
+        "img-src 'self' data: https://cdn.discordapp.com".to_string(),
+        format!("connect-src 'self'{reload}"),
+        "object-src 'none'".to_string(),
+        "base-uri 'none'".to_string(),
+        "form-action 'self'".to_string(),
+        "frame-ancestors 'none'".to_string(),
+    ]
+    .join("; ")
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod policy_tests {
+    use super::page_policy;
+
+    #[test]
+    fn scripts_need_the_nonce_and_the_reload_socket_only_comes_with_watch() {
+        let policy = page_policy("abc", false);
+        assert!(policy.contains("script-src 'nonce-abc' 'strict-dynamic' 'wasm-unsafe-eval'"), "{policy}");
+        assert!(!policy.contains("unsafe-inline' 'nonce") && !policy.contains("script-src 'self'"), "{policy}");
+        assert!(policy.contains("connect-src 'self';"), "{policy}");
+        assert!(policy.contains("frame-ancestors 'none'"), "{policy}");
+        assert!(page_policy("abc", true).contains("connect-src 'self' ws: wss:;"));
     }
 }
 
