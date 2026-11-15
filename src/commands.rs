@@ -2575,7 +2575,7 @@ mod tests {
             view.buttons
                 .last()
                 .map(|button| (&button.role, button.label.as_str())),
-            Some((&logic::ButtonRole::Web(web), "↗")),
+            Some((&logic::ButtonRole::Web(web), logic::WEB_BUTTON_LABEL)),
             "the event's page is the last button"
         );
         assert!(view.buttons[..view.buttons.len() - 1].iter().all(|button| {

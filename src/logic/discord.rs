@@ -16,6 +16,11 @@ use crate::values::{
     AccessKind, ChannelKind, EventRoleKind, EventStatus, OverwriteKind, SignupState,
 };
 
+/// The web page button's label. Discord draws an external-link icon on every
+/// link button and needs a label or an emoji, so a zero-width space leaves just
+/// the icon.
+pub const WEB_BUTTON_LABEL: &str = "\u{200B}";
+
 #[allow(
     clippy::large_enum_variant,
     reason = "returned once per sync and matched straight away, never stored"
@@ -400,7 +405,7 @@ pub fn discord_view(
     if let Some(url) = web_event_url(public_url, guild.discord_id.as_deref(), event.public_id) {
         buttons.push(DiscordButton {
             role: ButtonRole::Web(url),
-            label: "↗".into(),
+            label: WEB_BUTTON_LABEL.into(),
             emoji: String::new(),
             tone: ButtonTone::Secondary,
             disabled: false,
