@@ -42,7 +42,7 @@ opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics"] }
 openssl-sys = { version = "0.9.93", optional = true }
-poise = "0.6"
+poise = "0.7.1"
 pq-sys = { version = "0.7.6", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }

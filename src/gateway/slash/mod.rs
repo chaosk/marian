@@ -69,40 +69,40 @@ fn discord_locales(lang: Lang) -> &'static [&'static str] {
 /// is what the command itself says.
 fn describe_command(command: &mut poise::Command<Data, Error>, parent: &str) {
     let path = if parent.is_empty() {
-        command.name.clone()
+        command.name.to_string()
     } else {
         format!("{parent}-{}", command.name)
     };
     // Commands give their English as the en-US text; without a plain one,
     // Discord showed "A slash command" to everyone not set to US English.
     if command.description.is_none() {
-        command.description = command.description_localizations.get("en-US").cloned();
+        command.description = command
+            .description_localizations
+            .iter()
+            .find(|(locale, _)| locale == "en-US")
+            .map(|(_, text)| text.clone());
     }
     for lang in Lang::ALL {
         for &locale in discord_locales(lang) {
-            let translated = |key: &str, english: Option<&String>| {
+            let translated = |key: &str, english: Option<&str>| {
                 if lang == Lang::En {
-                    english.cloned()
+                    english.map(str::to_string)
                 } else {
                     command_text(lang, key)
                 }
             };
-            if let Some(text) = translated(&format!("cmd-{path}"), command.description.as_ref()) {
-                command
-                    .description_localizations
-                    .insert(locale.to_string(), text);
+            if let Some(text) = translated(&format!("cmd-{path}"), command.description.as_deref()) {
+                localize(&mut command.description_localizations, locale, text);
             }
             for parameter in &mut command.parameters {
                 let key = format!("cmd-{path}--{}", parameter.name);
-                if let Some(text) = translated(&key, parameter.description.as_ref()) {
-                    parameter
-                        .description_localizations
-                        .insert(locale.to_string(), text);
+                if let Some(text) = translated(&key, parameter.description.as_deref()) {
+                    localize(&mut parameter.description_localizations, locale, text);
                 }
-                for choice in &mut parameter.choices {
+                for choice in parameter.choices.to_mut() {
                     let key = format!("cmd-{path}--{}--{}", parameter.name, choice.name);
                     if let Some(text) = translated(&key, Some(&choice.name)) {
-                        choice.localizations.insert(locale.to_string(), text);
+                        localize(&mut choice.localizations, locale, text);
                     }
                 }
             }
@@ -110,6 +110,26 @@ fn describe_command(command: &mut poise::Command<Data, Error>, parent: &str) {
     }
     for subcommand in &mut command.subcommands {
         describe_command(subcommand, &path);
+    }
+}
+
+/// Sets one locale's text in a list of localizations, replacing the text the
+/// locale already has.
+fn localize(
+    list: &mut std::borrow::Cow<
+        'static,
+        [(
+            std::borrow::Cow<'static, str>,
+            std::borrow::Cow<'static, str>,
+        )],
+    >,
+    locale: &str,
+    text: String,
+) {
+    let list = list.to_mut();
+    match list.iter_mut().find(|(existing, _)| existing == locale) {
+        Some(entry) => entry.1 = text.into(),
+        None => list.push((locale.to_string().into(), text.into())),
     }
 }
 
@@ -193,7 +213,11 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
     }))
 }
 
-async fn complete_channel(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn complete_channel(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
+    serenity::CreateAutocompleteResponse::new().set_choices(channel_choices(ctx, partial))
+}
+
+fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
@@ -245,7 +269,11 @@ async fn deliver(
     Ok(())
 }
 
-async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn complete_event(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
+    serenity::CreateAutocompleteResponse::new().set_choices(event_choices(ctx, partial))
+}
+
+fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
@@ -270,7 +298,11 @@ async fn complete_event(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autoco
     .collect()
 }
 
-async fn complete_option(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn complete_option(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
+    serenity::CreateAutocompleteResponse::new().set_choices(option_choices(ctx, partial))
+}
+
+fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
@@ -323,21 +355,24 @@ mod tests {
         out: &mut Vec<(String, Option<String>)>,
     ) {
         let path = if parent.is_empty() {
-            command.name.clone()
+            command.name.to_string()
         } else {
             format!("{parent}-{}", command.name)
         };
-        out.push((format!("cmd-{path}"), command.description.clone()));
+        out.push((
+            format!("cmd-{path}"),
+            command.description.as_deref().map(str::to_string),
+        ));
         for parameter in &command.parameters {
             out.push((
                 format!("cmd-{path}--{}", parameter.name),
-                parameter.description.clone(),
+                parameter.description.as_deref().map(str::to_string),
             ));
             // A language is named in itself, whatever the server's language.
             if parameter.name == "language" {
                 continue;
             }
-            for choice in &parameter.choices {
+            for choice in parameter.choices.iter() {
                 out.push((
                     format!("cmd-{path}--{}--{}", parameter.name, choice.name),
                     None,
@@ -347,6 +382,15 @@ mod tests {
         for subcommand in &command.subcommands {
             command_paths(subcommand, &path, out);
         }
+    }
+
+    fn localized<'a>(
+        list: &'a [(std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>)],
+        locale: &str,
+    ) -> Option<&'a str> {
+        list.iter()
+            .find(|(existing, _)| existing == locale)
+            .map(|(_, text)| text.as_ref())
     }
 
     #[test]
@@ -389,25 +433,16 @@ mod tests {
             "English is the plain text"
         );
         assert_eq!(
-            digest
-                .description_localizations
-                .get("en-US")
-                .map(String::as_str),
+            localized(&digest.description_localizations, "en-US"),
             Some("How often Marian posts a digest")
         );
         assert_eq!(
-            digest
-                .description_localizations
-                .get("pl")
-                .map(String::as_str),
+            localized(&digest.description_localizations, "pl"),
             Some("Jak często Marian publikuje podsumowanie")
         );
         let daily = &digest.parameters[0].choices[1];
         assert_eq!(daily.name, "daily", "a choice keeps its English name");
-        assert_eq!(
-            daily.localizations.get("pl").map(String::as_str),
-            Some("codziennie")
-        );
+        assert_eq!(localized(&daily.localizations, "pl"), Some("codziennie"));
         let language = settings
             .subcommands
             .iter()

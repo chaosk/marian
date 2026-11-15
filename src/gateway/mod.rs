@@ -218,9 +218,7 @@ async fn connect(
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: all_commands(),
-            event_handler: |ctx, event, framework, data| {
-                Box::pin(on_event(ctx, event, framework, data))
-            },
+            event_handler: |framework, event| Box::pin(on_event(framework, event)),
             on_error: |error| Box::pin(on_error(error)),
             ..Default::default()
         })
@@ -276,21 +274,18 @@ async fn connect(
 /// and `parent: None` keeps it from joining whatever span that task's thread
 /// happens to have entered.
 async fn on_event(
-    ctx: &serenity::Context,
-    event: &serenity::FullEvent,
     framework: poise::FrameworkContext<'_, Data, Error>,
-    data: &Data,
+    event: &serenity::FullEvent,
 ) -> Result<(), Error> {
+    let ctx = framework.serenity_context;
+    let data = framework.user_data().await;
     let span = tracing::info_span!(parent: None, "discord_event", event = event.snake_case_name());
-    handle_event(ctx, event, framework, data)
-        .instrument(span)
-        .await
+    handle_event(ctx, event, data).instrument(span).await
 }
 
 async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
-    _framework: poise::FrameworkContext<'_, Data, Error>,
     data: &Data,
 ) -> Result<(), Error> {
     match event {
