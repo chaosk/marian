@@ -12,6 +12,7 @@ pub mod google;
 pub mod ics;
 pub(crate) mod ids;
 pub mod jobs;
+mod leader;
 mod live;
 pub mod logic;
 mod observe;
@@ -19,6 +20,7 @@ pub mod parse;
 mod release_version;
 mod schema;
 pub mod serve;
+mod shutdown;
 pub mod store;
 
 pub use error::OpError;

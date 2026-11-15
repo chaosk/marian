@@ -14,6 +14,7 @@ use tracing::Instrument;
 use crate::commands;
 use crate::i18n::{self, Lang};
 use crate::jobs::DiscordJob;
+use crate::leader::Term;
 use crate::tr;
 use crate::logic;
 use crate::schema;
@@ -60,26 +61,78 @@ impl MemberView {
     }
 }
 
+/// The running gateway and job worker, on the replica that leads, to stop
+/// when its term ends.
+pub struct Gateway {
+    worker: tokio::task::JoinHandle<()>,
+    connection: tokio::task::JoinHandle<()>,
+    shards: Arc<Mutex<Option<Arc<serenity::ShardManager>>>>,
+}
+
+/// Saves the job queue to the `discord_jobs` table, on every replica: the web
+/// adds jobs wherever it runs, and the bot's handlers where it leads.
+pub struct Saver {
+    task: tokio::task::JoinHandle<()>,
+    stop: tokio::sync::oneshot::Sender<()>,
+}
+
+impl Saver {
+    pub fn start(db: store::Db, jobs: UnboundedReceiver<DiscordJob>) -> Self {
+        let (stop, saving) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(save_jobs(db, jobs, saving));
+        Self { task, stop }
+    }
+
+    /// Saves jobs still in the queue, then returns.
+    pub async fn stop(self) {
+        let _ = self.stop.send(());
+        if tokio::time::timeout(Duration::from_secs(5), self.task).await.is_err() {
+            tracing::warn!("Discord jobs still in the queue weren't saved in time");
+        }
+    }
+}
+
+/// How long the worker keeps running due jobs once shutdown begins. What's
+/// left waits in the table for the next process.
+const DRAIN: Duration = Duration::from_secs(10);
+
+impl Gateway {
+    /// Call once the term has ended. At shutdown, lets the worker finish what
+    /// it can in `DRAIN`; when the lock was lost, the job in hand at most.
+    /// Then disconnects from Discord.
+    pub async fn stop(self) {
+        if tokio::time::timeout(DRAIN + Duration::from_secs(5), self.worker).await.is_err() {
+            tracing::warn!("the Discord job worker didn't stop in time");
+        }
+        let shards = self.shards.lock().ok().and_then(|slot| slot.clone());
+        if let Some(shards) = shards {
+            shards.shutdown_all().await;
+        }
+        if tokio::time::timeout(Duration::from_secs(5), self.connection).await.is_err() {
+            tracing::warn!("the Discord gateway didn't disconnect in time");
+        }
+    }
+}
+
+/// Connects to Discord and starts the job worker, for the leader's `term`.
+/// `queue` is where the bot's handlers send work; the `Saver` keeps it in the
+/// `discord_jobs` table, which the worker runs from.
 pub fn start(
     token: String,
     db: store::Db,
-    jobs: UnboundedReceiver<DiscordJob>,
-    retry: UnboundedSender<DiscordJob>,
+    queue: UnboundedSender<DiscordJob>,
     public_url: String,
     status: String,
     view: MemberView,
-) {
+    term: Term,
+) -> Gateway {
     let http = Arc::new(Mutex::new(None));
-    let data_db = db.clone();
-    let data_http = http.clone();
-    let jobs_url = public_url.clone();
-    let queue = retry.clone();
-    tokio::spawn(async move {
-        job_loop(data_db, jobs, retry, data_http, jobs_url).await;
-    });
-    tokio::spawn(async move {
+    let shards = Arc::new(Mutex::new(None));
+    let worker = tokio::spawn(job_loop(db.clone(), http.clone(), public_url.clone(), term.clone()));
+    let connection_shards = shards.clone();
+    let connection = tokio::spawn(async move {
         let mut members = true;
-        loop {
+        while !term.is_over() {
             let stopped = connect(
                 &token,
                 db.clone(),
@@ -89,14 +142,23 @@ pub fn start(
                 members,
                 queue.clone(),
                 view.clone(),
+                connection_shards.clone(),
+                &term,
             )
             .await;
             if let Ok(mut slot) = http.lock() {
                 *slot = None;
             }
+            // The client is gone; stopping its manager would only wait on it.
+            if let Ok(mut slot) = connection_shards.lock() {
+                *slot = None;
+            }
             // Changes made while disconnected never arrive; the web asks
             // Discord until the next connection brings the member list again.
             view.set(None);
+            if term.is_over() {
+                break;
+            }
             match stopped {
                 Err(err) if members && members_refused(&err) => {
                     tracing::warn!(
@@ -108,30 +170,170 @@ pub fn start(
                 Err(err) => tracing::warn!("Discord gateway stopped: {err}"),
                 Ok(()) => {}
             }
-            tokio::time::sleep(Duration::from_secs(8)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(8)) => {}
+                _ = term.ended() => {}
+            }
         }
     });
+    Gateway {
+        worker,
+        connection,
+        shards,
+    }
 }
 
-async fn job_loop(
+/// Runs `body` with a pooled connection on a blocking thread.
+async fn db_work<T: Send + 'static>(
+    db: &store::Db,
+    body: impl FnOnce(&mut Connection) -> Result<T, crate::error::OpError> + Send + 'static,
+) -> Result<T, Error> {
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || -> Result<T, Error> {
+        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        Ok(body(&mut conn)?)
+    })
+    .await?
+}
+
+/// Saves jobs from the queue to the table, in batches, and wakes the worker.
+/// Once told to stop, saves what's left in the queue and returns.
+async fn save_jobs(
     db: store::Db,
     mut jobs: UnboundedReceiver<DiscordJob>,
-    retry: UnboundedSender<DiscordJob>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        let first = tokio::select! {
+            biased;
+            job = jobs.recv() => job,
+            _ = &mut stop => None,
+        };
+        let Some(first) = first else { break };
+        let mut batch = vec![first];
+        while let Ok(job) = jobs.try_recv() {
+            batch.push(job);
+        }
+        save_batch(&db, batch).await;
+        crate::jobs::wake();
+    }
+    jobs.close();
+    let mut rest = Vec::new();
+    while let Ok(job) = jobs.try_recv() {
+        rest.push(job);
+    }
+    save_batch(&db, rest).await;
+}
+
+async fn save_batch(db: &store::Db, batch: Vec<DiscordJob>) {
+    if batch.is_empty() {
+        return;
+    }
+    for attempt in 1..=3 {
+        let jobs = batch.clone();
+        match db_work(db, move |conn| crate::jobs::save(conn, &jobs)).await {
+            Ok(()) => return,
+            Err(err) if attempt < 3 => {
+                tracing::warn!("could not save {} Discord jobs, trying again: {err}", batch.len());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(err) => {
+                tracing::error!("dropped {} Discord jobs the database wouldn't take: {err}", batch.len());
+            }
+        }
+    }
+}
+
+fn connected(http: &Arc<Mutex<Option<Arc<serenity::Http>>>>) -> bool {
+    http.lock().map(|slot| slot.is_some()).unwrap_or(false)
+}
+
+/// Runs jobs from the `discord_jobs` table, soonest due first, one at a time,
+/// each under a lease so no other worker runs it meanwhile. A job is deleted
+/// once it's done; a failed one is tried again later, each pause twice the
+/// last, and deleted after its last try. Once shutdown begins it keeps going
+/// for `DRAIN` at most, then leaves the rest for the next leader; when the
+/// leader lock is lost it stops after the job in hand.
+async fn job_loop(
+    db: store::Db,
     http: Arc<Mutex<Option<Arc<serenity::Http>>>>,
     public_url: String,
+    term: Term,
 ) {
     JOB_METRICS.report_zeros();
-    while let Some(job) = jobs.recv().await {
-        JOB_METRICS.waiting.record(jobs.len() as u64, &[]);
-        // While the gateway reconnects, the job waits for it without spending
-        // a try: nothing could reach Discord anyway.
-        while !http.lock().map(|slot| slot.is_some()).unwrap_or(false) {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut retrying = 0i64;
+    let mut drain_until: Option<Instant> = None;
+    loop {
+        if term.lost() {
+            break;
         }
+        if crate::shutdown::requested() {
+            let until = *drain_until.get_or_insert_with(|| Instant::now() + DRAIN);
+            if Instant::now() >= until {
+                break;
+            }
+        }
+        // While the gateway reconnects, jobs wait for it without spending a
+        // try: nothing could reach Discord anyway.
+        if !connected(&http) {
+            if term.is_over() {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                _ = term.ended() => {}
+            }
+            continue;
+        }
+        let now = chrono::Utc::now();
+        let next = db_work(&db, move |conn| {
+            let next = crate::jobs::claim(conn, now, crate::jobs::LEASE)?;
+            let counts = crate::jobs::counts(conn, now)?;
+            let later = match next {
+                Some(_) => None,
+                None => crate::jobs::next_run_at(conn)?,
+            };
+            Ok((next, counts, later))
+        })
+        .await;
+        let (next, (due, later_count), later) = match next {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::warn!("Discord jobs: {err}");
+                if term.is_over() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        JOB_METRICS.waiting.record(due.saturating_sub(1).max(0) as u64, &[]);
+        JOB_METRICS.retrying.add(later_count - retrying, &[]);
+        retrying = later_count;
+        let Some((row, job)) = next else {
+            if term.is_over() {
+                break;
+            }
+            // A job due but in another worker's hands is next free when its
+            // lease is up: look again shortly after.
+            let pause = later
+                .map(|at| {
+                    let left = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+                    left.max(Duration::from_millis(500))
+                })
+                .unwrap_or(Duration::from_secs(60))
+                .min(Duration::from_secs(60));
+            tokio::select! {
+                _ = crate::jobs::woken() => {}
+                _ = tokio::time::sleep(pause) => {}
+                _ = term.ended() => {}
+            }
+            continue;
+        };
         let (kind, id) = job_kind(&job);
         let span = tracing::info_span!("discord_job", job = kind, id, tries = job.tries());
         let started = Instant::now();
-        let result = async {
+        let run = async {
             match &job {
                 DiscordJob::Sync { event_id, .. } => {
                     push_sync(&db, &http, &public_url, *event_id).await
@@ -149,22 +351,40 @@ async fn job_loop(
                 DiscordJob::Commands { guild_id, .. } => push_commands(&db, &http, *guild_id).await,
             }
         }
-        .instrument(span.clone())
-        .await;
-        let outcome = match result {
-            Ok(()) => "done",
+        .instrument(span.clone());
+        // Cut off well inside the lease, so the job is never run twice at once.
+        let limit = crate::jobs::RUN_LIMIT;
+        let result = match tokio::time::timeout(limit, run).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("still running after {}s", limit.as_secs()).into()),
+        };
+        let (outcome, recorded) = match result {
+            Ok(()) => ("done", db_work(&db, move |conn| crate::jobs::done(conn, row)).await),
             Err(err) => match job.bump() {
                 Some(next) => {
-                    span.in_scope(|| tracing::warn!("Discord job failed, trying again: {err}"));
-                    retry_later(retry.clone(), next);
-                    "failed"
+                    let pause = crate::jobs::backoff(next.tries());
+                    span.in_scope(|| {
+                        tracing::warn!("Discord job failed, trying again in {}s: {err}", pause.as_secs())
+                    });
+                    let run_at = chrono::Utc::now()
+                        + chrono::Duration::from_std(pause).unwrap_or(chrono::Duration::seconds(300));
+                    (
+                        "failed",
+                        db_work(&db, move |conn| crate::jobs::retry(conn, row, &next, run_at)).await,
+                    )
                 }
                 None => {
                     span.in_scope(|| tracing::error!("Discord job dropped after its last try: {err}"));
-                    "dropped"
+                    ("dropped", db_work(&db, move |conn| crate::jobs::done(conn, row)).await)
                 }
             },
         };
+        if let Err(err) = recorded {
+            // The job stays as it was in the table and runs again once its
+            // lease is up.
+            span.in_scope(|| tracing::warn!("could not record how the Discord job went: {err}"));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
         let attributes = [KeyValue::new("kind", kind), KeyValue::new("outcome", outcome)];
         JOB_METRICS.runs.add(1, &attributes);
         JOB_METRICS.duration.record(started.elapsed().as_secs_f64(), &attributes);
@@ -259,17 +479,6 @@ async fn push_commands(
     Ok(())
 }
 
-/// Puts a failed job back in the queue after a pause. Until then it's counted
-/// in `retrying`, since the queue's own length can't see it.
-fn retry_later(retry: UnboundedSender<DiscordJob>, job: DiscordJob) {
-    JOB_METRICS.retrying.add(1, &[]);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        JOB_METRICS.retrying.add(-1, &[]);
-        let _ = retry.send(job);
-    });
-}
-
 /// Whether Discord closed the gateway because the bot may not ask for members.
 fn members_refused(err: &Error) -> bool {
     matches!(
@@ -289,6 +498,8 @@ async fn connect(
     members: bool,
     queue: UnboundedSender<DiscordJob>,
     view: MemberView,
+    shards: Arc<Mutex<Option<Arc<serenity::ShardManager>>>>,
+    term: &Term,
 ) -> Result<(), Error> {
     let presence = presence_line(&status);
     let framework = poise::Framework::builder()
@@ -337,6 +548,13 @@ async fn connect(
         builder = builder.activity(serenity::gateway::ActivityData::custom(line));
     }
     let mut client = builder.framework(framework).await?;
+    if let Ok(mut slot) = shards.lock() {
+        *slot = Some(client.shard_manager.clone());
+    }
+    // The term can end while connecting, before the manager was there to stop.
+    if term.is_over() {
+        return Ok(());
+    }
     client.start().await?;
     Ok(())
 }

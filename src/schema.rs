@@ -6,6 +6,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    discord_jobs (id) {
+        id -> BigInt,
+        job -> Jsonb,
+        run_at -> Timestamptz,
+        locked_until -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     guilds (id) {
         id -> BigInt,
         name -> Text,
@@ -524,6 +534,7 @@ diesel::joinable!(permission_roles -> guilds (guild_id));
 diesel::joinable!(permission_roles -> roles (role_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    discord_jobs,
     users,
     permission_roles,
     activity,

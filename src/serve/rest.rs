@@ -556,13 +556,24 @@ fn live_sse(guild_id: i64) -> Response {
     });
     let changes = tokio_stream::wrappers::BroadcastStream::new(crate::live::subscribe())
         .filter_map(move |news| match news {
-            Ok(news) if news.guild_id == guild_id => Some(Ok::<_, std::convert::Infallible>(
+            Ok(news) if news.concerns(guild_id) => Some(Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default().data(&*news.body),
             )),
             Ok(_) => None,
             Err(_) => Some(Ok(axum::response::sse::Event::default().data(crate::live::everything()))),
         });
-    axum::response::sse::Sse::new(tokio_stream::iter(first).chain(changes))
+    // Ends when Marian shuts down, so the graceful shutdown isn't left waiting
+    // on open pages; they reconnect to the next process.
+    let stopping = tokio_stream::wrappers::WatchStream::new(crate::shutdown::subscribe())
+        .filter(|stopping| *stopping)
+        .map(|_| None);
+    let feed = tokio_stream::iter(first)
+        .chain(changes)
+        .map(Some)
+        .merge(stopping)
+        .take_while(Option::is_some)
+        .map(|event| event.expect("taken while some"));
+    axum::response::sse::Sse::new(feed)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
 }

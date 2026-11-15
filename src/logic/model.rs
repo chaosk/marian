@@ -188,6 +188,7 @@ pub struct DiscordView {
 
 pub struct TickReport {
     pub notes: Vec<String>,
+    /// Already saved to `discord_jobs`, in the same transaction as the changes.
     pub jobs: Vec<DiscordJob>,
     /// Servers this pass changed something on.
     pub guilds: Vec<i64>,

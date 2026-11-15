@@ -34,7 +34,14 @@ pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpE
     for guild in guilds {
         // One server's trouble rolls back only its own changes; the rest
         // still post and remind.
-        let piece = match store::with_tx(conn, |tx| tick_guild(tx, guild.id, now)) {
+        // The server's Discord work is saved with its changes: an event marked
+        // posted, or a reminder marked sent, always has its job waiting.
+        let piece = match store::with_tx(conn, |tx| {
+            store::lock_tick(tx, guild.id)?;
+            let piece = tick_guild(tx, guild.id, now)?;
+            crate::jobs::save(tx, &piece.jobs)?;
+            Ok(piece)
+        }) {
             Ok(piece) => piece,
             Err(err) => {
                 tracing::warn!(guild_id = guild.id, "tick failed for server {}: {err}", guild.id);

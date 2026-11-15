@@ -44,6 +44,8 @@ struct AppState {
     members: crate::gateway::MemberView,
     /// When the tick last finished, for `/healthz`.
     heartbeat: Heartbeat,
+    /// Whether this replica leads, and so runs the tick.
+    leader: crate::leader::Status,
 }
 
 /// The last time the tick finished a round, in Unix seconds. It starts at
@@ -93,10 +95,14 @@ async fn with_db<T: Send + 'static>(
 }
 
 /// Every 5 seconds: posts, reminders, archiving, series dates and routines.
-fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: Heartbeat) {
+/// Stops when the leader's term ends, after the round in progress.
+fn spawn_tick(db: store::Db, heartbeat: Heartbeat, term: Term) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = term.ended() => break,
+            }
             // Instrumented, not entered: a guard held across the await below
             // stayed entered on the thread, and other tasks' spans joined this
             // trace until it ran past Tempo's size limit.
@@ -113,8 +119,9 @@ fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: He
                         for note in report.notes {
                             tracing::info!("{note}");
                         }
-                        for job in report.jobs {
-                            enqueue(&discord, job);
+                        // Saved with the tick's changes; the worker picks them up.
+                        if !report.jobs.is_empty() {
+                            crate::jobs::wake();
                         }
                         for guild_id in report.guilds {
                             crate::live::server(guild_id);
@@ -127,40 +134,47 @@ fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: He
             .instrument(span)
             .await;
         }
-    });
+    })
 }
 
 /// Every 5 seconds, apart from the tick, so a slow Google API never holds up
-/// posts and reminders.
+/// posts and reminders. Stops when the leader's term ends.
 fn spawn_google_sync(
     db: store::Db,
     http: reqwest::Client,
     client_id: String,
     client_secret: String,
     public_base: String,
-) {
+    term: Term,
+) -> Option<tokio::task::JoinHandle<()>> {
     if !crate::google::configured(&client_id, &client_secret) {
-        return;
+        return None;
     }
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = term.ended() => break,
+            }
             let span = tracing::info_span!(parent: None, "google_sync");
             sync_google(&db, &http, &client_id, &client_secret, &public_base)
                 .instrument(span)
                 .await;
         }
-    });
+    }))
 }
 
-/// Hourly, from launch: deletes sign-ins past their 30 days, which hold
-/// Discord tokens nobody can use any more.
-fn spawn_session_sweep(db: store::Db) {
+/// Hourly, from the start of the leader's term: deletes sign-ins past their
+/// 30 days, which hold Discord tokens nobody can use any more.
+fn spawn_session_sweep(db: store::Db, term: Term) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(3600));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            every.tick().await;
+            tokio::select! {
+                _ = every.tick() => {}
+                _ = term.ended() => break,
+            }
             match with_db(&db, "session sweep", |conn| {
                 store::delete_expired_sessions(conn, Utc::now())
             })
@@ -171,15 +185,58 @@ fn spawn_session_sweep(db: store::Db) {
                 Some(Err(err)) => tracing::warn!("session sweep failed: {err}"),
             }
         }
-    });
+    })
+}
+
+/// What only the leader runs: the Discord gateway and job worker, the tick,
+/// Google Calendar sync and the sign-in sweep. Starts them for `term`, and
+/// once it ends stops them, letting the tick in hand finish with its jobs
+/// saved and, at shutdown, due Discord jobs drain.
+async fn lead(state: AppState, token: String, status: String, term: Term) {
+    // A fresh term gets the full grace period before `/healthz` minds the tick.
+    state.heartbeat.beat();
+    let gateway = crate::gateway::start(
+        token,
+        state.db.clone(),
+        state.discord.clone(),
+        state.public_url.clone(),
+        status,
+        state.members.clone(),
+        term.clone(),
+    );
+    let tick = spawn_tick(state.db.clone(), state.heartbeat.clone(), term.clone());
+    let sync = spawn_google_sync(
+        state.db.clone(),
+        state.http.clone(),
+        state.google_client_id.clone(),
+        state.google_client_secret.clone(),
+        state.public_url.clone(),
+        term.clone(),
+    );
+    let sweep = spawn_session_sweep(state.db.clone(), term.clone());
+    term.ended().await;
+    let finish = std::time::Duration::from_secs(10);
+    if tokio::time::timeout(finish, tick).await.is_err() {
+        tracing::warn!("The tick didn't finish in time.");
+    }
+    gateway.stop().await;
+    for (what, task) in [("Google Calendar sync", sync), ("The sign-in sweep", Some(sweep))] {
+        let Some(mut task) = task else { continue };
+        if tokio::time::timeout(finish, &mut task).await.is_err() {
+            tracing::warn!("{what} didn't finish in time.");
+            task.abort();
+        }
+    }
 }
 
 use crate::api::{cookie, Viewer as Session};
+use crate::leader::Term;
 
-/// Runs Marian: the gateway, the tick, and the web service with `pages` for everything else.
+/// Runs Marian: the web service with `pages` for everything else, on every
+/// replica, and the gateway and the tick on the one that leads.
 pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> anyhow::Result<()> {
     store::load_dotenv();
-    let _telemetry = crate::observe::init();
+    let telemetry = crate::observe::init();
 
     let database_url = store::database_url()?;
     let port: u16 = env::var("PORT")
@@ -207,48 +264,73 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState {
         db,
-        discord: tx.clone(),
+        discord: tx,
         invite_url,
         http,
         client_id,
         client_secret,
-        public_url: public_url.clone(),
+        public_url,
         google_client_id,
         google_client_secret,
         bot_token: token.clone(),
         member_roles: member_roles_cache(),
         members: crate::gateway::MemberView::default(),
         heartbeat: Heartbeat::new(),
+        leader: crate::leader::Status::default(),
     };
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
+        tokio::spawn(crate::shutdown::on_signal());
         let web = crate::api::Web {
             db: state.db.clone(),
             invite_url: state.invite_url.clone(),
             oauth_ready: oauth_ready(&state),
         };
         let app = router(state.clone(), pages(web));
-        crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status, state.members.clone());
-        spawn_tick(state.db.clone(), state.discord.clone(), state.heartbeat.clone());
-        spawn_google_sync(
-            state.db.clone(),
-            state.http.clone(),
-            state.google_client_id.clone(),
-            state.google_client_secret.clone(),
-            state.public_url.clone(),
-        );
-        spawn_session_sweep(state.db.clone());
+        let saver = crate::gateway::Saver::start(state.db.clone(), rx);
+        crate::live::bridge(database_url.clone());
+        let leading = tokio::spawn(crate::leader::run(
+            database_url,
+            crate::leader::LEADER_KEY,
+            state.leader.clone(),
+            {
+                let state = state.clone();
+                move |term| lead(state.clone(), token.clone(), status.clone(), term)
+            },
+        ));
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Marian is listening on {addr}");
-        axum::serve(
+        let served = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .await?;
-        Ok(())
-    })
+        .with_graceful_shutdown(crate::shutdown::wait());
+        let served = std::future::IntoFuture::into_future(served);
+        tokio::pin!(served);
+        // Requests still open this long after the signal are cut off.
+        let cut_off = async {
+            crate::shutdown::wait().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        };
+        tokio::select! {
+            served = &mut served => served?,
+            _ = cut_off => tracing::warn!("Requests still open at shutdown were cut off."),
+        }
+        // The leader finishes its tick and due Discord jobs, disconnects,
+        // then lets the lock go for the next replica.
+        if tokio::time::timeout(std::time::Duration::from_secs(45), leading).await.is_err() {
+            tracing::warn!("The leader's work didn't stop in time.");
+        }
+        saver.stop().await;
+        tracing::info!("Marian stopped.");
+        Ok::<_, anyhow::Error>(())
+    });
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
+    // Sends the last spans and metrics.
+    drop(telemetry);
+    result
 }
 
 fn router(state: AppState, pages: Router) -> Router {
@@ -526,13 +608,19 @@ async fn revalidate_site(request: Request, next: Next) -> Response {
     response
 }
 
-/// Liveness: fails once the tick hasn't finished in two minutes, so a stuck
-/// process gets restarted. The database's own health is `/readyz`.
+/// Liveness: on the leader, fails once the tick hasn't finished in two
+/// minutes, so a stuck process gets restarted and another replica takes over.
+/// A follower runs no tick. The body says which this replica is. The
+/// database's own health is `/readyz`.
 async fn health(State(state): State<AppState>) -> Response {
-    if state.heartbeat.stale(Utc::now().timestamp()) {
-        (StatusCode::SERVICE_UNAVAILABLE, "the tick has stalled").into_response()
-    } else {
-        (StatusCode::OK, "ok").into_response()
+    liveness(state.leader.leading(), &state.heartbeat, Utc::now().timestamp()).into_response()
+}
+
+fn liveness(leading: bool, heartbeat: &Heartbeat, now: i64) -> (StatusCode, &'static str) {
+    match (leading, heartbeat.stale(now)) {
+        (true, true) => (StatusCode::SERVICE_UNAVAILABLE, "leader: the tick has stalled"),
+        (true, false) => (StatusCode::OK, "ok: leader"),
+        (false, _) => (StatusCode::OK, "ok: follower"),
     }
 }
 
@@ -1832,6 +1920,17 @@ mod tests {
     }
 
     #[test]
+    fn only_the_leader_minds_the_tick() {
+        let heartbeat = Heartbeat::new();
+        let later = Utc::now().timestamp() + TICK_STALE_AFTER_SECS + 5;
+        assert_eq!(liveness(true, &heartbeat, later).0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(liveness(false, &heartbeat, later), (StatusCode::OK, "ok: follower"));
+        heartbeat.beat();
+        let now = Utc::now().timestamp();
+        assert_eq!(liveness(true, &heartbeat, now), (StatusCode::OK, "ok: leader"));
+    }
+
+    #[test]
     fn a_server_list_accepts_string_and_integer_permissions() {
         let current = r#"[{"id":"1","owner":false,"permissions":"40"}]"#;
         let legacy = r#"[{"id":"2","owner":false,"permissions":8,"permissions_new":"8"}]"#;
@@ -2012,6 +2111,7 @@ mod tests {
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
             heartbeat: Heartbeat::new(),
+            leader: crate::leader::Status::default(),
         };
         let pages = Router::new().route(
             "/page",
@@ -2093,6 +2193,7 @@ mod tests {
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
             heartbeat: Heartbeat::new(),
+            leader: crate::leader::Status::default(),
         };
         let app = router(state, Router::new().nest_service("/pkg", site_files(&dir)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2205,6 +2306,7 @@ mod tests {
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
             heartbeat: Heartbeat::new(),
+            leader: crate::leader::Status::default(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2409,6 +2511,7 @@ mod tests {
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
             heartbeat: Heartbeat::new(),
+            leader: crate::leader::Status::default(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -3,6 +3,18 @@ image:
   tag: "0.11.1"
   pullPolicy: IfNotPresent
 
+# Pods. Each serves the web; one at a time runs the bot, the tick and Discord
+# jobs, chosen by a Postgres advisory lock, and another takes over within
+# seconds when it stops. Above 1 the chart adds a PodDisruptionBudget that
+# keeps one pod up through node drains.
+replicaCount: 1
+
+# RollingUpdate starts the new pod before stopping the old one, so the web
+# stays up through upgrades; for a while both versions run against the
+# migrated database. Recreate stops the old pod first, for a release whose
+# migrations the previous version can't run against.
+updateStrategy: RollingUpdate
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -39,7 +51,8 @@ database:
   # pod then reads the string from that secret under secretKey.
   url: ""
   secretKey: databaseUrl
-  # Connections this process keeps open.
+  # Pooled connections each pod keeps open. Each pod also holds two of its
+  # own: one for the leader lock, one for live updates between pods.
   pool: 10
 
 # Custom status under the bot's name. Empty leaves it unset.
