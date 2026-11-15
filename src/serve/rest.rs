@@ -119,14 +119,17 @@ fn scoped<T>(
     server: &str,
     body: impl FnOnce(&mut Connection, &Session) -> Result<T, OpError>,
 ) -> Result<T, Problem> {
-    let mut db = state.db.get().map_err(|_| {
-        Problem(StatusCode::SERVICE_UNAVAILABLE, "The database is busy.".into())
-    })?;
-    let Some(mut viewer) = read_session(&mut db, headers) else {
-        return Err(Problem(StatusCode::UNAUTHORIZED, "Sign in with Discord.".into()));
-    };
-    api::bind_server(&mut db, &mut viewer, server)?;
-    Ok(body(&mut db, &viewer)?)
+    // Every REST handler's database work goes through here, off the async workers.
+    crate::store::blocking(|| {
+        let mut db = state.db.get().map_err(|_| {
+            Problem(StatusCode::SERVICE_UNAVAILABLE, "The database is busy.".into())
+        })?;
+        let Some(mut viewer) = read_session(&mut db, headers) else {
+            return Err(Problem(StatusCode::UNAUTHORIZED, "Sign in with Discord.".into()));
+        };
+        api::bind_server(&mut db, &mut viewer, server)?;
+        Ok(body(&mut db, &viewer)?)
+    })
 }
 
 fn read<T>(

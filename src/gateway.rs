@@ -930,12 +930,12 @@ async fn handle_button(
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
     // The button names rows by public id; the handlers below work on row keys.
-    let found = {
+    let found = store::blocking(|| -> Result<_, Error> {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let event_key = |conn: &mut store::Connection, event: uuid::Uuid| -> Result<Option<i64>, crate::error::OpError> {
             Ok(store::event_by_public(conn, &event.to_string())?.map(|event| event.id))
         };
-        match action {
+        let found = match action {
             ButtonAction::Edit { event } => event_key(&mut conn, event)?.map(Found::Edit),
             ButtonAction::Delete { event } => event_key(&mut conn, event)?.map(Found::Delete),
             ButtonAction::ConfirmDelete { event } => event_key(&mut conn, event)?.map(Found::ConfirmDelete),
@@ -953,8 +953,9 @@ async fn handle_button(
             ButtonAction::Decide { run, day } => {
                 logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Decide(run_id, day))
             }
-        }
-    };
+        };
+        Ok(found)
+    })?;
     let Some(found) = found else {
         let lang = button_lang(data, component);
         return followup(ctx, component, &tr!(lang, "reply-gone")).await;
@@ -993,11 +994,11 @@ async fn decide_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (decided, lang) = {
+    let (decided, lang) = store::blocking(|| -> Result<_, Error> {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        (logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()), lang)
-    };
+        Ok((logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()), lang))
+    })?;
     match decided {
         Ok(effect) => {
             for job in effect.jobs {
@@ -1020,11 +1021,11 @@ async fn routine_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (saved, lang) = {
+    let (saved, lang) = store::blocking(|| -> Result<_, Error> {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        (logic::cast_run(&mut conn, run_id, membership_id, day), lang)
-    };
+        Ok((logic::cast_run(&mut conn, run_id, membership_id, day), lang))
+    })?;
     if let Err(err) = saved {
         return followup(ctx, component, &err.localized(lang)).await;
     }
@@ -1045,11 +1046,11 @@ async fn signup_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (signed, lang) = {
+    let (signed, lang) = store::blocking(|| -> Result<_, Error> {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        (logic::signup(&mut conn, event_id, option_id, membership_id), lang)
-    };
+        Ok((logic::signup(&mut conn, event_id, option_id, membership_id), lang))
+    })?;
     if let Err(err) = signed {
         return followup(ctx, component, &err.localized(lang)).await;
     }
@@ -1078,7 +1079,7 @@ async fn open_guests_form(
             .await?;
         return followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await;
     };
-    let found = {
+    let found = store::blocking(|| -> Result<_, Error> {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
         let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
         let option_id = store::event_by_public(&mut conn, &event.to_string())?
@@ -1087,8 +1088,8 @@ async fn open_guests_form(
             Some(option_id) => Some(logic::guests_form(&mut conn, option_id, membership_id)?),
             None => None,
         };
-        (form, lang)
-    };
+        Ok((form, lang))
+    })?;
     let (form, lang) = found;
     let refusal = match &form {
         None => Some(tr!(lang, "reply-gone")),
@@ -1659,8 +1660,8 @@ async fn push_sync(
 /// Tells open pages about a change made from Discord to one event: to who is
 /// signed up, or to the event itself.
 fn tell_pages(db: &store::Db, event_id: i64, signups: bool) {
-    let Ok(mut conn) = db.get() else { return };
-    if let Ok(Some(event)) = store::event(&mut conn, event_id) {
+    let found = store::blocking(|| db.get().ok().and_then(|mut conn| store::event(&mut conn, event_id).ok()));
+    if let Some(Some(event)) = found {
         if signups {
             crate::live::signups(event.guild_id, event.public_id);
         } else {
@@ -1676,10 +1677,10 @@ async fn post_event(
     event_id: i64,
     notify: bool,
 ) -> Result<(), Error> {
-    let view = {
+    let view = store::blocking(|| -> Result<_, Error> {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::discord_view(&mut conn, event_id, public_url)?
-    };
+        Ok(logic::discord_view(&mut conn, event_id, public_url)?)
+    })?;
     let Some(view) = view else {
         return Ok(());
     };
@@ -2057,15 +2058,16 @@ async fn push_attendance(
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     event_id: i64,
 ) -> Result<(), Error> {
-    let work = {
+    let attendance = store::blocking(|| -> Result<_, Error> {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        match logic::attendance(&mut conn, event_id)? {
-            logic::Attendance::Idle => return Ok(()),
-            logic::Attendance::Waiting => {
-                return Err("the Discord post is not up yet".into());
-            }
-            logic::Attendance::Ready(work) => work,
+        Ok(logic::attendance(&mut conn, event_id)?)
+    })?;
+    let work = match attendance {
+        logic::Attendance::Idle => return Ok(()),
+        logic::Attendance::Waiting => {
+            return Err("the Discord post is not up yet".into());
         }
+        logic::Attendance::Ready(work) => work,
     };
     if !work.open_thread
         && work.thread_add.is_empty()

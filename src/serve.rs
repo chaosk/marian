@@ -537,10 +537,12 @@ async fn health(State(state): State<AppState>) -> Response {
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    let ok = state.db.get().map(|mut conn| {
-        diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
-            .get_result::<i32>(&mut *conn)
-            .is_ok()
+    let ok = store::blocking(|| {
+        state.db.get().map(|mut conn| {
+            diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
+                .get_result::<i32>(&mut *conn)
+                .is_ok()
+        })
     });
     if ok.unwrap_or(false) {
         (StatusCode::OK, "ok").into_response()
@@ -1622,14 +1624,19 @@ async fn personal_calendar(State(state): State<AppState>, Path(file): Path<Strin
     let Some(token) = personal_token(&file) else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
-    let mut db = state.db.get().expect("database");
-    let Some(user_id) = store::calendar_user_id(&mut db, token).ok().flatten() else {
-        return (StatusCode::NOT_FOUND, "No calendar").into_response();
-    };
-    match ics::user_feed(&mut db, user_id) {
-        Ok(body) => calendar_response(body),
-        Err(err) => plain_error(err),
-    }
+    // Calendar apps poll this, so it stays off the async workers.
+    store::blocking(|| {
+        let Ok(mut db) = state.db.get() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "The database is busy.").into_response();
+        };
+        let Some(user_id) = store::calendar_user_id(&mut db, token).ok().flatten() else {
+            return (StatusCode::NOT_FOUND, "No calendar").into_response();
+        };
+        match ics::user_feed(&mut db, user_id) {
+            Ok(body) => calendar_response(body),
+            Err(err) => plain_error(err),
+        }
+    })
 }
 
 fn personal_token(file: &str) -> Option<&str> {
