@@ -17,6 +17,7 @@ mod live;
 pub mod logic;
 mod observe;
 pub mod parse;
+mod pg_tls;
 mod release_version;
 mod schema;
 pub mod serve;

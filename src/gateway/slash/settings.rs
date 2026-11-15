@@ -18,6 +18,7 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         let outcome = commands::apply_setting(
             &mut conn,
@@ -25,8 +26,9 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
             actor.membership_id,
             change,
             actor.lang,
-        );
-        (outcome, i18n::lang_of(&mut conn, actor.guild_id))
+        )
+        .await;
+        (outcome, i18n::lang_of(&mut conn, actor.guild_id).await)
     };
     let actor = Actor { lang, ..actor };
     deliver(ctx, &actor, label, outcome).await

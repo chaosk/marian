@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::catalog::slug_channel;
 use super::db::{must_channel, must_event, must_guild, trim_chars};
@@ -51,10 +52,10 @@ pub struct AttendanceWork {
     pub role_remove: Vec<String>,
 }
 
-pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, OpError> {
-    let event = must_event(conn, event_id)?;
-    let guild = must_guild(conn, event.guild_id)?;
-    let channel = must_channel(conn, event.channel_id)?;
+pub async fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, OpError> {
+    let event = must_event(conn, event_id).await?;
+    let guild = must_guild(conn, event.guild_id).await?;
+    let channel = must_channel(conn, event.channel_id).await?;
     let Some(guild_discord_id) = guild.discord_id else {
         return Ok(Attendance::Idle);
     };
@@ -70,28 +71,29 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
             Attendance::Idle
         });
     };
-    let settings = store::settings(conn, event.guild_id)?;
-    let thread_discord_id = store::thread_discord_id(conn, event_id)?;
+    let settings = store::settings(conn, event.guild_id).await?;
+    let thread_discord_id = store::thread_discord_id(conn, event_id).await?;
     let manage_thread = event.thread_enabled && settings.auto_join_threads;
     let desired_thread = if manage_thread {
-        let members = store::thread_member_ids(conn, &event)?;
-        store::discord_ids_for_memberships(conn, &members)?
+        let members = store::thread_member_ids(conn, &event).await?;
+        store::discord_ids_for_memberships(conn, &members).await?
     } else {
         Vec::new()
     };
-    let applied_thread = store::applied_membership_ids(conn, event_id, AccessKind::Thread)?;
+    let applied_thread = store::applied_membership_ids(conn, event_id, AccessKind::Thread).await?;
     let (thread_add, thread_remove) = id_diff(&desired_thread, &applied_thread);
-    let grants = store::grant_membership_ids(conn, &event)?;
-    let desired_role = store::discord_ids_for_memberships(conn, &grants)?;
-    let applied_role = store::applied_membership_ids(conn, event_id, AccessKind::Role)?;
+    let grants = store::grant_membership_ids(conn, &event).await?;
+    let desired_role = store::discord_ids_for_memberships(conn, &grants).await?;
+    let applied_role = store::applied_membership_ids(conn, event_id, AccessKind::Role).await?;
     let (mut role_add, role_remove) = id_diff(&desired_role, &applied_role);
-    let role = event
-        .attendee_role_id
-        .and_then(|id| store::role(conn, id).ok().flatten());
+    let role = match event.attendee_role_id {
+        Some(id) => store::role(conn, id).await.ok().flatten(),
+        None => None,
+    };
     // One of the server's own roles goes out only while whoever picked it
     // manages the server. Taking it back is always fine.
     if let Some(role) = &role {
-        if !role_add.is_empty() && !super::access::gives_attendee_role(conn, &event, role)? {
+        if !role_add.is_empty() && !super::access::gives_attendee_role(conn, &event, role).await? {
             tracing::warn!(
                 event_id,
                 role_id = role.id,
@@ -108,7 +110,7 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
         open_thread: event.thread_enabled && thread_discord_id.is_none(),
         thread_discord_id,
         thread_name: event_thread_name(
-            i18n::lang_of(conn, event.guild_id),
+            i18n::lang_of(conn, event.guild_id).await,
             &event.title,
             event.starts_at,
             &guild.timezone,
@@ -156,14 +158,15 @@ pub fn event_thread_name(
     format!("{}{suffix}", trim_chars(title, room))
 }
 
-pub(super) fn stored_thread_name(
+pub(super) async fn stored_thread_name(
     conn: &mut Connection,
     event: &store::Event,
 ) -> Result<String, OpError> {
-    let timezone = store::guild(conn, event.guild_id)?
+    let timezone = store::guild(conn, event.guild_id)
+        .await?
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
-    let lang = i18n::lang_of(conn, event.guild_id);
+    let lang = i18n::lang_of(conn, event.guild_id).await;
     Ok(event_thread_name(
         lang,
         &event.title,
@@ -245,20 +248,23 @@ pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
     line
 }
 
-fn mention_discord_roles(
+async fn mention_discord_roles(
     conn: &mut Connection,
     event: &store::Event,
 ) -> Result<Vec<String>, OpError> {
-    let ids = store::event_role_ids(conn, event, EventRoleKind::Mention)?;
-    mention_role_ids(conn, &ids)
+    let ids = store::event_role_ids(conn, event, EventRoleKind::Mention).await?;
+    mention_role_ids(conn, &ids).await
 }
 
 /// The Discord ids of roles a post may mention: not @everyone or @here, which
 /// go by their own switch, and not roles Marian never learned the id of.
-pub(super) fn mention_role_ids(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
+pub(super) async fn mention_role_ids(
+    conn: &mut Connection,
+    ids: &[i64],
+) -> Result<Vec<String>, OpError> {
     let mut roles = Vec::new();
     for &role_id in ids {
-        let Some(role) = store::role(conn, role_id)? else {
+        let Some(role) = store::role(conn, role_id).await? else {
             continue;
         };
         if role.name.eq_ignore_ascii_case("@everyone") || role.name.eq_ignore_ascii_case("@here") {
@@ -278,21 +284,21 @@ pub(super) fn mention_role_ids(conn: &mut Connection, ids: &[i64]) -> Result<Vec
     Ok(roles)
 }
 
-pub fn discord_view(
+pub async fn discord_view(
     conn: &mut Connection,
     event_id: i64,
     public_url: &str,
 ) -> Result<Option<DiscordView>, OpError> {
-    let event = must_event(conn, event_id)?;
+    let event = must_event(conn, event_id).await?;
     if event.status != EventStatus::Posted && event.discord_message_id.is_none() {
         return Ok(None);
     }
-    let channel = must_channel(conn, event.channel_id)?;
+    let channel = must_channel(conn, event.channel_id).await?;
     let Some(channel_id) = channel.discord_id else {
         return Ok(None);
     };
-    let guild = must_guild(conn, event.guild_id)?;
-    let settings = store::settings(conn, event.guild_id)?;
+    let guild = must_guild(conn, event.guild_id).await?;
+    let settings = store::settings(conn, event.guild_id).await?;
     let lang = settings.language;
     let start = event.starts_at;
     let end = start + chrono::Duration::minutes(event.duration_minutes);
@@ -320,9 +326,9 @@ pub fn discord_view(
     if event.status != EventStatus::Posted {
         body.push_str(&format!("\n\n_{}_", status_text(lang, event.status)));
     }
-    let options = store::options_for(conn, &event)?;
-    let signups = store::signups_for(conn, &event)?;
-    let memberships = store::list_memberships(conn, event.guild_id)?;
+    let options = store::options_for(conn, &event).await?;
+    let signups = store::signups_for(conn, &event).await?;
+    let memberships = store::list_memberships(conn, event.guild_id).await?;
     let names: HashMap<i64, String> = memberships
         .into_iter()
         .map(|user| (user.id, user.name))
@@ -411,9 +417,9 @@ pub fn discord_view(
             disabled: false,
         });
     }
-    let mention_roles = mention_discord_roles(conn, &event)?;
+    let mention_roles = mention_discord_roles(conn, &event).await?;
     let creator = match event.created_by {
-        Some(id) => store::membership(conn, id)?,
+        Some(id) => store::membership(conn, id).await?,
         None => None,
     }
     .map(|user| user.name)
@@ -456,14 +462,15 @@ pub fn web_event_url(
     Some(format!("{base}/servers/{server}/events/{public_id}"))
 }
 
-pub fn remember_discord_message(
+pub async fn remember_discord_message(
     conn: &mut Connection,
     event_id: i64,
     message_id: &str,
 ) -> Result<(), OpError> {
     diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
         .set(schema::events::discord_message_id.eq(message_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -474,19 +481,19 @@ pub struct ChannelReverse {
     pub repost: Vec<i64>,
 }
 
-pub fn channel_reverse_plan(
+pub async fn channel_reverse_plan(
     conn: &mut Connection,
     guild_id: i64,
     discord_channel_id: &str,
 ) -> Result<ChannelReverse, OpError> {
-    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_channel_id)? else {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_channel_id).await? else {
         return Err(OpError::from(crate::msg!("err-sort-where")));
     };
     if channel.kind != ChannelKind::Event {
         return Err(OpError::from(crate::msg!("err-sort-where")));
     }
     let mut posts = Vec::new();
-    for event in store::list_events(conn, guild_id)? {
+    for event in store::list_events(conn, guild_id).await? {
         if event.channel_id != channel.id {
             continue;
         }
@@ -515,13 +522,15 @@ pub fn channel_reverse_plan(
     })
 }
 
-pub fn detach_discord_posts(conn: &mut Connection, event_ids: &[i64]) -> Result<(), OpError> {
+pub async fn detach_discord_posts(conn: &mut Connection, event_ids: &[i64]) -> Result<(), OpError> {
     diesel::update(schema::events::table.filter(schema::events::id.eq_any(event_ids)))
         .set(schema::events::discord_message_id.eq(None::<String>))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     diesel::update(schema::threads::table.filter(schema::threads::event_id.eq_any(event_ids)))
         .set(schema::threads::discord_id.eq(None::<String>))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -533,28 +542,30 @@ struct NewGuild<'a> {
     discord_id: &'a str,
 }
 
-pub fn ensure_discord_guild(
+pub async fn ensure_discord_guild(
     conn: &mut Connection,
     discord_id: &str,
     name: &str,
 ) -> Result<store::Guild, OpError> {
-    store::with_tx(conn, |tx| {
+    store::with_tx(conn, async |tx| {
         // Two events for a new server can arrive together; they take turns here so
         // the server is stored once.
         diesel::sql_query("SELECT pg_advisory_xact_lock(hashtext('guild:' || $1))")
             .bind::<diesel::sql_types::Text, _>(discord_id)
-            .execute(tx)?;
-        if let Some(guild) = store::guild_by_discord(tx, discord_id)? {
+            .execute(tx)
+            .await?;
+        if let Some(guild) = store::guild_by_discord(tx, discord_id).await? {
             if guild.name != name && !name.is_empty() {
                 diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild.id)))
                     .set(schema::guilds::name.eq(name))
-                    .execute(tx)?;
+                    .execute(tx)
+                    .await?;
             }
             // A server stored before this was one transaction may have lost its settings.
-            if !store::has_settings(tx, guild.id)? {
-                store::insert_default_settings(tx, guild.id)?;
+            if !store::has_settings(tx, guild.id).await? {
+                store::insert_default_settings(tx, guild.id).await?;
             }
-            return store::guild(tx, guild.id)?.ok_or(OpError::NotFound);
+            return store::guild(tx, guild.id).await?.ok_or(OpError::NotFound);
         }
         let name = if name.is_empty() {
             "Discord server"
@@ -568,10 +579,12 @@ pub fn ensure_discord_guild(
                 discord_id,
             })
             .returning(schema::guilds::id)
-            .get_result(tx)?;
-        store::insert_default_settings(tx, id)?;
-        store::guild(tx, id)?.ok_or(OpError::NotFound)
+            .get_result(tx)
+            .await?;
+        store::insert_default_settings(tx, id).await?;
+        store::guild(tx, id).await?.ok_or(OpError::NotFound)
     })
+    .await
 }
 
 #[derive(Insertable)]
@@ -589,16 +602,16 @@ struct NewMembership<'a> {
 /// The member's membership, made if it's new, under `name`: the name they go
 /// by in this server, which replaces the one stored. With it come the events
 /// whose posts still show the old name; see [`follow_discord_name`].
-pub fn ensure_discord_user(
+pub async fn ensure_discord_user(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<(Membership, Vec<i64>), OpError> {
-    match follow_discord_name(conn, guild_id, discord_id, name)? {
+    match follow_discord_name(conn, guild_id, discord_id, name).await? {
         Some(found) => Ok(found),
         None => Ok((
-            new_discord_user(conn, guild_id, discord_id, name)?,
+            new_discord_user(conn, guild_id, discord_id, name).await?,
             Vec::new(),
         )),
     }
@@ -607,15 +620,15 @@ pub fn ensure_discord_user(
 /// The member's membership, made under `name` if it's new. For a name that
 /// may not be the one they go by here, like the global name the web sign-in
 /// gets: a stored name, perhaps a server nickname, is kept.
-pub fn admit_discord_user(
+pub async fn admit_discord_user(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Membership, OpError> {
-    match store::membership_by_discord(conn, guild_id, discord_id)? {
+    match store::membership_by_discord(conn, guild_id, discord_id).await? {
         Some(user) => Ok(user),
-        None => new_discord_user(conn, guild_id, discord_id, name),
+        None => new_discord_user(conn, guild_id, discord_id, name).await,
     }
 }
 
@@ -623,13 +636,13 @@ pub fn admit_discord_user(
 /// server. Nobody new is added. A rename also gives the events whose posts
 /// list the member under the old name and are still to be redrawn: see
 /// [`posts_listing`].
-pub fn follow_discord_name(
+pub async fn follow_discord_name(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Option<(Membership, Vec<i64>)>, OpError> {
-    let Some(user) = store::membership_by_discord(conn, guild_id, discord_id)? else {
+    let Some(user) = store::membership_by_discord(conn, guild_id, discord_id).await? else {
         return Ok(None);
     };
     if user.name == name || name.is_empty() {
@@ -637,15 +650,18 @@ pub fn follow_discord_name(
     }
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(user.id)))
         .set(schema::memberships::name.eq(name))
-        .execute(conn)?;
-    let redraw = posts_listing(conn, user.id, Utc::now())?;
-    let user = store::membership(conn, user.id)?.ok_or(OpError::NotFound)?;
+        .execute(conn)
+        .await?;
+    let redraw = posts_listing(conn, user.id, Utc::now()).await?;
+    let user = store::membership(conn, user.id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     Ok(Some((user, redraw)))
 }
 
 /// Keeps a member's picture as Discord has it; `None` clears one they took
 /// down. Posts don't show pictures, so nothing needs redrawing.
-pub fn follow_discord_avatar(
+pub async fn follow_discord_avatar(
     conn: &mut Connection,
     member: &Membership,
     avatar: Option<&str>,
@@ -655,14 +671,15 @@ pub fn follow_discord_avatar(
     }
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(member.id)))
         .set(schema::memberships::avatar.eq(avatar))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// Events whose Discord post lists the member among the people signed up and
 /// hasn't ended. A post for an event that's over keeps the names it was last
 /// drawn with, even while it still takes signups.
-fn posts_listing(
+async fn posts_listing(
     conn: &mut Connection,
     membership_id: i64,
     now: DateTime<Utc>,
@@ -680,7 +697,8 @@ fn posts_listing(
             schema::events::starts_at,
             schema::events::duration_minutes,
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(events
         .into_iter()
         .filter(|(_, starts_at, minutes)| *starts_at + chrono::Duration::minutes(*minutes) > now)
@@ -688,14 +706,14 @@ fn posts_listing(
         .collect())
 }
 
-fn new_discord_user(
+async fn new_discord_user(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Membership, OpError> {
-    let user_id = store::ensure_user(conn, discord_id)?;
-    let handle = unique_handle(conn, guild_id, name, discord_id)?;
+    let user_id = store::ensure_user(conn, discord_id).await?;
+    let handle = unique_handle(conn, guild_id, name, discord_id).await?;
     let color = [
         "#1e3a6e", "#2f6b4f", "#8a6232", "#6b3a6b", "#8d3a32", "#243038",
     ][discord_id
@@ -718,18 +736,20 @@ fn new_discord_user(
             server_manager: false,
         })
         .returning(schema::memberships::id)
-        .get_result(conn)?;
-    store::membership(conn, id)?.ok_or(OpError::NotFound)
+        .get_result(conn)
+        .await?;
+    store::membership(conn, id).await?.ok_or(OpError::NotFound)
 }
 
-pub fn set_server_manager(
+pub async fn set_server_manager(
     conn: &mut Connection,
     membership_id: i64,
     server_manager: bool,
 ) -> Result<(), OpError> {
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
         .set(schema::memberships::server_manager.eq(server_manager))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -743,20 +763,21 @@ struct NewChannel<'a> {
     discord_id: &'a str,
 }
 
-pub fn ensure_discord_channel(
+pub async fn ensure_discord_channel(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Channel, OpError> {
-    if let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? {
+    if let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id).await? {
         return Ok(channel);
     }
-    let slug = free_channel_slug(conn, guild_id, discord_id, name, None)?;
+    let slug = free_channel_slug(conn, guild_id, discord_id, name, None).await?;
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
         .select(diesel::dsl::max(schema::channels::position))
-        .first::<Option<i64>>(conn)?
+        .first::<Option<i64>>(conn)
+        .await?
         .unwrap_or(0)
         + 1;
     let id = diesel::insert_into(schema::channels::table)
@@ -768,13 +789,14 @@ pub fn ensure_discord_channel(
             discord_id,
         })
         .returning(schema::channels::id)
-        .get_result(conn)?;
-    store::channel(conn, id)?.ok_or(OpError::NotFound)
+        .get_result(conn)
+        .await?;
+    store::channel(conn, id).await?.ok_or(OpError::NotFound)
 }
 
 /// The slug a Discord channel goes by here, with a bit of its id added when
 /// another channel (other than `except`) already has the name.
-fn free_channel_slug(
+async fn free_channel_slug(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
@@ -790,7 +812,8 @@ fn free_channel_slug(
     } else {
         raw
     };
-    let taken = store::channel_by_name(conn, guild_id, &slug)?
+    let taken = store::channel_by_name(conn, guild_id, &slug)
+        .await?
         .is_some_and(|other| Some(other.id) != except);
     Ok(if taken {
         format!(
@@ -805,32 +828,36 @@ fn free_channel_slug(
 /// Brings the stored channel for a Discord text channel up to date: adds it,
 /// follows a rename, or brings it back. An event channel Marian is still
 /// creating under this name is taken over, so it isn't stored twice.
-pub fn sync_discord_channel(
+pub async fn sync_discord_channel(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
     name: &str,
 ) -> Result<Channel, OpError> {
-    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? else {
-        let pending =
-            store::channel_by_name(conn, guild_id, &slug_channel(name))?.filter(|channel| {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id).await? else {
+        let pending = store::channel_by_name(conn, guild_id, &slug_channel(name))
+            .await?
+            .filter(|channel| {
                 channel.kind == ChannelKind::Event
                     && channel.discord_id.as_deref().is_none_or(str::is_empty)
             });
         let Some(pending) = pending else {
-            return ensure_discord_channel(conn, guild_id, discord_id, name);
+            return ensure_discord_channel(conn, guild_id, discord_id, name).await;
         };
         diesel::update(schema::channels::table.filter(schema::channels::id.eq(pending.id)))
             .set(schema::channels::discord_id.eq(discord_id))
-            .execute(conn)?;
-        return store::channel(conn, pending.id)?.ok_or(OpError::NotFound);
+            .execute(conn)
+            .await?;
+        return store::channel(conn, pending.id)
+            .await?
+            .ok_or(OpError::NotFound);
     };
     let renamed = !slug_channel(name).is_empty() && slug_channel(name) != channel.name;
     if !renamed && channel.gone_at.is_none() {
         return Ok(channel);
     }
     let slug = if renamed {
-        free_channel_slug(conn, guild_id, discord_id, name, Some(channel.id))?
+        free_channel_slug(conn, guild_id, discord_id, name, Some(channel.id)).await?
     } else {
         channel.name.clone()
     };
@@ -839,12 +866,15 @@ pub fn sync_discord_channel(
             schema::channels::name.eq(&slug),
             schema::channels::gone_at.eq(None::<DateTime<Utc>>),
         ))
-        .execute(conn)?;
-    store::channel(conn, channel.id)?.ok_or(OpError::NotFound)
+        .execute(conn)
+        .await?;
+    store::channel(conn, channel.id)
+        .await?
+        .ok_or(OpError::NotFound)
 }
 
 /// Marks the channel for a deleted Discord channel as gone.
-pub fn discord_channel_gone(
+pub async fn discord_channel_gone(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
@@ -856,27 +886,28 @@ pub fn discord_channel_gone(
             .filter(schema::channels::gone_at.is_null()),
     )
     .set(schema::channels::gone_at.eq(Utc::now()))
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
 /// Matches the server's channels to the text channels Discord lists, as
 /// (Discord id, name): new ones are added, renames followed, missing ones gone.
-pub fn sync_discord_channels(
+pub async fn sync_discord_channels(
     conn: &mut Connection,
     guild_id: i64,
     present: &[(String, String)],
 ) -> Result<(), OpError> {
     for (discord_id, name) in present {
-        sync_discord_channel(conn, guild_id, discord_id, name)?;
+        sync_discord_channel(conn, guild_id, discord_id, name).await?;
     }
     let listed: HashSet<&str> = present.iter().map(|(id, _)| id.as_str()).collect();
-    for channel in store::list_channels(conn, guild_id)? {
+    for channel in store::list_channels(conn, guild_id).await? {
         let Some(discord_id) = channel.discord_id.as_deref().filter(|id| !id.is_empty()) else {
             continue;
         };
         if !listed.contains(discord_id) {
-            discord_channel_gone(conn, guild_id, discord_id)?;
+            discord_channel_gone(conn, guild_id, discord_id).await?;
         }
     }
     Ok(())
@@ -905,7 +936,7 @@ fn stored_role_color(colour: &str) -> String {
 /// Discord id: adds it, follows a rename or colour change, or brings it back.
 /// A role Marian is still creating under this name is taken over, so it isn't
 /// stored twice.
-pub fn sync_discord_role(
+pub async fn sync_discord_role(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
@@ -913,9 +944,10 @@ pub fn sync_discord_role(
     colour: &str,
 ) -> Result<Role, OpError> {
     let color = stored_role_color(colour);
-    let stored = match store::role_by_discord(conn, guild_id, discord_id)? {
+    let stored = match store::role_by_discord(conn, guild_id, discord_id).await? {
         Some(role) => Some(role),
-        None => store::role_by_name(conn, guild_id, name)?
+        None => store::role_by_name(conn, guild_id, name)
+            .await?
             .filter(|role| role.discord_id.as_deref().is_none_or(str::is_empty)),
     };
     let Some(role) = stored else {
@@ -927,8 +959,9 @@ pub fn sync_discord_role(
                 discord_id,
             })
             .returning(schema::roles::id)
-            .get_result(conn)?;
-        return store::role(conn, id)?.ok_or(OpError::NotFound);
+            .get_result(conn)
+            .await?;
+        return store::role(conn, id).await?.ok_or(OpError::NotFound);
     };
     let current = role.name == name
         && role.color == color
@@ -944,57 +977,61 @@ pub fn sync_discord_role(
             schema::roles::discord_id.eq(discord_id),
             schema::roles::gone_at.eq(None::<DateTime<Utc>>),
         ))
-        .execute(conn)?;
-    store::role(conn, role.id)?.ok_or(OpError::NotFound)
+        .execute(conn)
+        .await?;
+    store::role(conn, role.id).await?.ok_or(OpError::NotFound)
 }
 
 /// Marks the role for a deleted Discord role as gone; nobody holds it any more.
-pub fn discord_role_gone(
+pub async fn discord_role_gone(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
 ) -> Result<(), OpError> {
-    store::with_tx(conn, |tx| {
-        let Some(role) = store::role_by_discord(tx, guild_id, discord_id)? else {
+    store::with_tx(conn, async |tx| {
+        let Some(role) = store::role_by_discord(tx, guild_id, discord_id).await? else {
             return Ok(());
         };
         diesel::delete(
             schema::membership_roles::table.filter(schema::membership_roles::role_id.eq(role.id)),
         )
-        .execute(tx)?;
+        .execute(tx)
+        .await?;
         if role.gone_at.is_none() {
             diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
                 .set(schema::roles::gone_at.eq(Utc::now()))
-                .execute(tx)?;
+                .execute(tx)
+                .await?;
         }
         Ok(())
     })
+    .await
 }
 
 /// Matches the server's roles to the roles Discord lists, as (Discord id,
 /// name, colour): new ones are added, changes followed, missing ones gone.
-pub fn sync_discord_roles(
+pub async fn sync_discord_roles(
     conn: &mut Connection,
     guild_id: i64,
     present: &[(String, String, String)],
 ) -> Result<(), OpError> {
     for (discord_id, name, colour) in present {
-        sync_discord_role(conn, guild_id, discord_id, name, colour)?;
+        sync_discord_role(conn, guild_id, discord_id, name, colour).await?;
     }
     let listed: HashSet<&str> = present.iter().map(|(id, _, _)| id.as_str()).collect();
-    for role in store::list_roles(conn, guild_id)? {
+    for role in store::list_roles(conn, guild_id).await? {
         let Some(discord_id) = role.discord_id.as_deref().filter(|id| !id.is_empty()) else {
             continue;
         };
         if !listed.contains(discord_id) {
-            discord_role_gone(conn, guild_id, discord_id)?;
+            discord_role_gone(conn, guild_id, discord_id).await?;
         }
     }
     Ok(())
 }
 
 /// Stores a role's server-wide permissions; @everyone's id is the server's.
-pub fn sync_discord_permissions(
+pub async fn sync_discord_permissions(
     conn: &mut Connection,
     guild_id: i64,
     guild_discord_id: &str,
@@ -1004,7 +1041,8 @@ pub fn sync_discord_permissions(
     if role_discord_id == guild_discord_id {
         diesel::update(schema::guilds::table.find(guild_id))
             .set(schema::guilds::everyone_permissions.eq(permissions as i64))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     } else {
         diesel::update(
             schema::roles::table
@@ -1012,26 +1050,28 @@ pub fn sync_discord_permissions(
                 .filter(schema::roles::discord_id.eq(role_discord_id)),
         )
         .set(schema::roles::permissions.eq(permissions as i64))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     }
     Ok(())
 }
 
 /// Replaces a Discord channel's stored permission overwrites with `overwrites`.
-pub fn sync_channel_overwrites(
+pub async fn sync_channel_overwrites(
     conn: &mut Connection,
     guild_id: i64,
     channel_discord_id: &str,
     overwrites: &[super::access::Overwrite],
 ) -> Result<(), OpError> {
-    let Some(channel) = store::channel_by_discord(conn, guild_id, channel_discord_id)? else {
+    let Some(channel) = store::channel_by_discord(conn, guild_id, channel_discord_id).await? else {
         return Ok(());
     };
     diesel::delete(
         schema::channel_overwrites::table
             .filter(schema::channel_overwrites::channel_id.eq(channel.id)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     let rows: Vec<_> = overwrites
         .iter()
         .map(|o| {
@@ -1051,11 +1091,12 @@ pub fn sync_channel_overwrites(
     diesel::insert_into(schema::channel_overwrites::table)
         .values(&rows)
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-fn unique_handle(
+async fn unique_handle(
     conn: &mut Connection,
     guild_id: i64,
     name: &str,
@@ -1070,7 +1111,10 @@ fn unique_handle(
         base = format!("user{}", &discord_id[discord_id.len().saturating_sub(6)..]);
     }
     base = base.chars().take(24).collect();
-    if store::membership_by_handle(conn, guild_id, &base)?.is_none() {
+    if store::membership_by_handle(conn, guild_id, &base)
+        .await?
+        .is_none()
+    {
         return Ok(base);
     }
     let suffix = &discord_id[discord_id.len().saturating_sub(4)..];
@@ -1086,16 +1130,16 @@ pub struct EventChannelPurge {
     pub keep: HashSet<String>,
 }
 
-pub fn event_channel_purge(
+pub async fn event_channel_purge(
     conn: &mut Connection,
     event_id: i64,
 ) -> Result<Option<EventChannelPurge>, OpError> {
-    let event = must_event(conn, event_id)?;
-    let settings = store::settings(conn, event.guild_id)?;
+    let event = must_event(conn, event_id).await?;
+    let settings = store::settings(conn, event.guild_id).await?;
     if !settings.purge_channels {
         return Ok(None);
     }
-    let channel = must_channel(conn, event.channel_id)?;
+    let channel = must_channel(conn, event.channel_id).await?;
     if channel.kind != ChannelKind::Event {
         return Ok(None);
     }
@@ -1105,7 +1149,8 @@ pub fn event_channel_purge(
     let ids: Vec<Option<String>> = schema::events::table
         .filter(schema::events::channel_id.eq(channel.id))
         .select(schema::events::discord_message_id)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     // A routine's results reply sits under its event's post and stays with it.
     let results: Vec<Option<String>> = schema::routine_runs::table
         .inner_join(
@@ -1114,7 +1159,8 @@ pub fn event_channel_purge(
         )
         .filter(schema::events::channel_id.eq(channel.id))
         .select(schema::routine_runs::results_message_id)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let keep = ids
         .into_iter()
         .chain(results)
@@ -1128,10 +1174,11 @@ pub fn event_channel_purge(
     }))
 }
 
-pub fn mark_channel_purged(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
+pub async fn mark_channel_purged(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
     diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
         .set(schema::channels::purged_at.eq(Utc::now()))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -1150,42 +1197,44 @@ pub fn status_text(lang: Lang, status: EventStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use diesel::connection::SimpleConnection;
+    use diesel_async::SimpleAsyncConnection;
 
     use super::*;
 
-    fn one_channel() -> Connection {
-        let mut conn = store::open_memory().unwrap();
+    async fn one_channel() -> Connection {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
             INSERT INTO channels (id, guild_id, name, kind, position, discord_id) VALUES (41, 1, 'raids', 'text', 1, '100');
             ",
         )
-        .unwrap();
+        .await.unwrap();
         conn
     }
 
     /// Makes every `op` on `table` fail, as a lost connection or a full disk would.
-    fn refuse(conn: &mut Connection, op: &str, table: &str) {
+    async fn refuse(conn: &mut Connection, op: &str, table: &str) {
         conn.batch_execute(&format!(
             "CREATE OR REPLACE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS
                $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
              CREATE TRIGGER refuse BEFORE {op} ON {table} FOR EACH ROW EXECUTE FUNCTION refuse();"
         ))
+        .await
         .unwrap();
     }
 
-    fn names(conn: &mut Connection) -> Vec<String> {
+    async fn names(conn: &mut Connection) -> Vec<String> {
         store::list_channels(conn, 1)
+            .await
             .unwrap()
             .into_iter()
             .map(|channel| channel.name)
             .collect()
     }
 
-    fn one_role() -> Connection {
-        let mut conn = store::open_memory().unwrap();
+    async fn one_role() -> Connection {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1196,68 +1245,77 @@ mod tests {
             INSERT INTO membership_roles (membership_id, role_id) VALUES (71, 51);
             ",
         )
-        .unwrap();
+        .await.unwrap();
         conn
     }
 
-    fn role_names(conn: &mut Connection) -> Vec<String> {
+    async fn role_names(conn: &mut Connection) -> Vec<String> {
         store::list_roles(conn, 1)
+            .await
             .unwrap()
             .into_iter()
             .map(|role| role.name)
             .collect()
     }
 
-    #[test]
-    fn a_renamed_role_keeps_its_row() {
-        let mut conn = one_role();
-        let role = sync_discord_role(&mut conn, 1, "700", "Veteran", "aa0000").unwrap();
+    #[tokio::test]
+    async fn a_renamed_role_keeps_its_row() {
+        let mut conn = one_role().await;
+        let role = sync_discord_role(&mut conn, 1, "700", "Veteran", "aa0000")
+            .await
+            .unwrap();
         assert_eq!(
             (role.id, role.name.as_str(), role.color.as_str()),
             (51, "Veteran", "#aa0000")
         );
-        assert_eq!(role_names(&mut conn), vec!["Veteran"]);
-        assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
+        assert_eq!(role_names(&mut conn).await, vec!["Veteran"]);
+        assert!(store::membership_has_role(&mut conn, 71, 51).await.unwrap());
     }
 
-    #[test]
-    fn a_role_without_colour_reads_as_grey() {
-        let mut conn = one_role();
-        let role = sync_discord_role(&mut conn, 1, "701", "Plain", "000000").unwrap();
+    #[tokio::test]
+    async fn a_role_without_colour_reads_as_grey() {
+        let mut conn = one_role().await;
+        let role = sync_discord_role(&mut conn, 1, "701", "Plain", "000000")
+            .await
+            .unwrap();
         assert_eq!(role.color, "#99aab5");
     }
 
-    #[test]
-    fn a_deleted_role_leaves_the_list_and_its_holders() {
-        let mut conn = one_role();
-        discord_role_gone(&mut conn, 1, "700").unwrap();
-        assert!(role_names(&mut conn).is_empty());
-        assert!(!store::membership_has_role(&mut conn, 71, 51).unwrap());
+    #[tokio::test]
+    async fn a_deleted_role_leaves_the_list_and_its_holders() {
+        let mut conn = one_role().await;
+        discord_role_gone(&mut conn, 1, "700").await.unwrap();
+        assert!(role_names(&mut conn).await.is_empty());
+        assert!(!store::membership_has_role(&mut conn, 71, 51).await.unwrap());
         assert!(store::role(&mut conn, 51)
+            .await
             .unwrap()
             .unwrap()
             .gone_at
             .is_some());
 
-        let back = sync_discord_role(&mut conn, 1, "700", "Raider", "112233").unwrap();
+        let back = sync_discord_role(&mut conn, 1, "700", "Raider", "112233")
+            .await
+            .unwrap();
         assert_eq!(back.id, 51);
         assert!(back.gone_at.is_none());
     }
 
-    #[test]
-    fn syncing_roles_drops_missing_ones_and_takes_over_unlinked_ones() {
-        let mut conn = one_role();
+    #[tokio::test]
+    async fn syncing_roles_drops_missing_ones_and_takes_over_unlinked_ones() {
+        let mut conn = one_role().await;
         conn.batch_execute(
             "INSERT INTO roles (id, guild_id, name, color) VALUES (52, 1, 'Race attendee', '#1e3a6e');",
         )
-        .unwrap();
+        .await.unwrap();
         sync_discord_roles(
             &mut conn,
             1,
             &[("800".into(), "Race attendee".into(), "1e3a6e".into())],
         )
+        .await
         .unwrap();
-        let roles = store::list_roles(&mut conn, 1).unwrap();
+        let roles = store::list_roles(&mut conn, 1).await.unwrap();
         assert_eq!(roles.len(), 1);
         assert_eq!(
             (roles[0].id, roles[0].discord_id.as_deref()),
@@ -1265,74 +1323,93 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_renamed_discord_channel_is_renamed_here() {
-        let mut conn = one_channel();
-        let channel = sync_discord_channel(&mut conn, 1, "100", "Raid Night").unwrap();
+    #[tokio::test]
+    async fn a_renamed_discord_channel_is_renamed_here() {
+        let mut conn = one_channel().await;
+        let channel = sync_discord_channel(&mut conn, 1, "100", "Raid Night")
+            .await
+            .unwrap();
         assert_eq!((channel.id, channel.name.as_str()), (41, "raid-night"));
 
-        sync_discord_channel(&mut conn, 1, "200", "general").unwrap();
-        let clash = sync_discord_channel(&mut conn, 1, "200", "raid night").unwrap();
+        sync_discord_channel(&mut conn, 1, "200", "general")
+            .await
+            .unwrap();
+        let clash = sync_discord_channel(&mut conn, 1, "200", "raid night")
+            .await
+            .unwrap();
         assert_eq!(clash.name, "raid-night-200");
     }
 
-    #[test]
-    fn a_channel_keeps_letters_and_emoji_outside_ascii() {
-        let mut conn = one_channel();
-        let channel = sync_discord_channel(&mut conn, 1, "100", "wybierz-rolę").unwrap();
+    #[tokio::test]
+    async fn a_channel_keeps_letters_and_emoji_outside_ascii() {
+        let mut conn = one_channel().await;
+        let channel = sync_discord_channel(&mut conn, 1, "100", "wybierz-rolę")
+            .await
+            .unwrap();
         assert_eq!((channel.id, channel.name.as_str()), (41, "wybierz-rolę"));
 
-        let emoji = sync_discord_channel(&mut conn, 1, "200", "📢┃Ogłoszenia").unwrap();
+        let emoji = sync_discord_channel(&mut conn, 1, "200", "📢┃Ogłoszenia")
+            .await
+            .unwrap();
         assert_eq!(emoji.name, "📢┃ogłoszenia");
         assert_eq!(slug_channel("#Gry i zabawy!"), "gry-i-zabawy");
     }
 
-    #[test]
-    fn a_deleted_channel_leaves_the_list_and_frees_its_name() {
-        let mut conn = one_channel();
-        discord_channel_gone(&mut conn, 1, "100").unwrap();
-        assert!(names(&mut conn).is_empty());
+    #[tokio::test]
+    async fn a_deleted_channel_leaves_the_list_and_frees_its_name() {
+        let mut conn = one_channel().await;
+        discord_channel_gone(&mut conn, 1, "100").await.unwrap();
+        assert!(names(&mut conn).await.is_empty());
         assert!(store::channel(&mut conn, 41)
+            .await
             .unwrap()
             .unwrap()
             .gone_at
             .is_some());
 
-        let fresh = sync_discord_channel(&mut conn, 1, "300", "raids").unwrap();
+        let fresh = sync_discord_channel(&mut conn, 1, "300", "raids")
+            .await
+            .unwrap();
         assert_ne!(fresh.id, 41);
         assert_eq!(fresh.name, "raids");
     }
 
-    #[test]
-    fn syncing_adds_new_channels_and_drops_missing_ones() {
-        let mut conn = one_channel();
+    #[tokio::test]
+    async fn syncing_adds_new_channels_and_drops_missing_ones() {
+        let mut conn = one_channel().await;
         conn.batch_execute(
             "INSERT INTO channels (id, guild_id, name, kind, position) VALUES (42, 1, 'pending', 'event', 2);",
         )
-        .unwrap();
-        sync_discord_channels(&mut conn, 1, &[("200".into(), "general".into())]).unwrap();
-        assert_eq!(names(&mut conn), vec!["pending", "general"]);
+        .await.unwrap();
+        sync_discord_channels(&mut conn, 1, &[("200".into(), "general".into())])
+            .await
+            .unwrap();
+        assert_eq!(names(&mut conn).await, vec!["pending", "general"]);
 
-        sync_discord_channels(&mut conn, 1, &[("100".into(), "raids".into())]).unwrap();
-        assert_eq!(names(&mut conn), vec!["raids", "pending"]);
+        sync_discord_channels(&mut conn, 1, &[("100".into(), "raids".into())])
+            .await
+            .unwrap();
+        assert_eq!(names(&mut conn).await, vec!["raids", "pending"]);
     }
 
-    #[test]
-    fn a_channel_marian_is_creating_is_taken_over_not_doubled() {
-        let mut conn = one_channel();
+    #[tokio::test]
+    async fn a_channel_marian_is_creating_is_taken_over_not_doubled() {
+        let mut conn = one_channel().await;
         conn.batch_execute(
             "INSERT INTO channels (id, guild_id, name, kind, position) VALUES (42, 1, 'race-night', 'event', 2);",
         )
-        .unwrap();
-        let channel = sync_discord_channel(&mut conn, 1, "500", "race-night").unwrap();
+        .await.unwrap();
+        let channel = sync_discord_channel(&mut conn, 1, "500", "race-night")
+            .await
+            .unwrap();
         assert_eq!((channel.id, channel.kind), (42, ChannelKind::Event));
         assert_eq!(channel.discord_id.as_deref(), Some("500"));
-        assert_eq!(names(&mut conn), vec!["raids", "race-night"]);
+        assert_eq!(names(&mut conn).await, vec!["raids", "race-night"]);
     }
 
-    #[test]
-    fn only_a_posted_event_waits_for_its_post() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn only_a_posted_event_waits_for_its_post() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1347,29 +1424,29 @@ mod tests {
               (4, '01900000-0000-7000-8000-000000000044', 1, 1, 'Out', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '55');
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         assert!(
-            matches!(attendance(&mut conn, 1).unwrap(), Attendance::Idle),
+            matches!(attendance(&mut conn, 1).await.unwrap(), Attendance::Idle),
             "a draft has nothing to give"
         );
         assert!(
-            matches!(attendance(&mut conn, 2).unwrap(), Attendance::Idle),
+            matches!(attendance(&mut conn, 2).await.unwrap(), Attendance::Idle),
             "nor does a scheduled post"
         );
         assert!(
-            matches!(attendance(&mut conn, 3).unwrap(), Attendance::Waiting),
+            matches!(attendance(&mut conn, 3).await.unwrap(), Attendance::Waiting),
             "a posted event waits for its message"
         );
         assert!(matches!(
-            attendance(&mut conn, 4).unwrap(),
+            attendance(&mut conn, 4).await.unwrap(),
             Attendance::Ready(_)
         ));
     }
 
-    #[test]
-    fn a_rename_redraws_only_posts_of_events_not_over() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_rename_redraws_only_posts_of_events_not_over() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1401,9 +1478,9 @@ mod tests {
               (6, 6, 1, 'confirmed', '2026-10-13T00:00:00Z');
             ",
         )
-        .unwrap();
+        .await.unwrap();
         let now = clock::parse_stamp("2026-10-14T18:30:00Z").unwrap();
-        let mut redraw = posts_listing(&mut conn, 1, now).unwrap();
+        let mut redraw = posts_listing(&mut conn, 1, now).await.unwrap();
         redraw.sort();
         assert_eq!(
             redraw,
@@ -1412,9 +1489,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_channel_card_lists_names_in_columns() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn the_channel_card_lists_names_in_columns() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1442,9 +1519,10 @@ mod tests {
               (1, 2, 2, 'waitlisted', '2026-10-13T00:00:00Z');
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         let view = discord_view(&mut conn, 1, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert!(
@@ -1466,8 +1544,10 @@ mod tests {
         assert!(view.body.contains("🕐 <t:"), "{}", view.body);
         assert!(!view.body.contains("**Location**"), "{}", view.body);
         conn.batch_execute("UPDATE events SET location = 'The dock' WHERE id = 1")
+            .await
             .unwrap();
         let placed = discord_view(&mut conn, 1, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         let location_at = placed.body.find("**Location**").unwrap();
@@ -1489,8 +1569,10 @@ mod tests {
         conn.batch_execute(
             "UPDATE events SET status = 'archived', discord_message_id = '55' WHERE id = 1",
         )
+        .await
         .unwrap();
         let finished = discord_view(&mut conn, 1, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert!(
@@ -1508,9 +1590,9 @@ mod tests {
         assert!(view.mention_roles.is_empty());
     }
 
-    #[test]
-    fn the_post_mentions_everyone_and_the_checked_roles() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn the_post_mentions_everyone_and_the_checked_roles() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1538,9 +1620,10 @@ mod tests {
               (1, 3, 'restrict');
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         let view = discord_view(&mut conn, 1, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert!(view.mention_everyone);
@@ -1554,9 +1637,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_post_counts_guests_and_offers_a_guests_button() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn the_post_counts_guests_and_offers_a_guests_button() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1584,9 +1667,10 @@ mod tests {
               (1, 1, 2, 'confirmed', '2026-10-13T00:00:00Z', 0);
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         let view = discord_view(&mut conn, 1, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(view.fields[0].name, "✅ **Yes** (4/10)");
@@ -1627,88 +1711,119 @@ mod tests {
         assert!(draft.contains("This deletes the event."));
     }
 
-    #[test]
-    fn signing_in_does_not_make_the_first_member_a_server_manager() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn signing_in_does_not_make_the_first_member_a_server_manager() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .await
             .unwrap();
-        let (first, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        let (first, _) = ensure_discord_user(&mut conn, 1, "100", "Nell")
+            .await
+            .unwrap();
         assert!(!first.server_manager);
-        let (second, _) = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
+        let (second, _) = ensure_discord_user(&mut conn, 1, "200", "June")
+            .await
+            .unwrap();
         assert!(!second.server_manager);
-        set_server_manager(&mut conn, first.id, true).unwrap();
+        set_server_manager(&mut conn, first.id, true).await.unwrap();
         assert!(
             store::membership(&mut conn, first.id)
+                .await
                 .unwrap()
                 .unwrap()
                 .server_manager
         );
-        set_server_manager(&mut conn, first.id, false).unwrap();
+        set_server_manager(&mut conn, first.id, false)
+            .await
+            .unwrap();
         assert!(
             !store::membership(&mut conn, first.id)
+                .await
                 .unwrap()
                 .unwrap()
                 .server_manager
         );
     }
 
-    #[test]
-    fn a_server_nickname_stays_through_a_web_sign_in() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_server_nickname_stays_through_a_web_sign_in() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .await
             .unwrap();
         assert!(
             follow_discord_name(&mut conn, 1, "100", "Nellie")
+                .await
                 .unwrap()
                 .is_none(),
             "nobody new is added"
         );
-        let signed_in = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        let signed_in = admit_discord_user(&mut conn, 1, "100", "Nell")
+            .await
+            .unwrap();
         assert_eq!(
             signed_in.name, "Nell",
             "a new member starts with the name they signed in with"
         );
 
-        let (clicked, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
+        let (clicked, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie")
+            .await
+            .unwrap();
         assert_eq!(
             (clicked.id, clicked.name.as_str()),
             (signed_in.id, "Nellie")
         );
-        let again = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        let again = admit_discord_user(&mut conn, 1, "100", "Nell")
+            .await
+            .unwrap();
         assert_eq!(
             again.name, "Nellie",
             "the global name doesn't replace the nickname"
         );
 
         let (renamed, _) = follow_discord_name(&mut conn, 1, "100", "Nells")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(renamed.name, "Nells");
     }
 
-    #[test]
-    fn a_member_picture_follows_discord_and_can_be_taken_down() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_member_picture_follows_discord_and_can_be_taken_down() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .await
             .unwrap();
-        let (member, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
+        let (member, _) = ensure_discord_user(&mut conn, 1, "100", "Nell")
+            .await
+            .unwrap();
         assert_eq!(member.avatar, None, "a new member shows their initial");
 
         let url = "https://cdn.discordapp.com/avatars/100/abc.webp?size=64";
-        follow_discord_avatar(&mut conn, &member, Some(url)).unwrap();
-        let member = store::membership(&mut conn, member.id).unwrap().unwrap();
+        follow_discord_avatar(&mut conn, &member, Some(url))
+            .await
+            .unwrap();
+        let member = store::membership(&mut conn, member.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(member.avatar.as_deref(), Some(url));
 
-        let (renamed, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
+        let (renamed, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie")
+            .await
+            .unwrap();
         assert_eq!(
             renamed.avatar.as_deref(),
             Some(url),
             "a rename keeps the picture"
         );
 
-        follow_discord_avatar(&mut conn, &renamed, None).unwrap();
+        follow_discord_avatar(&mut conn, &renamed, None)
+            .await
+            .unwrap();
         assert_eq!(
             store::membership(&mut conn, member.id)
+                .await
                 .unwrap()
                 .unwrap()
                 .avatar,
@@ -1723,9 +1838,9 @@ mod tests {
         assert_eq!(mention_line(false, &["42".into()]), "<@&42>");
     }
 
-    #[test]
-    fn sort_reverses_posts_in_an_event_channel() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn sort_reverses_posts_in_an_event_channel() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1743,27 +1858,30 @@ mod tests {
             INSERT INTO threads (event_id, name, discord_id) VALUES (1, 'First', '900');
             ",
         )
-        .unwrap();
-        let refused = channel_reverse_plan(&mut conn, 1, "200").unwrap_err();
+        .await.unwrap();
+        let refused = channel_reverse_plan(&mut conn, 1, "200").await.unwrap_err();
         assert_eq!(
             refused.to_string(),
             "Sort reverses the posts in an event channel."
         );
-        let plan = channel_reverse_plan(&mut conn, 1, "100").unwrap();
+        let plan = channel_reverse_plan(&mut conn, 1, "100").await.unwrap();
         assert_eq!(plan.name, "events");
         assert_eq!(plan.messages, vec!["10", "20", "30"]);
         assert_eq!(plan.repost, vec![3, 2, 1]);
-        detach_discord_posts(&mut conn, &plan.repost).unwrap();
-        let first = store::event(&mut conn, 1).unwrap().unwrap();
+        detach_discord_posts(&mut conn, &plan.repost).await.unwrap();
+        let first = store::event(&mut conn, 1).await.unwrap().unwrap();
         assert!(first.discord_message_id.is_none());
-        assert!(store::thread_discord_id(&mut conn, 1).unwrap().is_none());
-        let elsewhere = store::event(&mut conn, 4).unwrap().unwrap();
+        assert!(store::thread_discord_id(&mut conn, 1)
+            .await
+            .unwrap()
+            .is_none());
+        let elsewhere = store::event(&mut conn, 4).await.unwrap().unwrap();
         assert_eq!(elsewhere.discord_message_id.as_deref(), Some("40"));
     }
 
-    #[test]
-    fn purge_keeps_event_posts_in_an_event_channel() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn purge_keeps_event_posts_in_an_event_channel() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -1781,8 +1899,8 @@ mod tests {
               (4, '01900000-0000-7000-8000-000000000024', 1, 3, 'Local', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', NULL);
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         // The second event came from a routine poll; its results reply stays too.
         conn.batch_execute(
             "
@@ -1796,8 +1914,8 @@ mod tests {
               VALUES (1, '2026-10-11T10:00:00Z', '2026-10-13T18:00:00Z', 'locked', '{3}', 2, '20', '21', '2026-10-11T10:00:00Z');
             ",
         )
-        .unwrap();
-        let plan = event_channel_purge(&mut conn, 1).unwrap().unwrap();
+        .await.unwrap();
+        let plan = event_channel_purge(&mut conn, 1).await.unwrap().unwrap();
         assert_eq!(plan.discord_channel_id, "100");
         let mut keep: Vec<_> = plan.keep.into_iter().collect();
         keep.sort();
@@ -1805,74 +1923,80 @@ mod tests {
             keep,
             vec!["10".to_string(), "20".to_string(), "21".to_string()]
         );
-        assert!(event_channel_purge(&mut conn, 3).unwrap().is_none());
-        assert!(event_channel_purge(&mut conn, 4).unwrap().is_none());
+        assert!(event_channel_purge(&mut conn, 3).await.unwrap().is_none());
+        assert!(event_channel_purge(&mut conn, 4).await.unwrap().is_none());
         diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))
             .set(schema::settings::purge_channels.eq(false))
             .execute(&mut conn)
+            .await
             .unwrap();
-        assert!(event_channel_purge(&mut conn, 1).unwrap().is_none());
+        assert!(event_channel_purge(&mut conn, 1).await.unwrap().is_none());
     }
-    #[test]
-    fn a_server_that_cannot_get_its_settings_is_not_half_stored() {
-        let mut conn = store::open_memory().unwrap();
-        refuse(&mut conn, "INSERT", "settings");
-        assert!(ensure_discord_guild(&mut conn, "777", "Keep").is_err());
-        assert!(store::guild_by_discord(&mut conn, "777").unwrap().is_none());
+    #[tokio::test]
+    async fn a_server_that_cannot_get_its_settings_is_not_half_stored() {
+        let mut conn = store::open_memory().await.unwrap();
+        refuse(&mut conn, "INSERT", "settings").await;
+        assert!(ensure_discord_guild(&mut conn, "777", "Keep")
+            .await
+            .is_err());
+        assert!(store::guild_by_discord(&mut conn, "777")
+            .await
+            .unwrap()
+            .is_none());
     }
 
-    #[test]
-    fn a_server_missing_its_settings_gets_them_back() {
-        let mut conn = one_channel();
-        assert!(store::settings(&mut conn, 1).is_err());
-        let guild = ensure_discord_guild(&mut conn, "4242", "Guild").unwrap();
+    #[tokio::test]
+    async fn a_server_missing_its_settings_gets_them_back() {
+        let mut conn = one_channel().await;
+        assert!(store::settings(&mut conn, 1).await.is_err());
+        let guild = ensure_discord_guild(&mut conn, "4242", "Guild")
+            .await
+            .unwrap();
         assert_eq!(guild.id, 1);
-        assert!(store::settings(&mut conn, 1).is_ok());
+        assert!(store::settings(&mut conn, 1).await.is_ok());
     }
 
-    #[test]
-    fn a_server_seen_twice_at_once_is_stored_once() {
-        use diesel::Connection as _;
+    #[tokio::test]
+    async fn a_server_seen_twice_at_once_is_stored_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::{Duration, Instant};
-        let mut conn = store::open_memory().unwrap();
-        let db = store::pool_for(&mut conn).unwrap();
-        let start = std::sync::Barrier::new(2);
+        let mut conn = store::open_memory().await.unwrap();
+        let db = store::pool_for(&mut conn).await.unwrap();
+        let start = tokio::sync::Barrier::new(2);
         let done = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                let (db, start, done) = (&db, &start, &done);
-                scope.spawn(move || {
-                    let mut conn = db.get().unwrap();
-                    // Each commit waits until both are done, or for half a second
-                    // when the other is waiting on it.
-                    conn.transaction::<_, diesel::result::Error, _>(|tx| {
-                        start.wait();
-                        let _ = ensure_discord_guild(tx, "888", "Twice");
-                        done.fetch_add(1, Ordering::SeqCst);
-                        let deadline = Instant::now() + Duration::from_millis(500);
-                        while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
-                });
+        let turn = async || {
+            use diesel_async::{AnsiTransactionManager, TransactionManager};
+            let mut conn = db.get().await.unwrap();
+            let tx: &mut Connection = &mut conn;
+            // Each commit waits until both are done, or for half a second
+            // when the other is waiting on it.
+            AnsiTransactionManager::begin_transaction(tx).await.unwrap();
+            start.wait().await;
+            let _ = ensure_discord_guild(tx, "888", "Twice").await;
+            done.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-        });
+            AnsiTransactionManager::commit_transaction(tx)
+                .await
+                .unwrap();
+        };
+        tokio::join!(turn(), turn());
         let stored: i64 = schema::guilds::table
             .filter(schema::guilds::discord_id.eq("888"))
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap();
         assert_eq!(stored, 1);
     }
 
-    #[test]
-    fn a_role_that_cannot_be_marked_gone_keeps_its_holders() {
-        let mut conn = one_role();
-        refuse(&mut conn, "UPDATE", "roles");
-        assert!(discord_role_gone(&mut conn, 1, "700").is_err());
-        assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
+    #[tokio::test]
+    async fn a_role_that_cannot_be_marked_gone_keeps_its_holders() {
+        let mut conn = one_role().await;
+        refuse(&mut conn, "UPDATE", "roles").await;
+        assert!(discord_role_gone(&mut conn, 1, "700").await.is_err());
+        assert!(store::membership_has_role(&mut conn, 71, 51).await.unwrap());
     }
 }

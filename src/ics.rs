@@ -1,23 +1,24 @@
 use chrono::{DateTime, Duration, Utc};
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use crate::error::OpError;
 use crate::schema::{events, memberships, signup_options, signups};
 use crate::store::{self, Connection, Event};
 use crate::values::{EventStatus, SignupState};
 
-pub fn user_feed(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+pub async fn user_feed(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
     let mut body = String::from(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Marian//Discord Scheduler//EN\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:Marian\r\n",
     );
-    for event in events_for_person(conn, user_id)? {
-        body.push_str(&event_body(conn, &event)?);
+    for event in events_for_person(conn, user_id).await? {
+        body.push_str(&event_body(conn, &event).await?);
     }
     body.push_str("END:VCALENDAR\r\n");
     Ok(body)
 }
 
-pub(crate) fn events_for_person(
+pub(crate) async fn events_for_person(
     conn: &mut Connection,
     user_id: i64,
 ) -> Result<Vec<Event>, OpError> {
@@ -53,15 +54,17 @@ pub(crate) fn events_for_person(
         .select(Event::as_select())
         .distinct()
         .order((events::starts_at.asc(), events::id.asc()))
-        .load::<Event>(conn)?;
+        .load::<Event>(conn)
+        .await?;
     // Only events in channels they can still see in Discord.
     let mut sights = std::collections::HashMap::new();
     for member in memberships::table
         .filter(memberships::user_id.eq(user_id))
         .select(crate::store::Membership::as_select())
-        .load(conn)?
+        .load(conn)
+        .await?
     {
-        sights.insert(member.guild_id, crate::logic::sight(conn, &member)?);
+        sights.insert(member.guild_id, crate::logic::sight(conn, &member).await?);
     }
     Ok(events
         .into_iter()
@@ -73,10 +76,11 @@ pub(crate) fn events_for_person(
         .collect())
 }
 
-fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
+async fn event_body(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
     let start = event.starts_at;
     let end = start + Duration::minutes(event.duration_minutes);
-    let channel = store::channel(conn, event.channel_id)?
+    let channel = store::channel(conn, event.channel_id)
+        .await?
         .map(|ch| format!("#{}", ch.name))
         .unwrap_or_default();
     Ok(format!(
@@ -180,7 +184,7 @@ pub fn pct(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::schema;
-    use diesel::connection::SimpleConnection;
+    use diesel_async::SimpleAsyncConnection;
 
     #[test]
     fn no_text_value_can_start_a_line_of_its_own() {
@@ -196,9 +200,9 @@ mod tests {
             .any(char::is_control));
     }
 
-    #[test]
-    fn a_personal_feed_lists_accepted_and_created_events() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_personal_feed_lists_accepted_and_created_events() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
@@ -222,31 +226,36 @@ mod tests {
               (3, 2, 1, 'confirmed', '2026-10-13T00:00:00Z');
             ",
         )
-        .unwrap();
+        .await.unwrap();
         let person: i64 = schema::users::table
             .filter(schema::users::discord_id.eq("u1"))
             .select(schema::users::id)
             .first(&mut conn)
+            .await
             .unwrap();
-        let feed = user_feed(&mut conn, person).unwrap();
+        let feed = user_feed(&mut conn, person).await.unwrap();
         assert!(feed.contains("Nell hosts"), "{feed}");
         assert!(feed.contains("June hosts accepted"), "{feed}");
         assert!(!feed.contains("June hosts declined"), "{feed}");
-        let token = store::ensure_calendar_token(&mut conn, person).unwrap();
+        let token = store::ensure_calendar_token(&mut conn, person)
+            .await
+            .unwrap();
         assert_eq!(token.len(), 64);
         assert_eq!(
-            store::ensure_calendar_token(&mut conn, person).unwrap(),
+            store::ensure_calendar_token(&mut conn, person)
+                .await
+                .unwrap(),
             token
         );
         assert_eq!(
-            store::calendar_user_id(&mut conn, &token).unwrap(),
+            store::calendar_user_id(&mut conn, &token).await.unwrap(),
             Some(person)
         );
     }
 
-    #[test]
-    fn calendar_template_keeps_the_slash_between_dates() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn calendar_template_keeps_the_slash_between_dates() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
@@ -258,8 +267,8 @@ mod tests {
             VALUES ('01900000-0000-7000-8000-000000000009', 1, 1, 'BotC #135', '2026-10-14T15:30:00Z', 105, 'posted', 1, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
             ",
         )
-        .unwrap();
-        let event = store::event(&mut conn, 1).unwrap().unwrap();
+        .await.unwrap();
+        let event = store::event(&mut conn, 1).await.unwrap().unwrap();
         let link = calendar_template(&event).unwrap();
         assert_eq!(
             link,

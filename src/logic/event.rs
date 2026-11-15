@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::access::{can_create, can_edit, may_pick_attendee_role};
 use super::db::{log, must_channel, must_event, must_membership, must_role};
@@ -15,72 +16,74 @@ use crate::schema;
 use crate::store::{self, Connection};
 use crate::values::{Cadence, EventRoleKind, EventStatus};
 
-pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpError> {
-    let clean = normalize(conn, &input)?;
+pub async fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpError> {
+    let clean = normalize(conn, &input).await?;
     let now = Utc::now();
-    store::with_tx(conn, |tx| {
+    store::with_tx(conn, async |tx| {
         let id = if let Some(existing) = &clean.existing {
-            update_event_row(tx, existing.id, &input, &clean, now)?;
-            sync_options(tx, existing.id, &clean.options)?;
+            update_event_row(tx, existing.id, &input, &clean, now).await?;
+            sync_options(tx, existing.id, &clean.options).await?;
             if existing.status == EventStatus::Posted {
-                replace_reminders(tx, existing, &clean.reminders)?;
+                replace_reminders(tx, existing, &clean.reminders).await?;
             } else {
                 diesel::delete(
                     schema::reminders::table.filter(schema::reminders::event_id.eq(existing.id)),
                 )
-                .execute(tx)?;
-                insert_reminders(tx, existing.id, &clean.reminders, &[])?;
+                .execute(tx)
+                .await?;
+                insert_reminders(tx, existing.id, &clean.reminders, &[]).await?;
             }
-            replace_roles(tx, existing.id, &input)?;
+            replace_roles(tx, existing.id, &input).await?;
             existing.id
         } else {
-            let id = insert_event_row(tx, &input, &clean, now)?;
-            replace_children(tx, id, &clean.options, &clean.reminders)?;
-            replace_roles(tx, id, &input)?;
+            let id = insert_event_row(tx, &input, &clean, now).await?;
+            replace_children(tx, id, &clean.options, &clean.reminders).await?;
+            replace_roles(tx, id, &input).await?;
             id
         };
 
-        transition(tx, id, &input, now)?;
+        transition(tx, id, &input, now).await?;
 
-        let event = must_event(tx, id)?;
+        let event = must_event(tx, id).await?;
         if input.repeat.is_some()
             && event.series_id.is_none()
             && clean.existing.as_ref().and_then(|e| e.series_id).is_none()
         {
-            link_new_series(tx, &event, &input, &clean, now)?;
+            link_new_series(tx, &event, &input, &clean, now).await?;
         }
-        let event = must_event(tx, id)?;
+        let event = must_event(tx, id).await?;
         if input.apply_series {
             if let Some(series_id) = event.series_id {
-                apply_series_template(tx, series_id, id, &input, &clean)?;
+                apply_series_template(tx, series_id, id, &input, &clean).await?;
             }
         }
-        let event = must_event(tx, id)?;
+        let event = must_event(tx, id).await?;
         if let Some(series_id) = event.series_id {
             if matches!(
                 event.status,
                 EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
             ) {
-                ensure_series(tx, series_id, now)?;
+                ensure_series(tx, series_id, now).await?;
             }
         }
         if event.status == EventStatus::Posted {
-            fill_all(tx, &event)?;
-            sync_access(tx, id)?;
+            fill_all(tx, &event).await?;
+            sync_access(tx, id).await?;
         }
         Ok(id)
     })
+    .await
 }
 
-fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, OpError> {
-    let settings = store::settings(conn, input.guild_id)?;
-    let actor = must_membership(conn, input.actor_id)?;
+async fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, OpError> {
+    let settings = store::settings(conn, input.guild_id).await?;
+    let actor = must_membership(conn, input.actor_id).await?;
     if actor.guild_id != input.guild_id {
         return Err(OpError::from(crate::msg!("err-person-elsewhere")));
     }
-    let roles = store::membership_role_ids(conn, &actor)?;
+    let roles = store::membership_role_ids(conn, &actor).await?;
     let existing = if let Some(id) = input.id {
-        let event = must_event(conn, id)?;
+        let event = must_event(conn, id).await?;
         if event.guild_id != input.guild_id {
             return Err(OpError::NotFound);
         }
@@ -133,13 +136,13 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
         Some(_) => return Err(OpError::from(crate::msg!("err-image-link"))),
     };
-    let channel = must_channel(conn, input.channel_id)?;
+    let channel = must_channel(conn, input.channel_id).await?;
     if channel.guild_id != input.guild_id {
         return Err(OpError::from(crate::msg!("err-channel-elsewhere")));
     }
     let mut attendee_role_by = None;
     if let Some(role_id) = input.attendee_role_id {
-        let role = must_role(conn, role_id)?;
+        let role = must_role(conn, role_id).await?;
         if role.guild_id != input.guild_id {
             return Err(OpError::from(crate::msg!("err-attendee-role-elsewhere")));
         }
@@ -159,7 +162,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         .iter()
         .chain(input.restrict_role_ids.iter())
     {
-        let role = must_role(conn, *role_id)?;
+        let role = must_role(conn, *role_id).await?;
         if role.guild_id != input.guild_id {
             return Err(OpError::from(crate::msg!("err-selected-role-elsewhere")));
         }
@@ -170,9 +173,9 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
     }
 
-    let options = clean_types(conn, input.guild_id, &input.options)?;
+    let options = clean_types(conn, input.guild_id, &input.options).await?;
     if let Some(existing) = &existing {
-        known_options(conn, existing, &options)?;
+        known_options(conn, existing, &options).await?;
     }
 
     let mut reminders = clean_reminders(&input.reminders)?;
@@ -232,12 +235,13 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
 }
 
 /// An option that names an id has to be one of this event's.
-fn known_options(
+async fn known_options(
     conn: &mut Connection,
     event: &store::Event,
     options: &[OptionInput],
 ) -> Result<(), OpError> {
-    let current: HashSet<i64> = store::options_for(conn, event)?
+    let current: HashSet<i64> = store::options_for(conn, event)
+        .await?
         .iter()
         .map(|opt| opt.id)
         .collect();
@@ -253,17 +257,17 @@ fn known_options(
 /// Changes an event's options in their new order. Options with an id are
 /// updated and keep their responses, options without one are added, and options
 /// left out go, with any responses on them.
-pub fn save_options(
+pub async fn save_options(
     conn: &mut Connection,
     event_id: i64,
     actor_id: i64,
     input: &[OptionInput],
 ) -> Result<(), OpError> {
-    store::with_tx(conn, |tx| {
-        let event = must_event(tx, event_id)?;
-        let actor = must_membership(tx, actor_id)?;
-        let settings = store::settings(tx, event.guild_id)?;
-        let roles = store::membership_role_ids(tx, &actor)?;
+    store::with_tx(conn, async |tx| {
+        let event = must_event(tx, event_id).await?;
+        let actor = must_membership(tx, actor_id).await?;
+        let settings = store::settings(tx, event.guild_id).await?;
+        let roles = store::membership_role_ids(tx, &actor).await?;
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
@@ -273,15 +277,16 @@ pub fn save_options(
         ) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
-        let options = clean_types(tx, event.guild_id, input)?;
-        known_options(tx, &event, &options)?;
-        sync_options(tx, event.id, &options)?;
+        let options = clean_types(tx, event.guild_id, input).await?;
+        known_options(tx, &event, &options).await?;
+        sync_options(tx, event.id, &options).await?;
         if event.status == EventStatus::Posted {
-            fill_all(tx, &event)?;
-            sync_access(tx, event.id)?;
+            fill_all(tx, &event).await?;
+            sync_access(tx, event.id).await?;
         }
         Ok(())
     })
+    .await
 }
 
 /// Checks reminders, dropping empty ones.
@@ -309,7 +314,7 @@ pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInp
 }
 
 /// Checks what a routine's events carry, with the same rules as an event's.
-pub(super) fn clean_extras(
+pub(super) async fn clean_extras(
     conn: &mut Connection,
     guild_id: i64,
     extras: &EventExtras,
@@ -327,14 +332,15 @@ pub(super) fn clean_extras(
         .chain(extras.restrict_role_ids.iter())
         .chain(extras.attendee_role_id.iter())
     {
-        if must_role(conn, *role_id)?.guild_id != guild_id {
+        if must_role(conn, *role_id).await?.guild_id != guild_id {
             return Err(OpError::from(crate::msg!("err-selected-role-elsewhere")));
         }
     }
     if extras.cutoff_offset_minutes.is_some_and(|mins| mins < 0) {
         return Err(OpError::from(crate::msg!("err-signups-close-late")));
     }
-    let options = clean_types(conn, guild_id, &extras.options)?
+    let options = clean_types(conn, guild_id, &extras.options)
+        .await?
         .into_iter()
         .map(|opt| OptionInput { id: None, ..opt })
         .collect();
@@ -377,7 +383,7 @@ struct NewEvent<'a> {
     updated_at: DateTime<Utc>,
 }
 
-fn insert_event_row(
+async fn insert_event_row(
     conn: &mut Connection,
     input: &EventInput,
     clean: &CleanInput,
@@ -410,7 +416,8 @@ fn insert_event_row(
     let id = diesel::insert_into(schema::events::table)
         .values(&row)
         .returning(schema::events::id)
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     Ok(id)
 }
 
@@ -437,7 +444,7 @@ struct EventEdits<'a> {
     updated_at: DateTime<Utc>,
 }
 
-fn update_event_row(
+async fn update_event_row(
     conn: &mut Connection,
     id: i64,
     input: &EventInput,
@@ -466,27 +473,29 @@ fn update_event_row(
     };
     diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
         .set(&edits)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub(super) fn replace_children(
+pub(super) async fn replace_children(
     conn: &mut Connection,
     event_id: i64,
     options: &[OptionInput],
     reminders: &[ReminderInput],
 ) -> Result<(), OpError> {
-    sync_options(conn, event_id, options)?;
+    sync_options(conn, event_id, options).await?;
     diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(event_id)))
-        .execute(conn)?;
-    insert_reminders(conn, event_id, reminders, &[])?;
+        .execute(conn)
+        .await?;
+    insert_reminders(conn, event_id, reminders, &[]).await?;
     Ok(())
 }
 
 /// Makes an event's options these, in this order. An option with an id stays,
 /// with its responses, and takes the new type, capacity, role, and place; one
 /// without is added; options left out go, and their responses with them.
-pub(super) fn sync_options(
+pub(super) async fn sync_options(
     conn: &mut Connection,
     event_id: i64,
     options: &[OptionInput],
@@ -497,7 +506,8 @@ pub(super) fn sync_options(
             .filter(schema::signup_options::event_id.eq(event_id))
             .filter(schema::signup_options::id.ne_all(&kept)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     for (index, opt) in options.iter().enumerate() {
         let position = index as i64;
         match opt.id {
@@ -514,7 +524,8 @@ pub(super) fn sync_options(
                     schema::signup_options::role_id.eq(opt.role_id),
                     schema::signup_options::position.eq(position),
                 ))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             }
             None => {
                 diesel::insert_into(schema::signup_options::table)
@@ -526,22 +537,24 @@ pub(super) fn sync_options(
                         schema::signup_options::role_id.eq(opt.role_id),
                         schema::signup_options::position.eq(position),
                     ))
-                    .execute(conn)?;
+                    .execute(conn)
+                    .await?;
             }
         }
     }
     Ok(())
 }
 
-fn replace_reminders(
+async fn replace_reminders(
     conn: &mut Connection,
     event: &store::Event,
     reminders: &[ReminderInput],
 ) -> Result<(), OpError> {
-    let old = store::reminders_for(conn, event)?;
+    let old = store::reminders_for(conn, event).await?;
     diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(event.id)))
-        .execute(conn)?;
-    insert_reminders(conn, event.id, reminders, &old)?;
+        .execute(conn)
+        .await?;
+    insert_reminders(conn, event.id, reminders, &old).await?;
     Ok(())
 }
 
@@ -555,7 +568,7 @@ struct NewReminder<'a> {
     sent_at: Option<DateTime<Utc>>,
 }
 
-fn insert_reminders(
+async fn insert_reminders(
     conn: &mut Connection,
     event_id: i64,
     reminders: &[ReminderInput],
@@ -583,7 +596,8 @@ fn insert_reminders(
     }
     diesel::insert_into(schema::reminders::table)
         .values(&rows)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -595,7 +609,7 @@ struct NewEventRole {
     kind: EventRoleKind,
 }
 
-pub(super) fn insert_event_roles(
+pub(super) async fn insert_event_roles(
     conn: &mut Connection,
     event_id: i64,
     mention_role_ids: &[i64],
@@ -626,28 +640,35 @@ pub(super) fn insert_event_roles(
     }
     diesel::insert_into(schema::event_roles::table)
         .values(&rows)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-fn replace_roles(conn: &mut Connection, event_id: i64, input: &EventInput) -> Result<(), OpError> {
+async fn replace_roles(
+    conn: &mut Connection,
+    event_id: i64,
+    input: &EventInput,
+) -> Result<(), OpError> {
     diesel::delete(schema::event_roles::table.filter(schema::event_roles::event_id.eq(event_id)))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     insert_event_roles(
         conn,
         event_id,
         &input.mention_role_ids,
         &input.restrict_role_ids,
     )
+    .await
 }
 
-fn transition(
+async fn transition(
     conn: &mut Connection,
     id: i64,
     input: &EventInput,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let event = must_event(conn, id)?;
+    let event = must_event(conn, id).await?;
     match (event.status, input.action) {
         (EventStatus::Posted, _) => {
             log(
@@ -655,13 +676,14 @@ fn transition(
                 event.guild_id,
                 Some(id),
                 &format!("Updated {}.", event.title),
-            )?;
+            )
+            .await?;
         }
         (
             EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
             SaveAction::Publish,
         ) => {
-            mark_posted(conn, id, now)?;
+            mark_posted(conn, id, now).await?;
         }
         (
             EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
@@ -677,13 +699,15 @@ fn transition(
                     schema::events::post_at.eq(post_at),
                     schema::events::updated_at.eq(now),
                 ))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             log(
                 conn,
                 event.guild_id,
                 Some(id),
                 &format!("Will post {} at {}.", event.title, clock::stamp(post_at)),
-            )?;
+            )
+            .await?;
         }
         (
             EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
@@ -695,7 +719,8 @@ fn transition(
                     schema::events::post_at.eq(None::<DateTime<Utc>>),
                     schema::events::updated_at.eq(now),
                 ))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
         _ => {
             return Err(OpError::from(crate::msg!("err-event-change")));

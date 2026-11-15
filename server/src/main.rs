@@ -29,8 +29,17 @@ fn main() {
             // An address no route matches renders the app too, and needs the
             // same context: the logo, sign-in, and the database come from it.
             .fallback(leptos_axum::file_and_error_handler_with_context(
-                move || provide_context(web.clone()),
+                {
+                    let web = web.clone();
+                    move || provide_context(web.clone())
+                },
                 marian_app::shell,
+            ))
+            // Rendering can't wait on the database, so whether a server page's
+            // server can be opened is decided first.
+            .layer(axum::middleware::from_fn_with_state(
+                web,
+                marian_app::decide_server_gate,
             ))
             .with_state(options)
     });

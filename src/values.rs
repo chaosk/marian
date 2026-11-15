@@ -194,9 +194,10 @@ text_enum! {
 
 #[cfg(test)]
 mod tests {
-    use diesel::connection::SimpleConnection;
     use diesel::prelude::*;
     use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl;
+    use diesel_async::SimpleAsyncConnection;
 
     use super::*;
     use crate::i18n::Lang;
@@ -208,7 +209,7 @@ mod tests {
     }
 
     /// The words a column's CHECK constraint allows, in order.
-    fn allowed(conn: &mut crate::store::Connection, constraint: &str) -> Vec<String> {
+    async fn allowed(conn: &mut crate::store::Connection, constraint: &str) -> Vec<String> {
         let check: Check = diesel::sql_query(
             "SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c \
              JOIN pg_namespace n ON n.oid = c.connamespace \
@@ -216,6 +217,7 @@ mod tests {
         )
         .bind::<Text, _>(constraint)
         .get_result(conn)
+        .await
         .unwrap_or_else(|err| panic!("no constraint {constraint}: {err}"));
         check
             .def
@@ -230,9 +232,9 @@ mod tests {
         all.iter().map(|value| word(*value).to_string()).collect()
     }
 
-    #[test]
-    fn each_column_takes_exactly_its_enums_words() {
-        let mut conn = crate::store::open_memory().unwrap();
+    #[tokio::test]
+    async fn each_column_takes_exactly_its_enums_words() {
+        let mut conn = crate::store::open_memory().await.unwrap();
         let columns: [(&str, Vec<String>); 16] = [
             (
                 "events_status_check",
@@ -288,22 +290,24 @@ mod tests {
             ),
         ];
         for (constraint, words) in columns {
-            assert_eq!(allowed(&mut conn, constraint), words, "{constraint}");
+            assert_eq!(allowed(&mut conn, constraint).await, words, "{constraint}");
         }
     }
 
-    #[test]
-    fn a_stored_word_outside_the_set_fails_the_read() {
-        let mut conn = crate::store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_stored_word_outside_the_set_fails_the_read() {
+        let mut conn = crate::store::open_memory().await.unwrap();
         conn.batch_execute(
             "ALTER TABLE settings DROP CONSTRAINT settings_digest_check;
              INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
              INSERT INTO settings (guild_id, digest) VALUES (1, 'hourly');",
         )
+        .await
         .unwrap();
         let read = crate::schema::settings::table
             .select(crate::schema::settings::digest)
-            .first::<Digest>(&mut conn);
+            .first::<Digest>(&mut conn)
+            .await;
         let err = read.unwrap_err();
         let mut causes = vec![err.to_string()];
         let mut source = std::error::Error::source(&err);

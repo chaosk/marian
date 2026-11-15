@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use chrono::Utc;
-use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::Instrument;
 
@@ -73,16 +73,19 @@ impl Heartbeat {
     }
 }
 
-/// Runs `body` with a pooled connection on a blocking thread, so database
-/// work doesn't hold up the async workers. `None`, after a warning, when no
-/// connection came or the work panicked; the caller skips this round.
-async fn with_db<T: Send + 'static>(
-    db: &store::Db,
-    what: &'static str,
-    body: impl FnOnce(&mut Connection) -> T + Send + 'static,
-) -> Option<T> {
+/// Runs `body` with a pooled connection, as a task of its own in the current
+/// span. `None`, after a warning, when no connection came or the work
+/// panicked; the caller skips this round.
+async fn with_db<T: Send + 'static, F>(db: &store::Db, what: &'static str, body: F) -> Option<T>
+where
+    F: for<'r> store::Work<'r, T> + Send + 'static,
+{
     let db = db.clone();
-    match tokio::task::spawn_blocking(move || db.get().map(|mut conn| body(&mut conn))).await {
+    let work = async move {
+        let mut conn = db.get().await?;
+        Ok::<_, store::PoolError>(body(&mut conn).await)
+    };
+    match tokio::spawn(work.instrument(tracing::Span::current())).await {
         Ok(Ok(value)) => Some(value),
         Ok(Err(err)) => {
             tracing::warn!("{what}: no database connection, skipping this round: {err}");
@@ -123,9 +126,8 @@ fn spawn_tasks(db: store::Db, heartbeat: Heartbeat, term: Term) -> tokio::task::
             // trace until it ran past Tempo's size limit.
             let span = tracing::info_span!(parent: None, "tasks");
             let delay = async {
-                let current = tracing::Span::current();
-                let pass = with_db(&db, "tasks", move |conn| {
-                    current.in_scope(|| logic::run_tasks(conn, Utc::now(), TASKS_PER_PASS))
+                let pass = with_db(&db, "tasks", async |conn| {
+                    logic::run_tasks(conn, Utc::now(), TASKS_PER_PASS).await
                 })
                 .await;
                 match pass {
@@ -202,8 +204,8 @@ fn spawn_google_sync(
     Some(tokio::spawn(async move {
         let mut woken = crate::tasks::subscribe_google();
         while !term.is_over() {
-            let claimed = with_db(&db, "google calendar", |conn| {
-                logic::claim_google(conn, Utc::now())
+            let claimed = with_db(&db, "google calendar", async |conn| {
+                logic::claim_google(conn, Utc::now()).await
             })
             .await;
             let delay = match claimed {
@@ -219,8 +221,8 @@ fn spawn_google_sync(
                     )
                     .instrument(span)
                     .await;
-                    let finished = with_db(&db, "google calendar", move |conn| {
-                        logic::finish_google(conn, user_id, lease, again, Utc::now())
+                    let finished = with_db(&db, "google calendar", async move |conn| {
+                        logic::finish_google(conn, user_id, lease, again, Utc::now()).await
                     })
                     .await;
                     if let Some(Err(err)) = finished {
@@ -262,8 +264,8 @@ fn spawn_session_sweep(db: store::Db, term: Term) -> tokio::task::JoinHandle<()>
                 _ = every.tick() => {}
                 _ = term.ended() => break,
             }
-            match with_db(&db, "session sweep", |conn| {
-                store::delete_expired_sessions(conn, Utc::now())
+            match with_db(&db, "session sweep", async |conn| {
+                store::delete_expired_sessions(conn, Utc::now()).await
             })
             .await
             {
@@ -350,7 +352,8 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let db = store::pool(&database_url)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let db = rt.block_on(store::pool(&database_url))?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState {
@@ -369,7 +372,6 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         heartbeat: Heartbeat::new(),
         leader: crate::leader::Status::default(),
     };
-    let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async move {
         tokio::spawn(crate::shutdown::on_signal());
         let web = crate::api::Web {
@@ -738,14 +740,14 @@ fn liveness(leading: bool, heartbeat: &Heartbeat, now: i64) -> (StatusCode, &'st
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    let ok = store::blocking(|| {
-        state.db.get().map(|mut conn| {
-            diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
-                .get_result::<i32>(&mut *conn)
-                .is_ok()
-        })
-    });
-    if ok.unwrap_or(false) {
+    let ok = match state.db.get().await {
+        Ok(mut conn) => diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("1"))
+            .get_result::<i32>(&mut *conn)
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    if ok {
         (StatusCode::OK, "ok").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response()
@@ -759,8 +761,8 @@ async fn asset(request: Request) -> Response {
     )
 }
 
-fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
-    crate::api::viewer(conn, headers)
+async fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
+    crate::api::viewer(conn, headers).await
 }
 
 fn oauth_ready(state: &AppState) -> bool {
@@ -787,13 +789,13 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     }
     let headers = request.headers().clone();
     let signed_in = {
-        let mut db = state.db.get().expect("database");
-        read_session(&mut db, &headers).is_some()
+        let mut db = state.db.get().await.expect("database");
+        read_session(&mut db, &headers).await.is_some()
     };
     if signed_in {
         // Both ask Discord, so neither holds up the request: it goes on with
         // what Marian already knows, at most a few minutes old.
-        start_session_guilds_recheck(&state, &headers);
+        start_session_guilds_recheck(&state, &headers).await;
         let (state, path, headers) = (state.clone(), path.clone(), headers.clone());
         tokio::spawn(
             async move { refresh_member_roles(&state, &path, &headers).await }.in_current_span(),
@@ -876,7 +878,7 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
     if state.bot_token.trim().is_empty() {
         return;
     }
-    let Some(target) = load_role_target(state, path, headers) else {
+    let Some(target) = load_role_target(state, path, headers).await else {
         return;
     };
     if !state.member_roles.lock().expect("member roles").claim(
@@ -891,7 +893,7 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
         .members
         .roles(&target.guild_discord, &target.user_discord)
     {
-        store_member_roles(state, &target, &roles);
+        store_member_roles(state, &target, &roles).await;
         return;
     }
     let Some((status, body)) = discord_member(
@@ -909,19 +911,19 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
         tracing::warn!("Discord role lookup returned {status}");
         return;
     };
-    store_member_roles(state, &target, &roles);
+    store_member_roles(state, &target, &roles).await;
 }
 
-fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
+async fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
     let server = server_in_path(path)?;
-    let mut db = state.db.get().expect("database");
-    role_target(&mut db, headers, server)
+    let mut db = state.db.get().await.expect("database");
+    role_target(&mut db, headers, server).await
 }
 
-fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
-    let mut db = state.db.get().expect("database");
+async fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
+    let mut db = state.db.get().await.expect("database");
     if let Err(err) =
-        store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles)
+        store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles).await
     {
         tracing::warn!("could not store Discord roles: {err}");
     }
@@ -941,9 +943,13 @@ fn snowflake(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn role_target(conn: &mut Connection, headers: &HeaderMap, server: &str) -> Option<RoleTarget> {
-    let session = read_session(conn, headers)?;
-    let guild = store::guild_by_discord(conn, server).ok()??;
+async fn role_target(
+    conn: &mut Connection,
+    headers: &HeaderMap,
+    server: &str,
+) -> Option<RoleTarget> {
+    let session = read_session(conn, headers).await?;
+    let guild = store::guild_by_discord(conn, server).await.ok()??;
     if !session.allowed.contains(&guild.id) {
         return None;
     }
@@ -953,6 +959,7 @@ fn role_target(conn: &mut Connection, headers: &HeaderMap, server: &str) -> Opti
         &session.discord_user_id,
         &session.display_name,
     )
+    .await
     .ok()?;
     Some(RoleTarget {
         guild_id: guild.id,
@@ -1009,13 +1016,14 @@ async fn discord_member(
 
 /// Makes the member at home in every Marian server they share on Discord and
 /// returns those servers with their membership in each, oldest server first.
-fn admit_guilds(
+async fn admit_guilds(
     db: &mut Connection,
     discord_user: &str,
     name: &str,
     member_of: &[MemberGuild],
 ) -> Result<Vec<(i64, i64)>, OpError> {
-    let pairs: Vec<(i64, String)> = store::list_guilds(db)?
+    let pairs: Vec<(i64, String)> = store::list_guilds(db)
+        .await?
         .into_iter()
         .filter_map(|guild| Some((guild.id, guild.discord_id?)))
         .collect();
@@ -1027,12 +1035,12 @@ fn admit_guilds(
             .find(|(id, _)| *id == guild_id)
             .map(|(_, discord_id)| discord_id.as_str())
             .unwrap_or("");
-        let user = logic::admit_discord_user(db, guild_id, discord_user, name)?;
+        let user = logic::admit_discord_user(db, guild_id, discord_user, name).await?;
         let manages = member_of
             .iter()
             .find(|guild| guild.id == discord_id)
             .is_some_and(|guild| guild.manages);
-        logic::set_server_manager(db, user.id, manages)?;
+        logic::set_server_manager(db, user.id, manages).await?;
         admitted.push((guild_id, user.id));
     }
     Ok(admitted)
@@ -1044,13 +1052,13 @@ const SESSION_GUILDS_TTL: chrono::Duration = chrono::Duration::minutes(5);
 /// joins after they sign in shows up, and one they leave drops out. One request
 /// per session claims the check, and Discord is asked in the background: the
 /// requests a page fires together used to each ask, and wait out the 429s.
-fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
+async fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
     let Some(token) = cookie(headers, "marian_session") else {
         return;
     };
     let session = {
-        let mut db = state.db.get().expect("database");
-        match store::web_session(&mut db, &token) {
+        let mut db = state.db.get().await.expect("database");
+        match store::web_session(&mut db, &token).await {
             Ok(Some(session)) => session,
             _ => return,
         }
@@ -1062,8 +1070,9 @@ fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
         return;
     }
     let claimed = {
-        let mut db = state.db.get().expect("database");
+        let mut db = state.db.get().await.expect("database");
         store::claim_session_guilds_check(&mut db, &token, Utc::now() - SESSION_GUILDS_TTL)
+            .await
     };
     match claimed {
         Ok(true) => {}
@@ -1090,17 +1099,17 @@ async fn recheck_session_guilds(
         grant
     } else {
         let fresh = discord_refresh(state, &grant.refresh).await;
-        let mut db = state.db.get().expect("database");
+        let mut db = state.db.get().await.expect("database");
         match fresh {
             Ok(fresh) => {
-                if let Err(err) = store::set_session_grant(&mut db, token, Some(&fresh)) {
+                if let Err(err) = store::set_session_grant(&mut db, token, Some(&fresh)).await {
                     tracing::warn!("could not keep the refreshed Discord grant: {err}");
                 }
                 fresh
             }
             Err(err) => {
                 if err.revoked() {
-                    let _ = store::set_session_grant(&mut db, token, None);
+                    let _ = store::set_session_grant(&mut db, token, None).await;
                 }
                 return;
             }
@@ -1110,19 +1119,21 @@ async fn recheck_session_guilds(
         Ok(member_of) => member_of,
         Err(err) => {
             if err.revoked() {
-                let mut db = state.db.get().expect("database");
-                let _ = store::set_session_grant(&mut db, token, None);
+                let mut db = state.db.get().await.expect("database");
+                let _ = store::set_session_grant(&mut db, token, None).await;
             }
             return;
         }
     };
-    let mut db = state.db.get().expect("database");
+    let mut db = state.db.get().await.expect("database");
     let admitted = match admit_guilds(
         &mut db,
         &session.discord_user_id,
         &session.display_name,
         &member_of,
-    ) {
+    )
+    .await
+    {
         Ok(admitted) => admitted,
         Err(err) => {
             tracing::warn!("could not recheck the member's servers: {err}");
@@ -1131,11 +1142,11 @@ async fn recheck_session_guilds(
     };
     let Some(&home) = admitted.first() else {
         // In none of Marian's servers any more: the next request signs in again.
-        let _ = store::delete_web_session(&mut db, token);
+        let _ = store::delete_web_session(&mut db, token).await;
         return;
     };
     let guilds: Vec<i64> = admitted.iter().map(|(guild_id, _)| *guild_id).collect();
-    if let Err(err) = store::replace_session_guilds(&mut db, token, &guilds, home) {
+    if let Err(err) = store::replace_session_guilds(&mut db, token, &guilds, home).await {
         tracing::warn!("could not store the member's servers: {err}");
     }
 }
@@ -1216,8 +1227,8 @@ async fn auth_callback(
         Err(err) => return nav_redirect("/", &err),
     };
     let name = auth::discord_display_name(None, me.global_name.as_deref(), &me.username);
-    let mut db = state.db.get().expect("database");
-    let admitted = match admit_guilds(&mut db, &me.id, &name, &member_of) {
+    let mut db = state.db.get().await.expect("database");
+    let admitted = match admit_guilds(&mut db, &me.id, &name, &member_of).await {
         Ok(admitted) => admitted,
         Err(err) => return plain_error(err),
     };
@@ -1238,7 +1249,9 @@ async fn auth_callback(
         membership_id,
         &allowed,
         Some(&grant),
-    ) {
+    )
+    .await
+    {
         return plain_error(err);
     }
     drop(db);
@@ -1280,8 +1293,8 @@ async fn sync_google_user(
     // A round that couldn't finish is tried again soon.
     let soon = || Some(Utc::now() + chrono::Duration::minutes(5));
     let base = public_base.to_string();
-    let (jobs, mut again) = match with_db(db, "google calendar", move |conn| {
-        crate::google::plan_user(conn, &base, user_id)
+    let (jobs, mut again) = match with_db(db, "google calendar", async move |conn| {
+        crate::google::plan_user(conn, &base, user_id).await
     })
     .await
     {
@@ -1300,8 +1313,8 @@ async fn sync_google_user(
         {
             tracing::warn!("google calendar event {event_id}: {message}");
         }
-        match with_db(db, "google calendar", move |conn| {
-            crate::google::record(conn, outcome)
+        match with_db(db, "google calendar", async move |conn| {
+            crate::google::record(conn, outcome).await
         })
         .await
         {
@@ -1311,8 +1324,8 @@ async fn sync_google_user(
             None => return soon(),
         }
     }
-    let revokes = match with_db(db, "google calendar", move |conn| {
-        crate::google::ready_revokes(conn, Some(user_id))
+    let revokes = match with_db(db, "google calendar", async move |conn| {
+        crate::google::ready_revokes(conn, Some(user_id)).await
     })
     .await
     {
@@ -1326,8 +1339,8 @@ async fn sync_google_user(
     for access in revokes {
         let user_id = access.user_id;
         if crate::google::forget_remote(http, client_id, client_secret, access).await {
-            match with_db(db, "google calendar", move |conn| {
-                crate::google::delete_account(conn, user_id)
+            match with_db(db, "google calendar", async move |conn| {
+                crate::google::delete_account(conn, user_id).await
             })
             .await
             {
@@ -1363,15 +1376,15 @@ async fn google_start(
         return nav_redirect(&next, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let session = {
-        let mut db = state.db.get().expect("database");
-        read_session(&mut db, &headers)
+        let mut db = state.db.get().await.expect("database");
+        read_session(&mut db, &headers).await
     };
     let Some(session) = session else {
         return nav_redirect(&next, "Sign in with Discord.");
     };
     let state_token = {
-        let mut db = state.db.get().expect("database");
-        match crate::google::begin_link(&mut db, session.user_id) {
+        let mut db = state.db.get().await.expect("database");
+        match crate::google::begin_link(&mut db, session.user_id).await {
             Ok(token) => token,
             Err(err) => return plain_error(err),
         }
@@ -1411,8 +1424,8 @@ async fn google_open(
         return nav_redirect("/", "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let pending = {
-        let mut db = state.db.get().expect("database");
-        match crate::google::claim_oauth(&mut db, &token) {
+        let mut db = state.db.get().await.expect("database");
+        match crate::google::claim_oauth(&mut db, &token).await {
             Ok(row) => row.is_some(),
             Err(err) => return plain_error(err),
         }
@@ -1468,8 +1481,8 @@ async fn google_callback(
         next
     };
     if query.error.is_some() {
-        let mut db = state.db.get().expect("database");
-        let _ = crate::google::finish_oauth(&mut db, &returned);
+        let mut db = state.db.get().await.expect("database");
+        let _ = crate::google::finish_oauth(&mut db, &returned).await;
         let mut response = nav_redirect(
             &dest,
             "The Google Calendar connection stopped before it finished.",
@@ -1484,10 +1497,10 @@ async fn google_callback(
         return nav_redirect(&dest, "Set MARIAN_PUBLIC_URL so Google can send you back.");
     };
     let user_id = {
-        let mut db = state.db.get().expect("database");
-        match crate::google::claim_oauth(&mut db, &returned) {
+        let mut db = state.db.get().await.expect("database");
+        match crate::google::claim_oauth(&mut db, &returned).await {
             Ok(Some(user_id)) => {
-                let _ = crate::google::finish_oauth(&mut db, &returned);
+                let _ = crate::google::finish_oauth(&mut db, &returned).await;
                 user_id
             }
             Ok(None) => {
@@ -1513,8 +1526,8 @@ async fn google_callback(
     };
     let email = crate::google::account_email(&state.http, &access).await;
     {
-        let mut db = state.db.get().expect("database");
-        if let Err(err) = crate::google::save_account(&mut db, user_id, &refresh, &email) {
+        let mut db = state.db.get().await.expect("database");
+        if let Err(err) = crate::google::save_account(&mut db, user_id, &refresh, &email).await {
             return plain_error(err);
         }
     }
@@ -1537,15 +1550,15 @@ async fn google_disconnect(
         .and_then(auth::safe_next)
         .unwrap_or_else(|| "/".into());
     let session = {
-        let mut db = state.db.get().expect("database");
-        read_session(&mut db, &headers)
+        let mut db = state.db.get().await.expect("database");
+        read_session(&mut db, &headers).await
     };
     let Some(session) = session else {
         return nav_redirect("/", "Sign in with Discord.");
     };
     let access = {
-        let mut db = state.db.get().expect("database");
-        match crate::google::remote_access(&mut db, session.user_id) {
+        let mut db = state.db.get().await.expect("database");
+        match crate::google::remote_access(&mut db, session.user_id).await {
             Ok(access) => access,
             Err(err) => return plain_error(err),
         }
@@ -1566,8 +1579,8 @@ async fn google_disconnect(
         true
     };
     {
-        let mut db = state.db.get().expect("database");
-        if let Err(err) = crate::google::delete_account(&mut db, session.user_id) {
+        let mut db = state.db.get().await.expect("database");
+        if let Err(err) = crate::google::delete_account(&mut db, session.user_id).await {
             return plain_error(err);
         }
     }
@@ -1593,8 +1606,8 @@ fn google_redirect(state: &AppState, headers: &HeaderMap) -> Option<String> {
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie(&headers, "marian_session") {
-        let mut db = state.db.get().expect("database");
-        let _ = store::delete_web_session(&mut db, &token);
+        let mut db = state.db.get().await.expect("database");
+        let _ = store::delete_web_session(&mut db, &token).await;
     }
     let mut response = Redirect::to("/").into_response();
     clear_cookie(&mut response, "marian_session");
@@ -1883,19 +1896,16 @@ async fn personal_calendar(State(state): State<AppState>, Path(file): Path<Strin
     let Some(token) = personal_token(&file) else {
         return (StatusCode::NOT_FOUND, "No calendar").into_response();
     };
-    // Calendar apps poll this, so it stays off the async workers.
-    store::blocking(|| {
-        let Ok(mut db) = state.db.get() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "The database is busy.").into_response();
-        };
-        let Some(user_id) = store::calendar_user_id(&mut db, token).ok().flatten() else {
-            return (StatusCode::NOT_FOUND, "No calendar").into_response();
-        };
-        match ics::user_feed(&mut db, user_id) {
-            Ok(body) => calendar_response(body),
-            Err(err) => plain_error(err),
-        }
-    })
+    let Ok(mut db) = state.db.get().await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "The database is busy.").into_response();
+    };
+    let Some(user_id) = store::calendar_user_id(&mut db, token).await.ok().flatten() else {
+        return (StatusCode::NOT_FOUND, "No calendar").into_response();
+    };
+    match ics::user_feed(&mut db, user_id).await {
+        Ok(body) => calendar_response(body),
+        Err(err) => plain_error(err),
+    }
 }
 
 fn personal_token(file: &str) -> Option<&str> {
@@ -1981,10 +1991,10 @@ pub fn mentioned_events(line: &str, reply: &str) -> Vec<i64> {
     ids
 }
 
-pub fn events_to_refresh(conn: &mut Connection, line: &str, reply: &str) -> Vec<i64> {
+pub async fn events_to_refresh(conn: &mut Connection, line: &str, reply: &str) -> Vec<i64> {
     let mut ids = mentioned_events(line, reply);
     for public_id in public_ids_in(line).into_iter().chain(public_ids_in(reply)) {
-        if let Ok(Some(event)) = store::event_by_public(conn, &public_id) {
+        if let Ok(Some(event)) = store::event_by_public(conn, &public_id).await {
             ids.push(event.id);
         }
     }
@@ -2062,6 +2072,9 @@ mod tests {
     use super::*;
     use crate::api::percent_decode;
     use crate::schema;
+    use crate::store::Connection;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
 
     #[tokio::test]
     async fn a_sign_in_page_shows_no_database_detail() {
@@ -2083,32 +2096,32 @@ mod tests {
     }
 
     /// Inserts a scheduled event of `id` due to post now, and wakes the worker.
-    fn post_due(conn: &mut Connection, id: i64) {
-        diesel::RunQueryDsl::execute(
-            diesel::sql_query(format!(
+    async fn post_due(conn: &mut Connection, id: i64) {
+        diesel::sql_query(format!(
                 "INSERT INTO events (id, public_id, guild_id, channel_id, title, description, starts_at, \
                  duration_minutes, status, post_at, created_at, updated_at) VALUES \
                  ({id}, gen_random_uuid(), 1, 1, 'Raid {id}', '', now() + interval '1 day', 60, \
                  'scheduled', now() - interval '1 minute', now(), now())"
-            )),
-            conn,
-        )
+            ))
+        .execute(conn)
+        .await
         .unwrap();
         crate::tasks::wake();
     }
 
-    fn posted(conn: &mut Connection, id: i64) -> bool {
+    async fn posted(conn: &mut Connection, id: i64) -> bool {
         schema::events::table
             .find(id)
             .select(schema::events::status)
             .first::<crate::values::EventStatus>(conn)
+            .await
             .unwrap()
             == crate::values::EventStatus::Posted
     }
 
-    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
         for _ in 0..300 {
-            if done() {
+            if done().await {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2117,7 +2130,7 @@ mod tests {
     }
 
     /// Ends the term of whoever holds `key`, as a lost database connection would.
-    fn cut_lock(admin: &mut Connection, key: i64) {
+    async fn cut_lock(admin: &mut Connection, key: i64) {
         #[derive(QueryableByName)]
         struct Holder {
             #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -2128,24 +2141,26 @@ mod tests {
              AND ((classid::bigint << 32) | objid::bigint) = {key}"
         ))
         .get_result(admin)
+        .await
         .unwrap();
         diesel::sql_query(format!("SELECT pg_terminate_backend({})", holder.pid))
             .execute(admin)
+            .await
             .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_the_leader_runs_tasks_and_the_next_leader_takes_them_over() {
-        use diesel::connection::{Connection as _, SimpleConnection};
+        use diesel_async::SimpleAsyncConnection;
         use std::sync::atomic::AtomicUsize;
-        let mut conn = store::open_memory().unwrap();
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Test', 'UTC');
              INSERT INTO settings (guild_id) VALUES (1);
              INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);",
         )
-        .unwrap();
-        let db = store::pool_for(&mut conn).unwrap();
+        .await.unwrap();
+        let db = store::pool_for(&mut conn).await.unwrap();
         let url = store::database_url().unwrap();
         // A key of its own, so test runs and a local Marian don't meet.
         let key = 0x7461_736b_0000_0000 | i64::from(uuid::Uuid::now_v7().as_u128() as u32);
@@ -2169,29 +2184,38 @@ mod tests {
             (status, task)
         };
         let (first, first_task) = node(0);
-        eventually("the first node leads", || first.leading()).await;
+        eventually("the first node leads", async || first.leading()).await;
         let (second, second_task) = node(1);
-        post_due(&mut conn, 1);
-        eventually("the leader posts", || posted(&mut conn, 1)).await;
-        post_due(&mut conn, 2);
-        eventually("the leader posts again", || posted(&mut conn, 2)).await;
+        post_due(&mut conn, 1).await;
+        eventually("the leader posts", async || posted(&mut conn, 1).await).await;
+        post_due(&mut conn, 2).await;
+        eventually("the leader posts again", async || {
+            posted(&mut conn, 2).await
+        })
+        .await;
         assert!(first.leading() && !second.leading());
 
-        let mut admin = Connection::establish(&url).unwrap();
-        cut_lock(&mut admin, key);
-        eventually("the first node steps down", || !first.leading()).await;
-        eventually("its worker stops", || ran[0].load(Ordering::SeqCst) > 0).await;
+        let mut admin = store::connect(&url).await.unwrap();
+        cut_lock(&mut admin, key).await;
+        eventually("the first node steps down", async || !first.leading()).await;
+        eventually("its worker stops", async || {
+            ran[0].load(Ordering::SeqCst) > 0
+        })
+        .await;
         assert_eq!(
             ran[0].load(Ordering::SeqCst),
             2,
             "the leader ran both posts"
         );
         assert_eq!(ran[1].load(Ordering::SeqCst), 0, "a follower runs nothing");
-        eventually("the second node takes over", || second.leading()).await;
-        post_due(&mut conn, 3);
-        eventually("the new leader posts", || posted(&mut conn, 3)).await;
-        cut_lock(&mut admin, key);
-        eventually("its worker stops", || ran[1].load(Ordering::SeqCst) > 0).await;
+        eventually("the second node takes over", async || second.leading()).await;
+        post_due(&mut conn, 3).await;
+        eventually("the new leader posts", async || posted(&mut conn, 3).await).await;
+        cut_lock(&mut admin, key).await;
+        eventually("its worker stops", async || {
+            ran[1].load(Ordering::SeqCst) > 0
+        })
+        .await;
         assert_eq!(
             ran[1].load(Ordering::SeqCst),
             1,
@@ -2201,6 +2225,7 @@ mod tests {
         let jobs: i64 = schema::discord_jobs::table
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap();
         assert_eq!(jobs, 6, "each post's sync and attend, once");
         first_task.abort();
@@ -2420,10 +2445,10 @@ mod tests {
 
     #[tokio::test]
     async fn only_marian_itself_may_call_the_api_and_non_pages_run_nothing() {
-        let mut conn = store::open_memory().unwrap();
+        let mut conn = store::open_memory().await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
-            db: store::pool_for(&mut conn).unwrap(),
+            db: store::pool_for(&mut conn).await.unwrap(),
             discord: tx,
             invite_url: String::new(),
             http: reqwest::Client::new(),
@@ -2551,10 +2576,10 @@ mod tests {
         std::fs::write(dir.join("marian.wasm"), &plain).unwrap();
         std::fs::write(dir.join("marian.wasm.br"), b"brotli bytes").unwrap();
 
-        let mut conn = store::open_memory().unwrap();
+        let mut conn = store::open_memory().await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
-            db: store::pool_for(&mut conn).unwrap(),
+            db: store::pool_for(&mut conn).await.unwrap(),
             discord: tx,
             invite_url: String::new(),
             http: reqwest::Client::new(),
@@ -2651,7 +2676,7 @@ mod tests {
 
     #[tokio::test]
     async fn sign_in_is_required() {
-        let mut conn = store::open_memory().unwrap();
+        let mut conn = store::open_memory().await.unwrap();
         diesel::insert_into(schema::guilds::table)
             .values(&SeedGuild {
                 id: 1,
@@ -2660,12 +2685,14 @@ mod tests {
                 discord_id: "99",
             })
             .execute(&mut conn)
+            .await
             .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         let user_id = diesel::insert_into(schema::users::table)
             .values(&SeedUser { discord_id: "42" })
             .returning(schema::users::id)
             .get_result::<i64>(&mut conn)
+            .await
             .unwrap();
         let membership_id = diesel::insert_into(schema::memberships::table)
             .values(&SeedMembership {
@@ -2679,6 +2706,7 @@ mod tests {
             })
             .returning(schema::memberships::id)
             .get_result::<i64>(&mut conn)
+            .await
             .unwrap();
         store::insert_web_session(
             &mut conn,
@@ -2690,10 +2718,11 @@ mod tests {
             &[1],
             None,
         )
+        .await
         .unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
-            db: store::pool_for(&mut conn).unwrap(),
+            db: store::pool_for(&mut conn).await.unwrap(),
             discord: tx,
             invite_url: "https://discord.com/oauth2/authorize?example".into(),
             http: reqwest::Client::new(),
@@ -2892,11 +2921,11 @@ mod tests {
 
     #[tokio::test]
     async fn google_callback_keeps_a_link_the_browser_did_not_start() {
-        let mut conn = store::open_memory().unwrap();
-        let user_id = store::ensure_user(&mut conn, "42").unwrap();
-        let token = crate::google::begin_link(&mut conn, user_id).unwrap();
+        let mut conn = store::open_memory().await.unwrap();
+        let user_id = store::ensure_user(&mut conn, "42").await.unwrap();
+        let token = crate::google::begin_link(&mut conn, user_id).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let db = store::pool_for(&mut conn).unwrap();
+        let db = store::pool_for(&mut conn).await.unwrap();
         let state = AppState {
             db: db.clone(),
             discord: tx,
@@ -2937,8 +2966,10 @@ mod tests {
             .unwrap();
         assert_eq!(missed.status(), StatusCode::SEE_OTHER);
         let still = {
-            let mut guard = db.get().unwrap();
-            crate::google::claim_oauth(&mut guard, &token).unwrap()
+            let mut guard = db.get().await.unwrap();
+            crate::google::claim_oauth(&mut guard, &token)
+                .await
+                .unwrap()
         };
         assert_eq!(still, Some(user_id));
 

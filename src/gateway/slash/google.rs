@@ -36,8 +36,9 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        commands::google_sign_in_url(&mut conn, actor.membership_id)
+        commands::google_sign_in_url(&mut conn, actor.membership_id).await
     };
     let url = match outcome {
         Ok(url) => url,
@@ -74,6 +75,7 @@ async fn google_auto_sync(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::google_auto_sync(
             &mut conn,
@@ -82,6 +84,7 @@ async fn google_auto_sync(
             enabled,
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, "/google auto_sync", outcome).await
 }
@@ -109,6 +112,7 @@ async fn google_sync(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::google_sync(
             &mut conn,
@@ -117,6 +121,7 @@ async fn google_sync(
             &event,
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, &label, outcome).await
 }
@@ -138,8 +143,9 @@ async fn google_revoke(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id, actor.lang)
+        commands::google_revoke(&mut conn, actor.guild_id, actor.membership_id, actor.lang).await
     };
     deliver(ctx, &actor, "/google revoke", outcome).await
 }

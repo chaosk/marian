@@ -46,8 +46,10 @@ pub async fn open_event_channel(
     let guild_discord = {
         let mut conn = db
             .get()
+            .await
             .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
-        store::guild(&mut conn, guild_id)?
+        store::guild(&mut conn, guild_id)
+            .await?
             .and_then(|guild| guild.discord_id)
             .filter(|id| !id.is_empty())
             .ok_or_else(|| crate::error::OpError::from(crate::msg!("err-server-not-connected")))?
@@ -58,9 +60,12 @@ pub async fn open_event_channel(
     let (channel_id, slug) = {
         let mut conn = db
             .get()
+            .await
             .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
-        let id = logic::create_channel(&mut conn, guild_id, membership_id, name)?;
-        let channel = store::channel(&mut conn, id)?.ok_or(crate::error::OpError::NotFound)?;
+        let id = logic::create_channel(&mut conn, guild_id, membership_id, name).await?;
+        let channel = store::channel(&mut conn, id)
+            .await?
+            .ok_or(crate::error::OpError::NotFound)?;
         (id, channel.name)
     };
     let created = serenity::GuildId::new(guild_discord)
@@ -73,23 +78,25 @@ pub async fn open_event_channel(
         Ok(channel) => channel,
         Err(err) => {
             tracing::warn!("could not create the Discord channel: {err}");
-            if let Ok(mut conn) = db.get() {
-                let _ = logic::discard_channel(&mut conn, channel_id);
+            if let Ok(mut conn) = db.get().await {
+                let _ = logic::discard_channel(&mut conn, channel_id).await;
             }
             return Err(crate::error::OpError::from(channel_create_failure(&err)));
         }
     };
     let mut conn = db
         .get()
+        .await
         .map_err(|_| crate::error::OpError::from(crate::msg!("err-database")))?;
     match logic::bind_channel_discord(&mut conn, channel_id, &discord_channel.id.get().to_string())
+        .await
     {
-        Ok(notice) => Ok(notice.render(i18n::lang_of(&mut conn, guild_id))),
+        Ok(notice) => Ok(notice.render(i18n::lang_of(&mut conn, guild_id).await)),
         Err(err) => {
             if let Err(delete_err) = discord_channel.delete(http).await {
                 tracing::warn!("could not remove the Discord channel: {delete_err}");
             }
-            let _ = logic::discard_channel(&mut conn, channel_id);
+            let _ = logic::discard_channel(&mut conn, channel_id).await;
             Err(err)
         }
     }
@@ -121,8 +128,9 @@ pub(super) async fn sort(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        logic::channel_reverse_plan(&mut conn, actor.guild_id, &discord_channel)
+        logic::channel_reverse_plan(&mut conn, actor.guild_id, &discord_channel).await
     };
     let plan = match plan {
         Ok(plan) => plan,
@@ -149,8 +157,9 @@ pub(super) async fn sort(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        logic::detach_discord_posts(&mut conn, &plan.repost)?;
+        logic::detach_discord_posts(&mut conn, &plan.repost).await?;
     }
     for event_id in &plan.repost {
         post_event(

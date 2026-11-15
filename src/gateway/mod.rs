@@ -298,7 +298,7 @@ async fn handle_event(
             }
         }
         serenity::FullEvent::GuildCreate { guild, .. } => {
-            if let Err(err) = remember_guild(data, guild) {
+            if let Err(err) = remember_guild(data, guild).await {
                 tracing::warn!("could not store {}: {err}", guild.name);
             }
             // Without the presences intent, the guild comes with almost none of
@@ -330,18 +330,18 @@ async fn handle_event(
         }
         serenity::FullEvent::ChannelCreate { channel }
         | serenity::FullEvent::ChannelUpdate { new: channel, .. } => {
-            if let Err(err) = follow_channel(data, channel, false) {
+            if let Err(err) = follow_channel(data, channel, false).await {
                 tracing::warn!("could not follow #{}: {err}", channel.name);
             }
         }
         serenity::FullEvent::ChannelDelete { channel, .. } => {
-            if let Err(err) = follow_channel(data, channel, true) {
+            if let Err(err) = follow_channel(data, channel, true).await {
                 tracing::warn!("could not forget #{}: {err}", channel.name);
             }
         }
         serenity::FullEvent::GuildRoleCreate { new: role }
         | serenity::FullEvent::GuildRoleUpdate { new: role, .. } => {
-            if let Err(err) = follow_role(data, role) {
+            if let Err(err) = follow_role(data, role).await {
                 tracing::warn!("could not follow the {} role: {err}", role.name);
             }
         }
@@ -350,7 +350,7 @@ async fn handle_event(
             removed_role_id,
             ..
         } => {
-            if let Err(err) = role_deleted(data, *guild_id, *removed_role_id) {
+            if let Err(err) = role_deleted(data, *guild_id, *removed_role_id).await {
                 tracing::warn!("could not forget a deleted role: {err}");
             }
         }
@@ -362,22 +362,24 @@ async fn handle_event(
                 event.nick.as_deref(),
                 event.avatar.as_ref(),
                 &event.roles,
-            ) {
+            )
+            .await
+            {
                 tracing::warn!("could not follow a member's name and roles: {err}");
             }
         }
         serenity::FullEvent::GuildMembersChunk { chunk } => {
-            if let Err(err) = follow_names(data, chunk.guild_id, chunk.members.values()) {
+            if let Err(err) = follow_names(data, chunk.guild_id, chunk.members.values()).await {
                 tracing::warn!("could not follow members' names: {err}");
             }
         }
         serenity::FullEvent::GuildMemberAddition { new_member } => {
-            if let Err(err) = member_joined(data, new_member) {
+            if let Err(err) = member_joined(data, new_member).await {
                 tracing::warn!("could not open the server to a new member: {err}");
             }
         }
         serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
-            if let Err(err) = member_left(data, *guild_id, user) {
+            if let Err(err) = member_left(data, *guild_id, user).await {
                 tracing::warn!("could not close the server to a member who left: {err}");
             }
         }
@@ -388,33 +390,37 @@ async fn handle_event(
             let (replies, posts) = {
                 let public_url = data.public_url.clone();
                 let author = new_message.author.id.get().to_string();
-                let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+                let mut conn = data
+                    .db
+                    .get()
+                    .await
+                    .map_err(|_| "Could not reach the database.")?;
                 let replies = commands::answer_event_dm(
                     &mut conn,
                     &author,
                     &new_message.content,
                     &public_url,
-                )?;
-                let posts = commands::channel_posts_waiting(&mut conn, &author)?;
+                )
+                .await?;
+                let posts = commands::channel_posts_waiting(&mut conn, &author).await?;
                 (replies, posts)
             };
             for event_id in &posts {
-                tell_pages(&data.db, *event_id, false);
+                tell_pages(&data.db, *event_id, false).await;
                 if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, *event_id).await
                 {
                     tracing::warn!("could not post event {event_id} in the channel: {err}");
                 }
             }
-            let replies = replies.map(|mut replies| {
-                if let Some(event_id) = posts.first() {
-                    if let Ok(mut conn) = data.db.get() {
-                        if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id) {
-                            commands::link_created_event(&mut replies, &url);
-                        }
+            let mut replies = replies;
+            if let (Some(replies), Some(event_id)) = (replies.as_mut(), posts.first()) {
+                if let Ok(mut conn) = data.db.get().await {
+                    if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id).await
+                    {
+                        commands::link_created_event(replies, &url);
                     }
                 }
-                replies
-            });
+            }
             if let Some(replies) = replies {
                 for reply in replies {
                     new_message
@@ -464,7 +470,7 @@ async fn register_guild(ctx: &serenity::Context, data: &Data, guild_id: serenity
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
     match error {
         poise::FrameworkError::Command { ctx, error, .. } => {
-            let lang = command_lang(&ctx);
+            let lang = command_lang(&ctx).await;
             let text = crate::error::user_text(error.as_ref(), lang);
             tracing::warn!(command = %ctx.command().qualified_name, "command failed: {error}");
             if let Err(err) = ctx
@@ -488,15 +494,15 @@ async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
 }
 
 /// The language of the server a command was used in; English outside one.
-fn command_lang(ctx: &Context<'_>) -> Lang {
+async fn command_lang(ctx: &Context<'_>) -> Lang {
     let Some(guild_id) = ctx.guild_id() else {
         return Lang::En;
     };
-    let Ok(mut conn) = ctx.data().db.get() else {
+    let Ok(mut conn) = ctx.data().db.get().await else {
         return Lang::En;
     };
-    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()) {
-        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id),
+    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await {
+        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id).await,
         _ => Lang::En,
     }
 }

@@ -111,17 +111,22 @@ async fn run_response(
     );
     let data = ctx.data();
     let outcome = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
         let (target, renamed) = logic::ensure_discord_user(
             &mut conn,
             actor.guild_id,
             &user.id.get().to_string(),
             &name,
-        )?;
+        )
+        .await?;
         redraw(&data.jobs, renamed);
         if let (Some(guild), Some(member)) = (ctx.guild_id(), &member) {
             let avatar = server_avatar(guild, user, member.avatar.as_ref());
-            logic::follow_discord_avatar(&mut conn, &target, avatar.as_deref())?;
+            logic::follow_discord_avatar(&mut conn, &target, avatar.as_deref()).await?;
         }
         commands::roster_action(
             &mut conn,
@@ -133,10 +138,11 @@ async fn run_response(
             guests,
             actor.lang,
         )
+        .await
     };
     match outcome {
         Ok((reply, event_id)) => {
-            tell_pages(&data.db, event_id, true);
+            tell_pages(&data.db, event_id, true).await;
             if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
                 tracing::warn!("could not refresh event {event_id}: {err}");
             }

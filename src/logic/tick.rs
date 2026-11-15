@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::db::{log, must_guild, must_membership};
 use super::lifecycle::archive_tx;
@@ -28,8 +29,8 @@ struct NewThreadMessage<'a> {
 /// Brings everything up to `now`: moves the tasks for whatever changed, then
 /// runs every task due by `now` until none is left. The leader's worker does
 /// the same a few tasks at a time; tests use this.
-pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpError> {
-    super::schedule::catch_up(conn, now)
+pub async fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpError> {
+    super::schedule::catch_up(conn, now).await
 }
 
 pub(super) fn empty_report() -> TickReport {
@@ -42,13 +43,13 @@ pub(super) fn empty_report() -> TickReport {
 
 /// Posts a scheduled event whose time has come, or counts a failed try when
 /// its channel is gone.
-pub(super) fn post_one(
+pub(super) async fn post_one(
     conn: &mut Connection,
     event_id: i64,
     now: DateTime<Utc>,
 ) -> Result<TickReport, OpError> {
     let mut report = empty_report();
-    let Some(event) = store::event(conn, event_id)? else {
+    let Some(event) = store::event(conn, event_id).await? else {
         return Ok(report);
     };
     if event.status != EventStatus::Scheduled
@@ -57,13 +58,13 @@ pub(super) fn post_one(
     {
         return Ok(report);
     }
-    if store::channel(conn, event.channel_id)?.is_none() {
-        fail_post(conn, &event)?;
+    if store::channel(conn, event.channel_id).await?.is_none() {
+        fail_post(conn, &event).await?;
         report
             .notes
             .push(format!("Post failed for {}", event.title));
     } else {
-        mark_posted(conn, event.id, now)?;
+        mark_posted(conn, event.id, now).await?;
         report.jobs.push(DiscordJob::sync(event.id));
         report.jobs.push(DiscordJob::attend(event.id));
         report.notes.push(format!("Posted {}", event.title));
@@ -74,7 +75,7 @@ pub(super) fn post_one(
 
 /// Sends one reminder that is due, or notes that it came too late or had
 /// nobody to ping.
-pub(super) fn remind_one(
+pub(super) async fn remind_one(
     conn: &mut Connection,
     reminder_id: i64,
     now: DateTime<Utc>,
@@ -83,11 +84,12 @@ pub(super) fn remind_one(
     let Some(rem) = store::Reminder::query()
         .filter(schema::reminders::id.eq(reminder_id))
         .first(conn)
+        .await
         .optional()?
     else {
         return Ok(report);
     };
-    let Some(event) = store::event(conn, rem.event_id)? else {
+    let Some(event) = store::event(conn, rem.event_id).await? else {
         return Ok(report);
     };
     if rem.sent_at.is_some() || event.status != EventStatus::Posted {
@@ -101,18 +103,19 @@ pub(super) fn remind_one(
     report.guilds.push(guild_id);
     diesel::update(schema::reminders::table.filter(schema::reminders::id.eq(rem.id)))
         .set(schema::reminders::sent_at.eq(now))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     if now > start + Duration::minutes(30) {
         let note = format!("Missed the reminder window for {}.", event.title);
-        log(conn, guild_id, Some(event.id), &note)?;
+        log(conn, guild_id, Some(event.id), &note).await?;
         report.notes.push(note);
         return Ok(report);
     }
-    let options = store::options_for(conn, &event)?;
-    let signups = store::signups_for(conn, &event)?;
-    match reminder_text(conn, &options, &signups)? {
+    let options = store::options_for(conn, &event).await?;
+    let signups = store::signups_for(conn, &event).await?;
+    match reminder_text(conn, &options, &signups).await? {
         Some(text) => {
-            let settings = store::settings(conn, guild_id)?;
+            let settings = store::settings(conn, guild_id).await?;
             let place = if event.thread_enabled && settings.thread_reminders {
                 ReminderPlace::Thread
             } else {
@@ -134,13 +137,14 @@ pub(super) fn remind_one(
                     place,
                     created_at: now,
                 })
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             let note = format!(
                 "Reminder sent for {}: {} before.",
                 event.title,
                 clock::human_offset(rem.offset_minutes)
             );
-            log(conn, guild_id, Some(event.id), &note)?;
+            log(conn, guild_id, Some(event.id), &note).await?;
             report
                 .jobs
                 .push(DiscordJob::remind(event.id, text, rem.message.clone()));
@@ -152,7 +156,7 @@ pub(super) fn remind_one(
                 clock::human_offset(rem.offset_minutes),
                 event.title
             );
-            log(conn, guild_id, Some(event.id), &note)?;
+            log(conn, guild_id, Some(event.id), &note).await?;
             report.notes.push(note);
         }
     }
@@ -160,13 +164,13 @@ pub(super) fn remind_one(
 }
 
 /// Closes a posted event's signups once its cutoff passes.
-pub(super) fn close_one(
+pub(super) async fn close_one(
     conn: &mut Connection,
     event_id: i64,
     now: DateTime<Utc>,
 ) -> Result<TickReport, OpError> {
     let mut report = empty_report();
-    let Some(event) = store::event(conn, event_id)? else {
+    let Some(event) = store::event(conn, event_id).await? else {
         return Ok(report);
     };
     if event.status != EventStatus::Posted || event.signups_closed || !cutoff_passed(&event, now) {
@@ -177,9 +181,10 @@ pub(super) fn close_one(
             schema::events::signups_closed.eq(true),
             schema::events::updated_at.eq(now),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     let note = format!("Signups for {} are closed.", event.title);
-    log(conn, event.guild_id, Some(event.id), &note)?;
+    log(conn, event.guild_id, Some(event.id), &note).await?;
     report.notes.push(note);
     report.jobs.push(DiscordJob::sync(event.id));
     report.jobs.push(DiscordJob::attend(event.id));
@@ -198,22 +203,22 @@ pub(super) fn archive_at(event: &Event, settings: &store::Settings) -> Option<Da
 }
 
 /// Archives a posted event once it has ended and its server's wait has passed.
-pub(super) fn archive_one(
+pub(super) async fn archive_one(
     conn: &mut Connection,
     event_id: i64,
     now: DateTime<Utc>,
 ) -> Result<TickReport, OpError> {
     let mut report = empty_report();
-    let Some(event) = store::event(conn, event_id)? else {
+    let Some(event) = store::event(conn, event_id).await? else {
         return Ok(report);
     };
-    let settings = store::settings(conn, event.guild_id)?;
+    let settings = store::settings(conn, event.guild_id).await?;
     if event.status != EventStatus::Posted
         || archive_at(&event, &settings).is_none_or(|at| now < at)
     {
         return Ok(report);
     }
-    archive_tx(conn, &event)?;
+    archive_tx(conn, &event).await?;
     report.jobs.push(DiscordJob::sync(event.id));
     report.jobs.push(DiscordJob::attend(event.id));
     report.notes.push(format!("Archived {}", event.title));
@@ -222,20 +227,21 @@ pub(super) fn archive_one(
 }
 
 /// Adds the next dates of a server's active series.
-pub(super) fn fill_guild(
+pub(super) async fn fill_guild(
     conn: &mut Connection,
     guild_id: i64,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let guild = must_guild(conn, guild_id)?;
+    let guild = must_guild(conn, guild_id).await?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
-    let dates = grouped(store::events_in_active_series(conn, guild_id)?, |event| {
-        event.series_id.unwrap_or(0)
-    });
-    for series in store::list_series(conn, guild_id)? {
+    let dates = grouped(
+        store::events_in_active_series(conn, guild_id).await?,
+        |event| event.series_id.unwrap_or(0),
+    );
+    for series in store::list_series(conn, guild_id).await? {
         if series.active {
             let existing = dates.get(&series.id).map(Vec::as_slice).unwrap_or(&[]);
-            fill_series(conn, &series, existing, tz, now)?;
+            fill_series(conn, &series, existing, tz, now).await?;
         }
     }
     Ok(())
@@ -256,25 +262,25 @@ pub(super) fn digest_key(guild_id: i64, day: chrono::NaiveDate) -> String {
 }
 
 /// The day's digest, once a day from 9:00 in the server's zone.
-pub(super) fn digest_one(
+pub(super) async fn digest_one(
     conn: &mut Connection,
     guild_id: i64,
     now: DateTime<Utc>,
 ) -> Result<TickReport, OpError> {
     let mut report = empty_report();
-    let settings = store::settings(conn, guild_id)?;
-    let guild = must_guild(conn, guild_id)?;
+    let settings = store::settings(conn, guild_id).await?;
+    let guild = must_guild(conn, guild_id).await?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
     let local = now.with_timezone(&tz);
     if !digest_day(settings.digest, local.date_naive()) || local.time().hour() < 9 {
         return Ok(report);
     }
     let key = digest_key(guild_id, local.date_naive());
-    if store::meta(conn, &key)?.is_some() {
+    if store::meta(conn, &key).await?.is_some() {
         return Ok(report);
     }
     let mut names = Vec::new();
-    for event in &store::events_with_status(conn, guild_id, EventStatus::Posted)? {
+    for event in &store::events_with_status(conn, guild_id, EventStatus::Posted).await? {
         let start = event.starts_at;
         if start.with_timezone(&tz).date_naive() == local.date_naive() {
             names.push(format!(
@@ -289,14 +295,14 @@ pub(super) fn digest_one(
     } else {
         format!("Daily digest: {}.", names.join(", "))
     };
-    log(conn, guild_id, None, &note)?;
-    store::set_meta(conn, &key, "1")?;
+    log(conn, guild_id, None, &note).await?;
+    store::set_meta(conn, &key, "1").await?;
     report.notes.push(note);
     report.guilds.push(guild_id);
     Ok(report)
 }
 
-fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
+async fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
     let attempts = event.post_attempts + 1;
     let stamp = Utc::now();
     if attempts >= 3 {
@@ -306,7 +312,8 @@ fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
                 schema::events::post_attempts.eq(attempts),
                 schema::events::updated_at.eq(&stamp),
             ))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
         log(
             conn,
             event.guild_id,
@@ -315,20 +322,23 @@ fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
                 "Couldn't post {} after 3 tries. Post it from the event page.",
                 event.title
             ),
-        )?;
+        )
+        .await?;
     } else {
         diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
             .set((
                 schema::events::post_attempts.eq(attempts),
                 schema::events::updated_at.eq(&stamp),
             ))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
         log(
             conn,
             event.guild_id,
             Some(event.id),
             &format!("Posting {} failed. Marian will try again.", event.title),
-        )?;
+        )
+        .await?;
     }
     Ok(())
 }
@@ -341,7 +351,7 @@ fn grouped<T>(rows: Vec<T>, key: impl Fn(&T) -> i64) -> HashMap<i64, Vec<T>> {
     grouped
 }
 
-fn reminder_text(
+async fn reminder_text(
     conn: &mut Connection,
     options: &[store::SignupOption],
     signups: &[store::Signup],
@@ -360,11 +370,11 @@ fn reminder_text(
         {
             continue;
         }
-        let user = must_membership(conn, signup.membership_id)?;
+        let user = must_membership(conn, signup.membership_id).await?;
         if !user.reminders_enabled {
             continue;
         }
-        let discord_id = store::discord_id_for_membership(conn, user.id)?;
+        let discord_id = store::discord_id_for_membership(conn, user.id).await?;
         mentions.push(format!("<@{discord_id}>"));
     }
     if mentions.is_empty() {

@@ -4,14 +4,15 @@
 //! and listens on it, on a connection of its own.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, LazyLock, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use diesel::connection::{Connection as _, SimpleConnection};
+use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use marian_types as dto;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::Instant;
+use tokio_stream::StreamExt;
 
 use crate::store::Connection;
 
@@ -36,7 +37,7 @@ fn bus() -> &'static broadcast::Sender<News> {
 
 /// Where this replica's changes wait to be sent to the others, once the
 /// bridge runs.
-static OUTGOING: OnceLock<SyncSender<String>> = OnceLock::new();
+static OUTGOING: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 
 /// This process, so the bridge skips its own changes coming back.
 static PROCESS: LazyLock<uuid::Uuid> = LazyLock::new(uuid::Uuid::now_v7);
@@ -108,46 +109,42 @@ pub fn subscribe() -> broadcast::Receiver<News> {
     bus().subscribe()
 }
 
-/// Starts this replica's bridge to the others, on a thread of its own with a
-/// connection of its own: it sends this replica's changes, hands the others'
-/// to pages open here, wakes the Discord job worker when any replica saves
-/// a job, and wakes the task worker when a trigger marks a change. When the connection drops it connects again, and pages open here
-/// refetch everything, since changes made meanwhile never arrive.
+/// Starts this replica's bridge to the others, as a task with a connection
+/// of its own: it sends this replica's changes, hands the others' to pages
+/// open here, wakes the Discord job worker when any replica saves a job, and
+/// wakes the task worker when a trigger marks a change. When the connection
+/// drops it connects again, and pages open here refetch everything, since
+/// changes made meanwhile never arrive.
 pub fn bridge(url: String) {
-    let (outgoing, pending) = mpsc::sync_channel(1024);
+    let (outgoing, pending) = mpsc::channel(1024);
     if OUTGOING.set(outgoing).is_err() {
         return;
     }
-    let started = std::thread::Builder::new()
-        .name("live-bridge".into())
-        .spawn(move || {
-            relay(&url, CHANNEL, *PROCESS, &pending, &|news| {
-                let _ = bus().send(news);
-            })
-        });
-    if let Err(err) = started {
-        tracing::warn!("live updates stay on this replica: {err}");
-    }
+    tokio::spawn(async move {
+        relay(&url, CHANNEL, *PROCESS, pending, &|news| {
+            let _ = bus().send(news);
+        })
+        .await
+    });
 }
 
-/// How often the bridge sends what's waiting and reads what arrived, and how
-/// often it checks the connection still answers when nothing else happens.
-const POLL: Duration = Duration::from_millis(200);
+/// How often the bridge checks the connection still answers when nothing
+/// else happens on it.
 const CHECK: Duration = Duration::from_secs(10);
 
 /// Runs the bridge until shutdown, or until `pending`'s sender is gone.
-fn relay(
+async fn relay(
     url: &str,
     channel: &str,
     me: uuid::Uuid,
-    pending: &Receiver<String>,
-    deliver: &dyn Fn(News),
+    mut pending: mpsc::Receiver<String>,
+    deliver: &(dyn Fn(News) + Sync),
 ) {
     let mut unsent = VecDeque::new();
     let mut first = true;
     let mut failing = false;
     while !crate::shutdown::requested() {
-        match listen(url, channel) {
+        match listen(url, channel).await {
             Ok(mut conn) => {
                 if failing {
                     tracing::info!("live updates reach the other replicas again");
@@ -163,7 +160,7 @@ fn relay(
                     crate::jobs::wake();
                     crate::tasks::wake();
                 }
-                match pump(&mut conn, channel, me, pending, deliver, &mut unsent) {
+                match pump(&mut conn, channel, me, &mut pending, deliver, &mut unsent).await {
                     Ok(()) => return,
                     Err(err) => {
                         tracing::warn!("live updates lost the database, connecting again: {err}")
@@ -177,78 +174,90 @@ fn relay(
             Err(_) => {}
         }
         first = false;
-        std::thread::sleep(Duration::from_secs(2));
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = crate::shutdown::wait() => {}
+        }
     }
 }
 
-fn listen(url: &str, channel: &str) -> Result<Connection, diesel::result::Error> {
-    let mut conn = Connection::establish(url)
-        .map_err(|err| diesel::result::Error::QueryBuilderError(err.to_string().into()))?;
+async fn listen(url: &str, channel: &str) -> Result<Connection, String> {
+    let mut conn = crate::store::connect(url)
+        .await
+        .map_err(|err| err.to_string())?;
     conn.batch_execute(&format!(
         "LISTEN {channel}; LISTEN {}; LISTEN {}",
         crate::jobs::WAKE_CHANNEL,
         crate::tasks::WAKE_CHANNEL
-    ))?;
+    ))
+    .await
+    .map_err(|err| err.to_string())?;
     Ok(conn)
 }
 
 /// Moves changes both ways until the connection fails, shutdown begins (`Ok`)
 /// or `pending`'s sender is gone (`Ok`). What it couldn't send stays in
 /// `unsent` for the next connection.
-fn pump(
+async fn pump(
     conn: &mut Connection,
     channel: &str,
     me: uuid::Uuid,
-    pending: &Receiver<String>,
-    deliver: &dyn Fn(News),
+    pending: &mut mpsc::Receiver<String>,
+    deliver: &(dyn Fn(News) + Sync),
     unsent: &mut VecDeque<String>,
-) -> Result<(), diesel::result::Error> {
+) -> Result<(), String> {
     let mut checked = Instant::now();
     loop {
-        if crate::shutdown::requested() {
-            return Ok(());
-        }
-        match pending.recv_timeout(POLL) {
-            Ok(payload) => unsent.push_back(payload),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
-        }
-        unsent.extend(pending.try_iter());
         while let Some(payload) = unsent.front() {
-            notify(conn, channel, payload)?;
+            notify(conn, channel, payload)
+                .await
+                .map_err(|err| err.to_string())?;
             unsent.pop_front();
             checked = Instant::now();
         }
-        for note in conn.notifications_iter() {
-            let note = note?;
-            if note.channel == crate::jobs::WAKE_CHANNEL {
-                crate::jobs::wake();
-            } else if note.channel == crate::tasks::WAKE_CHANNEL {
-                crate::tasks::wake();
-            } else if let Some(news) = arrived(&note.payload, me) {
-                deliver(news);
+        // Each arm only starts a wait, so whichever loses loses nothing:
+        // what arrives meanwhile stays queued for the next turn.
+        tokio::select! {
+            _ = crate::shutdown::wait() => return Ok(()),
+            payload = pending.recv() => match payload {
+                Some(payload) => unsent.push_back(payload),
+                None => return Ok(()),
+            },
+            note = async { std::pin::pin!(conn.notifications_stream()).next().await } => match note {
+                Some(Ok(note)) => {
+                    if note.channel == crate::jobs::WAKE_CHANNEL {
+                        crate::jobs::wake();
+                    } else if note.channel == crate::tasks::WAKE_CHANNEL {
+                        crate::tasks::wake();
+                    } else if let Some(news) = arrived(&note.payload, me) {
+                        deliver(news);
+                    }
+                }
+                Some(Err(err)) => return Err(err.to_string()),
+                None => return Err("the connection closed".into()),
+            },
+            // A connection that died quietly shows up only when used.
+            _ = tokio::time::sleep_until(checked + CHECK) => {
+                conn.batch_execute("SELECT 1")
+                    .await
+                    .map_err(|err| err.to_string())?;
+                checked = Instant::now();
             }
-        }
-        // A connection that died quietly shows up only when used.
-        if checked.elapsed() >= CHECK {
-            conn.batch_execute("SELECT 1")?;
-            checked = Instant::now();
         }
     }
 }
 
-fn notify(
+async fn notify(
     conn: &mut Connection,
     channel: &str,
     payload: &str,
 ) -> Result<(), diesel::result::Error> {
-    diesel::RunQueryDsl::execute(
-        diesel::sql_query("SELECT pg_notify($1, $2)")
-            .bind::<diesel::sql_types::Text, _>(channel)
-            .bind::<diesel::sql_types::Text, _>(payload),
-        conn,
-    )
-    .map(drop)
+    diesel::sql_query("SELECT pg_notify($1, $2)")
+        .bind::<diesel::sql_types::Text, _>(channel)
+        .bind::<diesel::sql_types::Text, _>(payload)
+        .execute(conn)
+        .await
+        .map(drop)
 }
 
 /// Another replica's change, for pages open here; `None` for this replica's
@@ -296,25 +305,26 @@ mod tests {
         assert_eq!(fallback, dto::Change::Server);
     }
 
-    #[test]
-    fn a_change_on_one_replica_reaches_pages_on_another() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_change_on_one_replica_reaches_pages_on_another() {
         let url = crate::store::database_url().unwrap();
         // A channel of its own, so test runs and a local Marian don't meet.
         let channel = format!("marian_live_t{}", uuid::Uuid::now_v7().simple());
         let replica = |me: uuid::Uuid| {
-            let (outgoing, pending) = mpsc::sync_channel::<String>(16);
-            let (seen, news) = mpsc::channel::<News>();
+            let (outgoing, pending) = mpsc::channel::<String>(16);
+            let (seen, news) = mpsc::unbounded_channel::<News>();
             let (url, channel) = (url.clone(), channel.clone());
-            let thread = std::thread::spawn(move || {
-                relay(&url, &channel, me, &pending, &move |news| {
+            let task = tokio::spawn(async move {
+                relay(&url, &channel, me, pending, &move |news| {
                     let _ = seen.send(news);
                 })
+                .await
             });
-            (outgoing, news, thread)
+            (outgoing, news, task)
         };
         let (a, b) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
-        let (a_out, a_news, a_thread) = replica(a);
-        let (b_out, b_news, b_thread) = replica(b);
+        let (a_out, mut a_news, a_task) = replica(a);
+        let (b_out, mut b_news, b_task) = replica(b);
         let event = uuid::Uuid::now_v7();
         let wire = |from| {
             serde_json::to_string(&Wire {
@@ -329,8 +339,10 @@ mod tests {
         // Both listen once a change sent after the start comes through.
         let mut arrived = None;
         for _ in 0..50 {
-            a_out.send(wire(a)).unwrap();
-            if let Ok(news) = b_news.recv_timeout(Duration::from_millis(200)) {
+            a_out.send(wire(a)).await.unwrap();
+            if let Ok(Some(news)) =
+                tokio::time::timeout(Duration::from_millis(200), b_news.recv()).await
+            {
                 arrived = Some(news);
                 break;
             }
@@ -346,12 +358,12 @@ mod tests {
         );
         assert!(news.concerns(9) && !news.concerns(10));
         // A doesn't hear its own change come back.
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(a_news.try_recv().is_err(), "A skips its own");
 
         drop((a_out, b_out));
-        a_thread.join().unwrap();
-        b_thread.join().unwrap();
+        a_task.await.unwrap();
+        b_task.await.unwrap();
     }
 
     #[test]

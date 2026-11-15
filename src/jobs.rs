@@ -2,8 +2,9 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
+use diesel_async::SimpleAsyncConnection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
@@ -147,7 +148,7 @@ pub async fn woken() {
 
 /// Saves jobs to be done. Call it in the transaction of the change that needs
 /// them, so they are kept exactly when the change is.
-pub fn save(conn: &mut Connection, jobs: &[DiscordJob]) -> Result<(), OpError> {
+pub async fn save(conn: &mut Connection, jobs: &[DiscordJob]) -> Result<(), OpError> {
     if jobs.is_empty() {
         return Ok(());
     }
@@ -164,9 +165,11 @@ pub fn save(conn: &mut Connection, jobs: &[DiscordJob]) -> Result<(), OpError> {
         .collect();
     diesel::insert_into(discord_jobs::table)
         .values(&rows)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     // Wakes the worker, on whichever replica leads, once this commits.
-    conn.batch_execute(&format!("NOTIFY {WAKE_CHANNEL}"))?;
+    conn.batch_execute(&format!("NOTIFY {WAKE_CHANNEL}"))
+        .await?;
     Ok(())
 }
 
@@ -183,7 +186,7 @@ pub const RUN_LIMIT: Duration = Duration::from_secs(120);
 /// takes it until the lease is up, by the database's clock. Two workers
 /// taking at once get different jobs. A row this build can't read (from a
 /// newer one) is deleted rather than left blocking the queue.
-pub fn claim(
+pub async fn claim(
     conn: &mut Connection,
     now: DateTime<Utc>,
     lease: Duration,
@@ -206,6 +209,7 @@ pub fn claim(
         .bind::<diesel::sql_types::Timestamptz, _>(now)
         .bind::<diesel::sql_types::Double, _>(lease.as_secs_f64())
         .get_result(conn)
+        .await
         .optional()?;
         let Some(Claimed { id, job: value }) = row else {
             return Ok(None);
@@ -214,24 +218,25 @@ pub fn claim(
             Ok(job) => return Ok(Some((id, job))),
             Err(err) => {
                 tracing::error!("dropping Discord job {id} this build can't read: {err}");
-                done(conn, id)?;
+                done(conn, id).await?;
             }
         }
     }
 }
 
 /// When the next job not yet due, or not yet free, is, if there is one.
-pub fn next_run_at(conn: &mut Connection) -> Result<Option<DateTime<Utc>>, OpError> {
+pub async fn next_run_at(conn: &mut Connection) -> Result<Option<DateTime<Utc>>, OpError> {
     Ok(discord_jobs::table
         // A job another worker has is next due when its lease is up.
         .select(diesel::dsl::sql::<
             diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>,
         >("min(GREATEST(run_at, locked_until))"))
-        .first(conn)?)
+        .first(conn)
+        .await?)
 }
 
 /// Jobs due at `now` that no worker has, and jobs waiting out a pause after failing.
-pub fn counts(conn: &mut Connection, now: DateTime<Utc>) -> Result<(i64, i64), OpError> {
+pub async fn counts(conn: &mut Connection, now: DateTime<Utc>) -> Result<(i64, i64), OpError> {
     let due = discord_jobs::table
         .filter(discord_jobs::run_at.le(now))
         .filter(
@@ -240,23 +245,27 @@ pub fn counts(conn: &mut Connection, now: DateTime<Utc>) -> Result<(i64, i64), O
                 .or(discord_jobs::locked_until.lt(now)),
         )
         .count()
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     let later = discord_jobs::table
         .filter(discord_jobs::run_at.gt(now))
         .count()
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     Ok((due, later))
 }
 
 /// The job succeeded, or is out of tries.
-pub fn done(conn: &mut Connection, id: i64) -> Result<(), OpError> {
-    diesel::delete(discord_jobs::table.filter(discord_jobs::id.eq(id))).execute(conn)?;
+pub async fn done(conn: &mut Connection, id: i64) -> Result<(), OpError> {
+    diesel::delete(discord_jobs::table.filter(discord_jobs::id.eq(id)))
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// The job failed: it's tried again as `job` (its tries counted) at `run_at`,
 /// by whichever worker takes it then.
-pub fn retry(
+pub async fn retry(
     conn: &mut Connection,
     id: i64,
     job: &DiscordJob,
@@ -268,7 +277,8 @@ pub fn retry(
             discord_jobs::run_at.eq(run_at),
             discord_jobs::locked_until.eq(None::<DateTime<Utc>>),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -310,55 +320,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn saved_jobs_come_back_in_order_and_wait_out_their_retries() {
+    #[tokio::test]
+    async fn saved_jobs_come_back_in_order_and_wait_out_their_retries() {
         use chrono::SubsecRound;
-        let mut conn = crate::store::open_memory().unwrap();
-        assert_eq!(claim(&mut conn, Utc::now(), LEASE).unwrap(), None);
-        save(&mut conn, &[DiscordJob::sync(1), DiscordJob::attend(1)]).unwrap();
+        let mut conn = crate::store::open_memory().await.unwrap();
+        assert_eq!(claim(&mut conn, Utc::now(), LEASE).await.unwrap(), None);
+        save(&mut conn, &[DiscordJob::sync(1), DiscordJob::attend(1)])
+            .await
+            .unwrap();
         let now = Utc::now();
-        let (first, job) = claim(&mut conn, now, LEASE).unwrap().unwrap();
+        let (first, job) = claim(&mut conn, now, LEASE).await.unwrap().unwrap();
         assert_eq!(job, DiscordJob::sync(1));
         let later = now + chrono::Duration::seconds(30);
-        retry(&mut conn, first, &job.clone().bump().unwrap(), later).unwrap();
-        let (second, job) = claim(&mut conn, now, LEASE).unwrap().unwrap();
+        retry(&mut conn, first, &job.clone().bump().unwrap(), later)
+            .await
+            .unwrap();
+        let (second, job) = claim(&mut conn, now, LEASE).await.unwrap().unwrap();
         assert_eq!(job, DiscordJob::attend(1));
-        done(&mut conn, second).unwrap();
-        assert_eq!(claim(&mut conn, now, LEASE).unwrap(), None);
-        assert_eq!(counts(&mut conn, now).unwrap(), (0, 1));
+        done(&mut conn, second).await.unwrap();
+        assert_eq!(claim(&mut conn, now, LEASE).await.unwrap(), None);
+        assert_eq!(counts(&mut conn, now).await.unwrap(), (0, 1));
         assert_eq!(
-            next_run_at(&mut conn).unwrap(),
+            next_run_at(&mut conn).await.unwrap(),
             Some(later).map(|at| at.trunc_subsecs(6))
         );
-        let (id, job) = claim(&mut conn, later, LEASE).unwrap().unwrap();
+        let (id, job) = claim(&mut conn, later, LEASE).await.unwrap().unwrap();
         assert_eq!((id, job.tries()), (first, 1));
     }
 
-    #[test]
-    fn two_workers_taking_at_once_never_get_the_same_job() {
-        let mut conn = crate::store::open_memory().unwrap();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_workers_taking_at_once_never_get_the_same_job() {
+        let mut conn = crate::store::open_memory().await.unwrap();
         let jobs: Vec<_> = (1..=40).map(DiscordJob::sync).collect();
-        save(&mut conn, &jobs).unwrap();
-        let db = crate::store::pool_for(&mut conn).unwrap();
+        save(&mut conn, &jobs).await.unwrap();
+        let db = crate::store::pool_for(&mut conn).await.unwrap();
         let now = Utc::now();
         let workers: Vec<_> = (0..2)
             .map(|_| {
                 let db = db.clone();
-                std::thread::spawn(move || {
-                    let mut conn = db.get().unwrap();
+                tokio::spawn(async move {
+                    let mut conn = db.get().await.unwrap();
                     let mut mine = Vec::new();
                     // Nothing is done or retried, so each job can be taken once.
-                    while let Some((id, _)) = claim(&mut conn, now, LEASE).unwrap() {
+                    while let Some((id, _)) = claim(&mut conn, now, LEASE).await.unwrap() {
                         mine.push(id);
                     }
                     mine
                 })
             })
             .collect();
-        let taken: Vec<Vec<i64>> = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect();
+        let mut taken: Vec<Vec<i64>> = Vec::new();
+        for worker in workers {
+            taken.push(worker.await.unwrap());
+        }
         let mut all: Vec<i64> = taken.concat();
         all.sort_unstable();
         all.dedup();
@@ -366,22 +380,23 @@ mod tests {
         assert_eq!(taken[0].len() + taken[1].len(), 40);
     }
 
-    #[test]
-    fn a_job_whose_lease_ran_out_is_taken_again() {
-        let mut conn = crate::store::open_memory().unwrap();
-        save(&mut conn, &[DiscordJob::sync(1)]).unwrap();
+    #[tokio::test]
+    async fn a_job_whose_lease_ran_out_is_taken_again() {
+        let mut conn = crate::store::open_memory().await.unwrap();
+        save(&mut conn, &[DiscordJob::sync(1)]).await.unwrap();
         let now = Utc::now();
-        let (id, _) = claim(&mut conn, now, LEASE).unwrap().unwrap();
+        let (id, _) = claim(&mut conn, now, LEASE).await.unwrap().unwrap();
         // Leased: nobody else gets it, and it doesn't count as waiting.
-        assert_eq!(claim(&mut conn, now, LEASE).unwrap(), None);
-        assert_eq!(counts(&mut conn, now).unwrap(), (0, 0));
+        assert_eq!(claim(&mut conn, now, LEASE).await.unwrap(), None);
+        assert_eq!(counts(&mut conn, now).await.unwrap(), (0, 0));
         // The worker that took it went away and its lease ran out.
         diesel::update(discord_jobs::table.filter(discord_jobs::id.eq(id)))
             .set(discord_jobs::locked_until.eq(Some(now - chrono::Duration::seconds(1))))
             .execute(&mut conn)
+            .await
             .unwrap();
         assert_eq!(
-            claim(&mut conn, Utc::now(), LEASE).unwrap(),
+            claim(&mut conn, Utc::now(), LEASE).await.unwrap(),
             Some((id, DiscordJob::sync(1)))
         );
     }

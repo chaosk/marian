@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use diesel::connection::{Connection as _, SimpleConnection};
+use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use opentelemetry::metrics::Gauge;
 use tokio::sync::watch;
 
@@ -116,9 +116,12 @@ where
                     let _ = duty.await;
                 }
                 status.set(false);
-                // Closing the lock connection lets the lock go.
-                if let Some(lock) = kept {
-                    let _ = tokio::task::spawn_blocking(move || drop(lock)).await;
+                // Letting go of the lock connection closes it, and the lock
+                // goes with it; unlocking first doesn't wait on Postgres
+                // noticing the connection closed.
+                if let Some(mut lock) = kept {
+                    let unlock = format!("SELECT pg_advisory_unlock({key})");
+                    let _ = tokio::time::timeout(CHECK_TIMEOUT, lock.batch_execute(&unlock)).await;
                 }
                 tracing::info!("This replica no longer leads.");
                 // Whatever cut the lock off may still trouble this replica:
@@ -149,23 +152,22 @@ where
 
 /// The lock connection, if the lock was free.
 async fn acquire(url: &str, key: i64) -> Result<Option<Connection>, String> {
-    let url = url.to_string();
-    let attempt = tokio::task::spawn_blocking(move || -> Result<Option<Connection>, String> {
-        let mut conn = Connection::establish(&url).map_err(|err| err.to_string())?;
-        let got: bool = diesel::RunQueryDsl::get_result(
-            diesel::select(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                "pg_try_advisory_lock({key})"
-            ))),
-            &mut conn,
-        )
+    let attempt = async {
+        let mut conn = crate::store::connect(url)
+            .await
+            .map_err(|err| err.to_string())?;
+        let got: bool = diesel::select(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
+            "pg_try_advisory_lock({key})"
+        )))
+        .get_result(&mut conn)
+        .await
         .map_err(|err| err.to_string())?;
         Ok(got.then_some(conn))
-    });
+    };
     // A connection that turns up after this gives up is dropped with the
-    // task's result, and the lock with it.
+    // attempt, and the lock with it.
     match tokio::time::timeout(CONNECT_TIMEOUT, attempt).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(err)) => Err(err.to_string()),
+        Ok(result) => result,
         Err(_) => Err("the database didn't answer in time".into()),
     }
 }
@@ -186,13 +188,9 @@ async fn hold(mut lock: Connection, duty: &mut tokio::task::JoinHandle<()>) -> O
                 return None;
             }
         }
-        let check = tokio::task::spawn_blocking(move || {
-            let alive = lock.batch_execute("SELECT 1").is_ok();
-            (lock, alive)
-        });
-        match tokio::time::timeout(CHECK_TIMEOUT, check).await {
-            Ok(Ok((back, true))) => lock = back,
-            Ok(Ok((_, false))) | Ok(Err(_)) | Err(_) => return None,
+        match tokio::time::timeout(CHECK_TIMEOUT, lock.batch_execute("SELECT 1")).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => return None,
         }
     }
 }
@@ -220,8 +218,9 @@ mod tests {
         (status, task)
     }
 
-    fn lock_holder(admin: &mut Connection, key: i64) -> Option<i32> {
+    async fn lock_holder(admin: &mut Connection, key: i64) -> Option<i32> {
         use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
         #[derive(QueryableByName)]
         struct Holder {
             #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -232,6 +231,7 @@ mod tests {
              AND ((classid::bigint << 32) | objid::bigint) = {key}"
         ))
         .get_result::<Holder>(admin)
+        .await
         .optional()
         .unwrap()
         .map(|holder| holder.pid)
@@ -268,18 +268,19 @@ mod tests {
 
         // The leader's lock connection is cut, as a database restart or a
         // network fault would.
-        let mut admin = Connection::establish(&url).unwrap();
-        let pid = lock_holder(&mut admin, key).expect("the leader holds the lock");
-        diesel::RunQueryDsl::execute(
-            diesel::sql_query(format!("SELECT pg_terminate_backend({pid})")),
-            &mut admin,
-        )
-        .unwrap();
+        let mut admin = crate::store::connect(&url).await.unwrap();
+        let pid = lock_holder(&mut admin, key)
+            .await
+            .expect("the leader holds the lock");
+        diesel::sql_query(format!("SELECT pg_terminate_backend({pid})"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
         until("the leader steps down", || !leader.leading()).await;
         until("the other takes over", || follower.leading()).await;
         assert!(!leader.leading());
         assert_eq!(leaders.load(Ordering::SeqCst), 1);
-        assert_ne!(lock_holder(&mut admin, key), Some(pid));
+        assert_ne!(lock_holder(&mut admin, key).await, Some(pid));
 
         first_task.abort();
         second_task.abort();

@@ -10,6 +10,7 @@ use super::template::{self, Spawn};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use uuid::Uuid;
 
 use crate::clock;
@@ -158,7 +159,7 @@ struct NewRun<'a> {
     clippy::too_many_arguments,
     reason = "every field of a new routine, as the web form and /routine send them"
 )]
-pub fn create_routine(
+pub async fn create_routine(
     conn: &mut Connection,
     guild_id: i64,
     actor_id: i64,
@@ -184,26 +185,29 @@ pub fn create_routine(
     check_clock(poll_weekday, poll_minutes)?;
     check_clock(lock_weekday, lock_minutes)?;
     check_clock(0, start_minutes)?;
-    store::with_tx(conn, |tx| {
-        let actor = must_membership(tx, actor_id)?;
+    store::with_tx(conn, async |tx| {
+        let actor = must_membership(tx, actor_id).await?;
         if actor.guild_id != guild_id {
             return Err(OpError::from(crate::msg!("err-person-elsewhere")));
         }
-        let settings = store::settings(tx, guild_id)?;
-        let roles = store::membership_role_ids(tx, &actor)?;
+        let settings = store::settings(tx, guild_id).await?;
+        let roles = store::membership_role_ids(tx, &actor).await?;
         if !can_create(&actor, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-create-events")));
         }
-        let channel = store::channel(tx, channel_id)?.ok_or(OpError::NotFound)?;
+        let channel = store::channel(tx, channel_id)
+            .await?
+            .ok_or(OpError::NotFound)?;
         if channel.guild_id != guild_id {
             return Err(OpError::NotFound);
         }
         let stamp = now;
         let public_id = crate::ids::routine_id();
         let extras = match extras {
-            Some(extras) => clean_extras(tx, guild_id, &extras)?,
+            Some(extras) => clean_extras(tx, guild_id, &extras).await?,
             None => {
-                let (options, multiple_signups) = super::library::starting_options(tx, guild_id)?;
+                let (options, multiple_signups) =
+                    super::library::starting_options(tx, guild_id).await?;
                 EventExtras {
                     color: "#1e3a6e".into(),
                     thread_enabled: settings.event_threads,
@@ -214,7 +218,8 @@ pub fn create_routine(
                 }
             }
         };
-        let picked_by = attendee_role_picker(tx, &actor, extras.attendee_role_id, None, None)?;
+        let picked_by =
+            attendee_role_picker(tx, &actor, extras.attendee_role_id, None, None).await?;
         let template_id = template::insert(
             tx,
             &with_extras(
@@ -225,8 +230,9 @@ pub fn create_routine(
                 duration_minutes,
                 extras,
             ),
-        )?;
-        template::set_role_by(tx, template_id, picked_by)?;
+        )
+        .await?;
+        template::set_role_by(tx, template_id, picked_by).await?;
         let prompt = format!("Next event: {title}");
         let id = diesel::insert_into(schema::routines::table)
             .values(&NewRoutine {
@@ -245,15 +251,17 @@ pub fn create_routine(
                 public_id,
             })
             .returning(schema::routines::id)
-            .get_result(tx)?;
-        store_steps(tx, id, &default_steps())?;
-        log(tx, guild_id, None, &format!("Saved the {title} routine."))?;
-        let jobs = progress_one(tx, id, now)?;
+            .get_result(tx)
+            .await?;
+        store_steps(tx, id, &default_steps()).await?;
+        log(tx, guild_id, None, &format!("Saved the {title} routine.")).await?;
+        let jobs = progress_one(tx, id, now).await?;
         Ok((id, public_id.to_string(), jobs))
     })
+    .await
 }
 
-pub fn routine_in_guild(
+pub async fn routine_in_guild(
     conn: &mut Connection,
     guild_id: i64,
     public_id: &str,
@@ -266,6 +274,7 @@ pub fn routine_in_guild(
         .filter(schema::routines::public_id.eq(public_id))
         .select(schema::routines::id)
         .first(conn)
+        .await
         .optional()?
         .ok_or(OpError::NotFound)
 }
@@ -274,7 +283,7 @@ pub fn routine_in_guild(
     clippy::too_many_arguments,
     reason = "every field of a routine, as the web form sends them"
 )]
-pub fn save_routine(
+pub async fn save_routine(
     conn: &mut Connection,
     routine_id: i64,
     actor_id: i64,
@@ -300,23 +309,28 @@ pub fn save_routine(
     check_clock(poll_weekday, poll_minutes)?;
     check_clock(lock_weekday, lock_minutes)?;
     check_clock(0, start_minutes)?;
-    store::with_tx(conn, |tx| {
-        let routine = must_routine(tx, routine_id)?;
-        require_owner(tx, &routine, actor_id)?;
-        let channel = store::channel(tx, channel_id)?.ok_or(OpError::NotFound)?;
+    store::with_tx(conn, async |tx| {
+        let routine = must_routine(tx, routine_id).await?;
+        require_owner(tx, &routine, actor_id).await?;
+        let channel = store::channel(tx, channel_id)
+            .await?
+            .ok_or(OpError::NotFound)?;
         if channel.guild_id != routine.guild_id {
             return Err(OpError::NotFound);
         }
         let previous_channel = routine.channel_id;
         match extras {
             Some(extras) => {
-                let extras = clean_extras(tx, routine.guild_id, &extras)?;
-                let actor = must_membership(tx, actor_id)?;
-                let current = template::load(tx, routine.template_id)?.attendee_role_id;
-                let current_by = template::role_by(tx, routine.template_id)?;
+                let extras = clean_extras(tx, routine.guild_id, &extras).await?;
+                let actor = must_membership(tx, actor_id).await?;
+                let current = template::load(tx, routine.template_id)
+                    .await?
+                    .attendee_role_id;
+                let current_by = template::role_by(tx, routine.template_id).await?;
                 let picked_by =
-                    attendee_role_picker(tx, &actor, extras.attendee_role_id, current, current_by)?;
-                template::set_role_by(tx, routine.template_id, picked_by)?;
+                    attendee_role_picker(tx, &actor, extras.attendee_role_id, current, current_by)
+                        .await?;
+                template::set_role_by(tx, routine.template_id, picked_by).await?;
                 template::update(
                     tx,
                     routine.template_id,
@@ -328,16 +342,20 @@ pub fn save_routine(
                         duration_minutes,
                         extras,
                     ),
-                )?;
+                )
+                .await?;
             }
-            None => template::update_wording(
-                tx,
-                routine.template_id,
-                channel_id,
-                &title,
-                &description,
-                duration_minutes,
-            )?,
+            None => {
+                template::update_wording(
+                    tx,
+                    routine.template_id,
+                    channel_id,
+                    &title,
+                    &description,
+                    duration_minutes,
+                )
+                .await?
+            }
         }
         diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
             .set((
@@ -349,95 +367,109 @@ pub fn save_routine(
                 schema::routines::lock_minutes.eq(i64::from(lock_minutes)),
                 schema::routines::days_json.eq(days_json(&days)),
             ))
-            .execute(tx)?;
-        let routine = must_routine(tx, routine.id)?;
-        let jobs = align_schedule(tx, &routine, previous_channel, now)?;
+            .execute(tx)
+            .await?;
+        let routine = must_routine(tx, routine.id).await?;
+        let jobs = align_schedule(tx, &routine, previous_channel, now).await?;
         log(
             tx,
             routine.guild_id,
             None,
             &format!("Saved the {} routine.", routine.title),
-        )?;
+        )
+        .await?;
         Ok(RoutineEffect { jobs })
     })
+    .await
 }
 
 /// Checks steps for a routine of `guild_id` before anything is saved.
-pub fn check_steps(conn: &mut Connection, guild_id: i64, steps: &[Step]) -> Result<(), OpError> {
-    clean_steps(conn, guild_id, steps).map(|_| ())
+pub async fn check_steps(
+    conn: &mut Connection,
+    guild_id: i64,
+    steps: &[Step],
+) -> Result<(), OpError> {
+    clean_steps(conn, guild_id, steps).await.map(|_| ())
 }
 
 /// Replaces a routine's steps. A request already waiting keeps going.
-pub fn save_steps(
+pub async fn save_steps(
     conn: &mut Connection,
     routine_id: i64,
     actor_id: i64,
     steps: &[Step],
 ) -> Result<RoutineEffect, OpError> {
-    store::with_tx(conn, |tx| {
-        let routine = must_routine(tx, routine_id)?;
-        require_owner(tx, &routine, actor_id)?;
-        let steps = clean_steps(tx, routine.guild_id, steps)?;
-        if load_steps(tx, routine.id)? == steps {
+    store::with_tx(conn, async |tx| {
+        let routine = must_routine(tx, routine_id).await?;
+        require_owner(tx, &routine, actor_id).await?;
+        let steps = clean_steps(tx, routine.guild_id, steps).await?;
+        if load_steps(tx, routine.id).await? == steps {
             return Ok(RoutineEffect { jobs: Vec::new() });
         }
-        store_steps(tx, routine.id, &steps)?;
+        store_steps(tx, routine.id, &steps).await?;
         log(
             tx,
             routine.guild_id,
             None,
             &format!("Changed the steps of the {} routine.", routine.title),
-        )?;
+        )
+        .await?;
         Ok(RoutineEffect { jobs: Vec::new() })
     })
+    .await
 }
 
-pub fn save_usual_days(
+pub async fn save_usual_days(
     conn: &mut Connection,
     routine_id: i64,
     actor_id: i64,
     days: &[u8],
 ) -> Result<String, OpError> {
     let days = clean_days(days)?;
-    store::with_tx(conn, |tx| {
-        let routine = must_routine(tx, routine_id)?;
-        require_owner(tx, &routine, actor_id)?;
+    store::with_tx(conn, async |tx| {
+        let routine = must_routine(tx, routine_id).await?;
+        require_owner(tx, &routine, actor_id).await?;
         diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
             .set(schema::routines::days_json.eq(days_json(&days)))
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         Ok("Later weeks will offer these days.".into())
     })
+    .await
 }
 
-pub fn save_run_days(
+pub async fn save_run_days(
     conn: &mut Connection,
     routine_id: i64,
     actor_id: i64,
     days: &[u8],
 ) -> Result<RoutineEffect, OpError> {
     let days = clean_days(days)?;
-    store::with_tx(conn, |tx| {
-        let routine = must_routine(tx, routine_id)?;
-        require_owner(tx, &routine, actor_id)?;
-        let Some(run) = editable_run(tx, routine.id)? else {
+    store::with_tx(conn, async |tx| {
+        let routine = must_routine(tx, routine_id).await?;
+        require_owner(tx, &routine, actor_id).await?;
+        let Some(run) = editable_run(tx, routine.id).await? else {
             return Err(OpError::from(crate::msg!("err-no-poll-yet")));
         };
         diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
             .set(schema::routine_runs::days_json.eq(days_json(&days)))
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         let allowed: Vec<String> = days.iter().map(|day| day.to_string()).collect();
         if allowed.is_empty() {
             diesel::delete(
                 schema::routine_votes::table.filter(schema::routine_votes::run_id.eq(run.id)),
             )
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         } else {
             diesel::delete(
                 schema::routine_votes::table
                     .filter(schema::routine_votes::run_id.eq(run.id))
                     .filter(schema::routine_votes::choice.ne_all(allowed)),
             )
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         }
         let jobs = if run.status == RunStatus::Open {
             vec![DiscordJob::routine(run.id)]
@@ -446,24 +478,25 @@ pub fn save_run_days(
         };
         Ok(RoutineEffect { jobs })
     })
+    .await
 }
 
-pub fn cast_run(
+pub async fn cast_run(
     conn: &mut Connection,
     run_id: i64,
     membership_id: i64,
     day: u8,
 ) -> Result<RoutineEffect, OpError> {
-    store::with_tx(conn, |tx| {
-        let run = must_run(tx, run_id)?;
+    store::with_tx(conn, async |tx| {
+        let run = must_run(tx, run_id).await?;
         if run.status != RunStatus::Open {
             return Err(OpError::from(crate::msg!("err-poll-closed")));
         }
         if !run.days.contains(&day) {
             return Err(OpError::from(crate::msg!("err-poll-day-missing")));
         }
-        let user = must_membership(tx, membership_id)?;
-        let routine = must_routine(tx, run.routine_id)?;
+        let user = must_membership(tx, membership_id).await?;
+        let routine = must_routine(tx, run.routine_id).await?;
         if user.guild_id != routine.guild_id {
             return Err(OpError::from(crate::msg!("err-person-elsewhere")));
         }
@@ -474,15 +507,18 @@ pub fn cast_run(
             .filter(schema::routine_votes::choice.eq(&choice))
             .select(schema::routine_votes::id)
             .first(tx)
+            .await
             .optional()?;
         // Taking a vote back is always allowed; casting one asks for the roles
         // the routine's events ask of signups.
         if existing.is_none() && !user.server_manager {
-            let restricts = template::load(tx, routine.template_id)?.restrict_role_ids;
+            let restricts = template::load(tx, routine.template_id)
+                .await?
+                .restrict_role_ids;
             if !restricts.is_empty() {
-                let roles = store::membership_role_ids(tx, &user)?;
+                let roles = store::membership_role_ids(tx, &user).await?;
                 if !restricts.iter().any(|role| roles.contains(role)) {
-                    let names = role_names(tx, &restricts)?;
+                    let names = role_names(tx, &restricts).await?;
                     return Err(OpError::from(crate::msg!(
                         "err-poll-limited",
                         roles = crate::i18n::each(|lang| crate::i18n::list_or(lang, &names)),
@@ -497,7 +533,8 @@ pub fn cast_run(
                     .filter(schema::routine_votes::membership_id.eq(membership_id))
                     .filter(schema::routine_votes::choice.eq(&choice)),
             )
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         } else {
             diesel::insert_into(schema::routine_votes::table)
                 .values(&NewVote {
@@ -506,78 +543,86 @@ pub fn cast_run(
                     membership_id,
                     created_at: Utc::now(),
                 })
-                .execute(tx)?;
+                .execute(tx)
+                .await?;
         }
         Ok(RoutineEffect {
             jobs: vec![DiscordJob::routine(run.id)],
         })
     })
+    .await
 }
 
-pub fn stop_routine(
+pub async fn stop_routine(
     conn: &mut Connection,
     routine_id: i64,
     actor_id: i64,
 ) -> Result<String, OpError> {
-    store::with_tx(conn, |tx| {
-        let routine = must_routine(tx, routine_id)?;
-        require_owner(tx, &routine, actor_id)?;
+    store::with_tx(conn, async |tx| {
+        let routine = must_routine(tx, routine_id).await?;
+        require_owner(tx, &routine, actor_id).await?;
         diesel::update(schema::routines::table.filter(schema::routines::id.eq(routine.id)))
             .set(schema::routines::active.eq(false))
-            .execute(tx)?;
+            .execute(tx)
+            .await?;
         diesel::delete(
             schema::routine_runs::table
                 .filter(schema::routine_runs::routine_id.eq(routine.id))
                 .filter(schema::routine_runs::status.eq(RunStatus::Scheduled)),
         )
-        .execute(tx)?;
+        .execute(tx)
+        .await?;
         Ok(format!(
             "Stopped {}. An open poll still locks on schedule.",
             routine.title
         ))
     })
+    .await
 }
 
-pub fn maintain(
+pub async fn maintain(
     conn: &mut Connection,
     guild_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    let routines = routines_for_guild(conn, guild_id)?;
+    let routines = routines_for_guild(conn, guild_id).await?;
     if routines.is_empty() {
         return Ok(Vec::new());
     }
     let mut by_routine: HashMap<i64, Vec<Run>> = HashMap::new();
-    for run in runs_for_guild(conn, guild_id)? {
+    for run in runs_for_guild(conn, guild_id).await? {
         by_routine.entry(run.routine_id).or_default().push(run);
     }
     let tz = if routines.iter().any(|routine| routine.active) {
-        Some(clock::zone(&must_guild(conn, guild_id)?.timezone)?)
+        Some(clock::zone(&must_guild(conn, guild_id).await?.timezone)?)
     } else {
         None
     };
     let mut jobs = Vec::new();
     for routine in &routines {
         let runs = by_routine.remove(&routine.id).unwrap_or_default();
-        jobs.extend(advance(conn, routine, runs, tz, now)?);
+        jobs.extend(advance(conn, routine, runs, tz, now).await?);
     }
     Ok(jobs)
 }
 
-pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<RoutinePost>, OpError> {
-    let run = must_run(conn, run_id)?;
-    let routine = must_routine(conn, run.routine_id)?;
-    let Some(channel) = store::channel(conn, routine.channel_id)? else {
+pub async fn routine_post(
+    conn: &mut Connection,
+    run_id: i64,
+) -> Result<Option<RoutinePost>, OpError> {
+    let run = must_run(conn, run_id).await?;
+    let routine = must_routine(conn, run.routine_id).await?;
+    let Some(channel) = store::channel(conn, routine.channel_id).await? else {
         return Ok(None);
     };
     let Some(discord_id) = channel.discord_id.filter(|id| !id.is_empty()) else {
         return Ok(None);
     };
-    let guild = must_guild(conn, routine.guild_id)?;
+    let guild = must_guild(conn, routine.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
-    let settings = store::settings(conn, routine.guild_id)?;
+    let settings = store::settings(conn, routine.guild_id).await?;
     let lang = settings.language;
-    let names = vote_names(conn, run.id)?;
+    let names = vote_names(conn, run.id).await?;
     // Every day on the poll with who voted for it, open or final. The voters
     // are a quote, which Discord dims under the day.
     let fields = run
@@ -655,21 +700,22 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
     let (mention_everyone, mention_roles) = if run.status != RunStatus::Open {
         (false, Vec::new())
     } else {
-        let template = template::load(conn, routine.template_id)?;
+        let template = template::load(conn, routine.template_id).await?;
         (
             template.mention_everyone,
-            mention_role_ids(conn, &template.mention_role_ids)?,
+            mention_role_ids(conn, &template.mention_role_ids).await?,
         )
     };
     let thread = match run.event_id.filter(|_| locked) {
         Some(event_id) => {
-            let event = super::db::must_event(conn, event_id)?;
+            let event = super::db::must_event(conn, event_id).await?;
             if event.thread_enabled {
                 Some(ResultsThread {
                     event_id,
-                    discord_id: store::thread_discord_id(conn, event_id)?
+                    discord_id: store::thread_discord_id(conn, event_id)
+                        .await?
                         .filter(|id| !id.is_empty()),
-                    name: super::discord::stored_thread_name(conn, &event)?,
+                    name: super::discord::stored_thread_name(conn, &event).await?,
                 })
             } else {
                 None
@@ -737,44 +783,47 @@ fn routine_url(public_url: &str, server: Option<&str>, public_id: Uuid) -> Optio
     Some(format!("{base}/servers/{server}/routines/{public_id}"))
 }
 
-pub fn remember_results_message(
+pub async fn remember_results_message(
     conn: &mut Connection,
     run_id: i64,
     message_id: &str,
 ) -> Result<(), OpError> {
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run_id)))
         .set(schema::routine_runs::results_message_id.eq(message_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn remember_routine_message(
+pub async fn remember_routine_message(
     conn: &mut Connection,
     run_id: i64,
     message_id: &str,
 ) -> Result<(), OpError> {
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run_id)))
         .set(schema::routine_runs::discord_message_id.eq(message_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn routine_page_data(
+pub async fn routine_page_data(
     conn: &mut Connection,
     routine_id: i64,
 ) -> Result<Option<RoutineView>, OpError> {
-    let Some(routine) = load_routine(conn, routine_id)? else {
+    let Some(routine) = load_routine(conn, routine_id).await? else {
         return Ok(None);
     };
-    let guild = must_guild(conn, routine.guild_id)?;
+    let guild = must_guild(conn, routine.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
-    let settings = store::settings(conn, routine.guild_id)?;
-    let channel = store::channel(conn, routine.channel_id)?;
-    let run = editable_run(conn, routine.id)?;
+    let settings = store::settings(conn, routine.guild_id).await?;
+    let channel = store::channel(conn, routine.channel_id).await?;
+    let run = editable_run(conn, routine.id).await?;
     let (counts, names) = match &run {
-        Some(run) if run.status == RunStatus::Open => {
-            (vote_counts(conn, run.id)?, vote_names(conn, run.id)?)
-        }
+        Some(run) if run.status == RunStatus::Open => (
+            vote_counts(conn, run.id).await?,
+            vote_names(conn, run.id).await?,
+        ),
         _ => (HashMap::new(), HashMap::new()),
     };
     let days_for = |selected: &[u8]| -> Vec<DayCheck> {
@@ -803,10 +852,11 @@ pub fn routine_page_data(
         days.sort_by_key(|(start, _)| *start);
         days.into_iter().map(|(_, day)| day).collect()
     };
-    let history = recent_runs(conn, routine.id, tz, settings.hour_24)?;
-    let upcoming = match current_event(conn, routine.id)? {
+    let history = recent_runs(conn, routine.id, tz, settings.hour_24).await?;
+    let upcoming = match current_event(conn, routine.id).await? {
         Some(event) => {
-            let winner = runs_for(conn, routine.id)?
+            let winner = runs_for(conn, routine.id)
+                .await?
                 .into_iter()
                 .find(|run| run.event_id == Some(event.id))
                 .and_then(|run| run.winner_weekday)
@@ -825,7 +875,7 @@ pub fn routine_page_data(
         prompt: routine.prompt.clone(),
         description: routine.description.clone(),
         active: routine.active,
-        channel_id: crate::ids::public::channel(conn, routine.channel_id)?,
+        channel_id: crate::ids::public::channel(conn, routine.channel_id).await?,
         channel: channel.map(|channel| channel.name).unwrap_or_default(),
         poll_weekday: routine.poll_weekday.to_string(),
         poll_time: hhmm(routine.poll_minutes),
@@ -846,8 +896,8 @@ pub fn routine_page_data(
         duration_minutes: routine.duration_minutes,
         usual: days_for(&routine.days),
         event: {
-            let extras = routine_extras(conn, routine_id)?;
-            event_dto(conn, extras)?
+            let extras = routine_extras(conn, routine_id).await?;
+            event_dto(conn, extras).await?
         },
         run: run.map(|run| RunView {
             open: run.status == RunStatus::Open,
@@ -858,47 +908,49 @@ pub fn routine_page_data(
         }),
         history,
         upcoming,
-        steps: step_views(conn, routine.id)?,
-        approval: approval_view(conn, &routine, tz, settings.hour_24)?,
+        steps: step_views(conn, routine.id).await?,
+        approval: approval_view(conn, &routine, tz, settings.hour_24).await?,
     }))
 }
 
 /// A routine's steps with public ids, as its page shows them.
-fn step_views(conn: &mut Connection, routine_id: i64) -> Result<Vec<RoutineStep>, OpError> {
+async fn step_views(conn: &mut Connection, routine_id: i64) -> Result<Vec<RoutineStep>, OpError> {
     let mut views = Vec::new();
-    for step in load_steps(conn, routine_id)? {
+    for step in load_steps(conn, routine_id).await? {
         views.push(RoutineStep {
             kind: step.kind.to_string(),
-            channel_id: step
-                .channel_id
-                .map(|id| crate::ids::public::channel(conn, id))
-                .transpose()?,
-            role_ids: crate::ids::public::roles(conn, &step.role_ids)?,
+            channel_id: match step.channel_id {
+                Some(id) => Some(crate::ids::public::channel(conn, id).await?),
+                None => None,
+            },
+            role_ids: crate::ids::public::roles(conn, &step.role_ids).await?,
         });
     }
     Ok(views)
 }
 
 /// The approval a closed poll waits on, for the routine's page.
-fn approval_view(
+async fn approval_view(
     conn: &mut Connection,
     routine: &Routine,
     tz: Tz,
     hour24: bool,
 ) -> Result<Option<ApprovalView>, OpError> {
-    let Some(run) = waiting_run(conn, routine.id)? else {
+    let Some(run) = waiting_run(conn, routine.id).await? else {
         return Ok(None);
     };
-    let channel = load_steps(conn, routine.id)?
+    let channel_id = load_steps(conn, routine.id)
+        .await?
         .into_iter()
         .nth(run.step as usize)
-        .and_then(|step| step.channel_id)
-        .map(|id| store::channel(conn, id))
-        .transpose()?
-        .flatten()
-        .map(|channel| channel.name)
-        .unwrap_or_default();
-    let counts = vote_counts(conn, run.id)?;
+        .and_then(|step| step.channel_id);
+    let channel = match channel_id {
+        Some(id) => store::channel(conn, id).await?,
+        None => None,
+    }
+    .map(|channel| channel.name)
+    .unwrap_or_default();
+    let counts = vote_counts(conn, run.id).await?;
     let winner = run.winner_weekday.unwrap_or(run.days[0]);
     let now = Utc::now();
     let mut days: Vec<(DateTime<Utc>, DayCheck)> = run
@@ -929,23 +981,27 @@ fn approval_view(
     }))
 }
 
-pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<RoutineSummary>, OpError> {
-    let guild = must_guild(conn, guild_id)?;
+pub async fn list_routines(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<Vec<RoutineSummary>, OpError> {
+    let guild = must_guild(conn, guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
-    let settings = store::settings(conn, guild_id)?;
+    let settings = store::settings(conn, guild_id).await?;
     let ids: Vec<i64> = schema::routines::table
         .inner_join(schema::event_templates::table)
         .filter(schema::routines::guild_id.eq(guild_id))
         .order(schema::routines::active.desc())
         .then_order_by(schema::lower(schema::event_templates::title))
         .select(schema::routines::id)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let mut rows = Vec::new();
     for id in ids {
-        let routine = must_routine(conn, id)?;
-        let channel = store::channel(conn, routine.channel_id)?;
-        let run = editable_run(conn, routine.id)?;
-        let waiting = waiting_run(conn, routine.id)?;
+        let routine = must_routine(conn, id).await?;
+        let channel = store::channel(conn, routine.channel_id).await?;
+        let run = editable_run(conn, routine.id).await?;
+        let waiting = waiting_run(conn, routine.id).await?;
         let (badge, poll) = match &run {
             _ if waiting.is_some() => {
                 let day = waiting
@@ -976,7 +1032,7 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
         };
         let choices = match &run {
             Some(run) if run.status == RunStatus::Open => {
-                let counts = vote_counts(conn, run.id)?;
+                let counts = vote_counts(conn, run.id).await?;
                 run.days
                     .iter()
                     .map(|day| {
@@ -990,7 +1046,8 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
             }
             _ => Vec::new(),
         };
-        let event = current_event(conn, routine.id)?
+        let event = current_event(conn, routine.id)
+            .await?
             .map(|event| {
                 format!(
                     "Next event · {}",
@@ -1023,16 +1080,19 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
     Ok(rows)
 }
 
-fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store::Event>, OpError> {
+async fn current_event(
+    conn: &mut Connection,
+    routine_id: i64,
+) -> Result<Option<store::Event>, OpError> {
     let mut found = None;
-    for run in runs_for(conn, routine_id)? {
+    for run in runs_for(conn, routine_id).await? {
         if run.status != RunStatus::Locked {
             continue;
         }
         let Some(event_id) = run.event_id else {
             continue;
         };
-        let Some(event) = store::event(conn, event_id)? else {
+        let Some(event) = store::event(conn, event_id).await? else {
             continue;
         };
         if matches!(event.status, EventStatus::Posted | EventStatus::Scheduled) {
@@ -1042,23 +1102,24 @@ fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store:
     Ok(found)
 }
 
-pub fn count_active(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+pub async fn count_active(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
     Ok(schema::routines::table
         .filter(schema::routines::guild_id.eq(guild_id))
         .filter(schema::routines::active.eq(true))
         .select(diesel::dsl::count_star())
-        .first(conn)?)
+        .first(conn)
+        .await?)
 }
 
-fn align_schedule(
+async fn align_schedule(
     conn: &mut Connection,
     routine: &Routine,
     previous_channel: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
     let mut jobs = Vec::new();
-    if let Some(run) = editable_run(conn, routine.id)? {
-        let guild = must_guild(conn, routine.guild_id)?;
+    if let Some(run) = editable_run(conn, routine.id).await? {
+        let guild = must_guild(conn, routine.guild_id).await?;
         let tz = clock::zone(&guild.timezone)?;
         if run.status == RunStatus::Open {
             let locks = lock_after(run.opens_at, tz, routine.lock_weekday, routine.lock_minutes);
@@ -1067,14 +1128,16 @@ fn align_schedule(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
                 .set(schema::routine_runs::locks_at.eq(locks))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             }
             if routine.channel_id != previous_channel {
                 diesel::update(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
                 .set(schema::routine_runs::discord_message_id.eq(None::<String>))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             }
             jobs.push(DiscordJob::routine(run.id));
         } else if run.status == RunStatus::Scheduled {
@@ -1090,41 +1153,43 @@ fn align_schedule(
                 diesel::delete(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             } else if run.locks_at != locks {
                 diesel::update(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
                 .set(schema::routine_runs::locks_at.eq(locks))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             }
         }
     }
-    jobs.extend(progress_one(conn, routine.id, now)?);
+    jobs.extend(progress_one(conn, routine.id, now).await?);
     Ok(jobs)
 }
 
 /// Moves one routine on to `now`: opens or locks its poll, lapses an
 /// approval, and starts next week's poll when it is time.
-pub(super) fn kick(
+pub(super) async fn kick(
     conn: &mut Connection,
     routine_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    progress_one(conn, routine_id, now)
+    progress_one(conn, routine_id, now).await
 }
 
 /// When the poll window `now` falls in, or the next one, closes: once it
 /// has, the following week's poll can start.
-pub(super) fn window_end(
+pub(super) async fn window_end(
     conn: &mut Connection,
     routine_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, OpError> {
-    let Some(routine) = load_routine(conn, routine_id)? else {
+    let Some(routine) = load_routine(conn, routine_id).await? else {
         return Ok(None);
     };
-    let tz = clock::zone(&must_guild(conn, routine.guild_id)?.timezone)?;
+    let tz = clock::zone(&must_guild(conn, routine.guild_id).await?.timezone)?;
     Ok(Some(
         window(
             now,
@@ -1138,22 +1203,24 @@ pub(super) fn window_end(
     ))
 }
 
-fn progress_one(
+async fn progress_one(
     conn: &mut Connection,
     routine_id: i64,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    let routine = must_routine(conn, routine_id)?;
-    let runs = runs_for(conn, routine.id)?;
+    let routine = must_routine(conn, routine_id).await?;
+    let runs = runs_for(conn, routine.id).await?;
     let tz = if routine.active {
-        Some(clock::zone(&must_guild(conn, routine.guild_id)?.timezone)?)
+        Some(clock::zone(
+            &must_guild(conn, routine.guild_id).await?.timezone,
+        )?)
     } else {
         None
     };
-    advance(conn, &routine, runs, tz, now)
+    advance(conn, &routine, runs, tz, now).await
 }
 
-fn advance(
+async fn advance(
     conn: &mut Connection,
     routine: &Routine,
     mut runs: Vec<Run>,
@@ -1163,28 +1230,30 @@ fn advance(
     let mut jobs = Vec::new();
     for run in &mut runs {
         if run.status == RunStatus::Approval && run.decide_by.is_some_and(|lapses| lapses <= now) {
-            jobs.extend(steps::expire(conn, routine, run)?);
+            jobs.extend(steps::expire(conn, routine, run).await?);
             run.status = RunStatus::Expired;
         } else if run.status == RunStatus::Open && run.locks_at <= now {
-            jobs.extend(lock_run(conn, routine, run, now)?);
-            run.status = must_run(conn, run.id)?.status;
+            jobs.extend(lock_run(conn, routine, run, now).await?);
+            run.status = must_run(conn, run.id).await?.status;
         } else if run.status == RunStatus::Scheduled && run.opens_at <= now {
             if run.locks_at <= now {
-                jobs.extend(lock_run(conn, routine, run, now)?);
-                run.status = must_run(conn, run.id)?.status;
+                jobs.extend(lock_run(conn, routine, run, now).await?);
+                run.status = must_run(conn, run.id).await?.status;
             } else {
                 diesel::update(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
                 .set(schema::routine_runs::status.eq(RunStatus::Open))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
                 run.status = RunStatus::Open;
                 log(
                     conn,
                     routine.guild_id,
                     None,
                     &format!("The poll for {} is open.", routine.title),
-                )?;
+                )
+                .await?;
                 jobs.push(DiscordJob::routine(run.id));
             }
         }
@@ -1224,14 +1293,16 @@ fn advance(
                     created_at: now,
                 })
                 .returning(schema::routine_runs::id)
-                .get_result(conn)?;
+                .get_result(conn)
+                .await?;
             if status == RunStatus::Open {
                 log(
                     conn,
                     routine.guild_id,
                     None,
                     &format!("The poll for {} is open.", routine.title),
-                )?;
+                )
+                .await?;
                 jobs.push(DiscordJob::routine(id));
             }
         }
@@ -1239,13 +1310,13 @@ fn advance(
     Ok(jobs)
 }
 
-fn lock_run(
+async fn lock_run(
     conn: &mut Connection,
     routine: &Routine,
     run: &Run,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    let counts = vote_counts(conn, run.id)?;
+    let counts = vote_counts(conn, run.id).await?;
     let winner = run
         .days
         .iter()
@@ -1253,25 +1324,25 @@ fn lock_run(
         .max_by_key(|day| (counts.get(day).copied().unwrap_or(0), -i16::from(*day)))
         .unwrap_or(run.days[0]);
     // The poll is the first step; what follows decides when the event posts.
-    proceed(conn, routine, run, winner, 0, now)
+    proceed(conn, routine, run, winner, 0, now).await
 }
 
 /// Posts the event on `winner`'s day, taking over the poll's message.
-fn post_run(
+async fn post_run(
     conn: &mut Connection,
     routine: &Routine,
     run: &Run,
     winner: u8,
     now: DateTime<Utc>,
 ) -> Result<Vec<DiscordJob>, OpError> {
-    let guild = must_guild(conn, routine.guild_id)?;
+    let guild = must_guild(conn, routine.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
     let start = event_start(run.locks_at, winner, routine.start_minutes, tz);
-    let event_id = insert_event(conn, routine, start, now)?;
+    let event_id = insert_event(conn, routine, start, now).await?;
     // The event takes over the poll's post: its sync edits that message into the
     // event, and the results go in its thread, or in a reply when it has none.
     if let Some(message) = &run.discord_message_id {
-        super::discord::remember_discord_message(conn, event_id, message)?;
+        super::discord::remember_discord_message(conn, event_id, message).await?;
     }
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
         .set((
@@ -1279,7 +1350,8 @@ fn post_run(
             schema::routine_runs::winner_weekday.eq(i64::from(winner)),
             schema::routine_runs::event_id.eq(event_id),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     log(
         conn,
         routine.guild_id,
@@ -1289,7 +1361,8 @@ fn post_run(
             routine.title,
             clock::weekday_name(winner)
         ),
-    )?;
+    )
+    .await?;
     // The event first, so the results land in its thread or under the finished post.
     Ok(vec![
         DiscordJob::sync(event_id),
@@ -1298,14 +1371,14 @@ fn post_run(
     ])
 }
 
-fn insert_event(
+async fn insert_event(
     conn: &mut Connection,
     routine: &Routine,
     start: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<i64, OpError> {
-    let template = template::load(conn, routine.template_id)?;
-    let attendee_role_by = template::role_by(conn, routine.template_id)?;
+    let template = template::load(conn, routine.template_id).await?;
+    let attendee_role_by = template::role_by(conn, routine.template_id).await?;
     let id = template::spawn(
         conn,
         &template,
@@ -1318,8 +1391,9 @@ fn insert_event(
             series_id: None,
             occurrence_index: None,
         },
-    )?;
-    mark_posted(conn, id, now)?;
+    )
+    .await?;
+    mark_posted(conn, id, now).await?;
     Ok(id)
 }
 
@@ -1436,37 +1510,36 @@ fn with_extras(
 }
 
 /// The page's form of what a routine's events carry, roles by public id.
-pub fn event_dto(
+pub async fn event_dto(
     conn: &mut Connection,
     extras: EventExtras,
 ) -> Result<marian_types::RoutineEvent, OpError> {
     use crate::ids::public;
-    let options = extras
-        .options
-        .into_iter()
-        .map(|opt| {
-            let kind = store::library_type(conn, opt.type_id)?.ok_or(OpError::NotFound)?;
-            Ok(marian_types::SignupOption {
-                id: None,
-                type_id: kind.public_id.to_string(),
-                name: kind.name,
-                emoji: kind.emoji,
-                attending: kind.attending,
-                capacity: opt.capacity,
-                max_guests: opt.max_guests,
-                role_id: public::role(conn, opt.role_id)?,
-            })
-        })
-        .collect::<Result<_, OpError>>()?;
+    let mut options = Vec::with_capacity(extras.options.len());
+    for opt in extras.options {
+        let kind = store::library_type(conn, opt.type_id)
+            .await?
+            .ok_or(OpError::NotFound)?;
+        options.push(marian_types::SignupOption {
+            id: None,
+            type_id: kind.public_id.to_string(),
+            name: kind.name,
+            emoji: kind.emoji,
+            attending: kind.attending,
+            capacity: opt.capacity,
+            max_guests: opt.max_guests,
+            role_id: public::role(conn, opt.role_id).await?,
+        });
+    }
     Ok(marian_types::RoutineEvent {
         location: extras.location,
         color: extras.color,
         thread_enabled: extras.thread_enabled,
         multiple_signups: extras.multiple_signups,
         mention_everyone: extras.mention_everyone,
-        attendee_role_id: public::role(conn, extras.attendee_role_id)?,
-        mention_role_ids: public::roles(conn, &extras.mention_role_ids)?,
-        restrict_role_ids: public::roles(conn, &extras.restrict_role_ids)?,
+        attendee_role_id: public::role(conn, extras.attendee_role_id).await?,
+        mention_role_ids: public::roles(conn, &extras.mention_role_ids).await?,
+        restrict_role_ids: public::roles(conn, &extras.restrict_role_ids).await?,
         cutoff_minutes: extras.cutoff_offset_minutes,
         options,
         reminders: extras
@@ -1483,36 +1556,35 @@ pub fn event_dto(
 
 /// What the page sent, as the routine keeps it. A role id from another server
 /// is refused.
-pub fn event_from(
+pub async fn event_from(
     conn: &mut Connection,
     guild_id: i64,
     event: &marian_types::RoutineEvent,
 ) -> Result<EventExtras, OpError> {
     use crate::ids::public;
-    let options = event
-        .options
-        .iter()
-        .map(|opt| {
-            let kind = store::library_type_by_public(conn, guild_id, &opt.type_id)?
-                .ok_or_else(|| OpError::from(crate::msg!("err-type-elsewhere")))?;
-            Ok(OptionInput {
-                id: None,
-                type_id: kind.id,
-                capacity: opt.capacity,
-                max_guests: opt.max_guests,
-                role_id: public::role_id(conn, guild_id, opt.role_id.as_deref())?,
-            })
-        })
-        .collect::<Result<_, OpError>>()?;
+    let mut options = Vec::with_capacity(event.options.len());
+    for opt in &event.options {
+        let kind = store::library_type_by_public(conn, guild_id, &opt.type_id)
+            .await?
+            .ok_or_else(|| OpError::from(crate::msg!("err-type-elsewhere")))?;
+        options.push(OptionInput {
+            id: None,
+            type_id: kind.id,
+            capacity: opt.capacity,
+            max_guests: opt.max_guests,
+            role_id: public::role_id(conn, guild_id, opt.role_id.as_deref()).await?,
+        });
+    }
     Ok(EventExtras {
         location: event.location.clone(),
         color: event.color.clone(),
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,
-        attendee_role_id: public::role_id(conn, guild_id, event.attendee_role_id.as_deref())?,
-        mention_role_ids: public::role_ids(conn, guild_id, &event.mention_role_ids)?,
-        restrict_role_ids: public::role_ids(conn, guild_id, &event.restrict_role_ids)?,
+        attendee_role_id: public::role_id(conn, guild_id, event.attendee_role_id.as_deref())
+            .await?,
+        mention_role_ids: public::role_ids(conn, guild_id, &event.mention_role_ids).await?,
+        restrict_role_ids: public::role_ids(conn, guild_id, &event.restrict_role_ids).await?,
         cutoff_offset_minutes: event.cutoff_minutes,
         options,
         reminders: event
@@ -1527,9 +1599,12 @@ pub fn event_from(
 }
 
 /// What a routine's events carry beyond their wording, as its page shows it.
-pub fn routine_extras(conn: &mut Connection, routine_id: i64) -> Result<EventExtras, OpError> {
-    let routine = must_routine(conn, routine_id)?;
-    let template = template::load(conn, routine.template_id)?;
+pub async fn routine_extras(
+    conn: &mut Connection,
+    routine_id: i64,
+) -> Result<EventExtras, OpError> {
+    let routine = must_routine(conn, routine_id).await?;
+    let template = template::load(conn, routine.template_id).await?;
     Ok(EventExtras {
         location: template.location,
         color: template.color,
@@ -1587,7 +1662,7 @@ fn check_clock(weekday: u8, minutes: u16) -> Result<(), OpError> {
 
 /// Who picked the attendee role a routine's events will carry: whoever
 /// picked the one it keeps, or `actor` for a new one, if they may pick it.
-fn attendee_role_picker(
+async fn attendee_role_picker(
     conn: &mut Connection,
     actor: &store::Membership,
     role_id: Option<i64>,
@@ -1600,28 +1675,36 @@ fn attendee_role_picker(
     if current == Some(role_id) {
         return Ok(current_by);
     }
-    if !may_pick_attendee_role(actor, &must_role(conn, role_id)?) {
+    if !may_pick_attendee_role(actor, &must_role(conn, role_id).await?) {
         return Err(OpError::from(crate::msg!("err-attendee-role-managers")));
     }
     Ok(Some(actor.id))
 }
 
-fn require_owner(conn: &mut Connection, routine: &Routine, actor_id: i64) -> Result<(), OpError> {
-    let actor = must_membership(conn, actor_id)?;
+async fn require_owner(
+    conn: &mut Connection,
+    routine: &Routine,
+    actor_id: i64,
+) -> Result<(), OpError> {
+    let actor = must_membership(conn, actor_id).await?;
     if routine.created_by == Some(actor.id) || actor.server_manager {
         return Ok(());
     }
     Err(OpError::from(crate::msg!("err-routine-not-yours")))
 }
 
-fn vote_names(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, Vec<String>>, OpError> {
+async fn vote_names(
+    conn: &mut Connection,
+    run_id: i64,
+) -> Result<HashMap<u8, Vec<String>>, OpError> {
     let rows: Vec<(String, String)> = schema::routine_votes::table
         .inner_join(schema::memberships::table)
         .filter(schema::routine_votes::run_id.eq(run_id))
         .order(schema::routine_votes::created_at.asc())
         .then_order_by(schema::routine_votes::membership_id.asc())
         .select((schema::routine_votes::choice, schema::memberships::name))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let mut names: HashMap<u8, Vec<String>> = HashMap::new();
     for (choice, name) in rows {
         if let Ok(day) = choice.parse::<u8>() {
@@ -1631,12 +1714,13 @@ fn vote_names(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, Vec<Stri
     Ok(names)
 }
 
-fn vote_counts(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, i64>, OpError> {
+async fn vote_counts(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, i64>, OpError> {
     let rows: Vec<(String, i64)> = schema::routine_votes::table
         .filter(schema::routine_votes::run_id.eq(run_id))
         .group_by(schema::routine_votes::choice)
         .select((schema::routine_votes::choice, diesel::dsl::count_star()))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let mut counts = HashMap::new();
     for (choice, count) in rows {
         if let Ok(day) = choice.parse::<u8>() {
@@ -1647,23 +1731,28 @@ fn vote_counts(conn: &mut Connection, run_id: i64) -> Result<HashMap<u8, i64>, O
 }
 
 /// A poll's row key, from the public id its Discord buttons carry.
-pub fn run_by_public(conn: &mut Connection, public: uuid::Uuid) -> Result<Option<i64>, OpError> {
+pub async fn run_by_public(
+    conn: &mut Connection,
+    public: uuid::Uuid,
+) -> Result<Option<i64>, OpError> {
     Ok(schema::routine_runs::table
         .filter(schema::routine_runs::public_id.eq(public))
         .select(schema::routine_runs::id)
         .first::<i64>(conn)
+        .await
         .optional()?)
 }
 
 /// This week's poll while people can vote on it.
-pub fn open_run_id(conn: &mut Connection, routine_id: i64) -> Result<Option<i64>, OpError> {
-    Ok(editable_run(conn, routine_id)?
+pub async fn open_run_id(conn: &mut Connection, routine_id: i64) -> Result<Option<i64>, OpError> {
+    Ok(editable_run(conn, routine_id)
+        .await?
         .filter(|run| run.status == RunStatus::Open)
         .map(|run| run.id))
 }
 
-fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
-    for run in runs_for(conn, routine_id)? {
+async fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
+    for run in runs_for(conn, routine_id).await? {
         if run.status == RunStatus::Open || run.status == RunStatus::Scheduled {
             return Ok(Some(run));
         }
@@ -1671,24 +1760,24 @@ fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, O
     Ok(None)
 }
 
-fn recent_runs(
+async fn recent_runs(
     conn: &mut Connection,
     routine_id: i64,
     tz: Tz,
     hour24: bool,
 ) -> Result<Vec<RunHistory>, OpError> {
     let mut rows = Vec::new();
-    for run in runs_for(conn, routine_id)? {
+    for run in runs_for(conn, routine_id).await? {
         if run.status != RunStatus::Locked {
             continue;
         }
         let Some(event_id) = run.event_id else {
             continue;
         };
-        let Some(event) = store::event(conn, event_id)? else {
+        let Some(event) = store::event(conn, event_id).await? else {
             continue;
         };
-        let guild = must_guild(conn, event.guild_id)?;
+        let guild = must_guild(conn, event.guild_id).await?;
         rows.push(RunHistory {
             when: clock::format_when(event.starts_at, tz, hour24),
             winner: clock::weekday_name(run.winner_weekday.unwrap_or(0)).to_string(),
@@ -1705,14 +1794,15 @@ fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String
     }
 }
 
-fn runs_for(conn: &mut Connection, routine_id: i64) -> Result<Vec<Run>, OpError> {
+async fn runs_for(conn: &mut Connection, routine_id: i64) -> Result<Vec<Run>, OpError> {
     let rows = store::RoutineRun::for_routine(routine_id)
         .order(schema::routine_runs::opens_at.asc())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(rows.into_iter().map(run_from_stored).collect())
 }
 
-fn runs_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Run>, OpError> {
+async fn runs_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Run>, OpError> {
     let rows = schema::routine_runs::table
         .inner_join(schema::routines::table)
         .filter(schema::routines::guild_id.eq(guild_id))
@@ -1721,11 +1811,12 @@ fn runs_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Run>, OpEr
             schema::routine_runs::opens_at.asc(),
         ))
         .select(store::RoutineRun::as_select())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(rows.into_iter().map(run_from_stored).collect())
 }
 
-fn routines_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine>, OpError> {
+async fn routines_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine>, OpError> {
     let rows = schema::routines::table
         .inner_join(schema::event_templates::table)
         .filter(schema::routines::guild_id.eq(guild_id))
@@ -1734,19 +1825,20 @@ fn routines_for_guild(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routin
             store::Routine::as_select(),
             store::StoredTemplate::as_select(),
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(routine, template)| routine_from_stored(routine, template))
         .collect())
 }
 
-fn must_run(conn: &mut Connection, id: i64) -> Result<Run, OpError> {
-    load_run(conn, id)?.ok_or(OpError::NotFound)
+async fn must_run(conn: &mut Connection, id: i64) -> Result<Run, OpError> {
+    load_run(conn, id).await?.ok_or(OpError::NotFound)
 }
 
-fn load_run(conn: &mut Connection, id: i64) -> Result<Option<Run>, OpError> {
-    let row = store::RoutineRun::by_id(id).first(conn).optional()?;
+async fn load_run(conn: &mut Connection, id: i64) -> Result<Option<Run>, OpError> {
+    let row = store::RoutineRun::by_id(id).first(conn).await.optional()?;
     Ok(row.map(run_from_stored))
 }
 
@@ -1770,8 +1862,8 @@ fn run_from_stored(row: store::RoutineRun) -> Run {
     }
 }
 
-fn must_routine(conn: &mut Connection, id: i64) -> Result<Routine, OpError> {
-    load_routine(conn, id)?.ok_or(OpError::NotFound)
+async fn must_routine(conn: &mut Connection, id: i64) -> Result<Routine, OpError> {
+    load_routine(conn, id).await?.ok_or(OpError::NotFound)
 }
 
 fn routine_from_stored(routine: store::Routine, template: store::StoredTemplate) -> Routine {
@@ -1796,7 +1888,7 @@ fn routine_from_stored(routine: store::Routine, template: store::StoredTemplate)
     }
 }
 
-fn load_routine(conn: &mut Connection, id: i64) -> Result<Option<Routine>, OpError> {
+async fn load_routine(conn: &mut Connection, id: i64) -> Result<Option<Routine>, OpError> {
     let row = schema::routines::table
         .inner_join(schema::event_templates::table)
         .filter(schema::routines::id.eq(id))
@@ -1805,6 +1897,7 @@ fn load_routine(conn: &mut Connection, id: i64) -> Result<Option<Routine>, OpErr
             store::StoredTemplate::as_select(),
         ))
         .first(conn)
+        .await
         .optional()?;
     Ok(row.map(|(routine, template)| routine_from_stored(routine, template)))
 }
@@ -1821,10 +1914,10 @@ fn weekday_numbers(days: Vec<i16>) -> Vec<u8> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use diesel::connection::SimpleConnection;
+    use diesel_async::SimpleAsyncConnection;
 
-    fn world() -> Connection {
-        let mut conn = store::open_memory().unwrap();
+    async fn world() -> Connection {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '99');
@@ -1838,8 +1931,8 @@ mod tests {
             SELECT 2, id, 1, 'June', 'june', '#112233', true, false FROM users WHERE discord_id = 'june';
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         conn
     }
 
@@ -1847,9 +1940,9 @@ mod tests {
         Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
     }
 
-    #[test]
-    fn the_poll_mentions_and_limits_votes_as_the_routines_events_do() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn the_poll_mentions_and_limits_votes_as_the_routines_events_do() {
+        let mut conn = world().await;
         conn.batch_execute(
             "
             UPDATE channels SET discord_id = '77' WHERE id = 1;
@@ -1861,7 +1954,7 @@ mod tests {
             INSERT INTO membership_roles (membership_id, role_id) VALUES (3, 501);
             ",
         )
-        .unwrap();
+        .await.unwrap();
         let (id, _, _) = create_routine(
             &mut conn,
             1,
@@ -1886,31 +1979,37 @@ mod tests {
             }),
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
-        let open = editable_run(&mut conn, id).unwrap().unwrap();
+        let open = editable_run(&mut conn, id).await.unwrap().unwrap();
 
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert!(post.mention_everyone);
         assert_eq!(post.mention_roles, vec!["502502".to_string()]);
 
-        let refused = cast_run(&mut conn, open.id, 2, 3).unwrap_err();
+        let refused = cast_run(&mut conn, open.id, 2, 3).await.unwrap_err();
         assert_eq!(refused.to_string(), "This poll is limited to Players.");
-        cast_run(&mut conn, open.id, 3, 3).unwrap();
+        cast_run(&mut conn, open.id, 3, 3).await.unwrap();
         // A server manager votes whatever their roles.
-        cast_run(&mut conn, open.id, 1, 3).unwrap();
+        cast_run(&mut conn, open.id, 1, 3).await.unwrap();
         // Losing the role still lets a vote be taken back.
         conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 3;")
+            .await
             .unwrap();
-        cast_run(&mut conn, open.id, 3, 3).unwrap();
+        cast_run(&mut conn, open.id, 3, 3).await.unwrap();
         assert_eq!(
-            vote_counts(&mut conn, open.id).unwrap().get(&3).copied(),
+            vote_counts(&mut conn, open.id)
+                .await
+                .unwrap()
+                .get(&3)
+                .copied(),
             Some(1)
         );
     }
 
-    #[test]
-    fn a_sunday_poll_locks_on_tuesday_and_posts_the_winning_day() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_sunday_poll_locks_on_tuesday_and_posts_the_winning_day() {
+        let mut conn = world().await;
         let (id, public_id, jobs) = create_routine(
             &mut conn,
             1,
@@ -1938,22 +2037,25 @@ mod tests {
             }),
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
         assert!(
             jobs.iter()
                 .any(|job| matches!(job, DiscordJob::Routine { .. })),
             "{jobs:?}"
         );
-        let open = editable_run(&mut conn, id).unwrap().unwrap();
+        let open = editable_run(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(open.status, RunStatus::Open);
         assert_eq!(open.days, vec![3, 4]);
 
-        save_run_days(&mut conn, id, 1, &[4, 5]).unwrap();
-        cast_run(&mut conn, open.id, 2, 4).unwrap();
-        cast_run(&mut conn, open.id, 2, 5).unwrap();
-        cast_run(&mut conn, open.id, 1, 4).unwrap();
+        save_run_days(&mut conn, id, 1, &[4, 5]).await.unwrap();
+        cast_run(&mut conn, open.id, 2, 4).await.unwrap();
+        cast_run(&mut conn, open.id, 2, 5).await.unwrap();
+        cast_run(&mut conn, open.id, 1, 4).await.unwrap();
 
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         assert!(jobs
             .iter()
             .any(|job| matches!(job, DiscordJob::Sync { .. })));
@@ -1964,7 +2066,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).await.unwrap().unwrap();
         assert_eq!(event.status, EventStatus::Posted);
         assert_eq!(event.title, "Game night");
         assert_eq!(
@@ -1979,29 +2081,30 @@ mod tests {
         assert_eq!(event.color, "#2f6b4f");
         assert!(event.multiple_signups);
         let names: Vec<String> = store::options_for(&mut conn, &event)
+            .await
             .unwrap()
             .into_iter()
             .map(|opt| opt.name)
             .collect();
         assert_eq!(names, ["Playing", "Watching"]);
-        let reminders = store::reminders_for(&mut conn, &event).unwrap();
+        let reminders = store::reminders_for(&mut conn, &event).await.unwrap();
         assert_eq!(
             (reminders[0].offset_minutes, reminders[0].message.as_str()),
             (60, "Snacks")
         );
-        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let shown = routine_page_data(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(shown.event.location, "The cellar");
         assert_eq!(shown.event.options.len(), 2);
-        let next = editable_run(&mut conn, id).unwrap().unwrap();
+        let next = editable_run(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(next.status, RunStatus::Scheduled);
         assert_eq!(next.days, vec![3, 4]);
-        let rows = list_routines(&mut conn, 1).unwrap();
+        let rows = list_routines(&mut conn, 1).await.unwrap();
         assert_eq!(rows[0].badge, "Waiting");
         assert_eq!(rows[0].poll, "Poll opens Sun, Oct 18 · 10:00 AM");
         assert_eq!(rows[0].event, "Next event · Fri, Oct 16 · 7:00 PM");
         assert!(rows[0].choices.is_empty());
         assert!(crate::ids::parse_event_id(&public_id).is_some());
-        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let shown = routine_page_data(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(shown.id, public_id);
         assert!(!shown.run.as_ref().unwrap().open);
         let run = shown.run.as_ref().unwrap();
@@ -2050,19 +2153,20 @@ mod tests {
             None,
             at(2026, 10, 13, 18, 0),
         )
+        .await
         .unwrap();
-        let next = editable_run(&mut conn, id).unwrap().unwrap();
+        let next = editable_run(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(next.status, RunStatus::Scheduled);
         assert_eq!(next.locks_at, locks);
         assert_eq!(next.days, vec![3, 4]);
-        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).await.unwrap().unwrap();
         assert_eq!(event.title, "Game night");
         assert!(event.description.starts_with("Bring dice on "));
-        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let shown = routine_page_data(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(shown.title, "Late night");
         assert_eq!(shown.description, "Bring snacks.");
         assert_eq!(shown.id, public_id);
-        let rows = list_routines(&mut conn, 1).unwrap();
+        let rows = list_routines(&mut conn, 1).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Late night");
         assert_eq!(rows[0].id, public_id);
@@ -2070,7 +2174,7 @@ mod tests {
 
     /// A Tuesday-locking routine for Thursday or Friday whose closed poll asks
     /// the Officers in #officers before it posts.
-    fn approved_routine(conn: &mut Connection) -> i64 {
+    async fn approved_routine(conn: &mut Connection) -> i64 {
         conn.batch_execute(
             "
             UPDATE channels SET discord_id = '77' WHERE id = 1;
@@ -2082,7 +2186,7 @@ mod tests {
             INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 501);
             ",
         )
-        .unwrap();
+        .await.unwrap();
         let (id, _, _) = create_routine(
             conn,
             1,
@@ -2104,6 +2208,7 @@ mod tests {
             }),
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
         let approval = Step {
             kind: StepKind::Approval,
@@ -2116,26 +2221,31 @@ mod tests {
             1,
             &[Step::of(StepKind::Poll), approval, Step::of(StepKind::Post)],
         )
+        .await
         .unwrap();
         id
     }
 
-    #[test]
-    fn a_routine_moves_on_by_its_tasks_alone() {
-        let mut conn = world();
-        let id = approved_routine(&mut conn);
-        let run = open_run_id(&mut conn, id).unwrap().unwrap();
-        cast_run(&mut conn, run, 2, 4).unwrap();
+    #[tokio::test]
+    async fn a_routine_moves_on_by_its_tasks_alone() {
+        let mut conn = world().await;
+        let id = approved_routine(&mut conn).await;
+        let run = open_run_id(&mut conn, id).await.unwrap().unwrap();
+        cast_run(&mut conn, run, 2, 4).await.unwrap();
 
-        crate::logic::tick(&mut conn, at(2026, 10, 13, 17, 59)).unwrap();
+        crate::logic::tick(&mut conn, at(2026, 10, 13, 17, 59))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, run).unwrap().status,
+            must_run(&mut conn, run).await.unwrap().status,
             RunStatus::Open,
             "not before the lock"
         );
-        crate::logic::tick(&mut conn, at(2026, 10, 13, 18, 0)).unwrap();
+        crate::logic::tick(&mut conn, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, run).unwrap().status,
+            must_run(&mut conn, run).await.unwrap().status,
             RunStatus::Approval
         );
         let next: DateTime<Utc> = schema::tasks::table
@@ -2143,6 +2253,7 @@ mod tests {
             .filter(schema::tasks::subject_id.eq(id))
             .select(schema::tasks::run_at)
             .first(&mut conn)
+            .await
             .unwrap();
         assert_eq!(
             next,
@@ -2150,47 +2261,55 @@ mod tests {
             "the hourly check comes before the lapse"
         );
 
-        crate::logic::tick(&mut conn, at(2026, 10, 15, 23, 59)).unwrap();
+        crate::logic::tick(&mut conn, at(2026, 10, 15, 23, 59))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, run).unwrap().status,
+            must_run(&mut conn, run).await.unwrap().status,
             RunStatus::Approval
         );
-        crate::logic::tick(&mut conn, at(2026, 10, 16, 0, 0)).unwrap();
+        crate::logic::tick(&mut conn, at(2026, 10, 16, 0, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, run).unwrap().status,
+            must_run(&mut conn, run).await.unwrap().status,
             RunStatus::Expired,
             "lapses as Friday begins"
         );
-        let runs = runs_for(&mut conn, id).unwrap();
+        let runs = runs_for(&mut conn, id).await.unwrap();
         assert_eq!(runs.len(), 2, "next week's poll is on its way");
         assert_eq!(
             (runs[1].status, runs[1].opens_at),
             (RunStatus::Scheduled, at(2026, 10, 18, 10, 0))
         );
 
-        crate::logic::tick(&mut conn, at(2026, 10, 18, 10, 0)).unwrap();
+        crate::logic::tick(&mut conn, at(2026, 10, 18, 10, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, runs[1].id).unwrap().status,
+            must_run(&mut conn, runs[1].id).await.unwrap().status,
             RunStatus::Open,
             "and opens on time"
         );
     }
 
-    #[test]
-    fn a_closed_poll_waits_for_an_officer_to_confirm_a_day() {
-        let mut conn = world();
-        let id = approved_routine(&mut conn);
-        let run = open_run_id(&mut conn, id).unwrap().unwrap();
-        cast_run(&mut conn, run, 2, 4).unwrap();
+    #[tokio::test]
+    async fn a_closed_poll_waits_for_an_officer_to_confirm_a_day() {
+        let mut conn = world().await;
+        let id = approved_routine(&mut conn).await;
+        let run = open_run_id(&mut conn, id).await.unwrap().unwrap();
+        cast_run(&mut conn, run, 2, 4).await.unwrap();
 
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         assert!(
             !jobs
                 .iter()
                 .any(|job| matches!(job, DiscordJob::Sync { .. })),
             "nothing posts yet: {jobs:?}"
         );
-        let waiting = must_run(&mut conn, run).unwrap();
+        let waiting = must_run(&mut conn, run).await.unwrap();
         assert_eq!(
             (waiting.status, waiting.winner_weekday, waiting.step),
             (RunStatus::Approval, Some(4), 1)
@@ -2201,7 +2320,7 @@ mod tests {
             "lapses as Friday begins"
         );
 
-        let poll = routine_post(&mut conn, run).unwrap().unwrap();
+        let poll = routine_post(&mut conn, run).await.unwrap().unwrap();
         assert!(
             poll.body.contains("waiting for confirmation"),
             "{}",
@@ -2210,6 +2329,7 @@ mod tests {
         assert!(poll.buttons.is_empty() && poll.mention_roles.is_empty());
 
         let ask = approval_post(&mut conn, run, "", at(2026, 10, 14, 9, 0))
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(ask.channel_discord_id, "88");
@@ -2226,12 +2346,12 @@ mod tests {
             "the winner stands out"
         );
 
-        let rows = list_routines(&mut conn, 1).unwrap();
+        let rows = list_routines(&mut conn, 1).await.unwrap();
         assert_eq!(
             (rows[0].badge.as_str(), rows[0].poll.as_str()),
             ("Approval", "Friday won · waiting for approval")
         );
-        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let shown = routine_page_data(&mut conn, id).await.unwrap().unwrap();
         let approval = shown.approval.unwrap();
         assert_eq!(
             (approval.channel.as_str(), approval.winner),
@@ -2246,12 +2366,16 @@ mod tests {
             ["poll", "approval", "post"]
         );
 
-        assert!(!can_decide(&mut conn, id, 3).unwrap());
-        let refused = decide_run(&mut conn, run, 3, Some(3), at(2026, 10, 14, 9, 0)).unwrap_err();
+        assert!(!can_decide(&mut conn, id, 3).await.unwrap());
+        let refused = decide_run(&mut conn, run, 3, Some(3), at(2026, 10, 14, 9, 0))
+            .await
+            .unwrap_err();
         assert!(refused.to_string().contains("Only the roles"), "{refused}");
 
-        assert!(can_decide(&mut conn, id, 2).unwrap());
-        let effect = decide_run(&mut conn, run, 2, Some(3), at(2026, 10, 14, 9, 0)).unwrap();
+        assert!(can_decide(&mut conn, id, 2).await.unwrap());
+        let effect = decide_run(&mut conn, run, 2, Some(3), at(2026, 10, 14, 9, 0))
+            .await
+            .unwrap();
         let event_id = effect
             .jobs
             .iter()
@@ -2260,21 +2384,23 @@ mod tests {
                 _ => None,
             })
             .expect("the event posts");
-        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).await.unwrap().unwrap();
         assert_eq!(
             event.starts_at,
             at(2026, 10, 15, 19, 0),
             "on the day June picked, not the winner"
         );
-        let done = must_run(&mut conn, run).unwrap();
+        let done = must_run(&mut conn, run).await.unwrap();
         assert_eq!(
             (done.status, done.winner_weekday, done.event_id),
             (RunStatus::Locked, Some(3), Some(event_id))
         );
 
         conn.batch_execute("UPDATE routine_runs SET approval_message_id = '900'")
+            .await
             .unwrap();
         let answered = approval_post(&mut conn, run, "", at(2026, 10, 14, 9, 0))
+            .await
             .unwrap()
             .unwrap();
         assert!(
@@ -2283,45 +2409,64 @@ mod tests {
             answered.body
         );
         assert!(answered.buttons.is_empty() && answered.mention_roles.is_empty());
-        let again = decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap_err();
+        let again = decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0))
+            .await
+            .unwrap_err();
         assert_eq!(again.to_string(), "This request has already been answered.");
     }
 
-    #[test]
-    fn an_approval_can_skip_the_week_or_lapse() {
-        let mut conn = world();
-        let id = approved_routine(&mut conn);
-        let run = open_run_id(&mut conn, id).unwrap().unwrap();
-        maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
-        let early = decide_run(&mut conn, run, 1, Some(9), at(2026, 10, 14, 9, 0)).unwrap_err();
+    #[tokio::test]
+    async fn an_approval_can_skip_the_week_or_lapse() {
+        let mut conn = world().await;
+        let id = approved_routine(&mut conn).await;
+        let run = open_run_id(&mut conn, id).await.unwrap().unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
+        let early = decide_run(&mut conn, run, 1, Some(9), at(2026, 10, 14, 9, 0))
+            .await
+            .unwrap_err();
         assert_eq!(early.to_string(), "That day isn't on this poll.");
-        decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, run).unwrap().status, RunStatus::Skipped);
-        let poll = routine_post(&mut conn, run).unwrap().unwrap();
+        decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            must_run(&mut conn, run).await.unwrap().status,
+            RunStatus::Skipped
+        );
+        let poll = routine_post(&mut conn, run).await.unwrap().unwrap();
         assert_eq!(poll.body, "There's no event this week.");
         assert_eq!(
-            must_run(&mut conn, run).unwrap().event_id,
+            must_run(&mut conn, run).await.unwrap().event_id,
             None,
             "no event was made"
         );
 
         // Next week nobody answers, so the request lapses as the winning day begins.
-        maintain(&mut conn, 1, at(2026, 10, 18, 10, 0)).unwrap();
-        let next = open_run_id(&mut conn, id).unwrap().unwrap();
-        cast_run(&mut conn, next, 2, 3).unwrap();
-        maintain(&mut conn, 1, at(2026, 10, 20, 18, 0)).unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 18, 10, 0))
+            .await
+            .unwrap();
+        let next = open_run_id(&mut conn, id).await.unwrap().unwrap();
+        cast_run(&mut conn, next, 2, 3).await.unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 20, 18, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, next).unwrap().status,
+            must_run(&mut conn, next).await.unwrap().status,
             RunStatus::Approval
         );
-        let late = decide_run(&mut conn, next, 1, Some(3), at(2026, 10, 22, 20, 0)).unwrap_err();
+        let late = decide_run(&mut conn, next, 1, Some(3), at(2026, 10, 22, 20, 0))
+            .await
+            .unwrap_err();
         assert_eq!(
             late.to_string(),
             "That day has already started. Pick a later one."
         );
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 22, 0, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 22, 0, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            must_run(&mut conn, next).unwrap().status,
+            must_run(&mut conn, next).await.unwrap().status,
             RunStatus::Expired
         );
         assert!(jobs
@@ -2330,7 +2475,7 @@ mod tests {
         assert!(!jobs
             .iter()
             .any(|job| matches!(job, DiscordJob::Sync { .. })));
-        let poll = routine_post(&mut conn, next).unwrap().unwrap();
+        let poll = routine_post(&mut conn, next).await.unwrap().unwrap();
         assert!(
             poll.body.starts_with("No one confirmed **Thursday"),
             "{}",
@@ -2338,31 +2483,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_poll_that_locked_before_its_window_closed_is_still_this_weeks() {
-        let mut conn = world();
-        let id = approved_routine(&mut conn);
-        let run = open_run_id(&mut conn, id).unwrap().unwrap();
+    #[tokio::test]
+    async fn a_poll_that_locked_before_its_window_closed_is_still_this_weeks() {
+        let mut conn = world().await;
+        let id = approved_routine(&mut conn).await;
+        let run = open_run_id(&mut conn, id).await.unwrap().unwrap();
         // The lock moved earlier after the poll opened, as an edit to the routine can do.
         conn.batch_execute("UPDATE routine_runs SET locks_at = '2026-10-12 13:00:00+00'")
+            .await
             .unwrap();
-        maintain(&mut conn, 1, at(2026, 10, 12, 14, 0)).unwrap();
-        decide_run(&mut conn, run, 1, Some(4), at(2026, 10, 12, 14, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, run).unwrap().status, RunStatus::Locked);
-        // Before Tuesday's lock, the week's window still matches the locked poll.
-        maintain(&mut conn, 1, at(2026, 10, 12, 15, 0)).unwrap();
-        maintain(&mut conn, 1, at(2026, 10, 13, 9, 0)).unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 12, 14, 0))
+            .await
+            .unwrap();
+        decide_run(&mut conn, run, 1, Some(4), at(2026, 10, 12, 14, 0))
+            .await
+            .unwrap();
         assert_eq!(
-            runs_for(&mut conn, id).unwrap().len(),
+            must_run(&mut conn, run).await.unwrap().status,
+            RunStatus::Locked
+        );
+        // Before Tuesday's lock, the week's window still matches the locked poll.
+        maintain(&mut conn, 1, at(2026, 10, 12, 15, 0))
+            .await
+            .unwrap();
+        maintain(&mut conn, 1, at(2026, 10, 13, 9, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            runs_for(&mut conn, id).await.unwrap().len(),
             1,
             "no second poll for the same week"
         );
     }
 
-    #[test]
-    fn a_routine_polls_first_and_posts_last() {
-        let mut conn = world();
-        let id = approved_routine(&mut conn);
+    #[tokio::test]
+    async fn a_routine_polls_first_and_posts_last() {
+        let mut conn = world().await;
+        let id = approved_routine(&mut conn).await;
         let poll = Step::of(StepKind::Poll);
         let post = Step::of(StepKind::Post);
         let ask = |channel_id| Step {
@@ -2376,7 +2533,10 @@ mod tests {
             vec![poll.clone(), ask(Some(2)), ask(Some(2)), post.clone()],
             vec![poll.clone(), ask(None), post.clone()],
         ] {
-            assert!(save_steps(&mut conn, id, 1, &wrong).is_err(), "{wrong:?}");
+            assert!(
+                save_steps(&mut conn, id, 1, &wrong).await.is_err(),
+                "{wrong:?}"
+            );
         }
         save_steps(
             &mut conn,
@@ -2384,19 +2544,22 @@ mod tests {
             1,
             &[poll.clone(), ask(Some(2)), post.clone()],
         )
+        .await
         .unwrap();
         assert_eq!(
-            load_steps(&mut conn, id).unwrap()[1].role_ids,
+            load_steps(&mut conn, id).await.unwrap()[1].role_ids,
             [501],
             "a role from elsewhere is dropped"
         );
-        save_steps(&mut conn, id, 1, &default_steps()).unwrap();
-        assert_eq!(load_steps(&mut conn, id).unwrap(), default_steps());
+        save_steps(&mut conn, id, 1, &default_steps())
+            .await
+            .unwrap();
+        assert_eq!(load_steps(&mut conn, id).await.unwrap(), default_steps());
     }
 
-    #[test]
-    fn moving_the_poll_while_one_is_open_keeps_a_single_poll() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn moving_the_poll_while_one_is_open_keeps_a_single_poll() {
+        let mut conn = world().await;
         let (id, _, _) = create_routine(
             &mut conn,
             1,
@@ -2414,6 +2577,7 @@ mod tests {
             None,
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
         // The poll opened Sunday at 10:00. Now it opens at 9:30, then at 22:30.
         for (minutes, now) in [
@@ -2437,10 +2601,12 @@ mod tests {
                 None,
                 now,
             )
+            .await
             .unwrap();
-            maintain(&mut conn, 1, now).unwrap();
+            maintain(&mut conn, 1, now).await.unwrap();
         }
         let live: Vec<RunStatus> = runs_for(&mut conn, id)
+            .await
             .unwrap()
             .into_iter()
             .filter(|run| run.status != RunStatus::Locked)
@@ -2451,7 +2617,9 @@ mod tests {
             [RunStatus::Open],
             "one poll, not one per schedule change"
         );
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         let events = jobs
             .iter()
             .filter(|job| matches!(job, DiscordJob::Sync { .. }))
@@ -2459,9 +2627,9 @@ mod tests {
         assert_eq!(events, 1, "locking posts one event");
     }
 
-    #[test]
-    fn a_day_already_past_on_lock_lands_the_following_week() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_day_already_past_on_lock_lands_the_following_week() {
+        let mut conn = world().await;
         let (id, _, _) = create_routine(
             &mut conn,
             1,
@@ -2479,10 +2647,13 @@ mod tests {
             None,
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
-        let open = editable_run(&mut conn, id).unwrap().unwrap();
-        cast_run(&mut conn, open.id, 1, 0).unwrap();
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let open = editable_run(&mut conn, id).await.unwrap().unwrap();
+        cast_run(&mut conn, open.id, 1, 0).await.unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         let event_id = jobs
             .iter()
             .find_map(|job| match job {
@@ -2490,14 +2661,15 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).await.unwrap().unwrap();
         assert_eq!(event.starts_at, at(2026, 10, 19, 19, 0));
     }
 
-    #[test]
-    fn a_locked_poll_hands_its_post_to_the_event_and_posts_the_results_in_its_thread() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_locked_poll_hands_its_post_to_the_event_and_posts_the_results_in_its_thread() {
+        let mut conn = world().await;
         conn.batch_execute("UPDATE channels SET discord_id = '123' WHERE id = 1")
+            .await
             .unwrap();
         let (id, _, _) = create_routine(
             &mut conn,
@@ -2516,14 +2688,19 @@ mod tests {
             None,
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
-        let open = editable_run(&mut conn, id).unwrap().unwrap();
-        remember_routine_message(&mut conn, open.id, "555").unwrap();
-        cast_run(&mut conn, open.id, 1, 3).unwrap();
-        cast_run(&mut conn, open.id, 2, 3).unwrap();
-        cast_run(&mut conn, open.id, 2, 4).unwrap();
+        let open = editable_run(&mut conn, id).await.unwrap().unwrap();
+        remember_routine_message(&mut conn, open.id, "555")
+            .await
+            .unwrap();
+        cast_run(&mut conn, open.id, 1, 3).await.unwrap();
+        cast_run(&mut conn, open.id, 2, 3).await.unwrap();
+        cast_run(&mut conn, open.id, 2, 4).await.unwrap();
 
-        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
+        let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
+            .await
+            .unwrap();
         let event_id = jobs
             .iter()
             .find_map(|job| match job {
@@ -2531,7 +2708,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let event = store::event(&mut conn, event_id).unwrap().unwrap();
+        let event = store::event(&mut conn, event_id).await.unwrap().unwrap();
         assert_eq!(
             event.discord_message_id.as_deref(),
             Some("555"),
@@ -2550,7 +2727,7 @@ mod tests {
             "the event goes up before the results reply: {jobs:?}"
         );
 
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert!(post.results);
         assert_eq!(post.reply_to.as_deref(), Some("555"));
         assert_eq!(post.message_id, None, "no reply yet, so one is sent");
@@ -2570,8 +2747,10 @@ mod tests {
         assert_eq!(post.fields[0].value, "> Nell\n> June");
         assert_eq!(post.fields[1].value, "> June");
 
-        remember_results_message(&mut conn, open.id, "777").unwrap();
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        remember_results_message(&mut conn, open.id, "777")
+            .await
+            .unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert_eq!(
             post.message_id.as_deref(),
             Some("777"),
@@ -2582,8 +2761,9 @@ mod tests {
         conn.batch_execute(&format!(
             "UPDATE events SET thread_enabled = false WHERE id = {event_id}"
         ))
+        .await
         .unwrap();
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert_eq!(
             post.thread, None,
             "no thread, so the results reply to the post"
@@ -2591,8 +2771,9 @@ mod tests {
         conn.batch_execute(&format!(
             "UPDATE events SET thread_enabled = true WHERE id = {event_id}"
         ))
+        .await
         .unwrap();
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         let thread = post.thread.expect("the event's thread");
         assert_eq!(thread.event_id, event_id);
         assert_eq!(
@@ -2600,15 +2781,18 @@ mod tests {
             "not open yet, so the results open it"
         );
         assert!(thread.name.starts_with("Game night -- "), "{}", thread.name);
-        store::set_thread_discord_id(&mut conn, event_id, &thread.name, "888").unwrap();
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        store::set_thread_discord_id(&mut conn, event_id, &thread.name, "888")
+            .await
+            .unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert_eq!(post.thread.unwrap().discord_id.as_deref(), Some("888"));
     }
 
-    #[test]
-    fn an_open_poll_lists_people_beside_each_day() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn an_open_poll_lists_people_beside_each_day() {
+        let mut conn = world().await;
         conn.batch_execute("UPDATE channels SET discord_id = '123' WHERE id = 1")
+            .await
             .unwrap();
         let (id, _, _) = create_routine(
             &mut conn,
@@ -2627,11 +2811,12 @@ mod tests {
             None,
             at(2026, 10, 12, 12, 0),
         )
+        .await
         .unwrap();
-        let open = editable_run(&mut conn, id).unwrap().unwrap();
-        cast_run(&mut conn, open.id, 1, 3).unwrap();
-        cast_run(&mut conn, open.id, 2, 3).unwrap();
-        let shown = routine_page_data(&mut conn, id).unwrap().unwrap();
+        let open = editable_run(&mut conn, id).await.unwrap().unwrap();
+        cast_run(&mut conn, open.id, 1, 3).await.unwrap();
+        cast_run(&mut conn, open.id, 2, 3).await.unwrap();
+        let shown = routine_page_data(&mut conn, id).await.unwrap().unwrap();
         let thursday = shown
             .run
             .unwrap()
@@ -2645,7 +2830,7 @@ mod tests {
             "the page names who voted, as the post does"
         );
         assert!(shown.usual.iter().all(|day| day.voters.is_empty()));
-        let rows = list_routines(&mut conn, 1).unwrap();
+        let rows = list_routines(&mut conn, 1).await.unwrap();
         assert_eq!(rows[0].badge, "Voting");
         assert_eq!(rows[0].poll, "Poll locks Tue, Oct 13 · 6:00 PM");
         assert_eq!(rows[0].event, "");
@@ -2653,17 +2838,17 @@ mod tests {
         assert_eq!(rows[0].choices[0].votes, 2);
         assert_eq!(rows[0].choices[1].label, "Fri, Oct 16");
         assert_eq!(rows[0].choices[1].votes, 0);
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert_eq!(post.title, "Next event: Game night");
         let locks = format!("Locks <t:{}:R>.", open.locks_at.timestamp());
         assert!(
             post.body.starts_with(&locks),
             "Discord counts down to the lock: {post:?}"
         );
-        let mut settings = store::settings(&mut conn, 1).unwrap();
+        let mut settings = store::settings(&mut conn, 1).await.unwrap();
         settings.localize_time = false;
-        store::update_settings(&mut conn, &settings).unwrap();
-        let post = routine_post(&mut conn, open.id).unwrap().unwrap();
+        store::update_settings(&mut conn, &settings).await.unwrap();
+        let post = routine_post(&mut conn, open.id).await.unwrap().unwrap();
         assert!(
             post.body.starts_with("Locks Tue, Oct 13 · 6:00 PM."),
             "without localized times the server's zone is spelled out: {post:?}"
@@ -2686,8 +2871,8 @@ mod tests {
         let run = uuid::Uuid::parse_str(run).expect("a public id, not a row number");
         assert_eq!(run.get_version_num(), 7);
         assert_eq!(
-            run_by_public(&mut conn, run).unwrap(),
-            open_run_id(&mut conn, id).unwrap()
+            run_by_public(&mut conn, run).await.unwrap(),
+            open_run_id(&mut conn, id).await.unwrap()
         );
     }
 }

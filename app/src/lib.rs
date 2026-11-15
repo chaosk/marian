@@ -9,6 +9,8 @@ use leptos_router::hooks::{use_params_map, use_query_map};
 use leptos_router::path;
 
 pub mod api;
+#[cfg(feature = "ssr")]
+pub use api::local::decide_server_gate;
 mod cache;
 mod client;
 mod format;

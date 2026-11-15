@@ -12,7 +12,7 @@ use tracing::Instrument;
 
 use crate::jobs::DiscordJob;
 use crate::leader::Term;
-use crate::store::{self, Connection};
+use crate::store;
 
 use super::publish::{push_attendance, push_remind, push_routine, push_sync};
 use super::slash::register_commands;
@@ -48,17 +48,16 @@ impl Saver {
 /// left waits in the table for the next process.
 pub(super) const DRAIN: Duration = Duration::from_secs(10);
 
-/// Runs `body` with a pooled connection on a blocking thread.
-async fn db_work<T: Send + 'static>(
-    db: &store::Db,
-    body: impl FnOnce(&mut Connection) -> Result<T, crate::error::OpError> + Send + 'static,
-) -> Result<T, Error> {
-    let db = db.clone();
-    tokio::task::spawn_blocking(move || -> Result<T, Error> {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        Ok(body(&mut conn)?)
-    })
-    .await?
+/// Runs `body` with a pooled connection.
+async fn db_work<T, F>(db: &store::Db, body: F) -> Result<T, Error>
+where
+    F: for<'r> store::Work<'r, Result<T, crate::error::OpError>> + Send,
+{
+    let mut conn = db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
+    Ok(body(&mut conn).await?)
 }
 
 /// Saves jobs from the queue to the table, in batches, and wakes the worker.
@@ -96,7 +95,7 @@ async fn save_batch(db: &store::Db, batch: Vec<DiscordJob>) {
     }
     for attempt in 1..=3 {
         let jobs = batch.clone();
-        match db_work(db, move |conn| crate::jobs::save(conn, &jobs)).await {
+        match db_work(db, async move |conn| crate::jobs::save(conn, &jobs).await).await {
             Ok(()) => return,
             Err(err) if attempt < 3 => {
                 tracing::warn!(
@@ -157,12 +156,12 @@ pub(super) async fn job_loop(
             continue;
         }
         let now = chrono::Utc::now();
-        let next = db_work(&db, move |conn| {
-            let next = crate::jobs::claim(conn, now, crate::jobs::LEASE)?;
-            let counts = crate::jobs::counts(conn, now)?;
+        let next = db_work(&db, async move |conn| {
+            let next = crate::jobs::claim(conn, now, crate::jobs::LEASE).await?;
+            let counts = crate::jobs::counts(conn, now).await?;
             let later = match next {
                 Some(_) => None,
-                None => crate::jobs::next_run_at(conn)?,
+                None => crate::jobs::next_run_at(conn).await?,
             };
             Ok((next, counts, later))
         })
@@ -234,7 +233,7 @@ pub(super) async fn job_loop(
         let (outcome, recorded) = match result {
             Ok(()) => (
                 "done",
-                db_work(&db, move |conn| crate::jobs::done(conn, row)).await,
+                db_work(&db, async move |conn| crate::jobs::done(conn, row).await).await,
             ),
             Err(err) => match job.bump() {
                 Some(next) => {
@@ -250,8 +249,8 @@ pub(super) async fn job_loop(
                             .unwrap_or(chrono::Duration::seconds(300));
                     (
                         "failed",
-                        db_work(&db, move |conn| {
-                            crate::jobs::retry(conn, row, &next, run_at)
+                        db_work(&db, async move |conn| {
+                            crate::jobs::retry(conn, row, &next, run_at).await
                         })
                         .await,
                     )
@@ -262,7 +261,7 @@ pub(super) async fn job_loop(
                     });
                     (
                         "dropped",
-                        db_work(&db, move |conn| crate::jobs::done(conn, row)).await,
+                        db_work(&db, async move |conn| crate::jobs::done(conn, row).await).await,
                     )
                 }
             },
@@ -365,8 +364,13 @@ async fn push_commands(
     guild_id: i64,
 ) -> Result<(), Error> {
     let discord = {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        store::guild(&mut conn, guild_id)?.and_then(|guild| guild.discord_id)
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        store::guild(&mut conn, guild_id)
+            .await?
+            .and_then(|guild| guild.discord_id)
     };
     let Some(discord) = discord.and_then(|id| id.parse::<u64>().ok()) else {
         return Ok(());

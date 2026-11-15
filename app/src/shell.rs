@@ -121,10 +121,8 @@ pub fn ServerShell() -> impl IntoView {
 /// Transition to decide later put every page inside it, and a page whose own
 /// read failed then hydrated differently from what was sent.
 #[cfg(feature = "ssr")]
-fn server_gate(id: &str) -> Option<crate::api::Failure> {
-    crate::api::local::with(id, |_, _| Ok(()))
-        .err()
-        .filter(crate::api::Failure::missing)
+fn server_gate(_: &str) -> Option<crate::api::Failure> {
+    crate::api::local::server_gate()
 }
 
 #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
