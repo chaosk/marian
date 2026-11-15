@@ -1,8 +1,27 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, NaiveDate, Offset, TimeZone, Utc};
+use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::{Tz, TZ_VARIANTS};
 use serde::{Deserialize, Serialize};
+
+/// The moment a wall-clock time in `tz` names. When clocks go back and the
+/// time happens twice, the first one. When clocks go forward and the time
+/// never happens, it moves forward by the gap, the way calendar apps do:
+/// 02:30 on the night Warsaw skips from 02:00 to 03:00 is 03:30.
+pub fn local_to_utc(naive: NaiveDateTime, tz: Tz) -> DateTime<Utc> {
+    match naive.and_local_timezone(tz) {
+        LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => at.with_timezone(&Utc),
+        LocalResult::None => {
+            // Read the time with the offset from before the gap. A day back is
+            // before any gap, and no zone changes its offset twice in a day.
+            let before = tz
+                .offset_from_utc_datetime(&(naive - Duration::days(1)))
+                .fix()
+                .local_minus_utc();
+            (naive - Duration::seconds(i64::from(before))).and_utc()
+        }
+    }
+}
 
 pub fn zone_label(tz: Tz, now: DateTime<Utc>) -> String {
     let offset = offset_text(offset_seconds(tz, now));
@@ -290,6 +309,40 @@ impl Clock {
 
 #[cfg(test)]
 mod tests {
+    use super::local_to_utc;
+
+    fn local(text: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    #[test]
+    fn a_skipped_time_moves_forward_and_a_doubled_one_takes_the_first() {
+        let warsaw: chrono_tz::Tz = "Europe/Warsaw".parse().unwrap();
+        let skipped = local_to_utc(local("2026-03-29 02:30"), warsaw);
+        assert_eq!(
+            skipped.with_timezone(&warsaw).to_rfc3339(),
+            "2026-03-29T03:30:00+02:00"
+        );
+        let doubled = local_to_utc(local("2026-10-25 02:30"), warsaw);
+        assert_eq!(
+            doubled.with_timezone(&warsaw).to_rfc3339(),
+            "2026-10-25T02:30:00+02:00"
+        );
+        let plain = local_to_utc(local("2026-06-01 19:00"), warsaw);
+        assert_eq!(plain.to_rfc3339(), "2026-06-01T17:00:00+00:00");
+    }
+
+    #[test]
+    fn a_midnight_that_never_happens_is_the_first_moment_of_the_day() {
+        // Santiago's clocks go from 00:00 to 01:00 on 6 September 2026, so the
+        // week that starts that day starts at 01:00, not at midnight read as UTC.
+        let santiago: chrono_tz::Tz = "America/Santiago".parse().unwrap();
+        let start = local_to_utc(local("2026-09-06 00:00"), santiago);
+        assert_eq!(
+            start.with_timezone(&santiago).to_rfc3339(),
+            "2026-09-06T01:00:00-03:00"
+        );
+    }
     use super::*;
 
     #[test]

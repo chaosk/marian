@@ -132,8 +132,17 @@ fn google_time(dt: DateTime<Utc>) -> String {
     dt.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
+/// A text value as RFC 5545 writes it. Any line break, CRLF, CR or LF, becomes
+/// `\n`, so no value can start a line of its own: some calendar apps end a line
+/// at a bare CR. Other control characters aren't allowed in text and are
+/// dropped; a tab stays.
 fn fold_escape(value: &str) -> String {
     value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect::<String>()
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace(',', "\\,")
@@ -172,6 +181,20 @@ mod tests {
     use super::*;
     use crate::schema;
     use diesel::connection::SimpleConnection;
+
+    #[test]
+    fn no_text_value_can_start_a_line_of_its_own() {
+        assert_eq!(
+            fold_escape("Raid\rATTACH:https://evil.example/x"),
+            "Raid\\nATTACH:https://evil.example/x"
+        );
+        assert_eq!(fold_escape("one\r\ntwo\nthree"), "one\\ntwo\\nthree");
+        assert_eq!(fold_escape("bell\u{7}\ttab"), "bell\ttab");
+        assert_eq!(fold_escape("a,b;c\\d"), "a\\,b\\;c\\\\d");
+        assert!(!fold_escape("x\ry\u{b}z\u{85}")
+            .chars()
+            .any(char::is_control));
+    }
 
     #[test]
     fn a_personal_feed_lists_accepted_and_created_events() {

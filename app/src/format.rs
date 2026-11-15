@@ -37,10 +37,7 @@ pub fn week_of(clock: &Clock, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Ut
 }
 
 fn midnight(clock: &Clock, date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(0, 0, 0)
-        .and_then(|naive| naive.and_local_timezone(clock.tz).earliest())
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|| date.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    marian_types::time::local_to_utc(date.and_time(chrono::NaiveTime::MIN), clock.tz)
 }
 
 /// "3/5 +2 waiting" for an event card.
