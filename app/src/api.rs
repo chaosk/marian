@@ -77,12 +77,14 @@ pub(crate) mod local {
         body: impl FnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
     ) -> Result<T, Failure> {
         let (web, parts) = web().ok_or_else(unsigned)?;
-        let mut db = web.db.get().map_err(|_| Failure {
-            status: 503,
-            message: "The database is busy.".into(),
-        })?;
-        let viewer = api::viewer(&mut db, &parts.headers).ok_or_else(unsigned)?;
-        body(&mut db, &viewer).map_err(failure)
+        marian::store::blocking(|| {
+            let mut db = web.db.get().map_err(|_| Failure {
+                status: 503,
+                message: "The database is busy.".into(),
+            })?;
+            let viewer = api::viewer(&mut db, &parts.headers).ok_or_else(unsigned)?;
+            body(&mut db, &viewer).map_err(failure)
+        })
     }
 
     pub fn with<T>(

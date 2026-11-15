@@ -855,6 +855,20 @@ pub fn open(database_url: &str) -> Result<Connection, OpError> {
     Ok(conn)
 }
 
+/// Runs synchronous database work from async code without holding up the
+/// runtime: the worker thread hands its other tasks to another worker for the
+/// duration. Borrows freely, unlike `spawn_blocking`. On a single-threaded
+/// runtime (tests) it just runs `body`.
+pub fn blocking<T>(body: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(body)
+        }
+        _ => body(),
+    }
+}
+
 pub fn pool(database_url: &str) -> Result<Db, OpError> {
     let url = parse_database_url(database_url)?;
     build_pool(&url, None, pool_size())
@@ -2378,6 +2392,29 @@ mod tests {
         id: i64,
         name: &'a str,
         timezone: &'a str,
+    }
+
+    #[test]
+    fn blocking_work_leaves_the_other_workers_free() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let heard = tokio::spawn(async move {
+                blocking(|| rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok())
+            });
+            // Queued behind the blocking task on the only worker: it would starve
+            // if `blocking` kept the worker to itself.
+            let other = tokio::spawn(async move { tx.send(()).unwrap() });
+            assert!(heard.await.unwrap(), "the other task ran while blocking work waited");
+            other.await.unwrap();
+        });
+        // A single-threaded runtime can't hand its tasks over; the work just runs.
+        let single = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(single.block_on(async { blocking(|| 7) }), 7);
     }
 
     #[test]
