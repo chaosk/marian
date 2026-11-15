@@ -241,7 +241,43 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .account-menu .toggle.on { background: var(--blue); }
 .account-menu .toggle.on span { transform: translateX(14px); }
-.account-menu a.calendar { color: #243044; font-size: 14px; font-weight: 600; text-decoration: none; }
+.account-menu .switcher-menu button.feed-toggle { justify-content: space-between; }
+.account-menu .feed-toggle[aria-expanded="true"] .switcher-chevron { transform: rotate(225deg) translate(-1px, -1px); }
+.feed-panel { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; padding: 6px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.feed-panel label.account-note { margin-bottom: 0; }
+.account-menu .switcher-menu { max-height: min(560px, calc(100vh - 120px)); }
+.feed-panel a { font-size: 14px; font-weight: 600; }
+.feed-copy { display: flex; gap: 6px; margin: 0 8px 4px; }
+.feed-copy input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f4ee;
+  color: var(--ink);
+}
+.account-menu .switcher-menu button.feed-copy-button {
+  width: auto;
+  flex: none;
+  justify-content: center;
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  font-size: 13px;
+}
+.feed-panel .account-note { margin: 2px 8px 0; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .account-menu .account-label {
   margin: 6px 8px 0;
   color: #243044;
@@ -916,7 +952,9 @@ form.channel-create .field { flex: 0 1 280px; min-width: 0; }
 .md pre { padding: 8px 10px; border-radius: 6px; overflow: auto; background: rgba(0, 0, 0, 0.06); }
 .md blockquote { border-left: 3px solid currentColor; padding-left: 8px; }
 .md .spoiler { background: var(--ink); color: transparent; border-radius: 3px; cursor: pointer; }
-.md .spoiler.open { color: inherit; background: #efe6d4; }
+.md .spoiler:not(.open) * { color: transparent; visibility: hidden; }
+.md .spoiler:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.md .spoiler.open { color: inherit; background: #efe6d4; cursor: auto; }
 .discord .md code, .discord .md pre { background: #1e1f22; color: #dbdee1; }
 .discord .md .spoiler { background: #202225; }
 .discord .md .spoiler.open { color: #dbdee1; background: #4e5058; }

@@ -42,9 +42,11 @@ fn span(element: &MarkdownElement) -> String {
         MarkdownElement::Bold(inner) => wrap("strong", inner.content()),
         MarkdownElement::Underline(inner) => wrap("u", inner.content()),
         MarkdownElement::Strikethrough(inner) => wrap("s", inner.content()),
+        // Hidden until clicked, or focused and Enter or Space pressed: see
+        // `reveal_spoilers`. A span, not a button, since a link may sit inside.
         MarkdownElement::Spoiler(inner) => {
             format!(
-                "<span class=\"spoiler\">{}</span>",
+                "<span class=\"spoiler\" role=\"button\" tabindex=\"0\" aria-expanded=\"false\">{}</span>",
                 spans(inner.content())
             )
         }
@@ -232,6 +234,64 @@ fn escape_char(c: char) -> String {
     }
 }
 
+/// Spoilers anywhere on the page open on a click, or on Enter or Space while
+/// focused, and close the same way. One listener on the document for them
+/// all, since they arrive as HTML from `render` rather than as views. A click
+/// on a link inside a closed spoiler only opens it, as in Discord.
+#[cfg(feature = "hydrate")]
+pub fn reveal_spoilers() {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    thread_local! {
+        static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if LISTENING.with(|on| on.replace(true)) {
+        return;
+    }
+    let toggle = |ev: &web_sys::Event| {
+        let Some(spoiler) = ev
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            .and_then(|element| element.closest(".md .spoiler").ok().flatten())
+        else {
+            return;
+        };
+        let open = spoiler.class_list().toggle("open").unwrap_or(false);
+        let _ = spoiler.set_attribute("aria-expanded", if open { "true" } else { "false" });
+        // Opening is all a click on a hidden spoiler does: not following a link
+        // inside it, and not opening the editor of the description around it.
+        ev.prevent_default();
+        ev.stop_propagation();
+    };
+    let on_click = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+        let opened_link = ev
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            .and_then(|element| element.closest(".md .spoiler.open a").ok().flatten())
+            .is_some();
+        if !opened_link {
+            toggle(&ev);
+        }
+    })
+    .into_js_value();
+    let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+        let on_spoiler = ev
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|element| element.matches(".md .spoiler").unwrap_or(false));
+        if on_spoiler && matches!(ev.key().as_str(), "Enter" | " ") {
+            toggle(&ev);
+        }
+    })
+    .into_js_value();
+    let document = leptos::prelude::document();
+    let _ = document.add_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
+    let _ = document.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn reveal_spoilers() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +319,12 @@ mod tests {
         assert_eq!(render("<script>"), "<p>&lt;script&gt;</p>");
         assert_eq!(
             render("||secret||"),
-            "<p><span class=\"spoiler\">secret</span></p>"
+            "<p><span class=\"spoiler\" role=\"button\" tabindex=\"0\" aria-expanded=\"false\">secret</span></p>"
+        );
+        assert_eq!(
+            render("||<b>&||"),
+            "<p><span class=\"spoiler\" role=\"button\" tabindex=\"0\" aria-expanded=\"false\">&lt;b&gt;&amp;</span></p>",
+            "a spoiler's text stays escaped"
         );
         assert_eq!(render("> noted"), "<blockquote><p>noted</p></blockquote>");
         assert_eq!(render("# Title"), "<h1>Title</h1>");

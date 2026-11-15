@@ -27,8 +27,10 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
   "BeforeUnloadEvent",
+  "Clipboard",
   "DataTransfer",
   "Document",
+  "DomTokenList",
   "DragEvent",
   "Element",
   "Event",
@@ -46,10 +48,12 @@ web-sys = { version = "0.3", optional = true, features = [
   "MessageEvent",
   "MouseEvent",
   "DomRect",
+  "KeyboardEvent",
   "KeyboardEventInit",
   "MutationObserver",
   "MutationObserverInit",
   "MutationRecord",
+  "Navigator",
   "Node",
   "NodeList",
   "ScrollBehavior",

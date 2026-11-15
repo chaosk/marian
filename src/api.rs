@@ -276,9 +276,15 @@ pub fn membership(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Members
         avatar: user.avatar,
         server_manager: user.server_manager,
         reminders_enabled: user.reminders_enabled,
-        calendar_url: format!("/calendar/{token}.ics"),
+        calendar_url: calendar_feed_url(&std::env::var("MARIAN_PUBLIC_URL").unwrap_or_default(), &token),
         google: google(conn, user.user_id)?,
     })
+}
+
+/// A person's calendar feed: its full address when the server knows its own,
+/// else a path the browser completes with the address it's on.
+fn calendar_feed_url(public_url: &str, token: &str) -> String {
+    format!("{}/calendar/{token}.ics", public_url.trim().trim_end_matches('/'))
 }
 
 fn google(conn: &mut Connection, user_id: i64) -> Result<dto::Google, OpError> {
@@ -2017,6 +2023,12 @@ mod tests {
         let shown = answers[1].1.to_string();
         assert!(shown.contains(&june), "June shows by her public id");
         assert_eq!(answers[2].1["role_event"].as_array().unwrap().len(), 1, "settings keep the role");
+    }
+
+    #[test]
+    fn the_calendar_feed_is_a_full_address_when_the_server_knows_its_own() {
+        assert_eq!(calendar_feed_url("https://marian.example/ ", "abc"), "https://marian.example/calendar/abc.ics");
+        assert_eq!(calendar_feed_url("", "abc"), "/calendar/abc.ics", "else a path the browser completes");
     }
 
     #[test]
