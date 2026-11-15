@@ -397,17 +397,17 @@ pub fn remote_access(
 }
 
 pub fn delete_account(conn: &mut Connection, user_id: i64) -> Result<(), OpError> {
-    diesel::delete(
-        schema::google_events::table
-            .filter(schema::google_events::user_id.eq(user_id)),
-    )
-    .execute(conn)?;
-    diesel::delete(
-        schema::google_accounts::table
-            .filter(schema::google_accounts::user_id.eq(user_id)),
-    )
-    .execute(conn)?;
-    Ok(())
+    store::with_tx(conn, |tx| {
+        diesel::delete(
+            schema::google_events::table.filter(schema::google_events::user_id.eq(user_id)),
+        )
+        .execute(tx)?;
+        diesel::delete(
+            schema::google_accounts::table.filter(schema::google_accounts::user_id.eq(user_id)),
+        )
+        .execute(tx)?;
+        Ok(())
+    })
 }
 
 pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpError> {
@@ -1394,5 +1394,40 @@ mod tests {
         let status = status(&mut conn, person).unwrap().unwrap();
         assert!(status.reconnect);
         assert!(!status.connected);
+    }
+
+    /// Makes every `op` on `table` fail, as a lost connection or a full disk would.
+    fn refuse(conn: &mut Connection, op: &str, table: &str) {
+        conn.batch_execute(&format!(
+            "CREATE OR REPLACE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+             CREATE TRIGGER refuse BEFORE {op} ON {table} FOR EACH ROW EXECUTE FUNCTION refuse();"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_account_that_cannot_be_removed_keeps_its_calendar_links() {
+        let mut conn = crate::store::open_memory().unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone) VALUES (1, 'Test', 'UTC');
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
+            INSERT INTO users (id, discord_id) VALUES (1, 'u1');
+            INSERT INTO events (id, public_id, guild_id, channel_id, title, description, starts_at, duration_minutes, status, created_at, updated_at) VALUES
+              (1, '01900000-0000-7000-8000-000000000001', 1, 1, 'Raid', '', '2026-10-14T18:00:00Z', 60, 'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z');
+            INSERT INTO google_accounts (user_id, refresh_token, email, connected_at)
+              VALUES (1, 'refresh-token', 'nell@example.com', '2026-10-15T00:00:00Z');
+            INSERT INTO google_events (user_id, event_id, google_event_id) VALUES (1, 1, 'g1');
+            ",
+        )
+        .unwrap();
+        refuse(&mut conn, "DELETE", "google_accounts");
+        assert!(delete_account(&mut conn, 1).is_err());
+        let links: i64 = schema::google_events::table
+            .count()
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(links, 1);
     }
 }

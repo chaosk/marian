@@ -477,29 +477,40 @@ pub fn ensure_discord_guild(
     discord_id: &str,
     name: &str,
 ) -> Result<store::Guild, OpError> {
-    if let Some(guild) = store::guild_by_discord(conn, discord_id)? {
-        if guild.name != name && !name.is_empty() {
-            diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild.id)))
-                .set(schema::guilds::name.eq(name))
-                .execute(conn)?;
+    store::with_tx(conn, |tx| {
+        // Two events for a new server can arrive together; they take turns here so
+        // the server is stored once.
+        diesel::sql_query("SELECT pg_advisory_xact_lock(hashtext('guild:' || $1))")
+            .bind::<diesel::sql_types::Text, _>(discord_id)
+            .execute(tx)?;
+        if let Some(guild) = store::guild_by_discord(tx, discord_id)? {
+            if guild.name != name && !name.is_empty() {
+                diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild.id)))
+                    .set(schema::guilds::name.eq(name))
+                    .execute(tx)?;
+            }
+            // A server stored before this was one transaction may have lost its settings.
+            if !store::has_settings(tx, guild.id)? {
+                store::insert_default_settings(tx, guild.id)?;
+            }
+            return store::guild(tx, guild.id)?.ok_or(OpError::NotFound);
         }
-        return store::guild(conn, guild.id)?.ok_or(OpError::NotFound);
-    }
-    let name = if name.is_empty() {
-        "Discord server"
-    } else {
-        name
-    };
-    let id = diesel::insert_into(schema::guilds::table)
-        .values(&NewGuild {
-            name,
-            timezone: "UTC",
-            discord_id,
-        })
-        .returning(schema::guilds::id)
-        .get_result(conn)?;
-    store::insert_default_settings(conn, id)?;
-    store::guild(conn, id)?.ok_or(OpError::NotFound)
+        let name = if name.is_empty() {
+            "Discord server"
+        } else {
+            name
+        };
+        let id = diesel::insert_into(schema::guilds::table)
+            .values(&NewGuild {
+                name,
+                timezone: "UTC",
+                discord_id,
+            })
+            .returning(schema::guilds::id)
+            .get_result(tx)?;
+        store::insert_default_settings(tx, id)?;
+        store::guild(tx, id)?.ok_or(OpError::NotFound)
+    })
 }
 
 #[derive(Insertable)]
@@ -853,17 +864,21 @@ pub fn sync_discord_role(
 
 /// Marks the role for a deleted Discord role as gone; nobody holds it any more.
 pub fn discord_role_gone(conn: &mut Connection, guild_id: i64, discord_id: &str) -> Result<(), OpError> {
-    let Some(role) = store::role_by_discord(conn, guild_id, discord_id)? else {
-        return Ok(());
-    };
-    diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::role_id.eq(role.id)))
-        .execute(conn)?;
-    if role.gone_at.is_none() {
-        diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
-            .set(schema::roles::gone_at.eq(Utc::now()))
-            .execute(conn)?;
-    }
-    Ok(())
+    store::with_tx(conn, |tx| {
+        let Some(role) = store::role_by_discord(tx, guild_id, discord_id)? else {
+            return Ok(());
+        };
+        diesel::delete(
+            schema::membership_roles::table.filter(schema::membership_roles::role_id.eq(role.id)),
+        )
+        .execute(tx)?;
+        if role.gone_at.is_none() {
+            diesel::update(schema::roles::table.filter(schema::roles::id.eq(role.id)))
+                .set(schema::roles::gone_at.eq(Utc::now()))
+                .execute(tx)?;
+        }
+        Ok(())
+    })
 }
 
 /// Matches the server's roles to the roles Discord lists, as (Discord id,
@@ -1031,6 +1046,16 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Makes every `op` on `table` fail, as a lost connection or a full disk would.
+    fn refuse(conn: &mut Connection, op: &str, table: &str) {
+        conn.batch_execute(&format!(
+            "CREATE OR REPLACE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+             CREATE TRIGGER refuse BEFORE {op} ON {table} FOR EACH ROW EXECUTE FUNCTION refuse();"
+        ))
+        .unwrap();
     }
 
     fn names(conn: &mut Connection) -> Vec<String> {
@@ -1571,6 +1596,68 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         assert!(event_channel_purge(&mut conn, 1).unwrap().is_none());
+    }
+    #[test]
+    fn a_server_that_cannot_get_its_settings_is_not_half_stored() {
+        let mut conn = store::open_memory().unwrap();
+        refuse(&mut conn, "INSERT", "settings");
+        assert!(ensure_discord_guild(&mut conn, "777", "Keep").is_err());
+        assert!(store::guild_by_discord(&mut conn, "777").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_server_missing_its_settings_gets_them_back() {
+        let mut conn = one_channel();
+        assert!(store::settings(&mut conn, 1).is_err());
+        let guild = ensure_discord_guild(&mut conn, "4242", "Guild").unwrap();
+        assert_eq!(guild.id, 1);
+        assert!(store::settings(&mut conn, 1).is_ok());
+    }
+
+    #[test]
+    fn a_server_seen_twice_at_once_is_stored_once() {
+        use diesel::Connection as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let mut conn = store::open_memory().unwrap();
+        let db = store::pool_for(&mut conn).unwrap();
+        let start = std::sync::Barrier::new(2);
+        let done = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let (db, start, done) = (&db, &start, &done);
+                scope.spawn(move || {
+                    let mut conn = db.get().unwrap();
+                    // Each commit waits until both are done, or for half a second
+                    // when the other is waiting on it.
+                    conn.transaction::<_, diesel::result::Error, _>(|tx| {
+                        start.wait();
+                        let _ = ensure_discord_guild(tx, "888", "Twice");
+                        done.fetch_add(1, Ordering::SeqCst);
+                        let deadline = Instant::now() + Duration::from_millis(500);
+                        while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        let stored: i64 = schema::guilds::table
+            .filter(schema::guilds::discord_id.eq("888"))
+            .count()
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(stored, 1);
+    }
+
+    #[test]
+    fn a_role_that_cannot_be_marked_gone_keeps_its_holders() {
+        let mut conn = one_role();
+        refuse(&mut conn, "UPDATE", "roles");
+        assert!(discord_role_gone(&mut conn, 1, "700").is_err());
+        assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
     }
 }
 

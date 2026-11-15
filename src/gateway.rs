@@ -599,39 +599,43 @@ async fn register_guild(ctx: &serenity::Context, data: &Data, guild_id: serenity
 
 fn remember_guild(data: &Data, guild: &serenity::Guild) -> Result<(), Error> {
     let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-    let stored = logic::ensure_discord_guild(&mut conn, &guild.id.get().to_string(), &guild.name)?;
     let channels: Vec<(String, String)> = guild
         .channels
         .values()
         .filter(|channel| postable(channel.kind))
         .map(|channel| (channel.id.get().to_string(), channel.name.clone()))
         .collect();
-    logic::sync_discord_channels(&mut conn, stored.id, &channels)?;
     let roles: Vec<(String, String, String)> = guild
         .roles
         .values()
         .filter(|role| role.id.get() != guild.id.get())
         .map(|role| (role.id.get().to_string(), role.name.clone(), role.colour.hex()))
         .collect();
-    logic::sync_discord_roles(&mut conn, stored.id, &roles)?;
     let guild_discord = guild.id.get().to_string();
-    for role in guild.roles.values() {
-        logic::sync_discord_permissions(
-            &mut conn,
-            stored.id,
-            &guild_discord,
-            &role.id.get().to_string(),
-            role.permissions.bits(),
-        )?;
-    }
-    for channel in guild.channels.values().filter(|channel| postable(channel.kind)) {
-        logic::sync_channel_overwrites(
-            &mut conn,
-            stored.id,
-            &channel.id.get().to_string(),
-            &overwrites(channel),
-        )?;
-    }
+    // All of it or none, so a failure halfway leaves no server with half its roles.
+    store::with_tx(&mut conn, |tx| {
+        let stored = logic::ensure_discord_guild(tx, &guild_discord, &guild.name)?;
+        logic::sync_discord_channels(tx, stored.id, &channels)?;
+        logic::sync_discord_roles(tx, stored.id, &roles)?;
+        for role in guild.roles.values() {
+            logic::sync_discord_permissions(
+                tx,
+                stored.id,
+                &guild_discord,
+                &role.id.get().to_string(),
+                role.permissions.bits(),
+            )?;
+        }
+        for channel in guild.channels.values().filter(|channel| postable(channel.kind)) {
+            logic::sync_channel_overwrites(
+                tx,
+                stored.id,
+                &channel.id.get().to_string(),
+                &overwrites(channel),
+            )?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 

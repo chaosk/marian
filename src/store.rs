@@ -1176,6 +1176,13 @@ struct NewSettings {
 /// A new server's settings, and the attendance it starts with: Accepted,
 /// Declined, and Tentative in the library, and a Standard preset listing them
 /// as the default.
+pub fn has_settings(conn: &mut Connection, guild_id: i64) -> Result<bool, OpError> {
+    Ok(diesel::select(diesel::dsl::exists(
+        schema::settings::table.filter(schema::settings::guild_id.eq(guild_id)),
+    ))
+    .get_result(conn)?)
+}
+
 pub fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     diesel::insert_into(schema::settings::table)
         .values(&NewSettings { guild_id })
@@ -1372,6 +1379,10 @@ struct NewPermissionRole<'a> {
 
 /// Saves the settings row and replaces the roles each permission names.
 pub fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
+    with_tx(conn, |tx| update_settings_tx(tx, settings))
+}
+
+fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
     let row = settings.row();
     diesel::update(&row).set(&row).execute(conn)?;
     diesel::delete(

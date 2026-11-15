@@ -396,8 +396,10 @@ pub fn put_settings(
             outcome.jobs.push(DiscordJob::commands(viewer.guild_id));
         }
     }
-    store::set_guild_timezone(conn, viewer.guild_id, &next.timezone)?;
-    store::update_settings(conn, &s)?;
+    store::with_tx(conn, |tx| {
+        store::set_guild_timezone(tx, viewer.guild_id, &next.timezone)?;
+        store::update_settings(tx, &s)
+    })?;
     Ok(outcome)
 }
 
@@ -1931,6 +1933,16 @@ mod tests {
         (conn, viewer)
     }
 
+    /// Makes every `op` on `table` fail, as a lost connection or a full disk would.
+    fn refuse(conn: &mut Connection, op: &str, table: &str) {
+        conn.batch_execute(&format!(
+            "CREATE OR REPLACE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+             CREATE TRIGGER refuse BEFORE {op} ON {table} FOR EACH ROW EXECUTE FUNCTION refuse();"
+        ))
+        .unwrap();
+    }
+
     /// Every id in an API answer is a UUIDv7 string; a row's sequential key never leaves.
     fn assert_public_ids(value: &serde_json::Value, path: &str) {
         let id_key = |key: &str| key == "id" || key.ends_with("_id") || key.ends_with("_ids") || key.starts_with("role_");
@@ -2658,5 +2670,20 @@ mod tests {
         next.language = "de".into();
         assert!(put_settings(&mut conn, &viewer, &next).is_err());
         assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl");
+    }
+
+    #[test]
+    fn settings_that_cannot_all_be_saved_change_nothing() {
+        let (mut conn, viewer) = world();
+        let mut next = settings(&mut conn, &viewer).unwrap();
+        next.timezone = "America/New_York".into();
+        next.waitlist = !next.waitlist;
+        let raider = store::role(&mut conn, 1).unwrap().unwrap();
+        next.role_event = vec![raider.public_id.to_string()];
+        refuse(&mut conn, "INSERT", "permission_roles");
+        assert!(put_settings(&mut conn, &viewer, &next).is_err());
+        let after = settings(&mut conn, &viewer).unwrap();
+        assert_eq!(after.timezone, "Europe/Warsaw");
+        assert_ne!(after.waitlist, next.waitlist);
     }
 }
