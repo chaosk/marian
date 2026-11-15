@@ -262,7 +262,7 @@ fn may_change_series(
         return Ok(());
     }
     let settings = store::settings(conn, series.guild_id)?;
-    let roles = store::membership_role_ids(conn, &actor)?;
+    let roles = store::membership_role_ids(conn, actor)?;
     let events = store::events_in_series(conn, series.id)?;
     if events
         .iter()

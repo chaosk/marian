@@ -498,7 +498,7 @@ fn consider_upsert(
         return Ok(());
     }
     jobs.push(Job::Upsert {
-        user_id: account.user_id.clone(),
+        user_id: account.user_id,
         event_id: event.id,
         google_event_id: link.and_then(|link| link.google_event_id.clone()),
         refresh_token: account.refresh_token.clone(),
@@ -553,7 +553,7 @@ fn drop_or_delete(
 ) -> Result<(), OpError> {
     match &link.google_event_id {
         Some(google_event_id) => jobs.push(Job::Delete {
-            user_id: account.user_id.clone(),
+            user_id: account.user_id,
             event_id: link.event_id,
             google_event_id: google_event_id.clone(),
             refresh_token: account.refresh_token.clone(),
@@ -737,7 +737,7 @@ pub async fn push(
             event_id,
             refresh_token,
             ..
-        } => (user_id.clone(), *event_id, refresh_token.clone()),
+        } => (*user_id, *event_id, refresh_token.clone()),
     };
     let access = match access_token(http, client_id, client_secret, &refresh_token).await {
         Ok(token) => token,

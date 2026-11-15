@@ -80,7 +80,7 @@ pub fn next_weekday_at(
 }
 
 pub fn at_local(date: NaiveDate, hour: u32, minute: u32, tz: Tz) -> DateTime<Utc> {
-    let time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap_or_else(|| NaiveTime::MIN);
+    let time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap_or(NaiveTime::MIN);
     date.and_time(time)
         .and_local_timezone(tz)
         .earliest()

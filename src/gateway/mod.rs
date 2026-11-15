@@ -198,6 +198,10 @@ fn members_refused(err: &Error) -> bool {
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the gateway's wiring, called once per leadership term"
+)]
 async fn connect(
     token: &str,
     db: store::Db,

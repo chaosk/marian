@@ -336,7 +336,7 @@ fn next_weekday(from: NaiveDate, target: Weekday, strict_next: bool) -> NaiveDat
     from
 }
 
-fn month_day<'a>(text: &'a str, today: NaiveDate) -> Option<(NaiveDate, &'a str)> {
+fn month_day(text: &str, today: NaiveDate) -> Option<(NaiveDate, &str)> {
     const MONTHS: &[(&str, u32)] = &[
         ("january", 1),
         ("february", 2),

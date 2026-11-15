@@ -14,6 +14,10 @@ use crate::tr;
 use crate::store::{self, Channel, Connection, Membership, Role};
 use crate::values::{AccessKind, ChannelKind, EventRoleKind, EventStatus, OverwriteKind, SignupState};
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once per sync and matched straight away, never stored"
+)]
 pub enum Attendance {
     Idle,
     Waiting,
@@ -352,7 +356,7 @@ pub fn discord_view(
     }
     // The event's page on the web, after the signup buttons. It's a link, not
     // an action, so a finished event keeps it.
-    if let Some(url) = web_event_url(public_url, guild.discord_id.as_deref(), &event.public_id) {
+    if let Some(url) = web_event_url(public_url, guild.discord_id.as_deref(), event.public_id) {
         buttons.push(DiscordButton {
             role: ButtonRole::Web(url),
             label: "↗".into(),
@@ -1043,6 +1047,19 @@ pub fn mark_channel_purged(conn: &mut Connection, channel_id: i64) -> Result<(),
     Ok(())
 }
 
+/// An event's status as a post shows it, in `lang`.
+pub fn status_text(lang: Lang, status: EventStatus) -> String {
+    match status {
+        EventStatus::Draft => tr!(lang, "status-draft"),
+        EventStatus::Scheduled => tr!(lang, "status-scheduled"),
+        EventStatus::Posted => tr!(lang, "status-posted"),
+        EventStatus::Archived => tr!(lang, "status-archived"),
+        EventStatus::Cancelled => tr!(lang, "status-cancelled"),
+        EventStatus::Skipped => tr!(lang, "status-skipped"),
+        EventStatus::Failed => tr!(lang, "status-failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use diesel::connection::SimpleConnection;
@@ -1671,18 +1688,5 @@ mod tests {
         refuse(&mut conn, "UPDATE", "roles");
         assert!(discord_role_gone(&mut conn, 1, "700").is_err());
         assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
-    }
-}
-
-/// An event's status as a post shows it, in `lang`.
-pub fn status_text(lang: Lang, status: EventStatus) -> String {
-    match status {
-        EventStatus::Draft => tr!(lang, "status-draft"),
-        EventStatus::Scheduled => tr!(lang, "status-scheduled"),
-        EventStatus::Posted => tr!(lang, "status-posted"),
-        EventStatus::Archived => tr!(lang, "status-archived"),
-        EventStatus::Cancelled => tr!(lang, "status-cancelled"),
-        EventStatus::Skipped => tr!(lang, "status-skipped"),
-        EventStatus::Failed => tr!(lang, "status-failed"),
     }
 }

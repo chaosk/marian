@@ -295,7 +295,7 @@ fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> im
     } else {
         view! { <p class="muted">"Only the roles the approval names, server managers, and whoever made the routine can answer."</p> }.into_any()
     };
-    let channel = (!approval.channel.is_empty()).then(|| format!(" Asked in #{}.", approval.channel)).unwrap_or_default();
+    let channel = if !approval.channel.is_empty() { format!(" Asked in #{}.", approval.channel) } else { Default::default() };
     view! {
         <div class="poll-part">
             <h3>"Waiting for approval"</h3>

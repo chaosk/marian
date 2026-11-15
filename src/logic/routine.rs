@@ -151,6 +151,10 @@ struct NewRun<'a> {
     created_at: DateTime<Utc>,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every field of a new routine, as the web form and /routine send them"
+)]
 pub fn create_routine(
     conn: &mut Connection,
     guild_id: i64,
@@ -253,6 +257,10 @@ pub fn routine_in_guild(
         .ok_or(OpError::NotFound)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every field of a routine, as the web form sends them"
+)]
 pub fn save_routine(
     conn: &mut Connection,
     routine_id: i64,
@@ -646,7 +654,7 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
         thread,
         title,
         body,
-        color: 0x1e3a_6e,
+        color: 0x1e_3a_6e,
         fields,
         buttons,
         mention_everyone,
@@ -760,7 +768,7 @@ pub fn routine_page_data(
             Some(RunHistory {
                 when: clock::format_when(event.starts_at, tz, settings.hour_24),
                 winner: clock::weekday_name(winner).to_string(),
-                href: event_path(&guild, &event.public_id),
+                href: event_path(&guild, event.public_id),
             })
         }
         None => None,
@@ -1598,7 +1606,7 @@ fn recent_runs(
         rows.push(RunHistory {
             when: clock::format_when(event.starts_at, tz, hour24),
             winner: clock::weekday_name(run.winner_weekday.unwrap_or(0)).to_string(),
-            href: event_path(&guild, &event.public_id),
+            href: event_path(&guild, event.public_id),
         });
     }
     Ok(rows)
@@ -1910,7 +1918,7 @@ mod tests {
         assert_eq!(shown.poll_time, "10:00");
         assert_eq!(shown.lock_time, "18:00");
         assert_eq!(shown.start_time, "19:00");
-        let locks = next.locks_at.clone();
+        let locks = next.locks_at;
         save_routine(
             &mut conn,
             id,

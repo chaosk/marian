@@ -125,12 +125,39 @@ fn google_time(dt: DateTime<Utc>) -> String {
 }
 
 fn fold_escape(value: &str) -> String {
-    let escaped = value
+    
+    value
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace(',', "\\,")
-        .replace(';', "\\;");
-    escaped
+        .replace(';', "\\;")
+}
+
+fn plus_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+pub fn pct(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -206,31 +233,4 @@ mod tests {
             "http://www.google.com/calendar/event?action=TEMPLATE&text=BotC+%23135&details=&location=&dates=20261014T153000Z/20261014T171500Z"
         );
     }
-}
-
-fn plus_encode(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-pub fn pct(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }

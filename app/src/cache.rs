@@ -87,13 +87,13 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
 
 /// Writes settings into the cache without remounting the form.
 pub fn apply_settings(client: QueryClient, server: &str, next: &dto::Settings) {
-    client.update_query(settings_scope(), &server.to_string(), |cached| {
+    client.update_query(settings_scope(), server.to_string(), |cached| {
         if let Some(Ok(settings)) = cached {
             *settings = next.clone();
         }
         client.untrack_update_query();
     });
-    client.update_query(server_scope(), &server.to_string(), |cached| {
+    client.update_query(server_scope(), server.to_string(), |cached| {
         if let Some(Ok(info)) = cached {
             info.hour_24 = next.hour_24;
             info.timezone = next.timezone.clone();
@@ -156,7 +156,7 @@ pub fn preview_reminders(client: QueryClient, key: &(String, String), next: &[dt
 
 /// Writes a personal preference into the cached membership without remounting.
 pub fn apply_membership(client: QueryClient, server: &str, change: &dto::MembershipPatch) {
-    client.update_query(membership_scope(), &server.to_string(), |cached| {
+    client.update_query(membership_scope(), server.to_string(), |cached| {
         if let Some(Ok(membership)) = cached {
             if let Some(on) = change.reminders_enabled {
                 membership.reminders_enabled = on;
@@ -565,14 +565,17 @@ async fn get_timezones(selected: String) -> Result<Vec<dto::ZoneGroup>, Failure>
     api::timezones(&selected).await
 }
 
+/// The channels a new event can go to, and the preset it starts from.
+pub type NewEventData = (Vec<dto::Channel>, Option<dto::Preset>);
+
 /// What a new event starts from: the server's channels, and the preset named in
 /// the address or, without one, the server's default.
-pub fn new_event_scope() -> QueryScope<(String, String), Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>>
+pub fn new_event_scope() -> QueryScope<(String, String), Result<NewEventData, Failure>>
 {
     QueryScope::new(get_new_event).with_invalidation_link(|(s, _)| ["s".into(), s.clone(), "form".into()])
 }
 
-async fn get_new_event((server, preset): (String, String)) -> Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>
+async fn get_new_event((server, preset): (String, String)) -> Result<NewEventData, Failure>
 {
     let channels = api::channels(&server).await?;
     let presets = api::presets(&server).await?;

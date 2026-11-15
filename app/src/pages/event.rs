@@ -144,7 +144,7 @@ pub fn EventPage() -> impl IntoView {
             .into_any();
             let status = view! {
                 <p>{status_label(event.status.as_str())}</p>
-                {(event.status == EventStatus::Scheduled).then(|| event.post_at).flatten().map(|at| view! {
+                {(event.status == EventStatus::Scheduled).then_some(event.post_at).flatten().map(|at| view! {
                     <p class="muted">"Posts "{clock.when(at)}</p>
                 })}
             }
@@ -483,7 +483,7 @@ fn embed_view(
                     <p class="d-foot">"Created by "{event.creator.clone()}</p>
                 </div>
                 <div class="btn-row">
-                    {(!finished).then(|| buttons)}
+                    {(!finished).then_some(buttons)}
                     {if here.is_empty() {
                         view! { <button class="d-btn" type="button" disabled>"↗"</button> }.into_any()
                     } else {

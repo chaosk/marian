@@ -9,10 +9,7 @@ use marian_types::EventStatus;
 #[component]
 pub fn Schedule() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
-    let week = cache::listen(cache::events_scope(), {
-        let server = server;
-        move || week_key(server.get())
-    });
+    let week = cache::listen(cache::events_scope(), move || week_key(server.get()));
     let wrapped = cache::listen(cache::events_scope(), || {
         cache::events_key(
             cache::server_key(),

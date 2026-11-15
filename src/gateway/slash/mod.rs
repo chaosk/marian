@@ -36,6 +36,10 @@ pub(super) fn all_commands() -> Vec<poise::Command<Data, Error>> {
 }
 
 /// Registers the commands in one server, described in its language.
+#[allow(
+    clippy::result_large_err,
+    reason = "serenity::Error is serenity's own type"
+)]
 pub(super) async fn register_commands(
     http: impl AsRef<serenity::Http>,
     guild_id: serenity::GuildId,

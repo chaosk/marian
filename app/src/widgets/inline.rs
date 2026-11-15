@@ -971,22 +971,16 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
         sender.problem.set(String::new());
         open.set(false);
     };
-    let schedule = {
-        let create = create.clone();
-        move || {
-            let Some(local) = parse_local(&when.get_untracked()) else {
-                return sender.fail("Pick a date and time to post.");
-            };
-            create(dto::SaveAction::Schedule, Some(local), "Scheduled.");
-            if problems.with_untracked(|list| list.is_empty()) {
-                open.set(false);
-            }
+    let schedule = move || {
+        let Some(local) = parse_local(&when.get_untracked()) else {
+            return sender.fail("Pick a date and time to post.");
+        };
+        create(dto::SaveAction::Schedule, Some(local), "Scheduled.");
+        if problems.with_untracked(|list| list.is_empty()) {
+            open.set(false);
         }
     };
-    let save_draft = {
-        let create = create.clone();
-        move |_| create(dto::SaveAction::Draft, None, "Saved as a draft.")
-    };
+    let save_draft = move |_| create(dto::SaveAction::Draft, None, "Saved as a draft.");
     let post_now = move |_| create(dto::SaveAction::Publish, None, "Posted to Discord.");
     let schedule = StoredValue::new(schedule);
     view! {

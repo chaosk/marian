@@ -785,7 +785,7 @@ fn timezone_card(lang: Lang) -> DmReply {
         .iter()
         .map(|name| {
             clock::zone(name)
-                .map(|tz| clock::zone_label(tz))
+                .map(clock::zone_label)
                 .unwrap_or_else(|_| (*name).to_string())
         })
         .collect::<Vec<_>>();
@@ -924,6 +924,10 @@ fn answer_channel(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one answer in the event DM and the draft it fills in"
+)]
 fn answer_finish(
     conn: &mut Connection,
     discord_user_id: &str,
@@ -1246,7 +1250,7 @@ fn finish_event(
     draft.event_id = Some(id);
     save_draft(conn, discord_user_id, PromptStep::Next, draft)?;
     let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
-    let path = event_path(&guild, &event.public_id);
+    let path = event_path(&guild, event.public_id);
     let body = if public_url.trim().is_empty() {
         tr!(lang, "reply-open-path", path = path)
     } else {
@@ -1275,7 +1279,7 @@ fn answer_next(
         "1" => {
             let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
             let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
-            let path = event_path(&guild, &event.public_id);
+            let path = event_path(&guild, event.public_id);
             let line = if public_url.trim().is_empty() {
                 tr!(lang, "reply-open-path", path = path)
             } else {
@@ -1307,7 +1311,7 @@ fn answer_next(
             // The copy goes by its public id; the row number stays on the server.
             let copy = store::event(conn, id)?.ok_or(OpError::NotFound)?;
             let guild = store::guild(conn, copy.guild_id)?.ok_or(OpError::NotFound)?;
-            let path = event_path(&guild, &copy.public_id);
+            let path = event_path(&guild, copy.public_id);
             let line = if public_url.trim().is_empty() {
                 tr!(lang, "dm-duplicated", path = path.as_str())
             } else {
@@ -1539,7 +1543,7 @@ pub fn edit_event(
         lang,
         "reply-event-updated",
         title = &event.title,
-        path = event_path(&guild, &event.public_id)
+        path = event_path(&guild, event.public_id)
     ))
 }
 
@@ -1645,6 +1649,10 @@ pub fn response_options(
     Ok(choices)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a roster press names the event, member, option, action and guest count"
+)]
 pub fn roster_action(
     conn: &mut Connection,
     actor_id: i64,

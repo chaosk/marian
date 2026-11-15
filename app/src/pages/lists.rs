@@ -522,7 +522,7 @@ pub fn EventActivity() -> impl IntoView {
     });
     when(move || (event.get(), rows.get()).ready(), move |(event, rows)| {
         let href = format!("{}/events/{}", base(), event.id);
-        title(&format!("Activity · {}", event.title));
+        title(format!("Activity · {}", event.title));
         let body = activity_list(rows, false, "Signups, edits, and posts for this event will show up here.");
         view! {
             <div class="page-head">
