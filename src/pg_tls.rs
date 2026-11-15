@@ -119,7 +119,17 @@ impl Target {
     /// Opens a connection: the client, and the connection task to drive it.
     pub async fn connect(&self) -> Result<diesel_async::AsyncPgConnection, String> {
         use diesel_async::AsyncPgConnection;
-        let failed = |err: &dyn std::fmt::Display| err.to_string();
+        // tokio-postgres says only "db error" or "error connecting to server";
+        // what went wrong is in the errors it wraps.
+        let failed = |err: &dyn std::error::Error| {
+            let mut text = err.to_string();
+            let mut source = err.source();
+            while let Some(err) = source {
+                text = format!("{text}: {err}");
+                source = err.source();
+            }
+            text
+        };
         match &self.tls {
             None => {
                 let (client, connection) = self
