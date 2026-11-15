@@ -284,7 +284,7 @@ fn RepeatCard(series: dto::Series, clock: format::Clock) -> impl IntoView {
             <p class="settings-note">"Upcoming dates move to the new rhythm. Posted and skipped dates stay as they are."</p>
             {move || {
                 let text = problem.get();
-                (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
             }}
             <div class="inline-actions series-actions">
                 <button type="submit" class="primary" disabled=move || saving.pending().get()>"Save repeat"</button>

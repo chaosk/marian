@@ -380,7 +380,28 @@ button:disabled,
   pointer-events: auto;
   box-shadow: 0 10px 28px rgba(28, 25, 21, 0.14);
   animation: toast-in 180ms ease;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding-right: 8px;
 }
+.toast p { margin: 0; flex: 1; min-width: 0; }
+.toast-error { border-left-color: var(--rose); background: #fdf4f1; }
+.toast-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: -2px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.toast-close:hover, .toast-close:focus-visible { background: rgba(28, 25, 21, 0.08); color: var(--ink); }
 .toast.out {
   pointer-events: none;
   animation: toast-out 180ms ease forwards;
@@ -1510,3 +1531,7 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 .d-content { margin: 0 0 6px; color: #dbdee1; }
 .d-mention { background: rgba(88, 101, 242, 0.3); color: #c9cdfb; border-radius: 3px; padding: 0 2px; font-weight: 500; }
 .d-time { background: rgba(255, 255, 255, 0.06); border-radius: 3px; padding: 0 2px; }
+/* A setting's title, with how its last change went beside it. */
+.setting-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.save-state { color: var(--muted); font-size: 13px; }
+.setting-text .setting-error { margin: 4px 0 0; padding: 6px 10px; font-size: 14px; }

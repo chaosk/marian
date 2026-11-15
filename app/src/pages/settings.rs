@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::widgets::{JsonForm, RolePicker, ZonePicker};
+use crate::widgets::{JsonForm, RolePicker, SaveState, ZonePicker};
 use crate::cache::{self, ask, Ready};
 use crate::head;
 
@@ -50,6 +50,9 @@ pub fn Settings() -> impl IntoView {
     )
 }
 
+/// The last change's progress, by the field it was to.
+type Status = RwSignal<Option<(String, SaveState)>>;
+
 fn settings_form(
     membership: marian_types::Membership,
     settings: marian_types::Settings,
@@ -57,6 +60,105 @@ fn settings_form(
     zones: Vec<marian_types::ZoneGroup>,
 ) -> impl IntoView {
     let server_manager = membership.server_manager;
+    let status: Status = RwSignal::new(None);
+    // What the controls are drawn from. A change the server turns down puts
+    // them all back to what's saved, rather than leaving the refused value
+    // showing as if it stuck.
+    let shown = StoredValue::new(settings);
+    // Bumped to draw the controls afresh. Redrawn in place, a control whose
+    // saved value didn't change would keep the refused one showing, so each
+    // round is keyed and mounts new controls.
+    let round = RwSignal::new(0_u32);
+    let roles = StoredValue::new(roles);
+    let zones = StoredValue::new(zones);
+    // Read now: the answer comes after the request, away from the page's context.
+    let queries = cache::client();
+    let server = StoredValue::new(cache::server_now());
+    let on_status = Callback::new(move |(field, state): (String, SaveState)| {
+        match &state {
+            SaveState::Failed(_) => {
+                let saved = untrack(|| queries.get_cached_query(cache::settings_scope(), server.get_value()));
+                if let Some(Ok(saved)) = saved {
+                    shown.set_value(saved);
+                }
+                round.update(|round| *round += 1);
+                focus_setting(field.clone());
+            }
+            SaveState::Saved => {
+                // "Saved" shows for a moment, unless something newer replaced it.
+                let said = (field.clone(), SaveState::Saved);
+                crate::client::later(2500, move || {
+                    if status.try_with_untracked(|now| now.as_ref() == Some(&said)) == Some(true) {
+                        status.try_set(None);
+                    }
+                });
+            }
+            SaveState::Saving => {}
+        }
+        status.set(Some((field, state)));
+    });
+    view! {
+        {head("Settings")}
+        {(!server_manager).then(|| view! { <p class="notice info">"Only people who can manage this Discord server can change these."</p> })}
+        <JsonForm method="PUT" url=crate::api::path::settings(&cache::server_now()) class="settings-page" autosave=server_manager on_status>
+            <For each=move || [round.get()] key=|round| *round let:_round>
+                {settings_rows(shown.get_value(), roles.get_value(), zones.get_value(), server_manager, status)}
+            </For>
+        </JsonForm>
+    }
+}
+
+/// A setting's title, with how its last change went: saving, saved, or why
+/// the server turned it down.
+fn setting_title(title: &'static str, name: &'static str, status: Status) -> impl IntoView {
+    let state = move || {
+        status.with(|now| match now {
+            Some((field, SaveState::Saving)) if field == name => "Saving…",
+            Some((field, SaveState::Saved)) if field == name => "Saved",
+            _ => "",
+        })
+    };
+    let failed = move || {
+        status.with(|now| match now {
+            Some((field, SaveState::Failed(message))) if field == name => {
+                Some(view! { <span class="error setting-error" role="alert">{message.clone()}</span> })
+            }
+            _ => None,
+        })
+    };
+    view! {
+        <span class="setting-title"><strong>{title}</strong><span class="save-state" aria-live="polite">{state}</span></span>
+        {failed}
+    }
+}
+
+/// Focus on the control of the setting a refused change was to, once the
+/// form is drawn again.
+#[cfg(feature = "hydrate")]
+fn focus_setting(name: String) {
+    crate::client::later(0, move || {
+        use wasm_bindgen::JsCast;
+        let selector = format!(
+            ".settings-page [data-setting=\"{name}\"] :is(input:not([type=hidden]):not(:disabled), select, button)"
+        );
+        if let Ok(Some(control)) = document().query_selector(&selector) {
+            if let Ok(control) = control.dyn_into::<leptos::web_sys::HtmlElement>() {
+                let _ = control.focus();
+            }
+        }
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn focus_setting(_: String) {}
+
+fn settings_rows(
+    settings: marian_types::Settings,
+    roles: Vec<marian_types::Role>,
+    zones: Vec<marian_types::ZoneGroup>,
+    server_manager: bool,
+    status: Status,
+) -> impl IntoView {
     let on = |name: &str| match name {
         "thread_reminders" => settings.thread_reminders,
         "auto_archive" => settings.auto_archive,
@@ -72,8 +174,8 @@ fn settings_form(
     };
     let switch = |(name, title, note): &Toggle| {
         view! {
-            <label class="setting-row">
-                <span class="setting-text"><strong>{*title}</strong><span class="muted">{*note}</span></span>
+            <label class="setting-row" data-setting=*name>
+                <span class="setting-text">{setting_title(title, name, status)}<span class="muted">{*note}</span></span>
                 <input type="checkbox" class="switch-input" role="switch" name=*name checked=on(name) disabled=!server_manager/>
             </label>
         }
@@ -81,8 +183,8 @@ fn settings_form(
     let switches = |list: &[Toggle]| list.iter().map(switch).collect_view();
     let number = |name: &'static str, title: &'static str, note: &'static str, value: i64, unit: &'static str| {
         view! {
-            <label class="setting-row">
-                <span class="setting-text"><strong>{title}</strong><span class="muted">{note}</span></span>
+            <label class="setting-row" data-setting=name>
+                <span class="setting-text">{setting_title(title, name, status)}<span class="muted">{note}</span></span>
                 <span class="with-unit">
                     <input name=name data-kind="int" type="number" min="1" value=value inputmode="numeric" disabled=!server_manager/>
                     <span class="muted">{unit}</span>
@@ -101,8 +203,8 @@ fn settings_form(
                 _ => settings.role_signup.clone(),
             };
             view! {
-                <div class="setting-row">
-                    <span class="setting-text"><strong>{*title}</strong><span class="muted">{*note}</span></span>
+                <div class="setting-row" data-setting=*name>
+                    <span class="setting-text">{setting_title(title, name, status)}<span class="muted">{*note}</span></span>
                     <span class="combo-slot">
                         <RolePicker name=*name label=*title roles=roles.clone() chosen=current enabled=server_manager empty=*empty/>
                     </span>
@@ -117,7 +219,7 @@ fn settings_form(
     let waitlist_switch = switch(&("waitlist", "Waitlist", "When an option is full, people can still sign up and wait. As spots open, the first in line takes them."));
     let role_switch = switch(&("temp_roles", "Temporary attendee role", "Marian creates a role for each event and gives it to people on an attending option."));
     let lead = number("post_lead_hours", "Post series dates early", "How long before a recurring date Marian posts it.", settings.post_lead_hours, "hours before");
-    let reminder = default_reminder(settings.default_reminder_minutes, server_manager);
+    let reminder = default_reminder(settings.default_reminder_minutes, server_manager, status);
     let archive_after = number("auto_archive_hours", "Archive after", "Counted from the end of the event.", settings.auto_archive_hours, "hours");
     let digest = settings.digest.clone();
     let digests = [("off", "Off"), ("daily", "Daily"), ("weekly", "Weekly")]
@@ -131,14 +233,11 @@ fn settings_form(
         .map(|(id, label)| view! { <option value=id selected=language == id>{label}</option> })
         .collect_view();
     view! {
-        {head("Settings")}
-        {(!server_manager).then(|| view! { <p class="notice info">"Only people who can manage this Discord server can change these."</p> })}
-        <JsonForm method="PUT" url=crate::api::path::settings(&cache::server_now()) class="settings-page" autosave=server_manager>
             <section class="panel settings-group">
                 <h2>"Time"</h2>
-                <div class="setting-row zone-row">
+                <div class="setting-row zone-row" data-setting="timezone">
                     <span class="setting-text">
-                        <strong>"Time zone"</strong>
+                        {setting_title("Time zone", "timezone", status)}
                         <span class="muted">"Event times on this site and in Discord are set in this zone."</span>
                     </span>
                     <span class="combo-slot"><ZonePicker groups=zones chosen=settings.timezone.clone() enabled=server_manager/></span>
@@ -147,14 +246,14 @@ fn settings_form(
             </section>
             <section class="panel settings-group">
                 <h2>"Discord posts"</h2>
-                <label class="setting-row">
-                    <span class="setting-text"><strong>"Language"</strong><span class="muted">"Marian writes in this language on Discord: posts, reminders, replies, and command descriptions. This site stays in English."</span></span>
+                <label class="setting-row" data-setting="language">
+                    <span class="setting-text">{setting_title("Language", "language", status)}<span class="muted">"Marian writes in this language on Discord: posts, reminders, replies, and command descriptions. This site stays in English."</span></span>
                     <select name="language" disabled=!server_manager>{languages}</select>
                 </label>
                 {post_switches}
                 {lead}
-                <label class="setting-row">
-                    <span class="setting-text"><strong>"Digest"</strong><span class="muted">"A summary of upcoming events."</span></span>
+                <label class="setting-row" data-setting="digest">
+                    <span class="setting-text">{setting_title("Digest", "digest", status)}<span class="muted">"A summary of upcoming events."</span></span>
                     <select name="digest" disabled=!server_manager>{digests}</select>
                 </label>
             </section>
@@ -178,13 +277,12 @@ fn settings_form(
                 <p class="settings-note">"People who can manage this Discord server can always do all of these."</p>
                 {role_rows}
             </section>
-        </JsonForm>
     }
 }
 
 /// The server's default reminder: a switch and a number of minutes, saved as one
 /// field where zero means off. The hidden field is set before the form reads it.
-fn default_reminder(minutes: i64, enabled: bool) -> impl IntoView {
+fn default_reminder(minutes: i64, enabled: bool, status: Status) -> impl IntoView {
     let on = RwSignal::new(minutes > 0);
     let amount = RwSignal::new(if minutes > 0 { minutes } else { 15 });
     let field = NodeRef::<leptos::html::Input>::new();
@@ -195,9 +293,9 @@ fn default_reminder(minutes: i64, enabled: bool) -> impl IntoView {
         }
     };
     view! {
-        <div class="setting-row">
+        <div class="setting-row" data-setting="default_reminder_minutes">
             <span class="setting-text">
-                <strong>"Default reminder"</strong>
+                {setting_title("Default reminder", "default_reminder_minutes", status)}
                 <span class="muted">"An event that goes out with no reminders of its own gets this one."</span>
             </span>
             <span class="with-unit">

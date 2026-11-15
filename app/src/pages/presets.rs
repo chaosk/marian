@@ -206,7 +206,7 @@ fn PresetForm(
             </label>
             {move || {
                 let text = problem.get();
-                (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
             }}
             <div class="actions">
                 <button type="submit" class="primary" disabled=move || saving.pending().get()>"Save preset"</button>
@@ -467,7 +467,7 @@ fn TypeForm(item: Option<dto::LibraryItem>, editing: RwSignal<Option<String>>) -
             </div>
             {move || {
                 let text = problem.get();
-                (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
             }}
             {move || if asking.get() {
                 view! {
