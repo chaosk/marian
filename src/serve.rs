@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use chrono::Utc;
 use diesel_async::RunQueryDsl;
 use tokio::sync::mpsc::UnboundedSender;
@@ -322,7 +322,7 @@ async fn lead(state: AppState, token: String, status: String, term: Term) {
     }
 }
 
-use crate::api::{cookie, Viewer as Session};
+use crate::api::{Viewer as Session, cookie};
 use crate::leader::Term;
 
 /// Runs Marian: the web service with `pages` for everything else, on every
@@ -932,11 +932,7 @@ async fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[Stri
 fn server_in_path(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/servers/")?;
     let id = rest.split('/').next()?;
-    if snowflake(id) {
-        Some(id)
-    } else {
-        None
-    }
+    if snowflake(id) { Some(id) } else { None }
 }
 
 fn snowflake(id: &str) -> bool {

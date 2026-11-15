@@ -1287,12 +1287,14 @@ mod tests {
         discord_role_gone(&mut conn, 1, "700").await.unwrap();
         assert!(role_names(&mut conn).await.is_empty());
         assert!(!store::membership_has_role(&mut conn, 71, 51).await.unwrap());
-        assert!(store::role(&mut conn, 51)
-            .await
-            .unwrap()
-            .unwrap()
-            .gone_at
-            .is_some());
+        assert!(
+            store::role(&mut conn, 51)
+                .await
+                .unwrap()
+                .unwrap()
+                .gone_at
+                .is_some()
+        );
 
         let back = sync_discord_role(&mut conn, 1, "700", "Raider", "112233")
             .await
@@ -1360,12 +1362,14 @@ mod tests {
         let mut conn = one_channel().await;
         discord_channel_gone(&mut conn, 1, "100").await.unwrap();
         assert!(names(&mut conn).await.is_empty());
-        assert!(store::channel(&mut conn, 41)
-            .await
-            .unwrap()
-            .unwrap()
-            .gone_at
-            .is_some());
+        assert!(
+            store::channel(&mut conn, 41)
+                .await
+                .unwrap()
+                .unwrap()
+                .gone_at
+                .is_some()
+        );
 
         let fresh = sync_discord_channel(&mut conn, 1, "300", "raids")
             .await
@@ -1871,10 +1875,12 @@ mod tests {
         detach_discord_posts(&mut conn, &plan.repost).await.unwrap();
         let first = store::event(&mut conn, 1).await.unwrap().unwrap();
         assert!(first.discord_message_id.is_none());
-        assert!(store::thread_discord_id(&mut conn, 1)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            store::thread_discord_id(&mut conn, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let elsewhere = store::event(&mut conn, 4).await.unwrap().unwrap();
         assert_eq!(elsewhere.discord_message_id.as_deref(), Some("40"));
     }
@@ -1936,13 +1942,17 @@ mod tests {
     async fn a_server_that_cannot_get_its_settings_is_not_half_stored() {
         let mut conn = store::open_memory().await.unwrap();
         refuse(&mut conn, "INSERT", "settings").await;
-        assert!(ensure_discord_guild(&mut conn, "777", "Keep")
-            .await
-            .is_err());
-        assert!(store::guild_by_discord(&mut conn, "777")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            ensure_discord_guild(&mut conn, "777", "Keep")
+                .await
+                .is_err()
+        );
+        assert!(
+            store::guild_by_discord(&mut conn, "777")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

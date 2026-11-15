@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use marian_types as dto;
 pub use marian_types::labels::{cadence_label, color_name, spots, status_label, weekday_name};
 pub use marian_types::time::{
-    format_day, format_long_date, format_rel, human_duration, human_offset, Clock,
+    Clock, format_day, format_long_date, format_rel, human_duration, human_offset,
 };
 
 pub fn clock_of(server: &dto::Server) -> Clock {

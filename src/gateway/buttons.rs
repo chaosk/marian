@@ -15,7 +15,7 @@ use crate::tr;
 
 use super::follow::{redraw, server_avatar, sync_roles};
 use super::publish::{purge_event_channel, push_attendance, push_routine, push_sync, tell_pages};
-use super::{clip, Data, Error};
+use super::{Data, Error, clip};
 use crate::values::EventStatus;
 
 pub(super) async fn handle_button(
@@ -755,7 +755,7 @@ pub(super) fn action_button(
         logic::ButtonRole::Signup(option) => format!("marian:{event}:{option}"),
         logic::ButtonRole::Guests(option) => format!("marian:{event}:{option}:g"),
         logic::ButtonRole::Web(url) => {
-            return serenity::CreateButton::new_link(url).label(clip(&button.label, 80))
+            return serenity::CreateButton::new_link(url).label(clip(&button.label, 80));
         }
     };
     let style = match button.tone {
@@ -819,7 +819,7 @@ fn parse_button(custom_id: &str) -> Option<ButtonAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_button, ButtonAction};
+    use super::{ButtonAction, parse_button};
 
     #[test]
     fn a_button_names_its_rows_by_public_id() {

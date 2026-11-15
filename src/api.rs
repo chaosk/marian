@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use marian_types as dto;
@@ -1505,7 +1505,7 @@ async fn save_stored(
         Some(dto::Cutoff::Before { .. }) => {
             return Err(OpError::message(
                 "Signups have to close before the event starts.",
-            ))
+            ));
         }
         None => event
             .cutoff_at
@@ -2561,12 +2561,16 @@ mod tests {
         .await.unwrap();
         let their_role = ids::public::roles(&mut conn, &[9]).await.unwrap().remove(0);
         let their_channel = ids::public::channel(&mut conn, 9).await.unwrap();
-        assert!(ids::public::role_ids(&mut conn, 1, &[their_role])
-            .await
-            .is_err());
-        assert!(ids::public::channel_id(&mut conn, 1, &their_channel)
-            .await
-            .is_err());
+        assert!(
+            ids::public::role_ids(&mut conn, 1, &[their_role])
+                .await
+                .is_err()
+        );
+        assert!(
+            ids::public::channel_id(&mut conn, 1, &their_channel)
+                .await
+                .is_err()
+        );
         let their_member: String = crate::schema::memberships::table
             .find(9)
             .select(crate::schema::memberships::public_id)
@@ -3259,11 +3263,13 @@ mod tests {
             .unwrap()
             .public_id
             .to_string();
-        assert!(event(&mut conn, &viewer, &public)
-            .await
-            .unwrap()
-            .series
-            .is_none());
+        assert!(
+            event(&mut conn, &viewer, &public)
+                .await
+                .unwrap()
+                .series
+                .is_none()
+        );
 
         let weekly = dto::EventPatch {
             repeat: Some(dto::Repeat {
@@ -3419,11 +3425,13 @@ mod tests {
         decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None })
             .await
             .unwrap();
-        assert!(routine(&mut conn, &viewer, &id)
-            .await
-            .unwrap()
-            .approval
-            .is_none());
+        assert!(
+            routine(&mut conn, &viewer, &id)
+                .await
+                .unwrap()
+                .approval
+                .is_none()
+        );
         let again = decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None })
             .await
             .unwrap_err();

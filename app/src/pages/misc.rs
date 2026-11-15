@@ -5,7 +5,7 @@ use crate::cache::{self, when};
 use crate::client;
 use crate::shell::Brand;
 use crate::widgets::Flash;
-use crate::{api, query, status, title, A};
+use crate::{A, api, query, status, title};
 
 const GUIDE: &str = include_str!("../guide.html");
 

@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use marian_types as dto;
 use marian_types::labels::PALETTE;
 
-use crate::format::{self, cadence_label, color_name, human_duration, human_offset, Clock};
+use crate::format::{self, Clock, cadence_label, color_name, human_duration, human_offset};
 use crate::{api, cache, client};
 use marian_types::{Cadence, EventStatus};
 
@@ -921,8 +921,8 @@ pub fn LeaveGuard(dirty: RwSignal<bool>) -> impl IntoView {
 #[cfg(feature = "hydrate")]
 fn watch_leaving(dirty: RwSignal<bool>, pending: RwSignal<Option<String>>) {
     use send_wrapper::SendWrapper;
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     let on_click =
         Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
             if !dirty.get_untracked()

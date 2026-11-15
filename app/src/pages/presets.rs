@@ -7,9 +7,9 @@ use leptos::prelude::*;
 use marian_types as dto;
 
 use crate::api::path;
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::widgets::{ActionButton, Choice, InlineConfirm};
-use crate::{api, base, client, head, A};
+use crate::{A, api, base, client, head};
 
 #[component]
 pub fn Presets() -> impl IntoView {

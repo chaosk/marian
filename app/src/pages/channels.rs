@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::format::clock_of;
 use crate::title;
 use crate::widgets::JsonForm;

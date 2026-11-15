@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use diesel::prelude::*;
 
 use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -3089,10 +3089,12 @@ mod tests {
         );
         replace_discord_roles(&mut conn, 1, 1, &[]).await.unwrap();
         let person = membership(&mut conn, 1).await.unwrap().unwrap();
-        assert!(membership_role_ids(&mut conn, &person)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            membership_role_ids(&mut conn, &person)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     async fn two_servers() -> Connection {
@@ -3132,12 +3134,14 @@ mod tests {
         assert_eq!(stored.refresh, "refresh");
 
         set_session_grant(&mut conn, "t", None).await.unwrap();
-        assert!(web_session(&mut conn, "t")
-            .await
-            .unwrap()
-            .unwrap()
-            .grant
-            .is_none());
+        assert!(
+            web_session(&mut conn, "t")
+                .await
+                .unwrap()
+                .unwrap()
+                .grant
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3174,10 +3178,12 @@ mod tests {
 
         let waiting = sessions_without_guild(&mut conn, 2, None).await.unwrap();
         assert_eq!(waiting, vec![("a".into(), "u1".into(), "Nell".into())]);
-        assert!(sessions_without_guild(&mut conn, 2, Some("u2"))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            sessions_without_guild(&mut conn, 2, Some("u2"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         add_session_guild(&mut conn, "a", 2).await.unwrap();
         add_session_guild(&mut conn, "a", 2).await.unwrap();
@@ -3185,10 +3191,12 @@ mod tests {
             web_session(&mut conn, "a").await.unwrap().unwrap().guilds,
             vec![1, 2]
         );
-        assert!(sessions_without_guild(&mut conn, 2, None)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            sessions_without_guild(&mut conn, 2, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3213,14 +3221,18 @@ mod tests {
             );
         }
         assert_eq!(claims, [true, false, false, false, false]);
-        assert!(!claim_session_guilds_check(&mut conn, "missing", stale)
-            .await
-            .unwrap());
+        assert!(
+            !claim_session_guilds_check(&mut conn, "missing", stale)
+                .await
+                .unwrap()
+        );
         // Five minutes on, the next request claims it again.
         let later = Utc::now() + chrono::Duration::seconds(1);
-        assert!(claim_session_guilds_check(&mut conn, "t", later)
-            .await
-            .unwrap());
+        assert!(
+            claim_session_guilds_check(&mut conn, "t", later)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

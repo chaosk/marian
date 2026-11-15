@@ -1072,7 +1072,7 @@ async fn answer_finish(
                 public_url,
                 lang,
             )
-            .await
+            .await;
         }
         "2" => {
             save_draft(conn, discord_user_id, PromptStep::Signup, draft).await?;
@@ -2031,7 +2031,7 @@ pub async fn apply_setting(
                     return Err(OpError::from(crate::msg!(
                         "err-unknown-role-setting",
                         name = other
-                    )))
+                    )));
                 }
             }
             "role"
@@ -2441,11 +2441,13 @@ mod tests {
             .into_iter()
             .find(|opt| opt.name == "Healer")
             .unwrap();
-        assert!(store::signups_for(&mut conn, &event)
-            .await
-            .unwrap()
-            .iter()
-            .any(|s| s.option_id == healer.id && s.membership_id == 2));
+        assert!(
+            store::signups_for(&mut conn, &event)
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.option_id == healer.id && s.membership_id == 2)
+        );
         // A typed name still works.
         roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En)
             .await
@@ -2675,9 +2677,10 @@ mod tests {
             "the web link is a button: {}",
             view.body
         );
-        assert!(view
-            .body
-            .contains("[+](http://www.google.com/calendar/event"),);
+        assert!(
+            view.body
+                .contains("[+](http://www.google.com/calendar/event"),
+        );
         assert_eq!(view.footer, "Created by Nell");
         assert!(
             view.fields

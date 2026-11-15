@@ -25,8 +25,8 @@ pub const ZONES: &[&str] = &[
 
 pub use marian_types::labels::{cadence_label, weekday_name, weekday_short};
 pub use marian_types::time::{
-    date_local, datetime_local, format_clock, format_day, format_end, format_long_date, format_rel,
-    format_when, human_duration, human_offset, zone_groups, ZoneGroup, ZoneRow,
+    ZoneGroup, ZoneRow, date_local, datetime_local, format_clock, format_day, format_end,
+    format_long_date, format_rel, format_when, human_duration, human_offset, zone_groups,
 };
 
 pub fn zone(name: &str) -> Result<Tz, OpError> {
@@ -214,9 +214,11 @@ mod tests {
         assert_eq!(chosen.id, "Europe/Warsaw");
         assert_eq!(chosen.label, "Warsaw");
         assert!(groups.iter().any(|group| group.offset == "UTC+1"));
-        assert!(groups
-            .iter()
-            .any(|group| group.zones.iter().any(|zone| zone.id == "Asia/Tokyo")));
+        assert!(
+            groups
+                .iter()
+                .any(|group| group.zones.iter().any(|zone| zone.id == "Asia/Tokyo"))
+        );
         let backwards = zone_groups(
             Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap(),
             "Etc/GMT+11",

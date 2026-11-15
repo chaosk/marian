@@ -75,11 +75,7 @@ pub(super) async fn link_new_series(
 fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
     let cutoff_offset_minutes = input.cutoff_at.and_then(|cutoff| {
         let mins = (input.starts_at - cutoff).num_minutes();
-        if mins > 0 {
-            Some(mins)
-        } else {
-            None
-        }
+        if mins > 0 { Some(mins) } else { None }
     });
     let options = clean
         .options

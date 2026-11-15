@@ -14,7 +14,7 @@ use diesel_async::RunQueryDsl;
 use super::access::{can_create, can_edit, holds_any};
 use super::db::{log, must_event, must_membership, must_role};
 use super::event::sync_options;
-use super::model::{OptionInput, PresetInput, TypeInput, MAX_GUESTS};
+use super::model::{MAX_GUESTS, OptionInput, PresetInput, TypeInput};
 use super::signup::{fill_all, sync_access};
 use crate::error::OpError;
 use crate::schema;
@@ -475,7 +475,7 @@ fn clean_type(input: &TypeInput) -> Result<TypeInput, OpError> {
     let emoji = match input.emoji.trim() {
         "" => "•".to_string(),
         emoji if emoji.chars().count() > 8 => {
-            return Err(OpError::from(crate::msg!("err-emoji-long")))
+            return Err(OpError::from(crate::msg!("err-emoji-long")));
         }
         emoji => emoji.to_string(),
     };
@@ -532,7 +532,7 @@ pub async fn presets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::{save_event, signup, EventInput, SaveAction};
+    use crate::logic::{EventInput, SaveAction, save_event, signup};
     use chrono::Duration;
     use diesel_async::SimpleAsyncConnection;
 

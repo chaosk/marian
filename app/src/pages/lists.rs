@@ -4,10 +4,10 @@ use leptos_router::components::Redirect;
 use leptos_router::params::ParamsMap;
 use marian_types as dto;
 
-use crate::cache::{self, show, when, Ready};
+use crate::cache::{self, Ready, show, when};
 use crate::format::{self, clock_of, status_label, window};
 use crate::widgets::Finder;
-use crate::{api, base, head, query, title, A};
+use crate::{A, api, base, head, query, title};
 
 /// Statuses an event can have, in the order the Status filter lists them.
 const STATUSES: &[&str] = &[

@@ -180,11 +180,13 @@ mod tests {
             .iter()
             .find(|event| event.name == "exception")
             .expect("an exception");
-        assert!(event
-            .attributes
-            .iter()
-            .any(|kv| kv.key.as_str() == "exception.stacktrace"
-                && kv.value.to_string().contains("event.rs:12:5")));
+        assert!(
+            event
+                .attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "exception.stacktrace"
+                    && kv.value.to_string().contains("event.rs:12:5"))
+        );
     }
 
     #[test]

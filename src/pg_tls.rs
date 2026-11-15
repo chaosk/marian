@@ -83,7 +83,7 @@ impl Target {
                         other => {
                             return Err(format!(
                                 "sslmode={other} isn't one of disable, allow, prefer, require, verify-ca or verify-full."
-                            ))
+                            ));
                         }
                     }
                 }
@@ -91,7 +91,7 @@ impl Target {
                 "sslcert" | "sslkey" | "sslpassword" | "sslcrl" | "sslcrldir" => {
                     return Err(format!(
                         "{key} isn't supported: Marian doesn't send client certificates or read CRLs."
-                    ))
+                    ));
                 }
                 _ => kept.push(pair),
             }
@@ -438,10 +438,12 @@ mod tests {
         );
         assert!(mode(&format!("{base}?sslmode=sometimes")).is_err());
         assert!(mode(&format!("{base}?sslmode=require&sslcert=/tmp/me.crt")).is_err());
-        assert!(mode(&format!(
-            "{base}?sslmode=verify-ca&sslrootcert=/no/such/file"
-        ))
-        .is_err());
+        assert!(
+            mode(&format!(
+                "{base}?sslmode=verify-ca&sslrootcert=/no/such/file"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::tr;
 use super::{complete_event, complete_option, remember_actor};
 use crate::gateway::follow::{redraw, server_avatar};
 use crate::gateway::publish::{push_attendance, push_sync, tell_pages};
-use crate::gateway::{clip, Context, Error};
+use crate::gateway::{Context, Error, clip};
 
 #[poise::command(
     slash_command,

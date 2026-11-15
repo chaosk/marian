@@ -1,9 +1,9 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::cache::{self, show, when, Ready};
+use crate::cache::{self, Ready, show, when};
 use crate::format::{self, clock_of, spot_count, status_label};
-use crate::{base, md, title, A};
+use crate::{A, base, md, title};
 use marian_types::EventStatus;
 
 #[component]

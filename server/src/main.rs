@@ -1,6 +1,6 @@
 use axum::Router;
 use leptos::prelude::*;
-use leptos_axum::{generate_route_list, LeptosRoutes};
+use leptos_axum::{LeptosRoutes, generate_route_list};
 
 fn main() {
     let result = marian::serve::run(|web| {

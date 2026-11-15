@@ -3,15 +3,15 @@ use leptos::prelude::*;
 use crate::api::path;
 use marian_types as dto;
 
-use crate::cache::{self, show, when, Ready};
+use crate::cache::{self, Ready, show, when};
 use crate::format::{self, clock_of, spots, status_label};
 use crate::widgets::{
-    numbered, unsaved_signups, ActionButton, ApplyToSeries, EventAttendeeRole, EventChannel,
-    EventColor, EventCutoff, EventDescription, EventLocation, EventMentions, EventReminders,
-    EventRepeat, EventRestrictions, EventTitle, EventWhen, LeaveGuard, LocalDraft, MultipleToggle,
-    PostButtons, SignupPanel, ThreadToggle,
+    ActionButton, ApplyToSeries, EventAttendeeRole, EventChannel, EventColor, EventCutoff,
+    EventDescription, EventLocation, EventMentions, EventReminders, EventRepeat, EventRestrictions,
+    EventTitle, EventWhen, LeaveGuard, LocalDraft, MultipleToggle, PostButtons, SignupPanel,
+    ThreadToggle, numbered, unsaved_signups,
 };
-use crate::{base, title, A};
+use crate::{A, base, title};
 use marian_types::{Cadence, EventStatus};
 
 /// What differs between a saved event's page and a new one. The layout around

@@ -16,22 +16,22 @@ mod template;
 mod tick;
 
 pub use access::{
-    can_create, can_delete, can_edit, may_pick_attendee_role, sees_channel, sight,
-    sight_for_discord, Overwrite, Sight,
+    Overwrite, Sight, can_create, can_delete, can_edit, may_pick_attendee_role, sees_channel,
+    sight, sight_for_discord,
 };
 pub use catalog::{
     bind_channel_discord, create_channel, discard_channel, manual_calendar_sync,
     set_user_reminders, slug_channel,
 };
 pub use discord::{
+    Attendance, AttendanceWork, ChannelReverse, EventChannelPurge, WEB_BUTTON_LABEL,
     admit_discord_user, attendance, channel_reverse_plan, delete_confirm_body,
     detach_discord_posts, discord_channel_gone, discord_role_gone, discord_view,
     ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
     event_thread_name, follow_discord_avatar, follow_discord_name, mark_channel_purged,
     mention_line, remember_discord_message, set_server_manager, sync_channel_overwrites,
     sync_discord_channel, sync_discord_channels, sync_discord_permissions, sync_discord_role,
-    sync_discord_roles, web_event_url, Attendance, AttendanceWork, ChannelReverse,
-    EventChannelPurge, WEB_BUTTON_LABEL,
+    sync_discord_roles, web_event_url,
 };
 pub use event::{save_event, save_options};
 pub use library::{
@@ -47,17 +47,18 @@ pub use model::{
     TypeInput,
 };
 pub use routine::{
-    approval_post, can_decide, cast_run, check_steps, count_active, create_routine, decide_run,
-    event_from as routine_event_from, list_routines, maintain as maintain_routines, open_run_id,
-    remember_approval_message, remember_results_message, remember_routine_message,
-    routine_in_guild, routine_page_data, routine_post, run_by_public, save_routine, save_run_days,
-    save_steps, save_usual_days, stop_routine, waiting_run_id, ApprovalPost, DayCheck, PollButton,
-    RoutineEffect, RoutinePost, RoutineSummary, RoutineView, RunHistory, RunView, Step, StepKind,
+    ApprovalPost, DayCheck, PollButton, RoutineEffect, RoutinePost, RoutineSummary, RoutineView,
+    RunHistory, RunView, Step, StepKind, approval_post, can_decide, cast_run, check_steps,
+    count_active, create_routine, decide_run, event_from as routine_event_from, list_routines,
+    maintain as maintain_routines, open_run_id, remember_approval_message,
+    remember_results_message, remember_routine_message, routine_in_guild, routine_page_data,
+    routine_post, run_by_public, save_routine, save_run_days, save_steps, save_usual_days,
+    stop_routine, waiting_run_id,
 };
-pub use schedule::{claim_google, finish_google, mark_everything, next_google, run_tasks, Pass};
-pub use signup::{editor_response, guests_form, signup, signup_guests, GuestsForm};
+pub use schedule::{Pass, claim_google, finish_google, mark_everything, next_google, run_tasks};
+pub use signup::{GuestsForm, editor_response, guests_form, signup, signup_guests};
 pub use template::series_template;
-pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
+pub use tick::{ReminderCard, discord_message_link, reminder_card, tick};
 
 /// An option of the named type, put in the server's library if it isn't there.
 #[cfg(test)]
@@ -571,10 +572,12 @@ mod tests {
         store::update_settings(&mut conn, &settings).await.unwrap();
         let id = save_event(&mut conn, bare("Off")).await.unwrap();
         let event = store::event(&mut conn, id).await.unwrap().unwrap();
-        assert!(store::reminders_for(&mut conn, &event)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            store::reminders_for(&mut conn, &event)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -594,11 +597,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("limited"), "{err}");
-        assert!(signup(&mut conn, gated_id, gated_option, 2)
-            .await
-            .unwrap()
-            .to_string()
-            .contains("signed up"));
+        assert!(
+            signup(&mut conn, gated_id, gated_option, 2)
+                .await
+                .unwrap()
+                .to_string()
+                .contains("signed up")
+        );
 
         let mut closed = input("Late", Utc::now() + Duration::hours(4), SaveAction::Publish);
         closed.cutoff_at = Some(Utc::now() - Duration::minutes(1));
@@ -1041,9 +1046,11 @@ mod tests {
             .await
             .unwrap();
         let stored = store::event(&mut conn, id).await.unwrap().unwrap();
-        assert!(store::reminders_for(&mut conn, &stored).await.unwrap()[0]
-            .sent_at
-            .is_some());
+        assert!(
+            store::reminders_for(&mut conn, &stored).await.unwrap()[0]
+                .sent_at
+                .is_some()
+        );
         assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder).await, None);
     }
 
@@ -1554,14 +1561,18 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert!(store::web_session(&mut conn, "old")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(store::web_session(&mut conn, "new")
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            store::web_session(&mut conn, "old")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store::web_session(&mut conn, "new")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

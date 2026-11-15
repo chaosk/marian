@@ -34,9 +34,9 @@ impl Failure {
 pub(crate) mod local {
     use axum::http::request::Parts;
     use leptos::prelude::use_context;
+    use marian::OpError;
     use marian::api::{self, Viewer, Web};
     use marian::store::Connection;
-    use marian::OpError;
 
     use super::Failure;
 
@@ -146,8 +146,8 @@ pub(crate) mod local {
 
 #[cfg(not(feature = "ssr"))]
 pub(crate) mod remote {
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
 
     use super::Failure;
 
@@ -190,8 +190,8 @@ pub(crate) mod remote {
     async fn pause(ms: i32) {
         #[cfg(feature = "hydrate")]
         {
-            use wasm_bindgen::prelude::Closure;
             use wasm_bindgen::JsCast;
+            use wasm_bindgen::prelude::Closure;
             let promise = js_sys::Promise::new(&mut |resolve, _| {
                 let cb = Closure::once_into_js(move || {
                     let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);

@@ -7,7 +7,7 @@ use crate::store;
 use crate::tr;
 
 use super::{complete_channel, complete_event, deliver, remember_actor};
-use crate::gateway::{clip, dm_message, Context, Error};
+use crate::gateway::{Context, Error, clip, dm_message};
 
 /// Why the event questions didn't arrive, and where else to make the event.
 /// `sent` is whether the DM opened and the message was refused.

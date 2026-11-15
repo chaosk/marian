@@ -26,8 +26,8 @@ pub use marian_types::{
 mod steps;
 use crate::values::{EventStatus, RunStatus};
 pub use steps::{
-    approval_post, can_decide, decide_run, default_steps, load_steps, remember_approval_message,
-    waiting_run_id, ApprovalPost, Step, StepKind,
+    ApprovalPost, Step, StepKind, approval_post, can_decide, decide_run, default_steps, load_steps,
+    remember_approval_message, waiting_run_id,
 };
 use steps::{clean_steps, proceed, store_steps, waiting_run};
 
@@ -1422,11 +1422,7 @@ fn next_strict(now: DateTime<Utc>, tz: Tz, weekday: u8, minutes: u16) -> DateTim
     let hour = u32::from(minutes / 60);
     let minute = u32::from(minutes % 60);
     let dt = clock::next_weekday_at(now, tz, weekday_chrono(weekday), hour, minute, 0);
-    if dt > now {
-        dt
-    } else {
-        dt + Duration::days(7)
-    }
+    if dt > now { dt } else { dt + Duration::days(7) }
 }
 
 fn lock_after(opens: DateTime<Utc>, tz: Tz, weekday: u8, minutes: u16) -> DateTime<Utc> {
@@ -2056,9 +2052,10 @@ mod tests {
         let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0))
             .await
             .unwrap();
-        assert!(jobs
-            .iter()
-            .any(|job| matches!(job, DiscordJob::Sync { .. })));
+        assert!(
+            jobs.iter()
+                .any(|job| matches!(job, DiscordJob::Sync { .. }))
+        );
         let event_id = jobs
             .iter()
             .find_map(|job| match job {
@@ -2469,12 +2466,15 @@ mod tests {
             must_run(&mut conn, next).await.unwrap().status,
             RunStatus::Expired
         );
-        assert!(jobs
-            .iter()
-            .any(|job| matches!(job, DiscordJob::Routine { run_id, .. } if *run_id == next)));
-        assert!(!jobs
-            .iter()
-            .any(|job| matches!(job, DiscordJob::Sync { .. })));
+        assert!(
+            jobs.iter()
+                .any(|job| matches!(job, DiscordJob::Routine { run_id, .. } if *run_id == next))
+        );
+        assert!(
+            !jobs
+                .iter()
+                .any(|job| matches!(job, DiscordJob::Sync { .. }))
+        );
         let poll = routine_post(&mut conn, next).await.unwrap().unwrap();
         assert!(
             poll.body.starts_with("No one confirmed **Thursday"),

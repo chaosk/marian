@@ -2,9 +2,9 @@ use leptos::prelude::*;
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_params_map};
 
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::widgets::{AccountMenu, Flash, Live};
-use crate::{api, A};
+use crate::{A, api};
 
 /// The sidebar: a path under the server, its label, and whether it sits under
 /// Events. Upcoming, Drafts, and Scheduled are filters on the Events page.

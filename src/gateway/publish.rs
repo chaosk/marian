@@ -10,7 +10,7 @@ use crate::logic;
 use crate::store;
 
 use super::buttons::action_button;
-use super::{clip, Error};
+use super::{Error, clip};
 use crate::values::{AccessKind, EventStatus};
 
 pub(super) async fn push_sync(

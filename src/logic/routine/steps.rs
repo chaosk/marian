@@ -226,11 +226,7 @@ pub(super) fn decide_by(
         .and_then(|local| tz.from_local_datetime(&local).earliest())
         .map(|at| at.with_timezone(&Utc))
         .unwrap_or(start);
-    if midnight > locks_at {
-        midnight
-    } else {
-        start
-    }
+    if midnight > locks_at { midnight } else { start }
 }
 
 /// Lapses an approval nobody answered in time.

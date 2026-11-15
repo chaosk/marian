@@ -17,7 +17,7 @@ use crate::store;
 
 use super::follow::{redraw, server_avatar, sync_roles};
 use super::publish::{push_attendance, push_sync};
-use super::{clip, Context, Data, Error};
+use super::{Context, Data, Error, clip};
 
 pub(super) fn all_commands() -> Vec<poise::Command<Data, Error>> {
     vec![

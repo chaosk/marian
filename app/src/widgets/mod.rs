@@ -16,10 +16,10 @@ pub use inline::{
     EventWhen, LeaveGuard, LocalDraft, MultipleToggle, PostButtons, ThreadToggle,
 };
 pub use routine::{
-    routine_problems, tally, template_event, PollMoment, PollTally, RoutineChannel,
-    RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, TallyRow, UsualDays,
+    PollMoment, PollTally, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps,
+    RoutineTime, RoutineTitle, TallyRow, UsualDays, routine_problems, tally, template_event,
 };
-pub use signups::{numbered, unsaved_signups, SignupPanel};
+pub use signups::{SignupPanel, numbered, unsaved_signups};
 
 /// A newer frontend than the one this page runs is being served.
 #[derive(Clone, Copy)]
@@ -69,8 +69,8 @@ struct LiveStream {
 #[cfg(feature = "hydrate")]
 impl LiveStream {
     fn open(self: &std::rc::Rc<Self>) {
-        use wasm_bindgen::closure::Closure;
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
         if self.stopped.get() {
             return;
         }
@@ -1532,8 +1532,8 @@ pub(crate) fn close_on_outside_press(
     open: impl Fn() -> bool + 'static,
     close: impl Fn() + 'static,
 ) {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     let on_press = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
         if !open() {
             return;
@@ -1588,8 +1588,8 @@ pub(crate) fn close_on_outside_press(
 pub(crate) fn watch_presses() {
     use std::cell::Cell;
     use std::rc::Rc;
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
 
     // Whether the press under way was held, so its click is held too.
     let held = Rc::new(Cell::new(false));
@@ -1818,8 +1818,8 @@ fn let_go(editor: &web_sys::Element) {
 /// Shakes an editor that is waiting for Save or Cancel, and brings it into view.
 #[cfg(feature = "hydrate")]
 fn nudge(editor: &web_sys::Element) {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     let options = web_sys::ScrollIntoViewOptions::new();
     options.set_block(web_sys::ScrollLogicalPosition::Nearest);
     options.set_behavior(web_sys::ScrollBehavior::Smooth);

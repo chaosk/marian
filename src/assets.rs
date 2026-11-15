@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#14284d"/><path d="M8 22V10h3.2l4.8 7.2L20.8 10H24v12h-2.6v-7.1L17.2 22h-2.4l-4.2-7.1V22H8z" fill="#f4efe4"/></svg>"##;

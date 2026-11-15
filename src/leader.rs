@@ -109,7 +109,9 @@ where
                 // At shutdown the duties see it for themselves, and finish
                 // their work rather than drop it.
                 if lost {
-                    tracing::warn!("This replica lost the leader lock; stopping the bot, the task worker and Discord jobs.");
+                    tracing::warn!(
+                        "This replica lost the leader lock; stopping the bot, the task worker and Discord jobs."
+                    );
                     let _ = lose.send(true);
                 }
                 if !duty.is_finished() {

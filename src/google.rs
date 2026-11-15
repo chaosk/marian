@@ -1338,12 +1338,13 @@ mod tests {
         else {
             panic!("expected an upsert");
         };
-        assert!(body
-            .get("description")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("Bring dice."));
+        assert!(
+            body.get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("Bring dice.")
+        );
         assert!(body.get("description").unwrap().as_str().unwrap().contains(
             "https://marian.example/servers/99/events/01900000-0000-7000-8000-000000000001"
         ));
@@ -1381,10 +1382,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(plan(&mut conn, "https://marian.example")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            plan(&mut conn, "https://marian.example")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(on_calendar(&mut conn, person, *event_id).await.unwrap());
 
         diesel::update(schema::events::table.filter(schema::events::id.eq(*event_id)))
@@ -1420,10 +1423,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(plan(&mut conn, "https://marian.example")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            plan(&mut conn, "https://marian.example")
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         diesel::update(
             schema::events::table.filter(schema::events::status.eq(EventStatus::Posted)),
@@ -1458,10 +1463,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(plan(&mut conn, "https://marian.example")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            plan(&mut conn, "https://marian.example")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let status = status(&mut conn, person).await.unwrap().unwrap();
         assert!(status.reconnect);
         assert!(!status.connected);

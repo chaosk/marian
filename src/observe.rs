@@ -12,15 +12,15 @@ use std::time::SystemTime;
 
 use diesel::connection::{Instrumentation, InstrumentationEvent};
 use opentelemetry::trace::{Span, SpanKind, Tracer, TracerProvider};
-use opentelemetry::{global, Context, KeyValue};
+use opentelemetry::{Context, KeyValue, global};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use opentelemetry_sdk::Resource;
 use tracing::Instrument;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const STATEMENT_LIMIT: usize = 500;
 
@@ -432,8 +432,8 @@ fn push_limited(out: &mut String, c: char) {
 #[cfg(test)]
 mod tests {
     use super::{
-        json_logs, log_format, parent_from, statement_shape, trace_filter, traceparent,
-        traces_endpoint, LogFormat, EXPORT,
+        EXPORT, LogFormat, json_logs, log_format, parent_from, statement_shape, trace_filter,
+        traceparent, traces_endpoint,
     };
 
     #[test]
@@ -598,8 +598,8 @@ mod tests {
     fn the_gateway_connection_is_not_a_trace() {
         use opentelemetry::trace::TracerProvider;
         use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-        use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
 
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
