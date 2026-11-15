@@ -66,6 +66,16 @@ pub(super) fn must_event(conn: &mut Connection, id: i64) -> Result<Event, OpErro
     store::event(conn, id)?.ok_or(OpError::NotFound)
 }
 
+/// The event, its row locked until the transaction ends, so that changes to its
+/// signups take turns: each one counts places after the last one committed.
+pub(super) fn lock_event(conn: &mut Connection, id: i64) -> Result<Event, OpError> {
+    Event::by_id(id)
+        .for_update()
+        .first(conn)
+        .optional()?
+        .ok_or(OpError::NotFound)
+}
+
 pub(super) fn must_membership(conn: &mut Connection, id: i64) -> Result<Membership, OpError> {
     store::membership(conn, id)?.ok_or(OpError::NotFound)
 }

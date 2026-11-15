@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::access::can_edit;
-use super::db::{log, must_event, must_option, must_role, must_membership, role_names};
+use super::db::{lock_event, log, must_event, must_option, must_role, must_membership, role_names};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event};
@@ -39,7 +39,7 @@ fn signup_tx(
     membership_id: i64,
     guests: Option<i64>,
 ) -> Result<crate::i18n::Msg, OpError> {
-    let event = must_event(conn, event_id)?;
+    let event = lock_event(conn, event_id)?;
     let user = must_membership(conn, membership_id)?;
     if user.guild_id != event.guild_id {
         return Err(OpError::from(crate::msg!("err-person-elsewhere")));
@@ -293,7 +293,7 @@ pub fn editor_response(
     guests: Option<i64>,
 ) -> Result<crate::i18n::Msg, OpError> {
     store::with_tx(conn, |tx| {
-        let event = must_event(tx, event_id)?;
+        let event = lock_event(tx, event_id)?;
         let actor = must_membership(tx, actor_id)?;
         let settings = store::settings(tx, event.guild_id)?;
         let roles = store::membership_role_ids(tx, &actor)?;
@@ -399,6 +399,7 @@ fn count_state(conn: &mut Connection, option_id: i64, state: &str) -> Result<i64
 }
 
 pub(super) fn fill_all(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
+    lock_event(conn, event.id)?;
     for opt in store::options_for(conn, event)? {
         fill_option(conn, opt.id)?;
     }
