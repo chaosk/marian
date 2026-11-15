@@ -4,7 +4,7 @@ use crate::commands;
 use crate::i18n::{self, Lang};
 use crate::tr;
 
-use super::{deliver, register_commands, remember_actor, Actor};
+use super::{deliver, remember_actor, Actor};
 use crate::gateway::{Context, Error};
 
 async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Result<(), Error> {
@@ -13,7 +13,6 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         ctx.say(tr!(Lang::En, "reply-outside")).await?;
         return Ok(());
     };
-    let language = matches!(change, commands::Setting::Language(_));
     let (outcome, lang) = {
         let mut conn = ctx
             .data()
@@ -29,14 +28,6 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
         );
         (outcome, i18n::lang_of(&mut conn, actor.guild_id))
     };
-    if language && outcome.is_ok() {
-        // The commands' descriptions follow the server's language.
-        if let Some(guild_id) = ctx.guild_id() {
-            if let Err(err) = register_commands(ctx.http(), guild_id, lang).await {
-                tracing::warn!("could not register commands in {guild_id}: {err}");
-            }
-        }
-    }
     let actor = Actor { lang, ..actor };
     deliver(ctx, &actor, label, outcome).await
 }

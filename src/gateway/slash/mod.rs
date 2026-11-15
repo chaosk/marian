@@ -35,7 +35,8 @@ pub(super) fn all_commands() -> Vec<poise::Command<Data, Error>> {
     ]
 }
 
-/// Registers the commands in one server, described in its language.
+/// Registers the commands in one server. They read the same everywhere:
+/// Discord picks each reader's language from what [`describe_command`] lists.
 #[allow(
     clippy::result_large_err,
     reason = "serenity::Error is serenity's own type"
@@ -43,49 +44,72 @@ pub(super) fn all_commands() -> Vec<poise::Command<Data, Error>> {
 pub(super) async fn register_commands(
     http: impl AsRef<serenity::Http>,
     guild_id: serenity::GuildId,
-    lang: Lang,
 ) -> Result<(), serenity::Error> {
     let mut commands = all_commands();
     for command in &mut commands {
-        describe_command(command, lang, "");
+        describe_command(command, "");
     }
     poise::builtins::register_in_guild(http, &commands, guild_id).await
 }
 
-/// Puts a command's descriptions, its options' and its choices' in `lang`,
-/// from the `cmd-` messages: `cmd-settings-hour_24` describes `/settings
-/// hour_24`, `cmd-edit--title` its `title` option. English is what the
-/// command itself says.
-fn describe_command(command: &mut poise::Command<Data, Error>, lang: Lang, parent: &str) {
+/// The Discord locales each language's text is listed under. English is also
+/// the plain text, which every other locale falls back to.
+fn discord_locales(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::En => &["en-US"],
+        Lang::Pl => &["pl"],
+    }
+}
+
+/// Describes a command, its options and its choices in English, and lists
+/// every language Marian speaks as a translation, so Discord shows each reader
+/// the one for their own client language and English to everyone else. The
+/// other languages come from the `cmd-` messages: `cmd-settings-hour_24`
+/// describes `/settings hour_24`, `cmd-edit--title` its `title` option. English
+/// is what the command itself says.
+fn describe_command(command: &mut poise::Command<Data, Error>, parent: &str) {
     let path = if parent.is_empty() {
         command.name.clone()
     } else {
         format!("{parent}-{}", command.name)
     };
-    if lang != Lang::En {
-        // Discord shows a description for the reader's own locale over the
-        // plain one; the server's language wins here.
-        command.description_localizations.clear();
-        if let Some(text) = command_text(lang, &format!("cmd-{path}")) {
-            command.description = Some(text);
-        }
-        for parameter in &mut command.parameters {
-            parameter.description_localizations.clear();
-            if let Some(text) = command_text(lang, &format!("cmd-{path}--{}", parameter.name)) {
-                parameter.description = Some(text);
+    // Commands give their English as the en-US text; without a plain one,
+    // Discord showed "A slash command" to everyone not set to US English.
+    if command.description.is_none() {
+        command.description = command.description_localizations.get("en-US").cloned();
+    }
+    for lang in Lang::ALL {
+        for &locale in discord_locales(lang) {
+            let translated = |key: &str, english: Option<&String>| {
+                if lang == Lang::En {
+                    english.cloned()
+                } else {
+                    command_text(lang, key)
+                }
+            };
+            if let Some(text) = translated(&format!("cmd-{path}"), command.description.as_ref()) {
+                command
+                    .description_localizations
+                    .insert(locale.to_string(), text);
             }
-            for choice in &mut parameter.choices {
-                if let Some(text) = command_text(
-                    lang,
-                    &format!("cmd-{path}--{}--{}", parameter.name, choice.name),
-                ) {
-                    choice.name = text;
+            for parameter in &mut command.parameters {
+                let key = format!("cmd-{path}--{}", parameter.name);
+                if let Some(text) = translated(&key, parameter.description.as_ref()) {
+                    parameter
+                        .description_localizations
+                        .insert(locale.to_string(), text);
+                }
+                for choice in &mut parameter.choices {
+                    let key = format!("cmd-{path}--{}--{}", parameter.name, choice.name);
+                    if let Some(text) = translated(&key, Some(&choice.name)) {
+                        choice.localizations.insert(locale.to_string(), text);
+                    }
                 }
             }
         }
     }
     for subcommand in &mut command.subcommands {
-        describe_command(subcommand, lang, &path);
+        describe_command(subcommand, &path);
     }
 }
 
@@ -348,7 +372,7 @@ mod tests {
         }
         let mut described = super::all_commands();
         for command in &mut described {
-            super::describe_command(command, Lang::Pl, "");
+            super::describe_command(command, "");
         }
         let settings = described
             .iter()
@@ -361,13 +385,29 @@ mod tests {
             .unwrap();
         assert_eq!(
             digest.description.as_deref(),
+            Some("How often Marian posts a digest"),
+            "English is the plain text"
+        );
+        assert_eq!(
+            digest
+                .description_localizations
+                .get("en-US")
+                .map(String::as_str),
+            Some("How often Marian posts a digest")
+        );
+        assert_eq!(
+            digest
+                .description_localizations
+                .get("pl")
+                .map(String::as_str),
             Some("Jak często Marian publikuje podsumowanie")
         );
-        assert!(
-            digest.description_localizations.is_empty(),
-            "the server's language wins"
+        let daily = &digest.parameters[0].choices[1];
+        assert_eq!(daily.name, "daily", "a choice keeps its English name");
+        assert_eq!(
+            daily.localizations.get("pl").map(String::as_str),
+            Some("codziennie")
         );
-        assert_eq!(digest.parameters[0].choices[1].name, "codziennie");
         let language = settings
             .subcommands
             .iter()
@@ -376,21 +416,34 @@ mod tests {
         assert_eq!(language.parameters[0].choices[1].name, "Polski");
     }
 
-    /// The commands as Discord receives them in each language, against
-    /// `commands.json` next to this file. `UPDATE_SNAPSHOTS=1` rewrites it
-    /// after a deliberate change to a command.
+    /// The commands as Discord receives them, against `commands.json` next to
+    /// this file. `UPDATE_SNAPSHOTS=1` rewrites it after a deliberate change
+    /// to a command.
     #[test]
     fn the_registered_commands_match_the_snapshot() {
-        let mut dump = serde_json::Map::new();
-        for lang in Lang::ALL {
-            let mut commands = super::all_commands();
-            for command in &mut commands {
-                super::describe_command(command, lang, "");
-            }
-            let created = poise::builtins::create_application_commands(&commands);
-            dump.insert(lang.code().into(), serde_json::to_value(&created).unwrap());
+        let mut commands = super::all_commands();
+        for command in &mut commands {
+            super::describe_command(command, "");
         }
-        let actual = serde_json::to_string_pretty(&dump).unwrap() + "\n";
+        let created = poise::builtins::create_application_commands(&commands);
+        // Translations are kept in hash maps, so sort keys for a stable file.
+        fn sorted(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let map: std::collections::BTreeMap<_, _> = map
+                        .into_iter()
+                        .map(|(key, value)| (key, sorted(value)))
+                        .collect();
+                    serde_json::Value::Object(map.into_iter().collect())
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.into_iter().map(sorted).collect())
+                }
+                other => other,
+            }
+        }
+        let created = sorted(serde_json::to_value(&created).unwrap());
+        let actual = serde_json::to_string_pretty(&created).unwrap() + "\n";
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/gateway/slash/commands.json"
