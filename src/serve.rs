@@ -42,21 +42,22 @@ struct AppState {
     member_roles: Arc<Mutex<MemberRoles>>,
     /// The bot's member list, when it can vouch for members' roles.
     members: crate::gateway::MemberView,
-    /// When the tick last finished, for `/healthz`.
+    /// When the task worker last finished a pass, for `/healthz`.
     heartbeat: Heartbeat,
-    /// Whether this replica leads, and so runs the tick.
+    /// Whether this replica leads, and so runs the task worker.
     leader: crate::leader::Status,
 }
 
-/// The last time the tick finished a round, in Unix seconds. It starts at
+/// The last time the task worker finished a pass, in Unix seconds. It starts at
 /// launch, so a fresh process has the full grace period before it counts as
 /// stuck.
 #[derive(Clone)]
 struct Heartbeat(Arc<AtomicI64>);
 
-/// How long the tick may go without finishing before `/healthz` fails and
-/// Kubernetes restarts the process. The tick runs every 5 seconds.
-const TICK_STALE_AFTER_SECS: i64 = 120;
+/// How long the task worker may go without finishing a pass before
+/// `/healthz` fails and Kubernetes restarts the process. It finishes one at
+/// least every minute (`TASKS_IDLE`), even when nothing is due.
+const TASKS_STALE_AFTER_SECS: i64 = 120;
 
 impl Heartbeat {
     fn new() -> Self {
@@ -68,7 +69,7 @@ impl Heartbeat {
     }
 
     fn stale(&self, now: i64) -> bool {
-        now - self.0.load(Ordering::Relaxed) > TICK_STALE_AFTER_SECS
+        now - self.0.load(Ordering::Relaxed) > TASKS_STALE_AFTER_SECS
     }
 }
 
@@ -94,51 +95,99 @@ async fn with_db<T: Send + 'static>(
     }
 }
 
-/// Every 5 seconds: posts, reminders, archiving, series dates and routines.
-/// Stops when the leader's term ends, after the round in progress.
-fn spawn_tick(db: store::Db, heartbeat: Heartbeat, term: Term) -> tokio::task::JoinHandle<()> {
+/// The longest the task worker sleeps, so `/healthz` hears from it at least
+/// this often even when nothing is due for hours.
+const TASKS_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many tasks one pass runs before it reports and starts the next.
+const TASKS_PER_PASS: usize = 16;
+/// How long the worker waits after a pass that couldn't reach the database.
+const TASKS_BACK_OFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Runs posts, reminders, signup cutoffs, archiving, series dates, routines
+/// and digests at their times: sets every task afresh as the term starts,
+/// then sleeps until the next task is due, a trigger marks a change, or a
+/// minute passes. Stops when the leader's term ends, after the pass in
+/// progress, and gives how many tasks it ran.
+fn spawn_tasks(db: store::Db, heartbeat: Heartbeat, term: Term) -> tokio::task::JoinHandle<usize> {
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                _ = term.ended() => break,
-            }
+        let mut woken = crate::tasks::subscribe();
+        let mut ran = 0;
+        // Whatever a trigger might have missed, or a former leader left
+        // half done, is set again from the data.
+        if let Some(Err(err)) = with_db(&db, "tasks", logic::mark_everything).await {
+            tracing::warn!("tasks: couldn't mark everything: {err}");
+        }
+        while !term.is_over() {
             // Instrumented, not entered: a guard held across the await below
             // stayed entered on the thread, and other tasks' spans joined this
             // trace until it ran past Tempo's size limit.
-            let span = tracing::info_span!(parent: None, "tick");
-            async {
+            let span = tracing::info_span!(parent: None, "tasks");
+            let delay = async {
                 let current = tracing::Span::current();
-                let report = with_db(&db, "tick", move |conn| {
-                    current.in_scope(|| logic::tick(conn, Utc::now()))
+                let pass = with_db(&db, "tasks", move |conn| {
+                    current.in_scope(|| logic::run_tasks(conn, Utc::now(), TASKS_PER_PASS))
                 })
                 .await;
-                match report {
-                    Some(Ok(report)) => {
+                match pass {
+                    Some(Ok(pass)) => {
                         heartbeat.beat();
-                        for note in report.notes {
+                        ran += pass.ran;
+                        for note in pass.report.notes {
                             tracing::info!("{note}");
                         }
-                        // Saved with the tick's changes; the worker picks them up.
-                        if !report.jobs.is_empty() {
+                        // Saved with the tasks' changes; the job worker picks them up.
+                        if !pass.report.jobs.is_empty() {
                             crate::jobs::wake();
                         }
-                        for guild_id in report.guilds {
+                        for guild_id in pass.report.guilds {
                             crate::live::server(guild_id);
                         }
+                        // A change may have set a Google sync.
+                        if pass.marks > 0 {
+                            crate::tasks::wake_google();
+                        }
+                        if pass.ran >= TASKS_PER_PASS {
+                            std::time::Duration::ZERO
+                        } else {
+                            until(pass.next, TASKS_IDLE)
+                        }
                     }
-                    Some(Err(err)) => tracing::warn!("tick failed: {err}"),
-                    None => {}
+                    Some(Err(err)) => {
+                        tracing::warn!("tasks failed: {err}");
+                        TASKS_BACK_OFF
+                    }
+                    None => TASKS_BACK_OFF,
                 }
             }
             .instrument(span)
             .await;
+            if delay.is_zero() {
+                continue;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = woken.changed() => {}
+                _ = term.ended() => break,
+            }
         }
+        ran
     })
 }
 
-/// Every 5 seconds, apart from the tick, so a slow Google API never holds up
-/// posts and reminders. Stops when the leader's term ends.
+/// How long until `next`, at most `longest`; nothing when it's due.
+fn until(next: Option<chrono::DateTime<Utc>>, longest: std::time::Duration) -> std::time::Duration {
+    match next {
+        Some(at) => (at - Utc::now())
+            .to_std()
+            .unwrap_or(std::time::Duration::ZERO)
+            .min(longest),
+        None => longest,
+    }
+}
+
+/// Google Calendar sync, apart from the task worker so a slow Google API
+/// never holds up posts and reminders: one person at a time, as their
+/// calendar's task comes due. Stops when the leader's term ends.
 fn spawn_google_sync(
     db: store::Db,
     http: reqwest::Client,
@@ -151,15 +200,53 @@ fn spawn_google_sync(
         return None;
     }
     Some(tokio::spawn(async move {
-        loop {
+        let mut woken = crate::tasks::subscribe_google();
+        while !term.is_over() {
+            let claimed = with_db(&db, "google calendar", |conn| {
+                logic::claim_google(conn, Utc::now())
+            })
+            .await;
+            let delay = match claimed {
+                Some(Ok(Some((user_id, lease)))) => {
+                    let span = tracing::info_span!(parent: None, "google_sync");
+                    let again = sync_google_user(
+                        &db,
+                        &http,
+                        &client_id,
+                        &client_secret,
+                        &public_base,
+                        user_id,
+                    )
+                    .instrument(span)
+                    .await;
+                    let finished = with_db(&db, "google calendar", move |conn| {
+                        logic::finish_google(conn, user_id, lease, again, Utc::now())
+                    })
+                    .await;
+                    if let Some(Err(err)) = finished {
+                        tracing::warn!("google calendar: {err}");
+                    }
+                    continue;
+                }
+                Some(Ok(None)) => match with_db(&db, "google calendar", logic::next_google).await {
+                    Some(Ok(next)) => until(next, TASKS_IDLE),
+                    Some(Err(err)) => {
+                        tracing::warn!("google calendar: {err}");
+                        TASKS_BACK_OFF
+                    }
+                    None => TASKS_BACK_OFF,
+                },
+                Some(Err(err)) => {
+                    tracing::warn!("google calendar: {err}");
+                    TASKS_BACK_OFF
+                }
+                None => TASKS_BACK_OFF,
+            };
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(delay) => {}
+                _ = woken.changed() => {}
                 _ = term.ended() => break,
             }
-            let span = tracing::info_span!(parent: None, "google_sync");
-            sync_google(&db, &http, &client_id, &client_secret, &public_base)
-                .instrument(span)
-                .await;
         }
     }))
 }
@@ -188,12 +275,13 @@ fn spawn_session_sweep(db: store::Db, term: Term) -> tokio::task::JoinHandle<()>
     })
 }
 
-/// What only the leader runs: the Discord gateway and job worker, the tick,
-/// Google Calendar sync and the sign-in sweep. Starts them for `term`, and
-/// once it ends stops them, letting the tick in hand finish with its jobs
-/// saved and, at shutdown, due Discord jobs drain.
+/// What only the leader runs: the Discord gateway and job worker, the task
+/// worker, Google Calendar sync and the sign-in sweep. Starts them for
+/// `term`, and once it ends stops them, letting the task in hand finish with
+/// its jobs saved and, at shutdown, due Discord jobs drain.
 async fn lead(state: AppState, token: String, status: String, term: Term) {
-    // A fresh term gets the full grace period before `/healthz` minds the tick.
+    // A fresh term gets the full grace period before `/healthz` minds the
+    // task worker.
     state.heartbeat.beat();
     let gateway = crate::gateway::start(
         token,
@@ -204,7 +292,7 @@ async fn lead(state: AppState, token: String, status: String, term: Term) {
         state.members.clone(),
         term.clone(),
     );
-    let tick = spawn_tick(state.db.clone(), state.heartbeat.clone(), term.clone());
+    let tasks = spawn_tasks(state.db.clone(), state.heartbeat.clone(), term.clone());
     let sync = spawn_google_sync(
         state.db.clone(),
         state.http.clone(),
@@ -216,8 +304,8 @@ async fn lead(state: AppState, token: String, status: String, term: Term) {
     let sweep = spawn_session_sweep(state.db.clone(), term.clone());
     term.ended().await;
     let finish = std::time::Duration::from_secs(10);
-    if tokio::time::timeout(finish, tick).await.is_err() {
-        tracing::warn!("The tick didn't finish in time.");
+    if tokio::time::timeout(finish, tasks).await.is_err() {
+        tracing::warn!("The task worker didn't finish in time.");
     }
     gateway.stop().await;
     for (what, task) in [
@@ -236,7 +324,7 @@ use crate::api::{cookie, Viewer as Session};
 use crate::leader::Term;
 
 /// Runs Marian: the web service with `pages` for everything else, on every
-/// replica, and the gateway and the tick on the one that leads.
+/// replica, and the gateway and the task worker on the one that leads.
 pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> anyhow::Result<()> {
     store::load_dotenv();
     let telemetry = crate::observe::init();
@@ -321,7 +409,7 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
             served = &mut served => served?,
             _ = cut_off => tracing::warn!("Requests still open at shutdown were cut off."),
         }
-        // The leader finishes its tick and due Discord jobs, disconnects,
+        // The leader finishes its task and due Discord jobs, disconnects,
         // then lets the lock go for the next replica.
         if tokio::time::timeout(std::time::Duration::from_secs(45), leading)
             .await
@@ -625,9 +713,9 @@ async fn revalidate_site(request: Request, next: Next) -> Response {
     response
 }
 
-/// Liveness: on the leader, fails once the tick hasn't finished in two
+/// Liveness: on the leader, fails once the task worker hasn't finished a pass in two
 /// minutes, so a stuck process gets restarted and another replica takes over.
-/// A follower runs no tick. The body says which this replica is. The
+/// A follower runs no tasks. The body says which this replica is. The
 /// database's own health is `/readyz`.
 async fn health(State(state): State<AppState>) -> Response {
     liveness(
@@ -642,7 +730,7 @@ fn liveness(leading: bool, heartbeat: &Heartbeat, now: i64) -> (StatusCode, &'st
     match (leading, heartbeat.stale(now)) {
         (true, true) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "leader: the tick has stalled",
+            "leader: the task worker has stalled",
         ),
         (true, false) => (StatusCode::OK, "ok: leader"),
         (false, _) => (StatusCode::OK, "ok: follower"),
@@ -1154,25 +1242,30 @@ async fn auth_callback(
     response
 }
 
-async fn sync_google(
+/// Brings one person's Google Calendar up to date. Returns when to look
+/// again sooner than the full pass, if at all.
+async fn sync_google_user(
     db: &store::Db,
     http: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
     public_base: &str,
-) {
+    user_id: i64,
+) -> Option<chrono::DateTime<Utc>> {
+    // A round that couldn't finish is tried again soon.
+    let soon = || Some(Utc::now() + chrono::Duration::minutes(5));
     let base = public_base.to_string();
-    let jobs = match with_db(db, "google calendar", move |conn| {
-        crate::google::plan(conn, &base)
+    let (jobs, mut again) = match with_db(db, "google calendar", move |conn| {
+        crate::google::plan_user(conn, &base, user_id)
     })
     .await
     {
-        Some(Ok(jobs)) => jobs,
+        Some(Ok(planned)) => planned,
         Some(Err(err)) => {
             tracing::warn!("google calendar: {err}");
-            return;
+            return soon();
         }
-        None => return,
+        None => return soon(),
     };
     for job in jobs {
         let outcome = crate::google::push(http, client_id, client_secret, job).await;
@@ -1190,16 +1283,20 @@ async fn sync_google(
             Some(Err(err)) => tracing::warn!("google calendar: {err}"),
             Some(Ok(_)) => {}
             // Without a database the rest of the round can't be recorded either.
-            None => return,
+            None => return soon(),
         }
     }
-    let revokes = match with_db(db, "google calendar", crate::google::ready_revokes).await {
+    let revokes = match with_db(db, "google calendar", move |conn| {
+        crate::google::ready_revokes(conn, Some(user_id))
+    })
+    .await
+    {
         Some(Ok(rows)) => rows,
         Some(Err(err)) => {
             tracing::warn!("google calendar: {err}");
-            return;
+            return soon();
         }
-        None => return,
+        None => return soon(),
     };
     for access in revokes {
         let user_id = access.user_id;
@@ -1211,12 +1308,17 @@ async fn sync_google(
             {
                 Some(Err(err)) => tracing::warn!("google calendar: {err}"),
                 Some(Ok(_)) => {}
-                None => return,
+                None => return soon(),
             }
         } else {
             tracing::warn!("google calendar disconnect for {user_id} will retry");
+            again = match (again, soon()) {
+                (Some(at), Some(retry)) => Some(at.min(retry)),
+                (at, retry) => at.or(retry),
+            };
         }
     }
+    again
 }
 
 async fn google_start(
@@ -1955,13 +2057,138 @@ mod tests {
         assert!(body.contains("Something went wrong"), "{body}");
     }
 
+    /// Inserts a scheduled event of `id` due to post now, and wakes the worker.
+    fn post_due(conn: &mut Connection, id: i64) {
+        diesel::RunQueryDsl::execute(
+            diesel::sql_query(format!(
+                "INSERT INTO events (id, public_id, guild_id, channel_id, title, description, starts_at, \
+                 duration_minutes, status, post_at, created_at, updated_at) VALUES \
+                 ({id}, gen_random_uuid(), 1, 1, 'Raid {id}', '', now() + interval '1 day', 60, \
+                 'scheduled', now() - interval '1 minute', now(), now())"
+            )),
+            conn,
+        )
+        .unwrap();
+        crate::tasks::wake();
+    }
+
+    fn posted(conn: &mut Connection, id: i64) -> bool {
+        schema::events::table
+            .find(id)
+            .select(schema::events::status)
+            .first::<crate::values::EventStatus>(conn)
+            .unwrap()
+            == crate::values::EventStatus::Posted
+    }
+
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("timed out waiting until {what}");
+    }
+
+    /// Ends the term of whoever holds `key`, as a lost database connection would.
+    fn cut_lock(admin: &mut Connection, key: i64) {
+        #[derive(QueryableByName)]
+        struct Holder {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            pid: i32,
+        }
+        let holder: Holder = diesel::sql_query(format!(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 1 \
+             AND ((classid::bigint << 32) | objid::bigint) = {key}"
+        ))
+        .get_result(admin)
+        .unwrap();
+        diesel::sql_query(format!("SELECT pg_terminate_backend({})", holder.pid))
+            .execute(admin)
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_the_leader_runs_tasks_and_the_next_leader_takes_them_over() {
+        use diesel::connection::{Connection as _, SimpleConnection};
+        use std::sync::atomic::AtomicUsize;
+        let mut conn = store::open_memory().unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Test', 'UTC');
+             INSERT INTO settings (guild_id) VALUES (1);
+             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);",
+        )
+        .unwrap();
+        let db = store::pool_for(&mut conn).unwrap();
+        let url = store::database_url().unwrap();
+        // A key of its own, so test runs and a local Marian don't meet.
+        let key = 0x7461_736b_0000_0000 | i64::from(uuid::Uuid::now_v7().as_u128() as u32);
+        // Tasks each node's worker ran, counted as its term ends.
+        let ran = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+        let node = |index: usize| {
+            let status = crate::leader::Status::default();
+            let (db, ran) = (db.clone(), ran[index].clone());
+            let task = tokio::spawn(crate::leader::run(
+                url.clone(),
+                key,
+                status.clone(),
+                move |term| {
+                    let (db, ran) = (db.clone(), ran.clone());
+                    async move {
+                        let count = spawn_tasks(db, Heartbeat::new(), term).await.unwrap_or(0);
+                        ran.fetch_add(count, Ordering::SeqCst);
+                    }
+                },
+            ));
+            (status, task)
+        };
+        let (first, first_task) = node(0);
+        eventually("the first node leads", || first.leading()).await;
+        let (second, second_task) = node(1);
+        post_due(&mut conn, 1);
+        eventually("the leader posts", || posted(&mut conn, 1)).await;
+        post_due(&mut conn, 2);
+        eventually("the leader posts again", || posted(&mut conn, 2)).await;
+        assert!(first.leading() && !second.leading());
+
+        let mut admin = Connection::establish(&url).unwrap();
+        cut_lock(&mut admin, key);
+        eventually("the first node steps down", || !first.leading()).await;
+        eventually("its worker stops", || ran[0].load(Ordering::SeqCst) > 0).await;
+        assert_eq!(
+            ran[0].load(Ordering::SeqCst),
+            2,
+            "the leader ran both posts"
+        );
+        assert_eq!(ran[1].load(Ordering::SeqCst), 0, "a follower runs nothing");
+        eventually("the second node takes over", || second.leading()).await;
+        post_due(&mut conn, 3);
+        eventually("the new leader posts", || posted(&mut conn, 3)).await;
+        cut_lock(&mut admin, key);
+        eventually("its worker stops", || ran[1].load(Ordering::SeqCst) > 0).await;
+        assert_eq!(
+            ran[1].load(Ordering::SeqCst),
+            1,
+            "only the post left for it"
+        );
+
+        let jobs: i64 = schema::discord_jobs::table
+            .count()
+            .get_result(&mut conn)
+            .unwrap();
+        assert_eq!(jobs, 6, "each post's sync and attend, once");
+        first_task.abort();
+        second_task.abort();
+    }
+
     #[test]
-    fn health_fails_once_the_tick_stalls() {
+    fn health_fails_once_the_task_worker_stalls() {
         let heartbeat = Heartbeat::new();
         let now = Utc::now().timestamp();
         assert!(!heartbeat.stale(now));
-        assert!(!heartbeat.stale(now + TICK_STALE_AFTER_SECS));
-        assert!(heartbeat.stale(now + TICK_STALE_AFTER_SECS + 5));
+        assert!(!heartbeat.stale(now + TASKS_STALE_AFTER_SECS));
+        assert!(heartbeat.stale(now + TASKS_STALE_AFTER_SECS + 5));
         heartbeat.0.store(now - 600, Ordering::Relaxed);
         assert!(heartbeat.stale(now));
         heartbeat.beat();
@@ -1969,9 +2196,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_leader_minds_the_tick() {
+    fn only_the_leader_minds_the_task_worker() {
         let heartbeat = Heartbeat::new();
-        let later = Utc::now().timestamp() + TICK_STALE_AFTER_SECS + 5;
+        let later = Utc::now().timestamp() + TASKS_STALE_AFTER_SECS + 5;
         assert_eq!(
             liveness(true, &heartbeat, later).0,
             StatusCode::SERVICE_UNAVAILABLE

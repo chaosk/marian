@@ -1,5 +1,5 @@
 //! Which replica runs the bot. Every replica serves the web; only the one
-//! holding a Postgres advisory lock connects to Discord and runs the tick,
+//! holding a Postgres advisory lock connects to Discord and runs the task worker,
 //! Google Calendar sync, the sign-in sweep and the Discord job worker. The
 //! lock lives on a connection of its own, outside the pool: when that
 //! connection ends, for any reason, Postgres lets the lock go and another
@@ -45,7 +45,7 @@ impl Status {
 static LEADER_GAUGE: LazyLock<Gauge<u64>> = LazyLock::new(|| {
     opentelemetry::global::meter("marian")
         .u64_gauge("marian.leader")
-        .with_description("1 while this replica leads: runs the Discord bot, the tick and Discord jobs; 0 otherwise.")
+        .with_description("1 while this replica leads: runs the Discord bot, the task worker and Discord jobs; 0 otherwise.")
         .build()
 });
 
@@ -92,7 +92,7 @@ where
             Ok(Some(lock)) => {
                 said_waiting = false;
                 tracing::info!(
-                    "This replica now leads: it runs the Discord bot, the tick and Discord jobs."
+                    "This replica now leads: it runs the Discord bot, the task worker and Discord jobs."
                 );
                 status.set(true);
                 let (lose, term) = watch::channel(false);
@@ -102,7 +102,7 @@ where
                 // At shutdown the duties see it for themselves, and finish
                 // their work rather than drop it.
                 if lost {
-                    tracing::warn!("This replica lost the leader lock; stopping the bot, the tick and Discord jobs.");
+                    tracing::warn!("This replica lost the leader lock; stopping the bot, the task worker and Discord jobs.");
                     let _ = lose.send(true);
                 }
                 if !duty.is_finished() {

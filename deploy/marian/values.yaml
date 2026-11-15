@@ -3,8 +3,8 @@ image:
   tag: "0.11.1"
   pullPolicy: IfNotPresent
 
-# Pods. Each serves the web; one at a time runs the bot, the tick and Discord
-# jobs, chosen by a Postgres advisory lock, and another takes over within
+# Pods. Each serves the web; one at a time runs the bot, the task worker and
+# Discord jobs, chosen by a Postgres advisory lock, and another takes over within
 # seconds when it stops. Above 1 the chart adds a PodDisruptionBudget that
 # keeps one pod up through node drains.
 replicaCount: 1

@@ -110,8 +110,8 @@ pub fn subscribe() -> broadcast::Receiver<News> {
 
 /// Starts this replica's bridge to the others, on a thread of its own with a
 /// connection of its own: it sends this replica's changes, hands the others'
-/// to pages open here, and wakes the Discord job worker when any replica saves
-/// a job. When the connection drops it connects again, and pages open here
+/// to pages open here, wakes the Discord job worker when any replica saves
+/// a job, and wakes the task worker when a trigger marks a change. When the connection drops it connects again, and pages open here
 /// refetch everything, since changes made meanwhile never arrive.
 pub fn bridge(url: String) {
     let (outgoing, pending) = mpsc::sync_channel(1024);
@@ -154,13 +154,14 @@ fn relay(
                 }
                 failing = false;
                 // Pages here missed whatever the others did meanwhile, and
-                // the worker any jobs they saved.
+                // the workers any jobs they saved and changes they marked.
                 if !first {
                     deliver(News {
                         guild_id: None,
                         body: everything().into(),
                     });
                     crate::jobs::wake();
+                    crate::tasks::wake();
                 }
                 match pump(&mut conn, channel, me, pending, deliver, &mut unsent) {
                     Ok(()) => return,
@@ -184,8 +185,9 @@ fn listen(url: &str, channel: &str) -> Result<Connection, diesel::result::Error>
     let mut conn = Connection::establish(url)
         .map_err(|err| diesel::result::Error::QueryBuilderError(err.to_string().into()))?;
     conn.batch_execute(&format!(
-        "LISTEN {channel}; LISTEN {}",
-        crate::jobs::WAKE_CHANNEL
+        "LISTEN {channel}; LISTEN {}; LISTEN {}",
+        crate::jobs::WAKE_CHANNEL,
+        crate::tasks::WAKE_CHANNEL
     ))?;
     Ok(conn)
 }
@@ -221,6 +223,8 @@ fn pump(
             let note = note?;
             if note.channel == crate::jobs::WAKE_CHANNEL {
                 crate::jobs::wake();
+            } else if note.channel == crate::tasks::WAKE_CHANNEL {
+                crate::tasks::wake();
             } else if let Some(news) = arrived(&note.payload, me) {
                 deliver(news);
             }

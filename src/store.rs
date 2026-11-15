@@ -1117,10 +1117,12 @@ pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Takes a server's tick lock for the rest of the transaction. Ticks for one
+/// Takes a server's tick lock for the rest of the transaction. Tasks for one
 /// server then take turns, so a replica that still thinks it leads for a
 /// moment after another took over can't post an event twice: the second
-/// tick sees what the first did. "tick" and the server's id.
+/// sees what the first did. The key, "tick" and the server's id, is the one
+/// the five-second tick took, so during an upgrade the old version's tick
+/// and the new version's tasks take turns too.
 pub fn lock_tick(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     conn.batch_execute(&format!(
         "SELECT pg_advisory_xact_lock(1953065835, {})",
@@ -1720,21 +1722,6 @@ pub fn discord_server_id(conn: &mut Connection, guild_id: i64) -> Result<String,
 
 pub fn list_events(conn: &mut Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_guild(guild_id)
-        .order((schema::events::starts_at.asc(), schema::events::id.asc()))
-        .load(conn)?)
-}
-
-/// The server's scheduled events whose post time has come and that haven't
-/// failed to post three times, soonest first.
-pub fn events_due_to_post(
-    conn: &mut Connection,
-    guild_id: i64,
-    now: DateTime<Utc>,
-) -> Result<Vec<Event>, OpError> {
-    Ok(Event::in_guild(guild_id)
-        .filter(schema::events::status.eq(EventStatus::Scheduled))
-        .filter(schema::events::post_attempts.lt(3))
-        .filter(schema::events::post_at.le(now))
         .order((schema::events::starts_at.asc(), schema::events::id.asc()))
         .load(conn)?)
 }
@@ -2687,6 +2674,7 @@ mod tests {
                 "20261115150000".to_string(),
                 "20261115160000".to_string(),
                 "20261115170000".to_string(),
+                "20261115180000".to_string(),
             ]
         );
     }

@@ -151,6 +151,58 @@ text_enum! {
 }
 text_sql!(PromptStep);
 
+text_enum! {
+    /// Something Marian does at a set time, one `tasks` row each.
+    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub enum TaskKind("task kind") {
+        /// Post a scheduled event; the subject is the event.
+        Post = "post",
+        /// Send a reminder; the subject is the reminder.
+        Remind = "remind",
+        /// Close an event's signups at its cutoff.
+        CloseSignups = "close_signups",
+        /// Archive an event once it's over.
+        Archive = "archive",
+        /// Open or lock a routine's poll, lapse an approval, start next
+        /// week's poll; the subject is the routine.
+        Routine = "routine",
+        /// A server's daily or weekly digest.
+        Digest = "digest",
+        /// Add the next dates of a server's series.
+        FillSeries = "fill_series",
+        /// Bring a user's Google Calendar up to date.
+        GoogleSync = "google_sync",
+    }
+}
+text_sql!(TaskKind);
+
+text_enum! {
+    /// What a trigger saw change, for the task worker to turn into task
+    /// times. One `task_marks` row each.
+    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub enum MarkKind("task mark kind") {
+        /// An event: its post, reminders, cutoff, archive and calendars.
+        Event = "event",
+        /// A routine's polls and approvals.
+        Routine = "routine",
+        /// A server's clock, and everything in it.
+        Guild = "guild",
+        /// A server's series, to fill now.
+        Fill = "fill",
+        /// A user's Google Calendar.
+        Google = "google",
+        /// A membership's user's Google Calendar.
+        Member = "member",
+        /// Who sees a channel: its server's calendars.
+        Channel = "channel",
+        /// Who sees what in a server: its calendars.
+        People = "people",
+    }
+}
+text_sql!(MarkKind);
+
 #[cfg(test)]
 mod tests {
     use diesel::connection::SimpleConnection;
@@ -192,7 +244,7 @@ mod tests {
     #[test]
     fn each_column_takes_exactly_its_enums_words() {
         let mut conn = crate::store::open_memory().unwrap();
-        let columns: [(&str, Vec<String>); 14] = [
+        let columns: [(&str, Vec<String>); 16] = [
             (
                 "events_status_check",
                 words(EventStatus::ALL, EventStatus::as_str),
@@ -239,6 +291,11 @@ mod tests {
             (
                 "event_prompts_step_check",
                 words(PromptStep::ALL, PromptStep::as_str),
+            ),
+            ("tasks_kind_check", words(TaskKind::ALL, TaskKind::as_str)),
+            (
+                "task_marks_kind_check",
+                words(MarkKind::ALL, MarkKind::as_str),
             ),
         ];
         for (constraint, words) in columns {

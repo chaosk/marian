@@ -22,6 +22,7 @@ mod schema;
 pub mod serve;
 mod shutdown;
 pub mod store;
+mod tasks;
 pub mod values;
 
 pub use error::OpError;
