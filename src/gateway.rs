@@ -4071,6 +4071,29 @@ mod tests {
         assert_eq!(language.parameters[0].choices[1].name, "Polski");
     }
 
+    /// The commands as Discord receives them in each language, against
+    /// `commands.json` next to this file. `UPDATE_SNAPSHOTS=1` rewrites it
+    /// after a deliberate change to a command.
+    #[test]
+    fn the_registered_commands_match_the_snapshot() {
+        let mut dump = serde_json::Map::new();
+        for lang in Lang::ALL {
+            let mut commands = super::all_commands();
+            for command in &mut commands {
+                super::describe_command(command, lang, "");
+            }
+            let created = poise::builtins::create_application_commands(&commands);
+            dump.insert(lang.code().into(), serde_json::to_value(&created).unwrap());
+        }
+        let actual = serde_json::to_string_pretty(&dump).unwrap() + "\n";
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/gateway/commands.json");
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            std::fs::write(path, &actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(actual == expected, "the registered commands changed; UPDATE_SNAPSHOTS=1 rewrites {path}");
+    }
+
     #[test]
     fn presence_is_the_status_text() {
         assert_eq!(
