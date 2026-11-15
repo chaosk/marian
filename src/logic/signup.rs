@@ -518,6 +518,7 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
                 guild_id: event.guild_id,
                 name: &name,
                 color: "#1e3a6e",
+                made_by_marian: true,
             })
             .returning(schema::roles::id)
             .get_result(conn)?;
@@ -596,6 +597,7 @@ struct NewRole<'a> {
     guild_id: i64,
     name: &'a str,
     color: &'a str,
+    made_by_marian: bool,
 }
 
 #[derive(Insertable)]

@@ -201,4 +201,7 @@ pub struct CleanInput {
     pub options: Vec<OptionInput>,
     pub reminders: Vec<ReminderInput>,
     pub existing: Option<Event>,
+    /// Who picked the attendee role: the actor for a new one, else whoever
+    /// picked the one the event keeps.
+    pub attendee_role_by: Option<i64>,
 }

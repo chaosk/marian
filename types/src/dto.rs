@@ -109,6 +109,10 @@ pub struct Member {
 pub struct Role {
     pub id: String,
     pub name: String,
+    /// The viewer may make it an event's attendee role: any role for a
+    /// server manager, else only the ones Marian made.
+    #[serde(default)]
+    pub attendee: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

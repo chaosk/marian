@@ -4,7 +4,7 @@ use diesel::prelude::*;
 
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Connection, Event, Membership, Settings};
+use crate::store::{self, Connection, Event, Membership, Role, Settings};
 
 /// Whether someone with `roles` holds any of the roles a permission names.
 pub fn holds_any(allowed: &[i64], roles: &[i64]) -> bool {
@@ -21,6 +21,26 @@ pub fn can_edit(user: &Membership, event: &Event, settings: &Settings, roles: &[
 
 pub fn can_delete(user: &Membership, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
     user.server_manager || event.created_by == Some(user.id) || holds_any(&settings.role_delete, roles)
+}
+
+/// Whether `actor` may make `role` an event's attendee role. Marian gives
+/// that role to whoever signs up, so one of the server's own roles takes a
+/// server manager; the roles Marian made for attendees are anyone's to pick.
+pub fn may_pick_attendee_role(actor: &Membership, role: &Role) -> bool {
+    actor.server_manager || role.made_by_marian
+}
+
+/// Whether Marian may give `role` as `event`'s attendee role: one it made, or
+/// one picked by someone who still manages the server.
+pub fn gives_attendee_role(conn: &mut Connection, event: &Event, role: &Role) -> Result<bool, OpError> {
+    if role.made_by_marian {
+        return Ok(true);
+    }
+    let Some(picker) = event.attendee_role_by else {
+        return Ok(false);
+    };
+    Ok(store::membership(conn, picker)?
+        .is_some_and(|picker| picker.guild_id == event.guild_id && picker.server_manager))
 }
 
 const ADMINISTRATOR: u64 = 1 << 3;

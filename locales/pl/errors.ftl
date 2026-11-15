@@ -70,6 +70,7 @@ err-color = Wybierz jeden z kolorów wydarzenia.
 err-image-link = Link do obrazka musi zaczynać się od http:// albo https://.
 err-channel-elsewhere = Wybierz kanał z tego serwera.
 err-attendee-role-elsewhere = Rola uczestnika nie pochodzi z tego serwera.
+err-attendee-role-managers = Tylko zarządzający serwerem mogą ustawić jedną z ról serwera jako rolę uczestnika.
 err-selected-role-elsewhere = Wybrana rola nie pochodzi z tego serwera.
 err-cutoff-late = Zapisy muszą się zamknąć przed rozpoczęciem wydarzenia.
 err-reminders-many = Wydarzenie może mieć najwyżej 5 przypomnień.

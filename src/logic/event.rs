@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
-use super::access::{can_create, can_edit};
+use super::access::{can_create, can_edit, may_pick_attendee_role};
 use super::db::{log, must_channel, must_event, must_role, must_membership};
 use super::library::clean_types;
 use super::model::*;
@@ -130,10 +130,18 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     if channel.guild_id != input.guild_id {
         return Err(OpError::from(crate::msg!("err-channel-elsewhere")));
     }
+    let mut attendee_role_by = None;
     if let Some(role_id) = input.attendee_role_id {
         let role = must_role(conn, role_id)?;
         if role.guild_id != input.guild_id {
             return Err(OpError::from(crate::msg!("err-attendee-role-elsewhere")));
+        }
+        // An event keeps the role it has, whoever saves it. Picking another
+        // one of the server's roles takes a server manager.
+        match existing.as_ref().filter(|event| event.attendee_role_id == Some(role_id)) {
+            Some(event) => attendee_role_by = event.attendee_role_by,
+            None if may_pick_attendee_role(&actor, &role) => attendee_role_by = Some(actor.id),
+            None => return Err(OpError::from(crate::msg!("err-attendee-role-managers"))),
         }
     }
     for role_id in input
@@ -212,6 +220,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         options,
         reminders,
         existing,
+        attendee_role_by,
     })
 }
 
@@ -339,6 +348,7 @@ struct NewEvent<'a> {
     cutoff_at: Option<DateTime<Utc>>,
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
+    attendee_role_by: Option<i64>,
     thread_enabled: bool,
     multiple_signups: bool,
     created_by: Option<i64>,
@@ -369,6 +379,7 @@ fn insert_event_row(
         cutoff_at: input.cutoff_at,
         mention_everyone: input.mention_everyone,
         attendee_role_id: input.attendee_role_id,
+        attendee_role_by: clean.attendee_role_by,
         thread_enabled: input.thread_enabled,
         multiple_signups: input.multiple_signups,
         created_by: Some(input.actor_id),
@@ -399,6 +410,7 @@ struct EventEdits<'a> {
     signups_closed: bool,
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
+    attendee_role_by: Option<i64>,
     thread_enabled: bool,
     multiple_signups: bool,
     updated_at: DateTime<Utc>,
@@ -426,6 +438,7 @@ fn update_event_row(
         signups_closed: input.cutoff_at.is_some_and(|cutoff| now >= cutoff),
         mention_everyone: input.mention_everyone,
         attendee_role_id: input.attendee_role_id,
+        attendee_role_by: clean.attendee_role_by,
         thread_enabled: input.thread_enabled,
         multiple_signups: input.multiple_signups,
         updated_at: now,

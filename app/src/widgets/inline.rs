@@ -2110,8 +2110,10 @@ pub fn EventAttendeeRole(key: (String, String), event: dto::Event, roles: Vec<dt
     let roles = StoredValue::new(roles);
     let choices = move || {
         roles.with_value(|roles| {
+            // Only the roles the viewer may pick, and the one the event has.
             roles
                 .iter()
+                .filter(|role| role.attendee || current.with_value(|now| now.as_ref() == Some(&role.id)))
                 .map(|role| view! { <option value=role.id.clone() selected=current.with_value(|now| now.as_ref() == Some(&role.id))>{role.name.clone()}</option> })
                 .collect_view()
         })

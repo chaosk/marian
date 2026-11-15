@@ -63,6 +63,7 @@ dm-mention-hint = Wyślij numery oddzielone przecinkami. `wszyscy` oznacza @ever
 dm-restrict-hint = Wyślij numery oddzielone przecinkami albo `brak`, żeby zdjąć ograniczenie.
 dm-role-hint = Wyślij numer albo `brak`, jeśli bez roli.
 dm-no-roles = Ten serwer nie ma jeszcze ról.
+dm-no-attendee-roles = Tylko zarządzający serwerem mogą wybrać jedną z ról serwera dla uczestników.
 dm-send-numbers = Wyślij numery oddzielone przecinkami.
 dm-pick-from-list = Wyślij numer z listy.
 dm-not-in-list = Tego numeru nie ma na liście.

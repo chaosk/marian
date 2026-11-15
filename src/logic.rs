@@ -14,7 +14,7 @@ mod signup;
 mod template;
 mod tick;
 
-pub use access::{can_create, can_delete, can_edit, sees_channel, sight, sight_for_discord, Overwrite, Sight};
+pub use access::{can_create, can_delete, can_edit, may_pick_attendee_role, sees_channel, sight, sight_for_discord, Overwrite, Sight};
 pub use catalog::{
     bind_channel_discord, create_channel, discard_channel, manual_calendar_sync,
     set_user_reminders, slug_channel,
@@ -497,6 +497,116 @@ mod tests {
         assert!(work.thread_add.is_empty());
         assert_eq!(work.thread_remove, vec!["u2".to_string()]);
         assert_eq!(work.role_remove, vec!["u2".to_string()]);
+    }
+
+    #[test]
+    fn only_a_server_manager_picks_one_of_the_servers_roles_for_attendees() {
+        let mut conn = world();
+        // June doesn't manage the server, and anyone may make events.
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.actor_id = 2;
+        event.attendee_role_id = Some(1);
+        let err = save_event(&mut conn, event.clone()).unwrap_err().to_string();
+        assert!(err.contains("server managers"), "{err}");
+
+        // Her event without one; Nell, who manages the server, gives it one.
+        event.attendee_role_id = None;
+        let id = save_event(&mut conn, event.clone()).unwrap();
+        let mut edit = event.clone();
+        edit.id = Some(id);
+        edit.actor_id = 1;
+        edit.attendee_role_id = Some(1);
+        save_event(&mut conn, edit.clone()).unwrap();
+        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(1), Some(1)));
+
+        // June renames her event: the role stays, as Nell's pick.
+        edit.actor_id = 2;
+        edit.title = "Raid night".into();
+        save_event(&mut conn, edit.clone()).unwrap();
+        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(1), Some(1)));
+        // She can't swap it for another of the server's roles.
+        edit.attendee_role_id = Some(2);
+        let err = save_event(&mut conn, edit.clone()).unwrap_err().to_string();
+        assert!(err.contains("server managers"), "{err}");
+
+        // Her copy of the event leaves the server's role behind.
+        let copy = duplicate_event(&mut conn, id, 2).unwrap();
+        assert_eq!(store::event(&mut conn, copy).unwrap().unwrap().attendee_role_id, None);
+    }
+
+    #[test]
+    fn anyone_picks_a_role_marian_made_for_attendees() {
+        let mut conn = world();
+        conn.batch_execute(
+            "INSERT INTO roles (id, guild_id, name, color, made_by_marian) VALUES (3, 1, 'Raid attendee', '#1e3a6e', true);",
+        )
+        .unwrap();
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.actor_id = 2;
+        event.attendee_role_id = Some(3);
+        let id = save_event(&mut conn, event).unwrap();
+        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(3), Some(2)));
+    }
+
+    #[test]
+    fn a_routine_takes_one_of_the_servers_roles_for_attendees_only_from_a_manager() {
+        let mut conn = world();
+        let extras = EventExtras {
+            color: "#1e3a6e".into(),
+            options: yes_no(),
+            attendee_role_id: Some(1),
+            ..Default::default()
+        };
+        let make = |conn: &mut Connection, actor_id| {
+            create_routine(conn, 1, actor_id, 1, "Raid", "", 60, 20 * 60, 0, 9 * 60, 2, 9 * 60, &[3], Some(extras.clone()), Utc::now())
+        };
+        let err = make(&mut conn, 2).unwrap_err().to_string();
+        assert!(err.contains("server managers"), "{err}");
+        make(&mut conn, 1).unwrap();
+    }
+
+    #[test]
+    fn marian_holds_back_a_servers_role_no_manager_picked() {
+        let mut conn = world();
+        diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
+            .set(schema::guilds::discord_id.eq("g1"))
+            .execute(&mut conn)
+            .unwrap();
+        diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
+            .set(schema::channels::discord_id.eq("c1"))
+            .execute(&mut conn)
+            .unwrap();
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.attendee_role_id = Some(1);
+        let id = save_event(&mut conn, event).unwrap();
+        // As an event from before the check stands: June picked the Officer role.
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set((
+                schema::events::discord_message_id.eq("m1"),
+                schema::events::attendee_role_by.eq(2_i64),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
+        signup(&mut conn, id, options[0].id, 2).unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+            panic!("expected a Discord attendance plan");
+        };
+        assert!(work.role_add.is_empty(), "{:?}", work.role_add);
+
+        // Nell picked it: it goes out.
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::attendee_role_by.eq(1_i64))
+            .execute(&mut conn)
+            .unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+            panic!("expected a Discord attendance plan");
+        };
+        assert_eq!(work.role_add, vec!["u2".to_string()]);
     }
 
     #[test]
