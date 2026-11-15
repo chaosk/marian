@@ -30,7 +30,7 @@ pub use discord::{
     mention_line, remember_discord_message, set_server_manager, sync_channel_overwrites,
     sync_discord_channel, sync_discord_channels, sync_discord_permissions, sync_discord_role,
     sync_discord_roles, web_event_url, Attendance, AttendanceWork, ChannelReverse,
-    EventChannelPurge,
+    EventChannelPurge, WEB_BUTTON_LABEL,
 };
 pub use event::{save_event, save_options};
 pub use library::{

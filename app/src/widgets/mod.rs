@@ -1101,6 +1101,10 @@ pub fn RoleCombo(
                 aria-label=label
                 title=move || names().join(", ")
                 aria-expanded=move || if open.get() { "true" } else { "false" }
+                // While open, focus stays in the search box. A press that moved
+                // it here would close the list on focusout, and the click would
+                // then open it again.
+                on:mousedown=move |ev| if open.get_untracked() { ev.prevent_default() }
                 on:click=move |_| if open.get_untracked() { close() } else { begin() }>
                 {face}
                 <span class="switcher-chevron" aria-hidden="true"></span>
@@ -1245,6 +1249,10 @@ pub fn Choice(
             <button type="button" class="combo-trigger" aria-haspopup="listbox"
                 aria-label=move || label.get_value()
                 aria-expanded=move || if open.get() { "true" } else { "false" }
+                // While open, focus stays in the search box. A press that moved
+                // it here would close the list on focusout, and the click would
+                // then open it again.
+                on:mousedown=move |ev| if open.get_untracked() { ev.prevent_default() }
                 on:click=move |_| if open.get_untracked() { close() } else { open.set(true) }>
                 <span class=move || if chosen.with(Option::is_none) && none.with_value(Option::is_none) { "muted" } else { "" }>{face}</span>
                 <span class="switcher-chevron" aria-hidden="true"></span>
@@ -1413,6 +1421,10 @@ pub fn ZonePicker(mut groups: Vec<dto::ZoneGroup>, chosen: String, enabled: bool
             <input type="hidden" name="timezone" node_ref=field value=start/>
             <button type="button" class="combo-trigger" disabled=!enabled aria-haspopup="listbox"
                 aria-expanded=move || if open.get() { "true" } else { "false" }
+                // While open, focus stays in the search box. A press that moved
+                // it here would close the list on focusout, and the click would
+                // then open it again.
+                on:mousedown=move |ev| if open.get_untracked() { ev.prevent_default() }
                 on:click=move |_| if open.get_untracked() { close() } else { open.set(true) }>
                 <span>{face}</span>
                 <span class="switcher-chevron" aria-hidden="true"></span>

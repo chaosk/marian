@@ -860,6 +860,9 @@ img.avatar { object-fit: cover; background: rgba(28, 25, 21, 0.08); }
 .d-btn.leave { background: #3d4a3e; }
 .d-btn.leave:hover:not(:disabled) { background: #324038; }
 .d-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* A link button shows only Discord's external-link icon. */
+.d-btn.link { display: inline-flex; align-items: center; padding: 6px 8px; }
+.d-btn.link svg { width: 16px; height: 16px; fill: currentColor; }
 .why { display: block; color: #b5bac1; font-size: 12px; margin-top: 4px; }
 .person { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 0; }
 .guest-step { display: inline-flex; gap: 2px; }
