@@ -13,8 +13,6 @@ all-features = true
 # gateway, with the default webpki roots and no CRLs or session store of ours.
 # Drop these when serenity moves to rustls 0.23.
 ignore = [
-  # derivative is unmaintained; poise 0.6 derives with it at compile time.
-  { id = "RUSTSEC-2024-0388", reason = "proc macro used by poise 0.6; no runtime code" },
   { id = "RUSTSEC-2026-0346", reason = "rustls 0.22 via serenity: Debug of session values; we never format a ClientSessionStore" },
   { id = "RUSTSEC-2026-0349", reason = "rustls 0.22 via serenity: no fix in 0.22; gateway connection to Discord only" },
   { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102 via serenity: CRL matching; no CRLs are configured" },
