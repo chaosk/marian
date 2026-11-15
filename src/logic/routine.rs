@@ -25,6 +25,7 @@ pub use steps::{
     ApprovalPost, Step, StepKind,
 };
 use steps::{clean_steps, proceed, store_steps, waiting_run};
+use crate::values::{EventStatus, RunStatus};
 
 #[derive(Debug, Clone)]
 pub struct RoutineEffect {
@@ -98,7 +99,7 @@ struct Run {
     routine_id: i64,
     opens_at: DateTime<Utc>,
     locks_at: DateTime<Utc>,
-    status: String,
+    status: RunStatus,
     days: Vec<u8>,
     winner_weekday: Option<u8>,
     event_id: Option<i64>,
@@ -145,7 +146,7 @@ struct NewRun<'a> {
     routine_id: i64,
     opens_at: DateTime<Utc>,
     locks_at: DateTime<Utc>,
-    status: &'a str,
+    status: RunStatus,
     days_json: &'a [i16],
     created_at: DateTime<Utc>,
 }
@@ -404,7 +405,7 @@ pub fn save_run_days(
             )
             .execute(tx)?;
         }
-        let jobs = if run.status == "open" {
+        let jobs = if run.status == RunStatus::Open {
             vec![DiscordJob::routine(run.id)]
         } else {
             Vec::new()
@@ -421,7 +422,7 @@ pub fn cast_run(
 ) -> Result<RoutineEffect, OpError> {
     store::with_tx(conn, |tx| {
         let run = must_run(tx, run_id)?;
-        if run.status != "open" {
+        if run.status != RunStatus::Open {
             return Err(OpError::from(crate::msg!("err-poll-closed")));
         }
         if !run.days.contains(&day) {
@@ -493,7 +494,7 @@ pub fn stop_routine(
         diesel::delete(
             schema::routine_runs::table
                 .filter(schema::routine_runs::routine_id.eq(routine.id))
-                .filter(schema::routine_runs::status.eq("scheduled")),
+                .filter(schema::routine_runs::status.eq(RunStatus::Scheduled)),
         )
         .execute(tx)?;
         Ok(format!(
@@ -541,7 +542,7 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
     let guild = must_guild(conn, routine.guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
     let settings = store::settings(conn, routine.guild_id)?;
-    let lang = crate::i18n::Lang::from_code(&settings.language).unwrap_or_default();
+    let lang = settings.language;
     let names = vote_names(conn, run.id)?;
     // Every day on the poll with who voted for it, open or final. The voters
     // are a quote, which Discord dims under the day.
@@ -564,7 +565,7 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
             }
         })
         .collect();
-    let locked = run.status == "locked";
+    let locked = run.status == RunStatus::Locked;
     let picked = || {
         let day = run.winner_weekday.unwrap_or(run.days[0]);
         let when = event_start(run.locks_at, day, routine.start_minutes, tz);
@@ -574,11 +575,11 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
         let (day, label) = picked();
         let votes = names.get(&day).map(Vec::len).unwrap_or(0);
         crate::tr!(lang, "poll-won", day = label, count = votes)
-    } else if run.status == "approval" {
+    } else if run.status == RunStatus::Approval {
         crate::tr!(lang, "poll-waiting", day = picked().1)
-    } else if run.status == "skipped" {
+    } else if run.status == RunStatus::Skipped {
         crate::tr!(lang, "poll-skipped")
-    } else if run.status == "expired" {
+    } else if run.status == RunStatus::Expired {
         crate::tr!(lang, "poll-expired", day = picked().1)
     } else if settings.localize_time {
         // Discord shows it counting down, and the full time in each member's zone on hover.
@@ -590,7 +591,7 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
             when = crate::i18n::format_when(lang, run.locks_at, tz, settings.hour_24)
         )
     };
-    let buttons = if run.status == "open" {
+    let buttons = if run.status == RunStatus::Open {
         run.days
             .iter()
             .map(|day| {
@@ -606,7 +607,7 @@ pub fn routine_post(conn: &mut Connection, run_id: i64) -> Result<Option<Routine
         Vec::new()
     };
     // Only the open poll mentions anyone.
-    let (mention_everyone, mention_roles) = if run.status != "open" {
+    let (mention_everyone, mention_roles) = if run.status != RunStatus::Open {
         (false, Vec::new())
     } else {
         let template = template::load(conn, routine.template_id)?;
@@ -719,7 +720,7 @@ pub fn routine_page_data(
     let channel = store::channel(conn, routine.channel_id)?;
     let run = editable_run(conn, routine.id)?;
     let (counts, names) = match &run {
-        Some(run) if run.status == "open" => (vote_counts(conn, run.id)?, vote_names(conn, run.id)?),
+        Some(run) if run.status == RunStatus::Open => (vote_counts(conn, run.id)?, vote_names(conn, run.id)?),
         _ => (HashMap::new(), HashMap::new()),
     };
     let days_for = |selected: &[u8]| -> Vec<DayCheck> {
@@ -795,7 +796,7 @@ pub fn routine_page_data(
             event_dto(conn, extras)?
         },
         run: run.map(|run| RunView {
-            open: run.status == "open",
+            open: run.status == RunStatus::Open,
             days: run_days(&run),
             opens: clock::format_when(run.opens_at, tz, settings.hour_24),
             locks: clock::format_when(run.locks_at, tz, settings.hour_24),
@@ -813,7 +814,7 @@ fn step_views(conn: &mut Connection, routine_id: i64) -> Result<Vec<RoutineStep>
     let mut views = Vec::new();
     for step in load_steps(conn, routine_id)? {
         views.push(RoutineStep {
-            kind: step.kind.code().to_string(),
+            kind: step.kind.to_string(),
             channel_id: step
                 .channel_id
                 .map(|id| crate::ids::public::channel(conn, id))
@@ -894,7 +895,7 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
                     format!("{} won · waiting for approval", clock::weekday_name(day)),
                 )
             }
-            Some(run) if run.status == "open" => (
+            Some(run) if run.status == RunStatus::Open => (
                 "Voting".to_string(),
                 format!(
                     "Poll locks {}",
@@ -912,7 +913,7 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
             None => ("Stopped".to_string(), String::new()),
         };
         let choices = match &run {
-            Some(run) if run.status == "open" => {
+            Some(run) if run.status == RunStatus::Open => {
                 let counts = vote_counts(conn, run.id)?;
                 run.days
                     .iter()
@@ -959,7 +960,7 @@ pub fn list_routines(conn: &mut Connection, guild_id: i64) -> Result<Vec<Routine
 fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store::Event>, OpError> {
     let mut found = None;
     for run in runs_for(conn, routine_id)? {
-        if run.status != "locked" {
+        if run.status != RunStatus::Locked {
             continue;
         }
         let Some(event_id) = run.event_id else {
@@ -968,7 +969,7 @@ fn current_event(conn: &mut Connection, routine_id: i64) -> Result<Option<store:
         let Some(event) = store::event(conn, event_id)? else {
             continue;
         };
-        if matches!(event.status.as_str(), "posted" | "scheduled") {
+        if matches!(event.status, EventStatus::Posted | EventStatus::Scheduled) {
             found = Some(event);
         }
     }
@@ -993,7 +994,7 @@ fn align_schedule(
     if let Some(run) = editable_run(conn, routine.id)? {
         let guild = must_guild(conn, routine.guild_id)?;
         let tz = clock::zone(&guild.timezone)?;
-        if run.status == "open" {
+        if run.status == RunStatus::Open {
             let locks = lock_after(
                 run.opens_at,
                 tz,
@@ -1015,7 +1016,7 @@ fn align_schedule(
                 .execute(conn)?;
             }
             jobs.push(DiscordJob::routine(run.id));
-        } else if run.status == "scheduled" {
+        } else if run.status == RunStatus::Scheduled {
             let (opens, locks) = window(
                 now,
                 tz,
@@ -1066,13 +1067,13 @@ fn advance(
 ) -> Result<Vec<DiscordJob>, OpError> {
     let mut jobs = Vec::new();
     for run in &mut runs {
-        if run.status == "approval" && run.decide_by.is_some_and(|lapses| lapses <= now) {
+        if run.status == RunStatus::Approval && run.decide_by.is_some_and(|lapses| lapses <= now) {
             jobs.extend(steps::expire(conn, routine, run)?);
-            run.status = "expired".to_string();
-        } else if run.status == "open" && run.locks_at <= now {
+            run.status = RunStatus::Expired;
+        } else if run.status == RunStatus::Open && run.locks_at <= now {
             jobs.extend(lock_run(conn, routine, run, now)?);
             run.status = must_run(conn, run.id)?.status;
-        } else if run.status == "scheduled" && run.opens_at <= now {
+        } else if run.status == RunStatus::Scheduled && run.opens_at <= now {
             if run.locks_at <= now {
                 jobs.extend(lock_run(conn, routine, run, now)?);
                 run.status = must_run(conn, run.id)?.status;
@@ -1080,9 +1081,9 @@ fn advance(
                 diesel::update(
                     schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)),
                 )
-                .set(schema::routine_runs::status.eq("open"))
+                .set(schema::routine_runs::status.eq(RunStatus::Open))
                 .execute(conn)?;
-                run.status = "open".to_string();
+                run.status = RunStatus::Open;
                 log(
                     conn,
                     routine.guild_id,
@@ -1110,10 +1111,10 @@ fn advance(
         // second one would break the unique window and stop the clock.
         let already = runs
             .iter()
-            .any(|run| matches!(run.status.as_str(), "open" | "approval") || run.opens_at == opens);
+            .any(|run| matches!(run.status, RunStatus::Open | RunStatus::Approval) || run.opens_at == opens);
         if !already && locks > now {
             let days_json = days_json(&routine.days);
-            let status = if opens <= now { "open" } else { "scheduled" };
+            let status = if opens <= now { RunStatus::Open } else { RunStatus::Scheduled };
             let id = diesel::insert_into(schema::routine_runs::table)
                 .values(&NewRun {
                     routine_id: routine.id,
@@ -1125,7 +1126,7 @@ fn advance(
                 })
                 .returning(schema::routine_runs::id)
                 .get_result(conn)?;
-            if status == "open" {
+            if status == RunStatus::Open {
                 log(
                     conn,
                     routine.guild_id,
@@ -1180,7 +1181,7 @@ fn post_run(
     }
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
         .set((
-            schema::routine_runs::status.eq("locked"),
+            schema::routine_runs::status.eq(RunStatus::Locked),
             schema::routine_runs::winner_weekday.eq(i64::from(winner)),
             schema::routine_runs::event_id.eq(event_id),
         ))
@@ -1219,7 +1220,7 @@ fn insert_event(
             attendee_role_by,
             starts_at: start,
             post_at: Some(start),
-            status: "scheduled",
+            status: EventStatus::Scheduled,
             series_id: None,
             occurrence_index: None,
         },
@@ -1563,13 +1564,13 @@ pub fn run_by_public(conn: &mut Connection, public: uuid::Uuid) -> Result<Option
 /// This week's poll while people can vote on it.
 pub fn open_run_id(conn: &mut Connection, routine_id: i64) -> Result<Option<i64>, OpError> {
     Ok(editable_run(conn, routine_id)?
-        .filter(|run| run.status == "open")
+        .filter(|run| run.status == RunStatus::Open)
         .map(|run| run.id))
 }
 
 fn editable_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
     for run in runs_for(conn, routine_id)? {
-        if run.status == "open" || run.status == "scheduled" {
+        if run.status == RunStatus::Open || run.status == RunStatus::Scheduled {
             return Ok(Some(run));
         }
     }
@@ -1584,7 +1585,7 @@ fn recent_runs(
 ) -> Result<Vec<RunHistory>, OpError> {
     let mut rows = Vec::new();
     for run in runs_for(conn, routine_id)? {
-        if run.status != "locked" {
+        if run.status != RunStatus::Locked {
             continue;
         }
         let Some(event_id) = run.event_id else {
@@ -1846,7 +1847,7 @@ mod tests {
             "{jobs:?}"
         );
         let open = editable_run(&mut conn, id).unwrap().unwrap();
-        assert_eq!(open.status, "open");
+        assert_eq!(open.status, RunStatus::Open);
         assert_eq!(open.days, vec![3, 4]);
 
         save_run_days(&mut conn, id, 1, &[4, 5]).unwrap();
@@ -1866,7 +1867,7 @@ mod tests {
             })
             .unwrap();
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
-        assert_eq!(event.status, "posted");
+        assert_eq!(event.status, EventStatus::Posted);
         assert_eq!(event.title, "Game night");
         assert_eq!(event.description, "Bring dice on {date}.", "wording is copied as written");
         assert_eq!(event.starts_at, at(2026, 10, 16, 19, 0));
@@ -1881,7 +1882,7 @@ mod tests {
         assert_eq!(shown.event.location, "The cellar");
         assert_eq!(shown.event.options.len(), 2);
         let next = editable_run(&mut conn, id).unwrap().unwrap();
-        assert_eq!(next.status, "scheduled");
+        assert_eq!(next.status, RunStatus::Scheduled);
         assert_eq!(next.days, vec![3, 4]);
         let rows = list_routines(&mut conn, 1).unwrap();
         assert_eq!(rows[0].badge, "Waiting");
@@ -1929,7 +1930,7 @@ mod tests {
         )
         .unwrap();
         let next = editable_run(&mut conn, id).unwrap().unwrap();
-        assert_eq!(next.status, "scheduled");
+        assert_eq!(next.status, RunStatus::Scheduled);
         assert_eq!(next.locks_at, locks);
         assert_eq!(next.days, vec![3, 4]);
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
@@ -2001,7 +2002,7 @@ mod tests {
         let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
         assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })), "nothing posts yet: {jobs:?}");
         let waiting = must_run(&mut conn, run).unwrap();
-        assert_eq!((waiting.status.as_str(), waiting.winner_weekday, waiting.step), ("approval", Some(4), 1));
+        assert_eq!((waiting.status, waiting.winner_weekday, waiting.step), (RunStatus::Approval, Some(4), 1));
         assert_eq!(waiting.decide_by, Some(at(2026, 10, 16, 0, 0)), "lapses as Friday begins");
 
         let poll = routine_post(&mut conn, run).unwrap().unwrap();
@@ -2039,7 +2040,7 @@ mod tests {
         let event = store::event(&mut conn, event_id).unwrap().unwrap();
         assert_eq!(event.starts_at, at(2026, 10, 15, 19, 0), "on the day June picked, not the winner");
         let done = must_run(&mut conn, run).unwrap();
-        assert_eq!((done.status.as_str(), done.winner_weekday, done.event_id), ("locked", Some(3), Some(event_id)));
+        assert_eq!((done.status, done.winner_weekday, done.event_id), (RunStatus::Locked, Some(3), Some(event_id)));
 
         conn.batch_execute("UPDATE routine_runs SET approval_message_id = '900'").unwrap();
         let answered = approval_post(&mut conn, run, "", at(2026, 10, 14, 9, 0)).unwrap().unwrap();
@@ -2058,7 +2059,7 @@ mod tests {
         let early = decide_run(&mut conn, run, 1, Some(9), at(2026, 10, 14, 9, 0)).unwrap_err();
         assert_eq!(early.to_string(), "That day isn't on this poll.");
         decide_run(&mut conn, run, 1, None, at(2026, 10, 14, 9, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, run).unwrap().status, "skipped");
+        assert_eq!(must_run(&mut conn, run).unwrap().status, RunStatus::Skipped);
         let poll = routine_post(&mut conn, run).unwrap().unwrap();
         assert_eq!(poll.body, "There's no event this week.");
         assert_eq!(must_run(&mut conn, run).unwrap().event_id, None, "no event was made");
@@ -2068,11 +2069,11 @@ mod tests {
         let next = open_run_id(&mut conn, id).unwrap().unwrap();
         cast_run(&mut conn, next, 2, 3).unwrap();
         maintain(&mut conn, 1, at(2026, 10, 20, 18, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, next).unwrap().status, "approval");
+        assert_eq!(must_run(&mut conn, next).unwrap().status, RunStatus::Approval);
         let late = decide_run(&mut conn, next, 1, Some(3), at(2026, 10, 22, 20, 0)).unwrap_err();
         assert_eq!(late.to_string(), "That day has already started. Pick a later one.");
         let jobs = maintain(&mut conn, 1, at(2026, 10, 22, 0, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, next).unwrap().status, "expired");
+        assert_eq!(must_run(&mut conn, next).unwrap().status, RunStatus::Expired);
         assert!(jobs.iter().any(|job| matches!(job, DiscordJob::Routine { run_id, .. } if *run_id == next)));
         assert!(!jobs.iter().any(|job| matches!(job, DiscordJob::Sync { .. })));
         let poll = routine_post(&mut conn, next).unwrap().unwrap();
@@ -2088,7 +2089,7 @@ mod tests {
         conn.batch_execute("UPDATE routine_runs SET locks_at = '2026-10-12 13:00:00+00'").unwrap();
         maintain(&mut conn, 1, at(2026, 10, 12, 14, 0)).unwrap();
         decide_run(&mut conn, run, 1, Some(4), at(2026, 10, 12, 14, 0)).unwrap();
-        assert_eq!(must_run(&mut conn, run).unwrap().status, "locked");
+        assert_eq!(must_run(&mut conn, run).unwrap().status, RunStatus::Locked);
         // Before Tuesday's lock, the week's window still matches the locked poll.
         maintain(&mut conn, 1, at(2026, 10, 12, 15, 0)).unwrap();
         maintain(&mut conn, 1, at(2026, 10, 13, 9, 0)).unwrap();
@@ -2136,13 +2137,13 @@ mod tests {
             .unwrap();
             maintain(&mut conn, 1, now).unwrap();
         }
-        let live: Vec<String> = runs_for(&mut conn, id)
+        let live: Vec<RunStatus> = runs_for(&mut conn, id)
             .unwrap()
             .into_iter()
-            .filter(|run| run.status != "locked")
+            .filter(|run| run.status != RunStatus::Locked)
             .map(|run| run.status)
             .collect();
-        assert_eq!(live, ["open"], "one poll, not one per schedule change");
+        assert_eq!(live, [RunStatus::Open], "one poll, not one per schedule change");
         let jobs = maintain(&mut conn, 1, at(2026, 10, 13, 18, 0)).unwrap();
         let events = jobs.iter().filter(|job| matches!(job, DiscordJob::Sync { .. })).count();
         assert_eq!(events, 1, "locking posts one event");

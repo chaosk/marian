@@ -13,13 +13,14 @@ use crate::clock::{self, occurrence_start};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::values::{Cadence, EventStatus};
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::series)]
-struct NewSeries<'a> {
+struct NewSeries {
     public_id: uuid::Uuid,
     guild_id: i64,
-    cadence: &'a str,
+    cadence: Cadence,
     end_on: Option<DateTime<Utc>>,
     max_occurrences: Option<i64>,
     active: bool,
@@ -47,7 +48,7 @@ pub(super) fn link_new_series(
         .values(&NewSeries {
             public_id: crate::ids::series_id(),
             guild_id: event.guild_id,
-            cadence: &repeat.cadence,
+            cadence: repeat.cadence,
             end_on: repeat.end_on,
             max_occurrences: repeat.max_occurrences,
             active: true,
@@ -122,7 +123,7 @@ pub(super) fn apply_series_template(
     template::set_role_by(conn, series.template_id, clean.attendee_role_by)?;
     let events = store::events_in_series(conn, series_id)?;
     for event in events {
-        if event.id == source_id || !matches!(event.status.as_str(), "draft" | "scheduled") {
+        if event.id == source_id || !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled) {
             continue;
         }
         apply_template_to_event(conn, &event, &template, clean.attendee_role_by)?;
@@ -179,10 +180,7 @@ pub(super) fn retune_series(
     if !series.active {
         return Err(OpError::from(crate::msg!("err-series-ended")));
     }
-    if !matches!(
-        repeat.cadence.as_str(),
-        "daily" | "weekly" | "biweekly" | "monthly"
-    ) {
+    if repeat.cadence == Cadence::Once {
         return Err(OpError::from(crate::msg!("err-repeat-values")));
     }
     if let Some(max) = repeat.max_occurrences {
@@ -201,7 +199,7 @@ pub(super) fn retune_series(
     let cadence_changed = series.cadence != repeat.cadence;
     diesel::update(schema::series::table.filter(schema::series::id.eq(series_id)))
         .set((
-            schema::series::cadence.eq(&repeat.cadence),
+            schema::series::cadence.eq(repeat.cadence),
             schema::series::end_on.eq(repeat.end_on),
             schema::series::max_occurrences.eq(repeat.max_occurrences),
         ))
@@ -210,12 +208,12 @@ pub(super) fn retune_series(
         let Some(index) = event.occurrence_index else {
             continue;
         };
-        if !matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
+        if !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
             continue;
         }
         let mut start = event.starts_at;
         if cadence_changed {
-            let next = occurrence_start(anchor, index, &repeat.cadence, tz);
+            let next = occurrence_start(anchor, index, repeat.cadence, tz);
             if next != start {
                 shift_occurrence(conn, &event, start, next, tz)?;
                 start = next;
@@ -282,7 +280,7 @@ pub(super) fn fill_series(
     }
     if !existing
         .iter()
-        .any(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "archived"))
+        .any(|event| matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived))
     {
         return Ok(());
     }
@@ -294,7 +292,7 @@ pub(super) fn fill_series(
     let creator = existing.iter().find_map(|event| event.created_by);
     let mut scheduled = existing
         .iter()
-        .filter(|event| matches!(event.status.as_str(), "scheduled" | "draft"))
+        .filter(|event| matches!(event.status, EventStatus::Scheduled | EventStatus::Draft))
         .count();
     let mut index = 1_i64;
     let mut last_start = None;
@@ -305,7 +303,7 @@ pub(super) fn fill_series(
                 break;
             }
         }
-        let start = occurrence_start(anchor, index, &series.cadence, tz);
+        let start = occurrence_start(anchor, index, series.cadence, tz);
         if last_start.is_some_and(|previous| start <= previous) {
             break;
         }
@@ -360,7 +358,7 @@ pub(super) fn insert_occurrence(
             attendee_role_by,
             starts_at: start,
             post_at: Some(post_at),
-            status: "scheduled",
+            status: EventStatus::Scheduled,
             series_id: Some(series.id),
             occurrence_index: Some(index),
         },
@@ -380,12 +378,12 @@ pub(super) fn mark_posted(
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
     let event = must_event(conn, id)?;
-    if event.status == "posted" {
+    if event.status == EventStatus::Posted {
         return Ok(());
     }
     diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
         .set((
-            schema::events::status.eq("posted"),
+            schema::events::status.eq(EventStatus::Posted),
             schema::events::posted_at.eq(now),
             schema::events::post_attempts.eq(0),
             schema::events::updated_at.eq(now),

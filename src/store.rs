@@ -12,6 +12,11 @@ use uuid::Uuid;
 
 use crate::error::OpError;
 use crate::schema;
+use crate::i18n::Lang;
+use crate::values::{
+    AccessKind, Cadence, ChannelKind, Digest, EventRoleKind, EventStatus, Permission, ReminderPlace, RunStatus,
+    SignupState,
+};
 
 pub use diesel::pg::PgConnection as Connection;
 
@@ -55,10 +60,10 @@ struct SettingsRow {
     temp_roles: bool,
     calendar_auto_sync: bool,
     post_lead_hours: i64,
-    digest: String,
+    digest: Digest,
     waitlist: bool,
     default_preset_id: Option<i64>,
-    language: String,
+    language: Lang,
 }
 
 /// A server's settings. Each `role_*` list names the roles that may do one
@@ -84,36 +89,34 @@ pub struct Settings {
     pub role_channel: Vec<i64>,
     pub role_signup: Vec<i64>,
     pub post_lead_hours: i64,
-    pub digest: String,
+    pub digest: Digest,
     /// A full option takes more signups onto a waitlist that moves up as spots open.
     pub waitlist: bool,
     /// The preset a new event starts with.
     pub default_preset_id: Option<i64>,
-    /// The language Marian writes in on Discord: "en" or "pl".
-    pub language: String,
+    /// The language Marian writes in on Discord.
+    pub language: Lang,
 }
 
-/// The permission names stored with each role, and the matching settings field.
-const PERMISSION_KINDS: [&str; 5] = ["event", "edit", "delete", "channel", "signup"];
-
 impl Settings {
-    fn permission(&self, kind: &str) -> &[i64] {
+    /// The roles that may do `kind`.
+    fn permission(&self, kind: Permission) -> &[i64] {
         match kind {
-            "event" => &self.role_event,
-            "edit" => &self.role_edit,
-            "delete" => &self.role_delete,
-            "channel" => &self.role_channel,
-            _ => &self.role_signup,
+            Permission::Event => &self.role_event,
+            Permission::Edit => &self.role_edit,
+            Permission::Delete => &self.role_delete,
+            Permission::Channel => &self.role_channel,
+            Permission::Signup => &self.role_signup,
         }
     }
 
-    fn permission_mut(&mut self, kind: &str) -> &mut Vec<i64> {
+    fn permission_mut(&mut self, kind: Permission) -> &mut Vec<i64> {
         match kind {
-            "event" => &mut self.role_event,
-            "edit" => &mut self.role_edit,
-            "delete" => &mut self.role_delete,
-            "channel" => &mut self.role_channel,
-            _ => &mut self.role_signup,
+            Permission::Event => &mut self.role_event,
+            Permission::Edit => &mut self.role_edit,
+            Permission::Delete => &mut self.role_delete,
+            Permission::Channel => &mut self.role_channel,
+            Permission::Signup => &mut self.role_signup,
         }
     }
 
@@ -133,10 +136,10 @@ impl Settings {
             temp_roles: self.temp_roles,
             calendar_auto_sync: self.calendar_auto_sync,
             post_lead_hours: self.post_lead_hours,
-            digest: self.digest.clone(),
+            digest: self.digest,
             waitlist: self.waitlist,
             default_preset_id: self.default_preset_id,
-            language: self.language.clone(),
+            language: self.language,
         }
     }
 }
@@ -228,7 +231,7 @@ pub struct Channel {
     pub id: i64,
     pub guild_id: i64,
     pub name: String,
-    pub kind: String,
+    pub kind: ChannelKind,
     pub position: i64,
     pub purged_at: Option<DateTime<Utc>>,
     pub discord_id: Option<String>,
@@ -255,7 +258,7 @@ pub struct Event {
     pub description: String,
     pub starts_at: DateTime<Utc>,
     pub duration_minutes: i64,
-    pub status: String,
+    pub status: EventStatus,
     pub post_at: Option<DateTime<Utc>>,
     pub posted_at: Option<DateTime<Utc>>,
     pub archived_at: Option<DateTime<Utc>>,
@@ -318,7 +321,7 @@ pub struct Series {
     pub id: i64,
     pub public_id: Uuid,
     pub guild_id: i64,
-    pub cadence: String,
+    pub cadence: Cadence,
     pub end_on: Option<DateTime<Utc>>,
     pub max_occurrences: Option<i64>,
     pub active: bool,
@@ -362,7 +365,7 @@ pub struct RoutineRun {
     pub routine_id: i64,
     pub opens_at: DateTime<Utc>,
     pub locks_at: DateTime<Utc>,
-    pub status: String,
+    pub status: RunStatus,
     pub days_json: Vec<i16>,
     pub winner_weekday: Option<i64>,
     pub event_id: Option<i64>,
@@ -432,7 +435,7 @@ pub struct Signup {
     pub event_id: i64,
     pub option_id: i64,
     pub membership_id: i64,
-    pub state: String,
+    pub state: SignupState,
     pub created_at: DateTime<Utc>,
     /// Guests this person brings. The signup takes 1 + guests places.
     pub guests: i64,
@@ -502,7 +505,7 @@ pub struct ThreadMessage {
     pub id: i64,
     pub event_id: i64,
     pub body: String,
-    pub place: String,
+    pub place: ReminderPlace,
     pub created_at: DateTime<Utc>,
 }
 
@@ -526,7 +529,7 @@ pub struct MembershipRole {
 pub struct EventRole {
     pub event_id: i64,
     pub role_id: i64,
-    pub kind: String,
+    pub kind: EventRoleKind,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations)]
@@ -1193,10 +1196,10 @@ pub fn default_settings(guild_id: i64) -> Settings {
         role_channel: Vec::new(),
         role_signup: Vec::new(),
         post_lead_hours: 48,
-        digest: "off".into(),
+        digest: Digest::Off,
         waitlist: false,
         default_preset_id: None,
-        language: "en".into(),
+        language: Lang::En,
     }
 }
 
@@ -1389,24 +1392,22 @@ pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpErro
         .optional()?
         .ok_or_else(|| OpError::message("This server has no settings yet."))?;
     let mut settings = Settings::from(row);
-    let granted: Vec<(String, i64)> = schema::permission_roles::table
+    let granted: Vec<(Permission, i64)> = schema::permission_roles::table
         .filter(schema::permission_roles::guild_id.eq(guild_id))
         .order(schema::permission_roles::role_id.asc())
         .select((schema::permission_roles::kind, schema::permission_roles::role_id))
         .load(conn)?;
     for (kind, role_id) in granted {
-        if PERMISSION_KINDS.contains(&kind.as_str()) {
-            settings.permission_mut(&kind).push(role_id);
-        }
+        settings.permission_mut(kind).push(role_id);
     }
     Ok(settings)
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::permission_roles)]
-struct NewPermissionRole<'a> {
+struct NewPermissionRole {
     guild_id: i64,
-    kind: &'a str,
+    kind: Permission,
     role_id: i64,
 }
 
@@ -1423,7 +1424,7 @@ fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), 
     )
     .execute(conn)?;
     let mut rows = Vec::new();
-    for kind in PERMISSION_KINDS {
+    for &kind in Permission::ALL {
         let mut ids = settings.permission(kind).to_vec();
         ids.sort_unstable();
         ids.dedup();
@@ -1692,7 +1693,7 @@ pub fn events_due_to_post(
     now: DateTime<Utc>,
 ) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_guild(guild_id)
-        .filter(schema::events::status.eq("scheduled"))
+        .filter(schema::events::status.eq(EventStatus::Scheduled))
         .filter(schema::events::post_attempts.lt(3))
         .filter(schema::events::post_at.le(now))
         .order((schema::events::starts_at.asc(), schema::events::id.asc()))
@@ -1703,7 +1704,7 @@ pub fn events_due_to_post(
 pub fn events_with_status(
     conn: &mut Connection,
     guild_id: i64,
-    status: &str,
+    status: EventStatus,
 ) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_guild(guild_id)
         .filter(schema::events::status.eq(status))
@@ -1856,7 +1857,7 @@ pub fn events_in_active_series(
 pub fn event_role_ids(
     conn: &mut Connection,
     event: &Event,
-    kind: &str,
+    kind: EventRoleKind,
 ) -> Result<Vec<i64>, OpError> {
     let roles: Vec<Role> = EventRole::belonging_to(event)
         .filter(schema::event_roles::kind.eq(kind))
@@ -2011,7 +2012,7 @@ pub fn discord_ids_for_memberships(
 pub fn applied_membership_ids(
     conn: &mut Connection,
     event_id: i64,
-    kind: &str,
+    kind: AccessKind,
 ) -> Result<Vec<String>, OpError> {
     Ok(schema::applied_access::table
         .filter(schema::applied_access::event_id.eq(event_id))
@@ -2026,13 +2027,13 @@ pub fn applied_membership_ids(
 struct NewApplied<'a> {
     event_id: i64,
     discord_user_id: &'a str,
-    kind: &'a str,
+    kind: AccessKind,
 }
 
 pub fn mark_applied(
     conn: &mut Connection,
     event_id: i64,
-    kind: &str,
+    kind: AccessKind,
     discord_user_id: &str,
 ) -> Result<(), OpError> {
     diesel::insert_into(schema::applied_access::table)
@@ -2049,7 +2050,7 @@ pub fn mark_applied(
 pub fn clear_applied(
     conn: &mut Connection,
     event_id: i64,
-    kind: &str,
+    kind: AccessKind,
     discord_user_id: &str,
 ) -> Result<(), OpError> {
     diesel::delete(
@@ -2062,7 +2063,7 @@ pub fn clear_applied(
     Ok(())
 }
 
-pub fn count_status(conn: &mut Connection, guild_id: i64, status: &str) -> Result<i64, OpError> {
+pub fn count_status(conn: &mut Connection, guild_id: i64, status: EventStatus) -> Result<i64, OpError> {
     Ok(schema::events::table
         .filter(schema::events::guild_id.eq(guild_id))
         .filter(schema::events::status.eq(status))
@@ -2073,9 +2074,9 @@ pub fn count_status(conn: &mut Connection, guild_id: i64, status: &str) -> Resul
 /// Posted events that have not ended, plus scheduled posts.
 pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
     let now = Utc::now();
-    let rows: Vec<(String, DateTime<Utc>, i64)> = schema::events::table
+    let rows: Vec<(EventStatus, DateTime<Utc>, i64)> = schema::events::table
         .filter(schema::events::guild_id.eq(guild_id))
-        .filter(schema::events::status.eq_any(["posted", "scheduled"]))
+        .filter(schema::events::status.eq_any([EventStatus::Posted, EventStatus::Scheduled]))
         .select((
             schema::events::status,
             schema::events::starts_at,
@@ -2084,9 +2085,9 @@ pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpErr
         .load(conn)?;
     Ok(rows
         .into_iter()
-        .filter(|(status, starts, minutes)| match status.as_str() {
-            "posted" => *starts + chrono::Duration::minutes(*minutes) >= now,
-            "scheduled" => true,
+        .filter(|(status, starts, minutes)| match status {
+            EventStatus::Posted => *starts + chrono::Duration::minutes(*minutes) >= now,
+            EventStatus::Scheduled => true,
             _ => false,
         })
         .count() as i64)
@@ -2096,7 +2097,7 @@ pub fn count_active_series(conn: &mut Connection, guild_id: i64) -> Result<i64, 
     Ok(schema::series::table
         .filter(schema::series::guild_id.eq(guild_id))
         .filter(schema::series::active.eq(true))
-        .filter(schema::series::cadence.ne("once"))
+        .filter(schema::series::cadence.ne(Cadence::Once))
         .count()
         .get_result(conn)?)
 }
@@ -2601,6 +2602,7 @@ mod tests {
                 "20261115140000".to_string(),
                 "20261115150000".to_string(),
                 "20261115160000".to_string(),
+                "20261115170000".to_string(),
             ]
         );
     }

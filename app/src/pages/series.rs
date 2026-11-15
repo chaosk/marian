@@ -6,6 +6,7 @@ use crate::widgets::{ActionButton, Finder};
 use crate::pages::lists::table_pager;
 use crate::cache::{self, when, Ready};
 use crate::{base, client, query, title, A};
+use marian_types::{Cadence, EventStatus};
 
 #[component]
 pub fn Recurring() -> impl IntoView {
@@ -18,7 +19,7 @@ pub fn Recurring() -> impl IntoView {
         let needle = q.trim().to_lowercase();
         let rows: Vec<_> = series
             .into_iter()
-            .filter(|item| item.cadence != "once")
+            .filter(|item| item.cadence != Cadence::Once)
             .filter(|item| needle.is_empty() || item.title.to_lowercase().contains(&needle))
             .collect();
         let searchable = !rows.is_empty() || !q.is_empty();
@@ -46,7 +47,7 @@ pub fn Recurring() -> impl IntoView {
                             <td><A href=href>{item.title}</A></td>
                             <td class="fit">{meta}</td>
                             <td class="fit">
-                                <span class="badge">{if item.active { cadence_label(&item.cadence) } else { "Ended" }}</span>
+                                <span class="badge">{if item.active { cadence_label(item.cadence.as_str()) } else { "Ended" }}</span>
                             </td>
                         </tr>
                     }
@@ -104,7 +105,7 @@ pub fn SeriesPage() -> impl IntoView {
                 .next
                 .map(|at| format!(" · next {}", clock.when(at)))
                 .unwrap_or_default();
-            format!("{} · {length}{next}", cadence_label(&series.cadence))
+            format!("{} · {length}{next}", cadence_label(series.cadence.as_str()))
         } else {
             "Ended. Dates that hadn't gone out were skipped.".to_string()
         };
@@ -116,8 +117,8 @@ pub fn SeriesPage() -> impl IntoView {
             .map(|event| {
                 let href = format!("{base}/events/{}", event.id);
                 // Once a date is out or skipped, its status says it all.
-                let posts = match event.status.as_str() {
-                    "posted" | "archived" | "skipped" | "cancelled" => "—".to_string(),
+                let posts = match event.status {
+                    EventStatus::Posted | EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled => "—".to_string(),
                     _ => event
                         .post_at
                         .map(|at| clock.when(at))
@@ -131,7 +132,7 @@ pub fn SeriesPage() -> impl IntoView {
                             {renamed.map(|title| view! { <span class="muted series-renamed">{title}</span> })}
                         </td>
                         <td class="fit">{posts}</td>
-                        <td class="fit"><span class=format!("badge status-{}", event.status)>{status_label(&event.status)}</span></td>
+                        <td class="fit"><span class=format!("badge status-{}", event.status)>{status_label(event.status.as_str())}</span></td>
                     </tr>
                 }
             })
@@ -179,7 +180,7 @@ pub fn SeriesPage() -> impl IntoView {
 /// How often a series repeats and when it stops, saved together.
 #[component]
 fn RepeatCard(series: dto::Series, clock: format::Clock) -> impl IntoView {
-    let cadence = RwSignal::new(series.cadence.clone());
+    let cadence = RwSignal::new(series.cadence.to_string());
     let ends = RwSignal::new(
         match (series.max_occurrences, series.end_on) {
             (Some(_), _) => "count",
@@ -242,9 +243,9 @@ fn RepeatCard(series: dto::Series, clock: format::Clock) -> impl IntoView {
         problem.set(String::new());
         saving.dispatch(repeat);
     };
-    let cadences = ["daily", "weekly", "biweekly", "monthly"]
+    let cadences = [Cadence::Daily, Cadence::Weekly, Cadence::Biweekly, Cadence::Monthly]
         .into_iter()
-        .map(|value| view! { <option value=value selected=series.cadence == value>{cadence_label(value)}</option> })
+        .map(|value| view! { <option value=value.as_str() selected=series.cadence == value>{cadence_label(value.as_str())}</option> })
         .collect_view();
     let choice = move |value: &'static str, label: &'static str| {
         view! {

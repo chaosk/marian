@@ -12,6 +12,7 @@ use crate::i18n::{self, Lang};
 use crate::schema;
 use crate::tr;
 use crate::store::{self, Channel, Connection, Membership, Role};
+use crate::values::{AccessKind, ChannelKind, EventRoleKind, EventStatus, OverwriteKind, SignupState};
 
 pub enum Attendance {
     Idle,
@@ -52,7 +53,7 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
     let Some(message_id) = event.discord_message_id.clone() else {
         // A posted event's message is on its way, so wait for it. One that
         // isn't posted (a draft, or a scheduled post) has no roles to give yet.
-        return Ok(if event.status == "posted" { Attendance::Waiting } else { Attendance::Idle });
+        return Ok(if event.status == EventStatus::Posted { Attendance::Waiting } else { Attendance::Idle });
     };
     let settings = store::settings(conn, event.guild_id)?;
     let thread_discord_id = store::thread_discord_id(conn, event_id)?;
@@ -63,11 +64,11 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
     } else {
         Vec::new()
     };
-    let applied_thread = store::applied_membership_ids(conn, event_id, "thread")?;
+    let applied_thread = store::applied_membership_ids(conn, event_id, AccessKind::Thread)?;
     let (thread_add, thread_remove) = id_diff(&desired_thread, &applied_thread);
     let grants = store::grant_membership_ids(conn, &event)?;
     let desired_role = store::discord_ids_for_memberships(conn, &grants)?;
-    let applied_role = store::applied_membership_ids(conn, event_id, "role")?;
+    let applied_role = store::applied_membership_ids(conn, event_id, AccessKind::Role)?;
     let (mut role_add, role_remove) = id_diff(&desired_role, &applied_role);
     let role = event
         .attendee_role_id
@@ -209,7 +210,7 @@ pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
 }
 
 fn mention_discord_roles(conn: &mut Connection, event: &store::Event) -> Result<Vec<String>, OpError> {
-    let ids = store::event_role_ids(conn, event, "mention")?;
+    let ids = store::event_role_ids(conn, event, EventRoleKind::Mention)?;
     mention_role_ids(conn, &ids)
 }
 
@@ -244,7 +245,7 @@ pub fn discord_view(
     public_url: &str,
 ) -> Result<Option<DiscordView>, OpError> {
     let event = must_event(conn, event_id)?;
-    if event.status != "posted" && event.discord_message_id.is_none() {
+    if event.status != EventStatus::Posted && event.discord_message_id.is_none() {
         return Ok(None);
     }
     let channel = must_channel(conn, event.channel_id)?;
@@ -253,7 +254,7 @@ pub fn discord_view(
     };
     let guild = must_guild(conn, event.guild_id)?;
     let settings = store::settings(conn, event.guild_id)?;
-    let lang = Lang::from_code(&settings.language).unwrap_or_default();
+    let lang = settings.language;
     let start = event.starts_at;
     let end = start + chrono::Duration::minutes(event.duration_minutes);
     let mut body = String::new();
@@ -274,8 +275,8 @@ pub fn discord_view(
     let plus = crate::ics::calendar_template(&event)?;
     body.push_str(&format!("[+]({plus})\n"));
     body.push_str(&format!("🕐 <t:{}:R>", start.timestamp()));
-    if event.status != "posted" {
-        body.push_str(&format!("\n\n_{}_", status_text(lang, &event.status)));
+    if event.status != EventStatus::Posted {
+        body.push_str(&format!("\n\n_{}_", status_text(lang, event.status)));
     }
     let options = store::options_for(conn, &event)?;
     let signups = store::signups_for(conn, &event)?;
@@ -283,18 +284,18 @@ pub fn discord_view(
     let names: HashMap<i64, String> = memberships.into_iter().map(|user| (user.id, user.name)).collect();
     let mut fields = Vec::new();
     let mut buttons = Vec::new();
-    let closed = event.status != "posted" || event.signups_closed;
+    let closed = event.status != EventStatus::Posted || event.signups_closed;
     // A finished event's post is a record; nothing on it can be pressed.
-    let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
+    let finished = matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped);
     for opt in &options {
         let confirmed: Vec<_> = signups
             .iter()
-            .filter(|signup| signup.option_id == opt.id && signup.state == "confirmed")
+            .filter(|signup| signup.option_id == opt.id && signup.state == SignupState::Confirmed)
             .collect();
         // Places: each person and the guests they bring.
         let waiting: i64 = signups
             .iter()
-            .filter(|signup| signup.option_id == opt.id && signup.state == "waitlisted")
+            .filter(|signup| signup.option_id == opt.id && signup.state == SignupState::Waitlisted)
             .map(|signup| 1 + signup.guests)
             .sum();
         let taken: i64 = confirmed.iter().map(|signup| 1 + signup.guests).sum();
@@ -431,7 +432,7 @@ pub fn channel_reverse_plan(
     let Some(channel) = store::channel_by_discord(conn, guild_id, discord_channel_id)? else {
         return Err(OpError::from(crate::msg!("err-sort-where")));
     };
-    if channel.kind != "event" {
+    if channel.kind != ChannelKind::Event {
         return Err(OpError::from(crate::msg!("err-sort-where")));
     }
     let mut posts = Vec::new();
@@ -609,11 +610,11 @@ pub fn follow_discord_avatar(conn: &mut Connection, member: &Membership, avatar:
 fn posts_listing(conn: &mut Connection, membership_id: i64, now: DateTime<Utc>) -> Result<Vec<i64>, OpError> {
     let signed_up = schema::signups::table
         .filter(schema::signups::membership_id.eq(membership_id))
-        .filter(schema::signups::state.eq("confirmed"))
+        .filter(schema::signups::state.eq(SignupState::Confirmed))
         .select(schema::signups::event_id);
     let events: Vec<(i64, DateTime<Utc>, i64)> = schema::events::table
         .filter(schema::events::id.eq_any(signed_up))
-        .filter(schema::events::status.eq("posted"))
+        .filter(schema::events::status.eq(EventStatus::Posted))
         .filter(schema::events::discord_message_id.is_not_null())
         .select((schema::events::id, schema::events::starts_at, schema::events::duration_minutes))
         .load(conn)?;
@@ -670,7 +671,7 @@ pub fn set_server_manager(conn: &mut Connection, membership_id: i64, server_mana
 struct NewChannel<'a> {
     guild_id: i64,
     name: &'a str,
-    kind: &'a str,
+    kind: ChannelKind,
     position: i64,
     discord_id: &'a str,
 }
@@ -695,7 +696,7 @@ pub fn ensure_discord_channel(
         .values(&NewChannel {
             guild_id,
             name: &slug,
-            kind: "text",
+            kind: ChannelKind::Text,
             position,
             discord_id,
         })
@@ -745,7 +746,7 @@ pub fn sync_discord_channel(
 ) -> Result<Channel, OpError> {
     let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? else {
         let pending = store::channel_by_name(conn, guild_id, &slug_channel(name))?.filter(|channel| {
-            channel.kind == "event" && channel.discord_id.as_deref().is_none_or(str::is_empty)
+            channel.kind == ChannelKind::Event && channel.discord_id.as_deref().is_none_or(str::is_empty)
         });
         let Some(pending) = pending else {
             return ensure_discord_channel(conn, guild_id, discord_id, name);
@@ -956,7 +957,7 @@ pub fn sync_channel_overwrites(
         .map(|o| {
             (
                 schema::channel_overwrites::channel_id.eq(channel.id),
-                schema::channel_overwrites::kind.eq(if o.member { "member" } else { "role" }),
+                schema::channel_overwrites::kind.eq(if o.member { OverwriteKind::Member } else { OverwriteKind::Role }),
                 schema::channel_overwrites::target.eq(&o.target),
                 schema::channel_overwrites::allow.eq(o.allow as i64),
                 schema::channel_overwrites::deny.eq(o.deny as i64),
@@ -1011,7 +1012,7 @@ pub fn event_channel_purge(
         return Ok(None);
     }
     let channel = must_channel(conn, event.channel_id)?;
-    if channel.kind != "event" {
+    if channel.kind != ChannelKind::Event {
         return Ok(None);
     }
     let Some(discord_channel_id) = channel.discord_id.filter(|id| !id.trim().is_empty()) else {
@@ -1200,7 +1201,7 @@ mod tests {
         )
         .unwrap();
         let channel = sync_discord_channel(&mut conn, 1, "500", "race-night").unwrap();
-        assert_eq!((channel.id, channel.kind.as_str()), (42, "event"));
+        assert_eq!((channel.id, channel.kind), (42, ChannelKind::Event));
         assert_eq!(channel.discord_id.as_deref(), Some("500"));
         assert_eq!(names(&mut conn), vec!["raids", "race-night"]);
     }
@@ -1674,28 +1675,14 @@ mod tests {
 }
 
 /// An event's status as a post shows it, in `lang`.
-pub fn status_text(lang: Lang, status: &str) -> String {
+pub fn status_text(lang: Lang, status: EventStatus) -> String {
     match status {
-        "draft" => tr!(lang, "status-draft"),
-        "scheduled" => tr!(lang, "status-scheduled"),
-        "posted" => tr!(lang, "status-posted"),
-        "archived" => tr!(lang, "status-archived"),
-        "cancelled" => tr!(lang, "status-cancelled"),
-        "skipped" => tr!(lang, "status-skipped"),
-        "failed" => tr!(lang, "status-failed"),
-        _ => tr!(lang, "status-unknown"),
-    }
-}
-
-pub fn status_label(status: &str) -> &'static str {
-    match status {
-        "draft" => "Draft",
-        "scheduled" => "Scheduled",
-        "posted" => "Posted",
-        "archived" => "Archived",
-        "cancelled" => "Cancelled",
-        "skipped" => "Skipped",
-        "failed" => "Post failed",
-        _ => "Unknown",
+        EventStatus::Draft => tr!(lang, "status-draft"),
+        EventStatus::Scheduled => tr!(lang, "status-scheduled"),
+        EventStatus::Posted => tr!(lang, "status-posted"),
+        EventStatus::Archived => tr!(lang, "status-archived"),
+        EventStatus::Cancelled => tr!(lang, "status-cancelled"),
+        EventStatus::Skipped => tr!(lang, "status-skipped"),
+        EventStatus::Failed => tr!(lang, "status-failed"),
     }
 }

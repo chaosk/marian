@@ -18,6 +18,7 @@ use super::signup::{fill_all, sync_access};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, LibraryOption, Preset};
+use crate::values::EventStatus;
 
 const MAX_OPTIONS: usize = 8;
 
@@ -115,7 +116,7 @@ pub fn update_type(
         let now = Utc::now();
         let events: Vec<store::Event> = schema::events::table
             .filter(schema::events::guild_id.eq(current.guild_id))
-            .filter(schema::events::status.eq("posted"))
+            .filter(schema::events::status.eq(EventStatus::Posted))
             .filter(schema::events::starts_at.gt(now - chrono::Duration::days(1)))
             .filter(schema::events::id.eq_any(
                 schema::signup_options::table
@@ -298,7 +299,7 @@ pub fn apply_preset(
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
+        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let preset = store::preset(tx, preset_id)?
@@ -325,7 +326,7 @@ pub fn apply_preset(
                 schema::events::updated_at.eq(Utc::now()),
             ))
             .execute(tx)?;
-        if event.status == "posted" {
+        if event.status == EventStatus::Posted {
             let event = must_event(tx, event.id)?;
             fill_all(tx, &event)?;
             sync_access(tx, event.id)?;

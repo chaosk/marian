@@ -3,5 +3,7 @@
 pub mod dto;
 pub mod labels;
 pub mod time;
+pub mod values;
 
 pub use dto::*;
+pub use values::{Cadence, ChannelKind, EventStatus, RunStatus};

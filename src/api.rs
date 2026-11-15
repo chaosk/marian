@@ -18,6 +18,7 @@ use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec};
 use crate::store::{self, Connection};
 
 pub use crate::observe::PageTrace;
+use crate::values::{Cadence, Digest, EventRoleKind, EventStatus, SignupState};
 
 /// What server-rendered pages need from the running service.
 #[derive(Clone)]
@@ -251,10 +252,10 @@ pub fn server(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Server, OpE
     let guild = store::guild(conn, viewer.guild_id)?.ok_or(OpError::NotFound)?;
     let settings = store::settings(conn, viewer.guild_id)?;
     let counts = dto::Counts {
-        drafts: store::count_status(conn, viewer.guild_id, "draft")?,
+        drafts: store::count_status(conn, viewer.guild_id, EventStatus::Draft)?,
         upcoming: store::count_upcoming(conn, viewer.guild_id)?,
-        scheduled: store::count_status(conn, viewer.guild_id, "scheduled")?
-            + store::count_status(conn, viewer.guild_id, "failed")?,
+        scheduled: store::count_status(conn, viewer.guild_id, EventStatus::Scheduled)?
+            + store::count_status(conn, viewer.guild_id, EventStatus::Failed)?,
         series: store::count_active_series(conn, viewer.guild_id)?,
         routines: logic::count_active(conn, viewer.guild_id)?,
     };
@@ -336,7 +337,7 @@ pub fn settings(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Settings,
         default_reminder_minutes: s.default_reminder_minutes,
         auto_archive_hours: s.auto_archive_hours,
         post_lead_hours: s.post_lead_hours,
-        digest: s.digest,
+        digest: s.digest.to_string(),
         thread_reminders: s.thread_reminders,
         auto_archive: s.auto_archive,
         event_threads: s.event_threads,
@@ -348,7 +349,7 @@ pub fn settings(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Settings,
         temp_roles: s.temp_roles,
         waitlist: s.waitlist,
         calendar_auto_sync: s.calendar_auto_sync,
-        language: s.language,
+        language: s.language.code().to_string(),
     })
 }
 
@@ -371,8 +372,9 @@ pub fn put_settings(
     s.auto_archive_hours = bounded("Archive after", next.auto_archive_hours, 1, 168)?;
     s.post_lead_hours = bounded("Post lead", next.post_lead_hours, 0, 336)?;
     s.digest = match next.digest.as_str() {
-        "daily" | "weekly" => next.digest.clone(),
-        _ => "off".into(),
+        "daily" => Digest::Daily,
+        "weekly" => Digest::Weekly,
+        _ => Digest::Off,
     };
     // Roles by public id. One the server no longer has is dropped.
     let roles: std::collections::HashMap<String, i64> = store::list_roles(conn, viewer.guild_id)?
@@ -400,8 +402,8 @@ pub fn put_settings(
     if !next.language.is_empty() {
         let picked = crate::i18n::Lang::from_code(&next.language)
             .ok_or_else(|| OpError::message("That language isn't one Marian writes in."))?;
-        if picked.code() != s.language {
-            s.language = picked.code().to_string();
+        if picked != s.language {
+            s.language = picked;
             // The slash commands are described in the server's language.
             outcome.jobs.push(DiscordJob::commands(viewer.guild_id));
         }
@@ -504,16 +506,16 @@ pub fn channels(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Chann
 fn matches_view(view: dto::EventView, event: &store::Event, now: DateTime<Utc>) -> bool {
     let ended = event.starts_at + Duration::minutes(event.duration_minutes) < now;
     match view {
-        dto::EventView::Upcoming => match event.status.as_str() {
-            "posted" => !ended,
-            "scheduled" => true,
+        dto::EventView::Upcoming => match event.status {
+            EventStatus::Posted => !ended,
+            EventStatus::Scheduled => true,
             _ => false,
         },
-        dto::EventView::Wrapped => event.status == "posted" && ended,
-        dto::EventView::Drafts => event.status == "draft",
-        dto::EventView::Queued => matches!(event.status.as_str(), "scheduled" | "failed"),
+        dto::EventView::Wrapped => event.status == EventStatus::Posted && ended,
+        dto::EventView::Drafts => event.status == EventStatus::Draft,
+        dto::EventView::Queued => matches!(event.status, EventStatus::Scheduled | EventStatus::Failed),
         dto::EventView::Archive => {
-            matches!(event.status.as_str(), "archived" | "cancelled" | "skipped")
+            matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped)
         }
         dto::EventView::All => true,
     }
@@ -601,7 +603,7 @@ pub fn events(
             id: event.public_id.to_string(),
             title: event.title.clone(),
             description: event.description.chars().take(180).collect(),
-            status: event.status.clone(),
+            status: event.status,
             starts_at: event.starts_at,
             duration_minutes: event.duration_minutes,
             post_at: event.post_at,
@@ -630,8 +632,8 @@ fn spots(options: &[store::SignupOption], signups: &[store::Signup]) -> Vec<dto:
                 emoji: opt.emoji.clone(),
                 name: opt.name.clone(),
                 capacity: opt.capacity,
-                confirmed: places(signups, opt.id, "confirmed"),
-                waiting: places(signups, opt.id, "waitlisted"),
+                confirmed: places(signups, opt.id, SignupState::Confirmed),
+                waiting: places(signups, opt.id, SignupState::Waitlisted),
             }
         })
         .collect()
@@ -682,7 +684,7 @@ pub fn event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<
         title: event.title.clone(),
         description: event.description.clone(),
         location: event.location.trim().to_string(),
-        status: event.status.clone(),
+        status: event.status,
         starts_at: event.starts_at,
         duration_minutes: event.duration_minutes,
         cutoff_at: event.cutoff_at,
@@ -694,11 +696,11 @@ pub fn event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<
         attendee_role_id: ids::public::role(conn, event.attendee_role_id)?,
         mention_everyone: event.mention_everyone,
         mention_role_ids: {
-            let ids = store::event_role_ids(conn, &event, "mention")?;
+            let ids = store::event_role_ids(conn, &event, EventRoleKind::Mention)?;
             ids::public::roles(conn, &ids)?
         },
         restrict_role_ids: {
-            let ids = store::event_role_ids(conn, &event, "restrict")?;
+            let ids = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
             ids::public::roles(conn, &ids)?
         },
         thread_enabled: event.thread_enabled,
@@ -714,10 +716,10 @@ pub fn event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<
         can: dto::Abilities {
             edit: can_edit,
             delete: logic::can_delete(&user, &event, &settings, &roles),
-            archive: can_edit && event.status == "posted",
+            archive: can_edit && event.status == EventStatus::Posted,
             skip: can_edit
                 && event.series_id.is_some()
-                && matches!(event.status.as_str(), "scheduled" | "draft"),
+                && matches!(event.status, EventStatus::Scheduled | EventStatus::Draft),
         },
     })
 }
@@ -761,11 +763,11 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
     let signups = store::signups_for(conn, &event)?;
     let people = store::list_memberships(conn, viewer.guild_id)?;
     let role_rows = store::list_roles(conn, viewer.guild_id)?;
-    let restrict_ids = store::event_role_ids(conn, &event, "restrict")?;
+    let restrict_ids = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
     let now = Utc::now();
-    let closed = event.status != "posted" || event.signups_closed || cutoff_passed(&event, now);
+    let closed = event.status != EventStatus::Posted || event.signups_closed || cutoff_passed(&event, now);
     let show_names = settings.show_attendees || can_manage;
-    let named = |state: &str, option_id: i64| -> Vec<dto::Person> {
+    let named = |state: SignupState, option_id: i64| -> Vec<dto::Person> {
         if !show_names {
             return Vec::new();
         }
@@ -785,12 +787,12 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
     let rows = options
         .iter()
         .map(|opt| {
-            let confirmed = places(&signups, opt.id, "confirmed");
+            let confirmed = places(&signups, opt.id, SignupState::Confirmed);
             let my_signup = signups
                 .iter()
                 .find(|s| s.option_id == opt.id && s.membership_id == user.id);
             let mine = my_signup.is_some();
-            let queue = places(&signups, opt.id, "waitlisted") > 0;
+            let queue = places(&signups, opt.id, SignupState::Waitlisted) > 0;
             let gate = Gate {
                 event: &event,
                 user: &user,
@@ -813,9 +815,9 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
                 max_guests: opt.max_guests,
                 my_guests: my_signup.map(|s| s.guests).unwrap_or(0),
                 confirmed_count: confirmed,
-                waiting_count: places(&signups, opt.id, "waitlisted"),
-                confirmed: named("confirmed", opt.id),
-                waiting: named("waitlisted", opt.id),
+                waiting_count: places(&signups, opt.id, SignupState::Waitlisted),
+                confirmed: named(SignupState::Confirmed, opt.id),
+                waiting: named(SignupState::Waitlisted, opt.id),
                 mine,
                 open,
                 reason,
@@ -828,8 +830,8 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
         notes: signup_notes(&event, &options, &signups, &user, &roles, &restrict_ids, &role_rows, settings.waitlist, now),
         show_names,
         can_manage,
-        editable: can_manage && !matches!(event.status.as_str(), "archived" | "skipped" | "cancelled"),
-        posted: event.status == "posted",
+        editable: can_manage && !matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled),
+        posted: event.status == EventStatus::Posted,
     })
 }
 
@@ -847,9 +849,9 @@ impl Gate<'_> {
     /// Whether the person can press this option's button, why not, and whether it waitlists.
     fn button(&self, opt: &store::SignupOption, mine: bool, confirmed: i64, queue: bool) -> (bool, String, bool) {
         if mine {
-            return (self.event.status == "posted", String::new(), false);
+            return (self.event.status == EventStatus::Posted, String::new(), false);
         }
-        if self.event.status != "posted" {
+        if self.event.status != EventStatus::Posted {
             return (false, "Signups open once the event is posted.".into(), false);
         }
         if self.closed {
@@ -891,11 +893,11 @@ fn signup_notes(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     // A finished event has nothing left to say about signing up.
-    if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
+    if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
         return Vec::new();
     }
     let mut notes = Vec::new();
-    if event.status != "posted" {
+    if event.status != EventStatus::Posted {
         notes.push("Signups open once the event is posted.".to_string());
     }
     if event.signups_closed || cutoff_passed(event, now) {
@@ -906,7 +908,7 @@ fn signup_notes(
     }
     for opt in options {
         let yours = signups.iter().any(|s| {
-            s.option_id == opt.id && s.membership_id == user.id && s.state == "confirmed"
+            s.option_id == opt.id && s.membership_id == user.id && s.state == SignupState::Confirmed
         });
         if yours {
             continue;
@@ -922,7 +924,7 @@ fn signup_notes(
             }
         }
         if let Some(cap) = opt.capacity {
-            if places(signups, opt.id, "confirmed") >= cap && !waitlist {
+            if places(signups, opt.id, SignupState::Confirmed) >= cap && !waitlist {
                 notes.push(format!("{} is full.", opt.name));
             }
         }
@@ -934,7 +936,7 @@ fn signup_notes(
 }
 
 /// Places an option's signups in `state` take: each person and their guests.
-fn places(signups: &[store::Signup], option_id: i64, state: &str) -> i64 {
+fn places(signups: &[store::Signup], option_id: i64, state: SignupState) -> i64 {
     signups
         .iter()
         .filter(|s| s.option_id == option_id && s.state == state)
@@ -1009,7 +1011,7 @@ pub fn pending_reminders(
     let sight = sight(conn, viewer)?;
     let events: Vec<store::Event> = store::list_events(conn, viewer.guild_id)?
         .into_iter()
-        .filter(|event| event.status == "posted" && sight.sees_event(event))
+        .filter(|event| event.status == EventStatus::Posted && sight.sees_event(event))
         .collect();
     let groups = store::reminders_by_event(conn, &events)?;
     Ok(events
@@ -1113,7 +1115,7 @@ fn event_input(
     let repeat = match &draft.repeat {
         Some(repeat) if !in_series && !repeat.cadence.is_empty() && repeat.cadence != "none" => {
             Some(RepeatSpec {
-                cadence: repeat.cadence.clone(),
+                cadence: RepeatSpec::cadence(&repeat.cadence)?,
                 end_on: repeat.until.map(|date| end_of_day(date, tz)).transpose()?,
                 max_occurrences: repeat.count,
             })
@@ -1242,10 +1244,10 @@ fn save_stored(
     posting: Option<Posting>,
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
-    if posting.is_some() && !matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
+    if posting.is_some() && !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
         return Err(OpError::message("This event has already gone out."));
     }
-    let unposted = matches!(event.status.as_str(), "draft" | "scheduled" | "failed") && event.discord_message_id.is_none();
+    let unposted = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) && event.discord_message_id.is_none();
     let channel_id = match &patch.channel_id {
         Some(public) => channel_seen(conn, viewer, public)?,
         None => event.channel_id,
@@ -1300,11 +1302,11 @@ fn save_stored(
     };
     let mention_role_ids = match &patch.mention_role_ids {
         Some(public) => ids::public::role_ids(conn, viewer.guild_id, public)?,
-        None => store::event_role_ids(conn, &event, "mention")?,
+        None => store::event_role_ids(conn, &event, EventRoleKind::Mention)?,
     };
     let restrict_role_ids = match &patch.restrict_role_ids {
         Some(public) => ids::public::role_ids(conn, viewer.guild_id, public)?,
-        None => store::event_role_ids(conn, &event, "restrict")?,
+        None => store::event_role_ids(conn, &event, EventRoleKind::Restrict)?,
     };
     let attendee_role_id = match &patch.attendee_role_id {
         Some(public) => ids::public::role_id(conn, viewer.guild_id, public.as_deref())?,
@@ -1336,7 +1338,7 @@ fn save_stored(
         reminders,
         repeat: match &patch.repeat {
             Some(repeat) => Some(RepeatSpec {
-                cadence: repeat.cadence.trim().to_string(),
+                cadence: RepeatSpec::cadence(&repeat.cadence)?,
                 end_on: repeat.until.map(|date| end_of_day(date, tz)).transpose()?,
                 max_occurrences: repeat.count,
             }),
@@ -1346,7 +1348,7 @@ fn save_stored(
             Some(Posting::Now) => logic::SaveAction::Publish,
             Some(Posting::At(_)) => logic::SaveAction::Schedule,
             Some(Posting::Hold) => logic::SaveAction::Draft,
-            None if event.status == "draft" => logic::SaveAction::Draft,
+            None if event.status == EventStatus::Draft => logic::SaveAction::Draft,
             None => logic::SaveAction::Save,
         },
         post_at: match posting {
@@ -1397,7 +1399,7 @@ fn series_dto(conn: &mut Connection, series: store::Series) -> Result<dto::Serie
     let events = store::events_in_series(conn, series.id)?;
     let next = events
         .iter()
-        .find(|event| matches!(event.status.as_str(), "posted" | "scheduled" | "draft"))
+        .find(|event| matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Draft))
         .map(|event| event.starts_at);
     Ok(dto::Series {
         id: series.public_id.to_string(),
@@ -1416,7 +1418,7 @@ pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Se
     let sight = sight(conn, viewer)?;
     let mut rows = Vec::new();
     for series in store::list_series(conn, viewer.guild_id)? {
-        if series.cadence != "once" && sight.sees_channel(template_channel(conn, series.template_id)?) {
+        if series.cadence != Cadence::Once && sight.sees_channel(template_channel(conn, series.template_id)?) {
             rows.push(series_dto(conn, series)?);
         }
     }
@@ -1453,7 +1455,7 @@ pub fn patch_series(
         series.id,
         viewer.membership_id,
         RepeatSpec {
-            cadence: repeat.cadence.trim().to_string(),
+            cadence: RepeatSpec::cadence(&repeat.cadence)?,
             end_on: repeat.until.map(|date| end_of_day(date, tz)).transpose()?,
             max_occurrences: repeat.count,
         },
@@ -1710,8 +1712,10 @@ fn routine_steps(conn: &mut Connection, viewer: &Viewer, steps: &[dto::RoutineSt
     steps
         .iter()
         .map(|step| {
-            let kind = logic::StepKind::from_code(&step.kind)
-                .ok_or_else(|| OpError::message("That step isn't one a routine has."))?;
+            let kind = step
+                .kind
+                .parse::<logic::StepKind>()
+                .map_err(|_| OpError::message("That step isn't one a routine has."))?;
             let channel_id = match step.channel_id.as_deref().filter(|id| !id.is_empty()) {
                 Some(id) => Some(channel_seen(conn, viewer, id)?),
                 None => None,
@@ -2173,7 +2177,7 @@ mod tests {
     fn the_event_list_filters_by_status_end_and_day() {
         let (mut conn, viewer) = world();
         let now = Utc::now();
-        let mut add = |title: &str, status: &str, starts_at: DateTime<Utc>| {
+        let mut add = |title: &str, status: EventStatus, starts_at: DateTime<Utc>| {
             let id = logic::save_event(
                 &mut conn,
                 EventInput {
@@ -2209,11 +2213,11 @@ mod tests {
                 .execute(&mut conn)
                 .unwrap();
         };
-        add("old raid", "archived", now - Duration::days(20));
-        add("last raid", "posted", now - Duration::days(2));
-        add("next raid", "posted", now + Duration::days(2));
-        add("plan", "draft", now + Duration::days(5));
-        add("queued", "scheduled", now + Duration::days(9));
+        add("old raid", EventStatus::Archived, now - Duration::days(20));
+        add("last raid", EventStatus::Posted, now - Duration::days(2));
+        add("next raid", EventStatus::Posted, now + Duration::days(2));
+        add("plan", EventStatus::Draft, now + Duration::days(5));
+        add("queued", EventStatus::Scheduled, now + Duration::days(9));
         let titles = |conn: &mut Connection, query: dto::EventQuery| -> Vec<String> {
             events(conn, &viewer, &dto::EventQuery { view: dto::EventView::All, ..query })
                 .unwrap()
@@ -2301,7 +2305,7 @@ mod tests {
         assert_eq!(after.title, "Raid night");
         assert_eq!(after.description, "Bring food");
         assert_eq!(after.location, "Keep");
-        assert_eq!(after.status, "posted");
+        assert_eq!(after.status, EventStatus::Posted);
         assert!(after.multiple_signups);
         assert_eq!(after.starts_at.timestamp(), moved.timestamp());
         let cutoff = after.cutoff_at.unwrap();
@@ -2370,8 +2374,8 @@ mod tests {
         assert_eq!(reminders.len(), 1);
         assert_eq!((reminders[0].offset_minutes, reminders[0].message.as_str()), (120, "Bring flasks"));
         assert!(after.mention_everyone);
-        assert_eq!(store::event_role_ids(&mut conn, &after, "mention").unwrap(), [1]);
-        assert_eq!(store::event_role_ids(&mut conn, &after, "restrict").unwrap(), [1]);
+        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(), [1]);
+        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Restrict).unwrap(), [1]);
         assert_eq!(after.attendee_role_id, Some(1));
 
         let cleared: dto::EventPatch = serde_json::from_str(r#"{"attendee_role_id":null}"#).unwrap();
@@ -2379,7 +2383,7 @@ mod tests {
         patch_event(&mut conn, &viewer, &public, &cleared).unwrap();
         let after = store::event(&mut conn, id).unwrap().unwrap();
         assert_eq!(after.attendee_role_id, None);
-        assert_eq!(store::event_role_ids(&mut conn, &after, "mention").unwrap(), [1], "unset fields stay");
+        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(), [1], "unset fields stay");
 
         patch_event(
             &mut conn,
@@ -2472,12 +2476,12 @@ mod tests {
         let post_at = starts_at - Duration::days(1);
         schedule_event(&mut conn, &viewer, &public, &dto::PostAt { post_local: local(post_at) }).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!(event.status, "scheduled");
+        assert_eq!(event.status, EventStatus::Scheduled);
         assert_eq!(event.post_at.unwrap().timestamp() / 60, post_at.timestamp() / 60);
 
         unschedule_event(&mut conn, &viewer, &public).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!((event.status.as_str(), event.post_at), ("draft", None), "back to a draft");
+        assert_eq!((event.status, event.post_at), (EventStatus::Draft, None), "back to a draft");
 
         // Before posting, an option can go.
         let mut options = store::options_for(&mut conn, &event).unwrap();
@@ -2491,7 +2495,7 @@ mod tests {
         assert_eq!(store::options_for(&mut conn, &event).unwrap().len(), 1);
 
         publish_event(&mut conn, &viewer, &public).unwrap();
-        assert_eq!(store::event(&mut conn, id).unwrap().unwrap().status, "posted");
+        assert_eq!(store::event(&mut conn, id).unwrap().unwrap().status, EventStatus::Posted);
         let moved = dto::EventPatch { channel_id: Some(ids::public::channel(&mut conn, 2).unwrap()), ..Default::default() };
         let err = patch_event(&mut conn, &viewer, &public, &moved).unwrap_err().to_string();
         assert!(err.contains("stays in its channel"), "{err}");
@@ -2546,10 +2550,10 @@ mod tests {
         patch_event(&mut conn, &viewer, &public, &weekly).unwrap();
         let shown = event(&mut conn, &viewer, &public).unwrap();
         let series = shown.series.expect("the event now belongs to a series");
-        assert_eq!(series.cadence, "weekly");
+        assert_eq!(series.cadence, Cadence::Weekly);
         assert_eq!(series.max_occurrences, Some(3));
         assert!(series.active);
-        assert_eq!(shown.status, "posted");
+        assert_eq!(shown.status, EventStatus::Posted);
 
         let err = patch_event(&mut conn, &viewer, &public, &weekly).unwrap_err().to_string();
         assert!(err.contains("already belongs to a series"), "{err}");

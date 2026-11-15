@@ -4,6 +4,7 @@ use crate::format::clock_of;
 use crate::widgets::JsonForm;
 use crate::cache::{self, when, Ready};
 use crate::title;
+use marian_types::ChannelKind;
 
 #[component]
 pub fn Channels() -> impl IntoView {
@@ -15,7 +16,10 @@ pub fn Channels() -> impl IntoView {
             let rows = channels
                 .into_iter()
                 .map(|channel| {
-                    let kind = if channel.kind == "event" { "Event" } else { "Text" };
+                    let kind = match channel.kind {
+                        ChannelKind::Event => "Event",
+                        ChannelKind::Text => "Text",
+                    };
                     let purged = channel
                         .purged_at
                         .map(|dt| clock.when(dt))

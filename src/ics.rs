@@ -4,6 +4,7 @@ use diesel::prelude::*;
 use crate::error::OpError;
 use crate::schema::{events, signup_options, signups, memberships};
 use crate::store::{self, Connection, Event};
+use crate::values::{EventStatus, SignupState};
 
 pub fn user_feed(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
     let mut body = String::from(
@@ -26,7 +27,7 @@ pub(crate) fn events_for_person(
             signups::table.on(signups::event_id
                 .eq(events::id)
                 .and(signups::membership_id.eq(memberships::id))
-                .and(signups::state.eq("confirmed"))),
+                .and(signups::state.eq(SignupState::Confirmed))),
         )
         .left_join(
             // Only a type that counts as attending puts the event in someone's calendar.
@@ -39,7 +40,7 @@ pub(crate) fn events_for_person(
             )),
         )
         .filter(memberships::user_id.eq(user_id))
-        .filter(events::status.eq_any(["posted", "scheduled", "archived"]))
+        .filter(events::status.eq_any([EventStatus::Posted, EventStatus::Scheduled, EventStatus::Archived]))
         .filter(
             events::created_by
                 .eq(memberships::id.nullable())

@@ -8,6 +8,7 @@ use super::inline::{escape, focus_when_shown, pencil, LocalDraft};
 use super::RoleCombo;
 use crate::format::{human_duration, weekday_name};
 use crate::{api, cache, client};
+use marian_types::EventStatus;
 
 const DURATIONS: [i64; 12] = [15, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440];
 
@@ -679,7 +680,7 @@ pub fn template_event(draft: &dto::RoutineDraft, event: &dto::RoutineEvent, chan
         title: draft.title.clone(),
         description: draft.description.clone(),
         location: event.location.clone(),
-        status: "draft".into(),
+        status: EventStatus::Draft,
         starts_at,
         duration_minutes: draft.duration_minutes,
         cutoff_at: event.cutoff_minutes.map(|mins| starts_at - chrono::Duration::minutes(mins)),

@@ -1,0 +1,14 @@
+ALTER TABLE events DROP CONSTRAINT events_status_check;
+ALTER TABLE series DROP CONSTRAINT series_cadence_check;
+ALTER TABLE routine_runs DROP CONSTRAINT routine_runs_status_check;
+ALTER TABLE routine_steps DROP CONSTRAINT routine_steps_kind_check;
+ALTER TABLE signups DROP CONSTRAINT signups_state_check;
+ALTER TABLE settings DROP CONSTRAINT settings_digest_check;
+ALTER TABLE settings DROP CONSTRAINT settings_language_check;
+ALTER TABLE thread_messages DROP CONSTRAINT thread_messages_place_check;
+ALTER TABLE event_roles DROP CONSTRAINT event_roles_kind_check;
+ALTER TABLE applied_access DROP CONSTRAINT applied_access_kind_check;
+ALTER TABLE permission_roles DROP CONSTRAINT permission_roles_kind_check;
+ALTER TABLE channels DROP CONSTRAINT channels_kind_check;
+ALTER TABLE channel_overwrites DROP CONSTRAINT channel_overwrites_kind_check;
+ALTER TABLE event_prompts DROP CONSTRAINT event_prompts_step_check;

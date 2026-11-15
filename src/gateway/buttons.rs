@@ -14,6 +14,7 @@ use crate::tr;
 use super::follow::{redraw, server_avatar, sync_roles};
 use super::publish::{purge_event_channel, push_attendance, push_routine, push_sync, tell_pages};
 use super::{clip, Data, Error};
+use crate::values::EventStatus;
 
 pub(super) async fn handle_button(
     ctx: &serenity::Context,
@@ -366,8 +367,8 @@ async fn ask_delete(
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event)
                 if !matches!(
-                    event.status.as_str(),
-                    "draft" | "scheduled" | "failed" | "posted"
+                    event.status,
+                    EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed | EventStatus::Posted
                 ) =>
             {
                 Err(tr!(lang, "err-event-closed"))
@@ -386,7 +387,7 @@ async fn ask_delete(
                         &event.title,
                         event.starts_at,
                         url.as_deref(),
-                        event.status == "posted",
+                        event.status == EventStatus::Posted,
                     ),
                     event.public_id,
                 )))

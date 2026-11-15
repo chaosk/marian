@@ -14,13 +14,14 @@ use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::values::{Digest, EventStatus, ReminderPlace, SignupState};
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::thread_messages)]
 struct NewThreadMessage<'a> {
     event_id: i64,
     body: &'a str,
-    place: &'a str,
+    place: ReminderPlace,
     created_at: DateTime<Utc>,
 }
 
@@ -96,7 +97,7 @@ fn tick_guild(
         .extend(super::routine::maintain(conn, guild_id, now)?);
 
     let mut people = None;
-    let posted = store::events_with_status(conn, guild_id, "posted")?;
+    let posted = store::events_with_status(conn, guild_id, EventStatus::Posted)?;
     let reminder_groups = store::reminders_by_event(conn, &posted)?;
     let option_groups = store::options_by_event(conn, &posted)?;
     let signup_groups = store::signups_by_event(conn, &posted)?;
@@ -129,9 +130,9 @@ fn tick_guild(
             match text {
                 Some(text) => {
                     let place = if event.thread_enabled && settings.thread_reminders {
-                        "thread"
+                        ReminderPlace::Thread
                     } else {
-                        "channel"
+                        ReminderPlace::Channel
                     };
                     let mut body = format!(
                         "{text}\nREMINDER: {} starts in {}.",
@@ -191,7 +192,7 @@ fn tick_guild(
             let end = start + Duration::minutes(event.duration_minutes);
             if now >= end + Duration::hours(settings.auto_archive_hours) {
                 let fresh = must_event(conn, event.id)?;
-                if fresh.status == "posted" {
+                if fresh.status == EventStatus::Posted {
                     archive_tx(conn, &fresh)?;
                     report.jobs.push(DiscordJob::sync(event.id));
                     report.jobs.push(DiscordJob::attend(event.id));
@@ -211,14 +212,14 @@ fn tick_guild(
         }
     }
 
-    if settings.digest == "daily" || settings.digest == "weekly" {
+    if settings.digest != Digest::Off {
         let local = now.with_timezone(&tz);
-        let due_day = settings.digest == "daily" || local.weekday() == chrono::Weekday::Mon;
+        let due_day = settings.digest == Digest::Daily || local.weekday() == chrono::Weekday::Mon;
         if due_day && local.time().hour() >= 9 {
             let key = format!("digest:{guild_id}:{}", local.date_naive());
             if store::meta(conn, &key)?.is_none() {
                 let mut names = Vec::new();
-                for event in &store::events_with_status(conn, guild_id, "posted")? {
+                for event in &store::events_with_status(conn, guild_id, EventStatus::Posted)? {
                     let start = event.starts_at;
                     if start.with_timezone(&tz).date_naive() == local.date_naive() {
                         names.push(format!(
@@ -248,7 +249,7 @@ fn fail_post(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
     if attempts >= 3 {
         diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
             .set((
-                schema::events::status.eq("failed"),
+                schema::events::status.eq(EventStatus::Failed),
                 schema::events::post_attempts.eq(attempts),
                 schema::events::updated_at.eq(&stamp),
             ))
@@ -316,7 +317,7 @@ fn reminder_text(
     let mut mentions = Vec::new();
     let mut seen = HashSet::new();
     for signup in signups {
-        if signup.state != "confirmed"
+        if signup.state != SignupState::Confirmed
             || !reminding.contains(&signup.option_id)
             || !seen.insert(signup.membership_id)
         {

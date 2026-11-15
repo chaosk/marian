@@ -11,6 +11,7 @@ use crate::store;
 
 use super::buttons::action_button;
 use super::{clip, Error};
+use crate::values::{AccessKind, EventStatus};
 
 pub(super) async fn push_sync(
     db: &store::Db,
@@ -147,10 +148,9 @@ pub(super) async fn post_event(
     if let Some(message) = &sent {
         logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string())?;
     }
-    let status = store::event(&mut conn, event_id)?
-        .map(|event| event.status)
-        .unwrap_or_default();
-    let plan = if sent.is_some() || status == "cancelled" {
+    let cancelled = store::event(&mut conn, event_id)?
+        .is_some_and(|event| event.status == EventStatus::Cancelled);
+    let plan = if sent.is_some() || cancelled {
         logic::event_channel_purge(&mut conn, event_id)?
     } else {
         None
@@ -475,7 +475,7 @@ pub(super) async fn push_attendance(
         if work.thread_discord_id.is_none() && opened.is_none() && work.thread_add.is_empty() {
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
             for membership_id in &work.thread_remove {
-                store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
+                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
             }
         } else {
             let thread_id = match opened {
@@ -485,19 +485,19 @@ pub(super) async fn push_attendance(
             for membership_id in &work.thread_add {
                 join_thread(&http, thread_id, membership_id).await?;
                 let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-                store::mark_applied(&mut conn, event_id, "thread", membership_id)?;
+                store::mark_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
             }
             for membership_id in &work.thread_remove {
                 leave_thread(&http, thread_id, membership_id).await?;
                 let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-                store::clear_applied(&mut conn, event_id, "thread", membership_id)?;
+                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
             }
         }
     }
     if work.role_discord_id.is_none() && work.role_add.is_empty() {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
         for membership_id in &work.role_remove {
-            store::clear_applied(&mut conn, event_id, "role", membership_id)?;
+            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
         }
     } else if !work.role_add.is_empty() || !work.role_remove.is_empty() {
         let role_id = open_role(db, &http, &work).await?;
@@ -510,7 +510,7 @@ pub(super) async fn push_attendance(
                 Err(err) => return Err(err.into()),
             }
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            store::mark_applied(&mut conn, event_id, "role", membership_id)?;
+            store::mark_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
         }
         for membership_id in &work.role_remove {
             let user = serenity::UserId::new(membership_id.parse()?);
@@ -520,7 +520,7 @@ pub(super) async fn push_attendance(
                 Err(err) => return Err(err.into()),
             }
             let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            store::clear_applied(&mut conn, event_id, "role", membership_id)?;
+            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
         }
     }
     Ok(())

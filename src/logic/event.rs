@@ -13,6 +13,7 @@ use crate::clock;
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection};
+use crate::values::{Cadence, EventRoleKind, EventStatus};
 
 pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpError> {
     let clean = normalize(conn, &input)?;
@@ -21,7 +22,7 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
         let id = if let Some(existing) = &clean.existing {
             update_event_row(tx, existing.id, &input, &clean, now)?;
             sync_options(tx, existing.id, &clean.options)?;
-            if existing.status == "posted" {
+            if existing.status == EventStatus::Posted {
                 replace_reminders(tx, existing, &clean.reminders)?;
             } else {
                 diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(existing.id)))
@@ -54,11 +55,11 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
         }
         let event = must_event(tx, id)?;
         if let Some(series_id) = event.series_id {
-            if matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
+            if matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived) {
                 ensure_series(tx, series_id, now)?;
             }
         }
-        if event.status == "posted" {
+        if event.status == EventStatus::Posted {
             fill_all(tx, &event)?;
             sync_access(tx, id)?;
         }
@@ -81,7 +82,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
+        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         Some(event)
@@ -183,10 +184,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
     }
 
     if let Some(repeat) = &input.repeat {
-        if !matches!(
-            repeat.cadence.as_str(),
-            "daily" | "weekly" | "biweekly" | "monthly"
-        ) {
+        if repeat.cadence == Cadence::Once {
             return Err(OpError::from(crate::msg!("err-repeat-values")));
         }
         if let Some(max) = repeat.max_occurrences {
@@ -253,13 +251,13 @@ pub fn save_options(
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status.as_str(), "archived" | "skipped" | "cancelled") {
+        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let options = clean_types(tx, event.guild_id, input)?;
         known_options(tx, &event, &options)?;
         sync_options(tx, event.id, &options)?;
-        if event.status == "posted" {
+        if event.status == EventStatus::Posted {
             fill_all(tx, &event)?;
             sync_access(tx, event.id)?;
         }
@@ -342,7 +340,7 @@ struct NewEvent<'a> {
     location: String,
     starts_at: DateTime<Utc>,
     duration_minutes: i64,
-    status: &'a str,
+    status: EventStatus,
     color: &'a str,
     image_url: Option<&'a str>,
     cutoff_at: Option<DateTime<Utc>>,
@@ -373,7 +371,7 @@ fn insert_event_row(
         location: clean.location.clone(),
         starts_at: input.starts_at,
         duration_minutes: input.duration_minutes,
-        status: "draft",
+        status: EventStatus::Draft,
         color: &input.color,
         image_url: clean.image_url.as_deref(),
         cutoff_at: input.cutoff_at,
@@ -565,10 +563,10 @@ fn insert_reminders(
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::event_roles)]
-struct NewEventRole<'a> {
+struct NewEventRole {
     event_id: i64,
     role_id: i64,
-    kind: &'a str,
+    kind: EventRoleKind,
 }
 
 pub(super) fn insert_event_roles(
@@ -580,20 +578,20 @@ pub(super) fn insert_event_roles(
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
     for role_id in mention_role_ids {
-        if seen.insert((*role_id, "mention")) {
+        if seen.insert((*role_id, EventRoleKind::Mention)) {
             rows.push(NewEventRole {
                 event_id,
                 role_id: *role_id,
-                kind: "mention",
+                kind: EventRoleKind::Mention,
             });
         }
     }
     for role_id in restrict_role_ids {
-        if seen.insert((*role_id, "restrict")) {
+        if seen.insert((*role_id, EventRoleKind::Restrict)) {
             rows.push(NewEventRole {
                 event_id,
                 role_id: *role_id,
-                kind: "restrict",
+                kind: EventRoleKind::Restrict,
             });
         }
     }
@@ -624,8 +622,8 @@ fn transition(
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
     let event = must_event(conn, id)?;
-    match (event.status.as_str(), input.action) {
-        ("posted", _) => {
+    match (event.status, input.action) {
+        (EventStatus::Posted, _) => {
             log(
                 conn,
                 event.guild_id,
@@ -633,17 +631,17 @@ fn transition(
                 &format!("Updated {}.", event.title),
             )?;
         }
-        ("draft" | "scheduled" | "failed", SaveAction::Publish) => {
+        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Publish) => {
             mark_posted(conn, id, now)?;
         }
-        ("draft" | "scheduled" | "failed", SaveAction::Schedule)
-        | ("scheduled", SaveAction::Save) => {
+        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Schedule)
+        | (EventStatus::Scheduled, SaveAction::Save) => {
             let post_at = input
                 .post_at
                 .ok_or_else(|| OpError::from(crate::msg!("err-post-time")))?;
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
-                    schema::events::status.eq("scheduled"),
+                    schema::events::status.eq(EventStatus::Scheduled),
                     schema::events::post_at.eq(post_at),
                     schema::events::updated_at.eq(now),
                 ))
@@ -655,10 +653,10 @@ fn transition(
                 &format!("Will post {} at {}.", event.title, clock::stamp(post_at)),
             )?;
         }
-        ("draft" | "scheduled" | "failed", SaveAction::Draft | SaveAction::Save) => {
+        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Draft | SaveAction::Save) => {
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
-                    schema::events::status.eq("draft"),
+                    schema::events::status.eq(EventStatus::Draft),
                     schema::events::post_at.eq(None::<DateTime<Utc>>),
                     schema::events::updated_at.eq(now),
                 ))

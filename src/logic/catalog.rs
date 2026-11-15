@@ -6,6 +6,7 @@ use super::db::{log, must_event, must_membership};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection};
+use crate::values::{ChannelKind, EventStatus};
 
 pub fn set_user_reminders(
     conn: &mut Connection,
@@ -50,7 +51,7 @@ pub fn create_channel(
             .discord_id
             .as_deref()
             .is_some_and(|id| !id.is_empty());
-        if existing.kind == "event" && !linked {
+        if existing.kind == ChannelKind::Event && !linked {
             return Ok(existing.id);
         }
         return Err(OpError::from(crate::msg!("err-channel-exists", name = slug.as_str())));
@@ -65,7 +66,7 @@ pub fn create_channel(
         .values(&NewChannel {
             guild_id,
             name: &slug,
-            kind: "event",
+            kind: ChannelKind::Event,
             position,
         })
         .returning(schema::channels::id)
@@ -98,7 +99,7 @@ pub fn discard_channel(conn: &mut Connection, channel_id: i64) -> Result<(), OpE
 struct NewChannel<'a> {
     guild_id: i64,
     name: &'a str,
-    kind: &'a str,
+    kind: ChannelKind,
     position: i64,
 }
 
@@ -131,7 +132,7 @@ pub fn manual_calendar_sync(
     if !can_edit(&actor, &event, &settings, &roles) {
         return Err(OpError::from(crate::msg!("err-cant-sync")));
     }
-    if !matches!(event.status.as_str(), "posted" | "scheduled") {
+    if !matches!(event.status, EventStatus::Posted | EventStatus::Scheduled) {
         return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
     let stamp = Utc::now();
@@ -174,7 +175,7 @@ mod tests {
         assert_eq!(again.to_string(), "#this-is-an-event-channel already exists.");
         let channel = store::channel(&mut conn, id).unwrap().unwrap();
         assert_eq!(channel.discord_id.as_deref(), Some("900"));
-        assert_eq!(channel.kind, "event");
+        assert_eq!(channel.kind, ChannelKind::Event);
         discard_channel(&mut conn, id).unwrap();
         assert!(store::channel(&mut conn, id).unwrap().is_none());
     }

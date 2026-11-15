@@ -194,7 +194,7 @@ pub fn AllEvents() -> impl IntoView {
                 let href = format!("{base}/events/{}", event.id);
                 let stripe = crate::paint("stripe", event.color.clone());
                 let when = clock.when(event.starts_at);
-                let status = status_label(&event.status);
+                let status = status_label(event.status.as_str());
                 view! {
                     <tr>
                         <td class="event-title">{stripe}
@@ -455,7 +455,7 @@ fn event_list(
                     let href = format!("{base}/events/{}", event.id);
                     let stripe = crate::paint("stripe", event.color.clone());
                     let when = clock.when(event.starts_at);
-                    let status = status_label(&event.status);
+                    let status = status_label(event.status.as_str());
                     view! {
                         <tr>
                             <td class="event-title">{stripe}

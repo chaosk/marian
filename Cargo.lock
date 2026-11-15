@@ -2086,7 +2086,9 @@ version = "0.11.1"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "diesel",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

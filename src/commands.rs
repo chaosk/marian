@@ -16,6 +16,7 @@ use crate::logic::{
 use crate::parse;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::values::{Cadence, ChannelKind, Digest, EventRoleKind, EventStatus, PromptStep};
 
 fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String {
     match guild.discord_id.as_deref().filter(|id| !id.is_empty()) {
@@ -91,7 +92,7 @@ pub fn channel_posts_waiting(
 ) -> Result<Vec<i64>, OpError> {
     let raw: Option<serde_json::Value> = schema::event_prompts::table
         .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
-        .filter(schema::event_prompts::step.eq("next"))
+        .filter(schema::event_prompts::step.eq(PromptStep::Next))
         .select(schema::event_prompts::draft.assume_not_null())
         .first(conn)
         .optional()?;
@@ -105,7 +106,7 @@ pub fn channel_posts_waiting(
     let Some(event) = store::event(conn, id)? else {
         return Ok(Vec::new());
     };
-    if event.status == "posted" {
+    if event.status == EventStatus::Posted {
         Ok(vec![id])
     } else {
         Ok(Vec::new())
@@ -119,7 +120,7 @@ struct NewEventPrompt<'a> {
     discord_user_id: &'a str,
     guild_id: i64,
     membership_id: i64,
-    step: &'a str,
+    step: PromptStep,
     title: Option<&'a str>,
     start_raw: Option<&'a str>,
     channel_name: Option<&'a str>,
@@ -196,7 +197,7 @@ pub fn start_event_dm(
             discord_user_id,
             guild_id,
             membership_id,
-            step: "channel",
+            step: PromptStep::Channel,
             title: None,
             start_raw: None,
             channel_name: None,
@@ -209,7 +210,7 @@ pub fn start_event_dm(
         .set((
             schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
             schema::event_prompts::membership_id.eq(excluded(schema::event_prompts::membership_id)),
-            schema::event_prompts::step.eq("channel"),
+            schema::event_prompts::step.eq(PromptStep::Channel),
             schema::event_prompts::title.eq(None::<&str>),
             schema::event_prompts::start_raw.eq(None::<&str>),
             schema::event_prompts::channel_name.eq(None::<&str>),
@@ -302,8 +303,8 @@ pub fn answer_event_dm(
         cancel_event_dm(conn, discord_user_id)?;
         return just(DmReply::plain(tr!(lang, "dm-cancelled")));
     }
-    match step.as_str() {
-        "channel" => answer_channel(
+    match step {
+        PromptStep::Channel => answer_channel(
             conn,
             discord_user_id,
             guild_id,
@@ -312,7 +313,7 @@ pub fn answer_event_dm(
             source_discord.as_deref(),
             lang,
         ),
-        "channel_other" => {
+        PromptStep::ChannelOther => {
             let others = other_channels(conn, guild_id, discord_user_id, source_channel.as_deref())?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(channel) = choice.and_then(|n| others.get(n - 1)) else {
@@ -320,7 +321,7 @@ pub fn answer_event_dm(
             };
             just(advance_to_title(conn, discord_user_id, &channel.name, lang)?)
         }
-        "title" => {
+        PromptStep::Title => {
             if text.is_empty() || text.chars().count() > 120 {
                 return just(note(&title_card(lang), &tr!(lang, "err-title-length")));
             }
@@ -330,12 +331,12 @@ pub fn answer_event_dm(
             )
             .set((
                 schema::event_prompts::title.eq(text),
-                schema::event_prompts::step.eq("description"),
+                schema::event_prompts::step.eq(PromptStep::Description),
             ))
             .execute(conn)?;
             just(description_card(lang))
         }
-        "description" => {
+        PromptStep::Description => {
             if text.chars().count() > 2000 {
                 return just(note(&description_card(lang), &tr!(lang, "err-description-length")));
             }
@@ -344,10 +345,10 @@ pub fn answer_event_dm(
             } else {
                 text.to_string()
             };
-            save_draft(conn, discord_user_id, "start", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Start, &draft)?;
             just(start_card(conn, guild_id, lang)?)
         }
-        "timezone" => {
+        PromptStep::Timezone => {
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(name) = choice.and_then(|n| clock::ZONES.get(n - 1)) else {
                 return just(timezone_card(lang));
@@ -355,12 +356,12 @@ pub fn answer_event_dm(
             diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
                 .set(schema::guilds::timezone.eq(*name))
                 .execute(conn)?;
-            save_draft(conn, discord_user_id, "start", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Start, &draft)?;
             just(start_card(conn, guild_id, lang)?)
         }
-        "start" => {
+        PromptStep::Start => {
             if said(text, &ZONE) {
-                save_draft(conn, discord_user_id, "timezone", &draft)?;
+                save_draft(conn, discord_user_id, PromptStep::Timezone, &draft)?;
                 return just(timezone_card(lang));
             }
             let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
@@ -384,12 +385,12 @@ pub fn answer_event_dm(
             )
             .set((
                 schema::event_prompts::start_raw.eq(&stored),
-                schema::event_prompts::step.eq("end"),
+                schema::event_prompts::step.eq(PromptStep::End),
             ))
             .execute(conn)?;
             just(end_card(lang))
         }
-        "end" => {
+        PromptStep::End => {
             let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
             let tz = clock::zone(&guild.timezone)?;
             let start = parse::parse_when(start_raw.as_deref().unwrap_or(""), Utc::now(), tz)
@@ -397,26 +398,26 @@ pub fn answer_event_dm(
             match span_minutes(text, start, tz, lang) {
                 Ok(minutes) => {
                     draft.duration_minutes = minutes;
-                    save_draft(conn, discord_user_id, "repeat", &draft)?;
+                    save_draft(conn, discord_user_id, PromptStep::Repeat, &draft)?;
                     just(repeat_card(lang))
                 }
                 Err(err) => just(note(&end_card(lang), &err)),
             }
         }
-        "repeat" => {
+        PromptStep::Repeat => {
             let cadence = match text {
                 "1" => None,
-                "2" => Some("daily"),
-                "3" => Some("weekly"),
-                "4" => Some("biweekly"),
-                "5" => Some("monthly"),
+                "2" => Some(Cadence::Daily),
+                "3" => Some(Cadence::Weekly),
+                "4" => Some(Cadence::Biweekly),
+                "5" => Some(Cadence::Monthly),
                 _ => return just(repeat_card(lang)),
             };
-            draft.repeat = cadence.map(str::to_string);
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            draft.repeat = cadence;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "finish" => answer_finish(
+        PromptStep::Finish => answer_finish(
             conn,
             discord_user_id,
             guild_id,
@@ -429,8 +430,8 @@ pub fn answer_event_dm(
             public_url,
             lang,
         ),
-        "signup" => answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang),
-        "signup_custom" => {
+        PromptStep::Signup => answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        PromptStep::SignupCustom => {
             let names: Vec<&str> = text
                 .split(',')
                 .map(str::trim)
@@ -451,10 +452,10 @@ pub fn answer_event_dm(
                 types.push(draft_type(conn, type_id)?);
             }
             draft.types = types;
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "signup_preset" => {
+        PromptStep::SignupPreset => {
             let presets = store::list_presets(conn, guild_id)?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(preset) = choice.and_then(|n| presets.get(n - 1)) else {
@@ -465,11 +466,11 @@ pub fn answer_event_dm(
                 .into_iter()
                 .map(|opt| draft_type(conn, opt.type_id))
                 .collect::<Result<_, _>>()?;
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "mention" => answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang),
-        "image" => {
+        PromptStep::Mention => answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        PromptStep::Image => {
             if said(text, &NONE) {
                 draft.image_url = None;
             } else if (text.starts_with("https://") || text.starts_with("http://"))
@@ -479,21 +480,21 @@ pub fn answer_event_dm(
             } else {
                 return just(image_card(lang));
             }
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "color" => {
+        PromptStep::Color => {
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some((color, _)) = choice.and_then(|n| EVENT_COLORS.get(n - 1)) else {
                 return just(color_card(lang));
             };
             draft.color = (*color).to_string();
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "restrict" => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang),
-        "role" => answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang),
-        "cutoff" => answer_clock_field(
+        PromptStep::Restrict => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        PromptStep::Role => answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang),
+        PromptStep::Cutoff => answer_clock_field(
             conn,
             discord_user_id,
             guild_id,
@@ -503,7 +504,7 @@ pub fn answer_event_dm(
             start_raw.as_deref(),
             lang,
         ),
-        "post" => answer_clock_field(
+        PromptStep::Post => answer_clock_field(
             conn,
             discord_user_id,
             guild_id,
@@ -513,7 +514,7 @@ pub fn answer_event_dm(
             start_raw.as_deref(),
             lang,
         ),
-        "reminder" => {
+        PromptStep::Reminder => {
             let minutes = text
                 .parse::<i64>()
                 .ok()
@@ -525,22 +526,18 @@ pub fn answer_event_dm(
                 offset_minutes: minutes,
                 message: String::new(),
             }];
-            save_draft(conn, discord_user_id, "finish", &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        "next" => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url, lang),
-        "respond" => answer_respond(conn, discord_user_id, membership_id, text, &draft, lang),
-        _ => {
-            cancel_event_dm(conn, discord_user_id)?;
-            Ok(None)
-        }
+        PromptStep::Next => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url, lang),
+        PromptStep::Respond => answer_respond(conn, discord_user_id, membership_id, text, &draft, lang),
     }
 }
 
 struct EventPrompt {
     guild_id: i64,
     membership_id: i64,
-    step: String,
+    step: PromptStep,
     title: Option<String>,
     start_raw: Option<String>,
     channel_name: Option<String>,
@@ -561,7 +558,7 @@ struct EventDraft {
     #[serde(default)]
     duration_minutes: i64,
     #[serde(default)]
-    repeat: Option<String>,
+    repeat: Option<Cadence>,
     #[serde(default = "marian_blue")]
     color: String,
     #[serde(default)]
@@ -815,15 +812,15 @@ fn preset_card(presets: &[store::Preset], lang: Lang) -> DmReply {
 }
 
 /// The heading and the hint for picking roles at one step of the DM.
-fn role_step(step: &str, lang: Lang) -> (String, String) {
+fn role_step(step: PromptStep, lang: Lang) -> (String, String) {
     match step {
-        "mention" => (tr!(lang, "dm-finish-mention"), tr!(lang, "dm-mention-hint")),
-        "restrict" => (tr!(lang, "dm-finish-restrict"), tr!(lang, "dm-restrict-hint")),
+        PromptStep::Mention => (tr!(lang, "dm-finish-mention"), tr!(lang, "dm-mention-hint")),
+        PromptStep::Restrict => (tr!(lang, "dm-finish-restrict"), tr!(lang, "dm-restrict-hint")),
         _ => (tr!(lang, "dm-finish-role"), tr!(lang, "dm-role-hint")),
     }
 }
 
-fn role_card(step: &str, roles: &[store::Role], lang: Lang) -> DmReply {
+fn role_card(step: PromptStep, roles: &[store::Role], lang: Lang) -> DmReply {
     let (title, extra) = role_step(step, lang);
     if roles.is_empty() {
         return ask(&title, &tr!(lang, "dm-no-roles"), lang);
@@ -840,7 +837,7 @@ fn role_card(step: &str, roles: &[store::Role], lang: Lang) -> DmReply {
 fn save_draft(
     conn: &mut Connection,
     discord_user_id: &str,
-    step: &str,
+    step: PromptStep,
     draft: &EventDraft,
 ) -> Result<(), OpError> {
     let json = serde_json::to_value(draft)
@@ -869,7 +866,7 @@ fn advance_to_title(
     )
     .set((
         schema::event_prompts::channel_name.eq(channel),
-        schema::event_prompts::step.eq("title"),
+        schema::event_prompts::step.eq(PromptStep::Title),
     ))
     .execute(conn)?;
     Ok(title_card(lang))
@@ -912,7 +909,7 @@ fn answer_channel(
                 schema::event_prompts::table
                     .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
             )
-            .set(schema::event_prompts::step.eq("channel_other"))
+            .set(schema::event_prompts::step.eq(PromptStep::ChannelOther))
             .execute(conn)?;
             just(other_channel_prompt(&others, lang))
         }
@@ -956,48 +953,48 @@ fn answer_finish(
             )
         }
         "2" => {
-            save_draft(conn, discord_user_id, "signup", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Signup, draft)?;
             return just(signup_card(lang));
         }
-        "3" => "mention",
+        "3" => PromptStep::Mention,
         "4" => {
-            save_draft(conn, discord_user_id, "image", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Image, draft)?;
             return just(image_card(lang));
         }
         "5" => {
-            save_draft(conn, discord_user_id, "color", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Color, draft)?;
             return just(color_card(lang));
         }
-        "6" => "restrict",
+        "6" => PromptStep::Restrict,
         "7" => {
             draft.multiple = !draft.multiple;
-            save_draft(conn, discord_user_id, "finish", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
             return just(finish_card(draft, lang));
         }
-        "8" => "role",
+        "8" => PromptStep::Role,
         "9" => {
-            save_draft(conn, discord_user_id, "cutoff", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Cutoff, draft)?;
             return just(clock_card(true, lang));
         }
         "10" => {
-            save_draft(conn, discord_user_id, "post", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Post, draft)?;
             return just(clock_card(false, lang));
         }
         "11" => {
-            save_draft(conn, discord_user_id, "reminder", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Reminder, draft)?;
             return just(reminder_card(lang));
         }
         _ => return just(finish_card(draft, lang)),
     };
     let roles = match step {
-        "role" => attendee_roles(conn, membership_id)?,
+        PromptStep::Role => attendee_roles(conn, membership_id)?,
         _ => store::list_roles(conn, guild_id)?,
     };
     save_draft(conn, discord_user_id, step, draft)?;
     if roles.is_empty() {
-        save_draft(conn, discord_user_id, "finish", draft)?;
+        save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
         let why = match step {
-            "role" => tr!(lang, "dm-no-attendee-roles"),
+            PromptStep::Role => tr!(lang, "dm-no-attendee-roles"),
             _ => tr!(lang, "dm-no-roles"),
         };
         return just(note(&finish_card(draft, lang), &why));
@@ -1017,11 +1014,11 @@ fn answer_signup(
         "1" => {
             draft.types.clear();
             draft.multiple = false;
-            save_draft(conn, discord_user_id, "finish", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
             just(finish_card(draft, lang))
         }
         "2" => {
-            save_draft(conn, discord_user_id, "signup_custom", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::SignupCustom, draft)?;
             just(ask(
                 &tr!(lang, "dm-signup-custom-title"),
                 &tr!(lang, "dm-signup-custom-body"),
@@ -1030,7 +1027,7 @@ fn answer_signup(
         }
         "3" => {
             let presets = store::list_presets(conn, guild_id)?;
-            save_draft(conn, discord_user_id, "signup_preset", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::SignupPreset, draft)?;
             just(preset_card(&presets, lang))
         }
         _ => just(signup_card(lang)),
@@ -1059,11 +1056,11 @@ fn answer_mention(
                 draft.mention_role_ids = ids;
             }
             Err(err) => {
-                return just(note(&role_card("mention", &roles, lang), &err));
+                return just(note(&role_card(PromptStep::Mention, &roles, lang), &err));
             }
         }
     }
-    save_draft(conn, discord_user_id, "finish", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
     just(finish_card(draft, lang))
 }
 
@@ -1082,11 +1079,11 @@ fn answer_restrict(
         match picked_roles(text, &roles, lang) {
             Ok(ids) => draft.restrict_role_ids = ids,
             Err(err) => {
-                return just(note(&role_card("restrict", &roles, lang), &err));
+                return just(note(&role_card(PromptStep::Restrict, &roles, lang), &err));
             }
         }
     }
-    save_draft(conn, discord_user_id, "finish", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
     just(finish_card(draft, lang))
 }
 
@@ -1115,13 +1112,13 @@ fn answer_attendee_role(
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(role) = choice.and_then(|n| roles.get(n - 1)) else {
             return just(note(
-                &role_card("role", &roles, lang),
+                &role_card(PromptStep::Role, &roles, lang),
                 &tr!(lang, "dm-pick-from-list"),
             ));
         };
         draft.attendee_role_id = Some(role.id);
     }
-    save_draft(conn, discord_user_id, "finish", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
     just(finish_card(draft, lang))
 }
 
@@ -1161,7 +1158,7 @@ fn answer_clock_field(
     } else {
         draft.post_raw = Some(text.to_string());
     }
-    save_draft(conn, discord_user_id, "finish", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
     just(finish_card(draft, lang))
 }
 
@@ -1197,7 +1194,7 @@ fn finish_event(
     } else {
         SaveAction::Publish
     };
-    let repeat = draft.repeat.clone().map(|cadence| RepeatSpec {
+    let repeat = draft.repeat.map(|cadence| RepeatSpec {
         cadence,
         end_on: None,
         max_occurrences: None,
@@ -1247,7 +1244,7 @@ fn finish_event(
         Err(err) => return just(note(&finish_card(draft, lang), &err.localized(lang))),
     };
     draft.event_id = Some(id);
-    save_draft(conn, discord_user_id, "next", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Next, draft)?;
     let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
     let path = event_path(&guild, &event.public_id);
     let body = if public_url.trim().is_empty() {
@@ -1296,7 +1293,7 @@ fn answer_next(
             just(next_card(Some(&tr!(lang, "dm-cleared")), lang))
         }
         "3" => {
-            save_draft(conn, discord_user_id, "respond", draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Respond, draft)?;
             let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
             let options = store::options_for(conn, &event)?;
             let lines = options
@@ -1346,7 +1343,7 @@ fn answer_respond(
         return just(numbered_prompt(&tr!(lang, "dm-next-respond"), &lines, lang));
     };
     let reply = logic::signup(conn, event_id, option.id, membership_id)?;
-    save_draft(conn, discord_user_id, "next", draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Next, draft)?;
     just(next_card(Some(&reply.render(lang)), lang))
 }
 
@@ -1584,7 +1581,7 @@ pub fn response_events(
     let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
     let mut choices = Vec::new();
     for event in store::list_events(conn, guild_id)? {
-        if event.status != "posted" || !sight.sees_event(&event) {
+        if event.status != EventStatus::Posted || !sight.sees_event(&event) {
             continue;
         }
         let start = event.starts_at;
@@ -1721,7 +1718,7 @@ pub fn channel_choices(
         if !needle.is_empty() && !channel.name.to_lowercase().contains(&needle) {
             continue;
         }
-        let kind = if channel.kind == "event" {
+        let kind = if channel.kind == ChannelKind::Event {
             tr!(lang, "reply-channel-kind-event")
         } else {
             tr!(lang, "reply-channel-kind-text")
@@ -1817,10 +1814,9 @@ pub fn apply_setting(
             "waitlist"
         }
         Setting::Digest(value) => {
-            if !matches!(value.as_str(), "off" | "daily" | "weekly") {
-                return Err(OpError::from(crate::msg!("err-digest-values")));
-            }
-            settings.digest = value;
+            settings.digest = value
+                .parse::<Digest>()
+                .map_err(|_| OpError::from(crate::msg!("err-digest-values")))?;
             "digest"
         }
         Setting::PostLeadHours(hours) => {
@@ -1851,7 +1847,7 @@ pub fn apply_setting(
         Setting::Language(code) => {
             let picked = Lang::from_code(&code)
                 .ok_or_else(|| OpError::from(crate::msg!("err-unknown-language", code = code.as_str())))?;
-            settings.language = picked.code().to_string();
+            settings.language = picked;
             // The reply is in the language just picked.
             lang = picked;
             "language"
@@ -2058,7 +2054,7 @@ pub fn google_sync(
 ) -> Result<String, OpError> {
     let sight = member_sight(conn, membership_id)?;
     let event = find_event(conn, guild_id, &sight, event)?;
-    if !matches!(event.status.as_str(), "posted" | "scheduled" | "archived") {
+    if !matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived) {
         return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
     let user_id = person_user_id(conn, membership_id)?;
@@ -2086,8 +2082,8 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,
-        mention_role_ids: store::event_role_ids(conn, event, "mention")?,
-        restrict_role_ids: store::event_role_ids(conn, event, "restrict")?,
+        mention_role_ids: store::event_role_ids(conn, event, EventRoleKind::Mention)?,
+        restrict_role_ids: store::event_role_ids(conn, event, EventRoleKind::Restrict)?,
         options: options
             .into_iter()
             .map(|opt| OptionInput {
@@ -2354,7 +2350,7 @@ mod tests {
             posted[0]
         );
         assert_eq!(event.channel_id, 2, "the agreed channel");
-        assert_eq!(event.status, "posted");
+        assert_eq!(event.status, EventStatus::Posted);
         let view = logic::discord_view(&mut conn, event.id, "https://marian.example.com")
             .unwrap()
             .unwrap();

@@ -8,6 +8,7 @@ use super::db::{lock_event, log, must_event, must_option, must_role, must_member
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::values::{EventRoleKind, EventStatus, SignupState};
 
 /// A signup button: signs the person up, or takes them off an option they're
 /// already on, guests and all.
@@ -48,7 +49,7 @@ fn signup_tx(
     if option.event_id != event.id {
         return Err(OpError::NotFound);
     }
-    if event.status != "posted" {
+    if event.status != EventStatus::Posted {
         return Err(OpError::from(crate::msg!("err-signups-not-open")));
     }
     let now = Utc::now();
@@ -59,12 +60,12 @@ fn signup_tx(
             }
             return set_guests(conn, &event, &option, &user, existing, guests, now);
         }
-        let state = existing.state.clone();
+        let state = existing.state;
         diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
             .execute(conn)?;
         fill_all(conn, &event)?;
         sync_access(conn, event.id)?;
-        let notice = if state == "waitlisted" {
+        let notice = if state == SignupState::Waitlisted {
             crate::msg!("notice-left-waitlist", name = &user.name, option = &option.name)
         } else {
             crate::msg!("notice-left", name = &user.name, option = &option.name)
@@ -75,7 +76,7 @@ fn signup_tx(
     if event.signups_closed || cutoff_passed(&event, now) {
         return Err(OpError::from(crate::msg!("err-signups-closed", title = &event.title)));
     }
-    let restricts = store::event_role_ids(conn, &event, "restrict")?;
+    let restricts = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
     if !restricts.is_empty() && !user.server_manager {
         let roles = store::membership_role_ids(conn, &user)?;
         if !restricts.iter().any(|role| roles.contains(role)) {
@@ -127,8 +128,8 @@ fn signup_tx(
     sync_access(conn, event.id)?;
     let (name, option_name) = (&user.name, &option.name);
     let notice = match (state, moved, guests) {
-        ("waitlisted", _, 0) => crate::msg!("notice-waiting", name = name, option = option_name),
-        ("waitlisted", _, _) => crate::msg!("notice-waiting-guests", name = name, option = option_name, guests = guests),
+        (SignupState::Waitlisted, _, 0) => crate::msg!("notice-waiting", name = name, option = option_name),
+        (SignupState::Waitlisted, _, _) => crate::msg!("notice-waiting-guests", name = name, option = option_name, guests = guests),
         (_, true, 0) => crate::msg!("notice-moved", name = name, option = option_name),
         (_, true, _) => crate::msg!("notice-moved-guests", name = name, option = option_name, guests = guests),
         (_, false, 0) => crate::msg!("notice-signed-up", name = name, option = option_name),
@@ -153,14 +154,14 @@ fn set_guests(
 ) -> Result<crate::i18n::Msg, OpError> {
     check_guests(option, guests)?;
     let size = 1 + guests;
-    let mut state = existing.state.clone();
+    let mut state = existing.state;
     let mut created_at = existing.created_at;
     if guests > existing.guests {
         if let Some(cap) = option.capacity {
             if size > cap {
                 return Err(too_big(option, cap, size));
             }
-            if state == "confirmed" {
+            if state == SignupState::Confirmed {
                 let others = places_used(conn, option.id)? - (1 + existing.guests);
                 if others + size > cap {
                     if !store::settings(conn, event.guild_id)?.waitlist {
@@ -170,7 +171,7 @@ fn set_guests(
                             left = cap - others - 1,
                         )));
                     }
-                    state = "waitlisted".to_string();
+                    state = SignupState::Waitlisted;
                     created_at = now;
                 }
             } else {
@@ -181,13 +182,13 @@ fn set_guests(
     diesel::update(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
         .set((
             schema::signups::guests.eq(guests),
-            schema::signups::state.eq(&state),
+            schema::signups::state.eq(state),
             schema::signups::created_at.eq(created_at),
         ))
         .execute(conn)?;
     fill_all(conn, event)?;
     sync_access(conn, event.id)?;
-    let notice = if state == "waitlisted" && existing.state == "confirmed" {
+    let notice = if state == SignupState::Waitlisted && existing.state == SignupState::Confirmed {
         crate::msg!("notice-guests-waiting", name = &user.name, option = &option.name, size = size)
     } else {
         crate::msg!("notice-guests", name = &user.name, option = &option.name, guests = guests)
@@ -239,20 +240,20 @@ fn place(
     option: &store::SignupOption,
     size: i64,
     waitlist: bool,
-) -> Result<&'static str, OpError> {
+) -> Result<SignupState, OpError> {
     let Some(cap) = option.capacity else {
-        return Ok("confirmed");
+        return Ok(SignupState::Confirmed);
     };
     if size > cap {
         return Err(too_big(option, cap, size));
     }
     let used = places_used(conn, option.id)?;
-    let queue = count_state(conn, option.id, "waitlisted")? > 0;
+    let queue = count_state(conn, option.id, SignupState::Waitlisted)? > 0;
     if !queue && used + size <= cap {
-        return Ok("confirmed");
+        return Ok(SignupState::Confirmed);
     }
     if waitlist {
-        return Ok("waitlisted");
+        return Ok(SignupState::Waitlisted);
     }
     if size > 1 && used < cap {
         return Err(OpError::from(crate::msg!(
@@ -277,7 +278,7 @@ fn too_big(option: &store::SignupOption, cap: i64, size: i64) -> OpError {
 pub(crate) fn places_used(conn: &mut Connection, option_id: i64) -> Result<i64, OpError> {
     let guests: Vec<i64> = schema::signups::table
         .filter(schema::signups::option_id.eq(option_id))
-        .filter(schema::signups::state.eq("confirmed"))
+        .filter(schema::signups::state.eq(SignupState::Confirmed))
         .select(schema::signups::guests)
         .load(conn)?;
     Ok(guests.iter().map(|guests| 1 + guests).sum())
@@ -300,7 +301,7 @@ pub fn editor_response(
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-change-responses")));
         }
-        if event.status != "posted" {
+        if event.status != EventStatus::Posted {
             return Err(OpError::from(crate::msg!("err-responses-unposted")));
         }
         let target = must_membership(tx, target_id)?;
@@ -356,7 +357,7 @@ pub fn editor_response(
                         event_id: event.id,
                         option_id: option.id,
                         membership_id: target_id,
-                        state: "confirmed",
+                        state: SignupState::Confirmed,
                         created_at: Utc::now(),
                         guests: guests.unwrap_or(0),
                     })
@@ -390,7 +391,7 @@ fn signups_for_user(
     Ok(store::Signup::for_event_member(event_id, membership_id).load(conn)?)
 }
 
-fn count_state(conn: &mut Connection, option_id: i64, state: &str) -> Result<i64, OpError> {
+fn count_state(conn: &mut Connection, option_id: i64, state: SignupState) -> Result<i64, OpError> {
     Ok(schema::signups::table
         .filter(schema::signups::option_id.eq(option_id))
         .filter(schema::signups::state.eq(state))
@@ -416,7 +417,7 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
     for _ in 0..50 {
         let next: Option<(i64, i64, i64)> = schema::signups::table
             .filter(schema::signups::option_id.eq(option_id))
-            .filter(schema::signups::state.eq("waitlisted"))
+            .filter(schema::signups::state.eq(SignupState::Waitlisted))
             .order((schema::signups::created_at.asc(), schema::signups::id.asc()))
             .select((schema::signups::id, schema::signups::membership_id, schema::signups::guests))
             .first(conn)
@@ -428,7 +429,7 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
             break;
         }
         diesel::update(schema::signups::table.filter(schema::signups::id.eq(signup_id)))
-            .set(schema::signups::state.eq("confirmed"))
+            .set(schema::signups::state.eq(SignupState::Confirmed))
             .execute(conn)?;
         let user = must_membership(conn, membership_id)?;
         let event = must_event(conn, option.event_id)?;
@@ -452,7 +453,7 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
     let signups = store::signups_for(conn, &event)?;
     let mut reminding = HashSet::new();
     for signup in &signups {
-        if signup.state != "confirmed" {
+        if signup.state != SignupState::Confirmed {
             continue;
         }
         if options
@@ -575,11 +576,11 @@ pub(super) fn cutoff_passed(event: &Event, now: DateTime<Utc>) -> bool {
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::signups)]
-struct NewSignup<'a> {
+struct NewSignup {
     event_id: i64,
     option_id: i64,
     membership_id: i64,
-    state: &'a str,
+    state: SignupState,
     created_at: DateTime<Utc>,
     guests: i64,
 }

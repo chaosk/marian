@@ -10,6 +10,7 @@ use super::template;
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event, Series, Membership};
+use crate::values::{Cadence, EventRoleKind, EventStatus};
 
 pub fn archive_event(
     conn: &mut Connection,
@@ -29,13 +30,13 @@ pub fn archive_event(
 }
 
 pub(super) fn archive_tx(conn: &mut Connection, event: &Event) -> Result<String, OpError> {
-    if event.status != "posted" {
+    if event.status != EventStatus::Posted {
         return Err(OpError::from(crate::msg!("err-archive-unposted")));
     }
     let stamp = Utc::now();
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
         .set((
-            schema::events::status.eq("archived"),
+            schema::events::status.eq(EventStatus::Archived),
             schema::events::archived_at.eq(&stamp),
             schema::events::updated_at.eq(&stamp),
         ))
@@ -61,32 +62,32 @@ pub fn delete_event(
         if !can_delete(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-delete")));
         }
-        if matches!(event.status.as_str(), "draft" | "scheduled" | "failed")
+        if matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed)
             && series_keeps_its_dates(tx, &event)?
         {
             // Deleting the row would leave a gap the series fills straight back in,
             // so a date of a series stays behind as skipped.
             diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .set((
-                    schema::events::status.eq("skipped"),
+                    schema::events::status.eq(EventStatus::Skipped),
                     schema::events::updated_at.eq(Utc::now()),
                 ))
                 .execute(tx)?;
             let notice = crate::msg!("notice-deleted-series-date", title = &event.title);
             log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
             Ok(notice)
-        } else if matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
+        } else if matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
             let title = event.title.clone();
             diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .execute(tx)?;
             let notice = crate::msg!("notice-deleted", title = title);
             log(tx, event.guild_id, None, &notice.to_string())?;
             Ok(notice)
-        } else if event.status == "posted" {
+        } else if event.status == EventStatus::Posted {
             let stamp = Utc::now();
             diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .set((
-                    schema::events::status.eq("cancelled"),
+                    schema::events::status.eq(EventStatus::Cancelled),
                     schema::events::archived_at.eq(&stamp),
                     schema::events::updated_at.eq(&stamp),
                 ))
@@ -123,7 +124,7 @@ pub fn duplicate_event(
     let zone = store::guild(conn, event.guild_id)?
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
-    let starts_at = crate::clock::occurrence_start(event.starts_at, 2, "weekly", crate::clock::zone(&zone)?);
+    let starts_at = crate::clock::occurrence_start(event.starts_at, 2, Cadence::Weekly, crate::clock::zone(&zone)?);
     // The copy keeps one of the server's roles only for someone who may pick it.
     let actor = must_membership(conn, actor_id)?;
     let attendee_role_id = match event.attendee_role_id {
@@ -147,8 +148,8 @@ pub fn duplicate_event(
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,
-        mention_role_ids: store::event_role_ids(conn, &event, "mention")?,
-        restrict_role_ids: store::event_role_ids(conn, &event, "restrict")?,
+        mention_role_ids: store::event_role_ids(conn, &event, EventRoleKind::Mention)?,
+        restrict_role_ids: store::event_role_ids(conn, &event, EventRoleKind::Restrict)?,
         options: options
             .into_iter()
             .map(|opt| OptionInput {
@@ -186,12 +187,12 @@ pub fn skip_event(conn: &mut Connection, event_id: i64, actor_id: i64) -> Result
         if event.series_id.is_none() {
             return Err(OpError::from(crate::msg!("err-skip-not-series")));
         }
-        if !matches!(event.status.as_str(), "scheduled" | "draft") {
+        if !matches!(event.status, EventStatus::Scheduled | EventStatus::Draft) {
             return Err(OpError::from(crate::msg!("err-skip-posted")));
         }
         diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
             .set((
-                schema::events::status.eq("skipped"),
+                schema::events::status.eq(EventStatus::Skipped),
                 schema::events::updated_at.eq(Utc::now()),
             ))
             .execute(tx)?;
@@ -232,10 +233,10 @@ pub fn end_series(conn: &mut Connection, series_id: i64, actor_id: i64) -> Resul
         diesel::update(
             schema::events::table
                 .filter(schema::events::series_id.eq(series_id))
-                .filter(schema::events::status.eq_any(["scheduled", "draft"])),
+                .filter(schema::events::status.eq_any([EventStatus::Scheduled, EventStatus::Draft])),
         )
         .set((
-            schema::events::status.eq("skipped"),
+            schema::events::status.eq(EventStatus::Skipped),
             schema::events::updated_at.eq(Utc::now()),
         ))
         .execute(tx)?;

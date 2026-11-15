@@ -12,6 +12,7 @@ use crate::error::OpError;
 use crate::ics;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::values::EventStatus;
 
 const SCOPE: &str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email";
 const BATCH: usize = 4;
@@ -453,7 +454,7 @@ pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpErro
                 drop_link(conn, link)?;
                 continue;
             };
-            if !calendar_status(&event.status) {
+            if !calendar_status(event.status) {
                 drop_link(conn, link)?;
                 continue;
             }
@@ -463,8 +464,8 @@ pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpErro
     Ok(jobs)
 }
 
-fn calendar_status(status: &str) -> bool {
-    matches!(status, "posted" | "scheduled" | "archived")
+fn calendar_status(status: EventStatus) -> bool {
+    matches!(status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived)
 }
 
 fn job_event(job: &Job) -> Option<i64> {
@@ -1360,8 +1361,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        diesel::update(schema::events::table.filter(schema::events::status.eq("posted")))
-            .set(schema::events::status.eq("draft"))
+        diesel::update(schema::events::table.filter(schema::events::status.eq(EventStatus::Posted)))
+            .set(schema::events::status.eq(EventStatus::Draft))
             .execute(&mut conn)
             .unwrap();
         diesel::update(
