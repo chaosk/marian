@@ -32,7 +32,15 @@ pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpE
     };
     let guilds = store::list_guilds(conn)?;
     for guild in guilds {
-        let piece = store::with_tx(conn, |tx| tick_guild(tx, guild.id, now))?;
+        // One server's trouble rolls back only its own changes; the rest
+        // still post and remind.
+        let piece = match store::with_tx(conn, |tx| tick_guild(tx, guild.id, now)) {
+            Ok(piece) => piece,
+            Err(err) => {
+                tracing::warn!(guild_id = guild.id, "tick failed for server {}: {err}", guild.id);
+                continue;
+            }
+        };
         if !piece.notes.is_empty() || !piece.jobs.is_empty() {
             report.guilds.push(guild.id);
         }
@@ -55,21 +63,12 @@ fn tick_guild(
     let settings = store::settings(conn, guild_id)?;
     let guild = must_guild(conn, guild_id)?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
-    let events = store::list_events(conn, guild_id)?;
+    let due = store::events_due_to_post(conn, guild_id, now)?;
 
     let mut posted_this_pass = 0;
-    for event in &events {
+    for event in &due {
         if posted_this_pass >= 3 {
             break;
-        }
-        if event.status != "scheduled" || event.post_attempts >= 3 {
-            continue;
-        }
-        let Some(post_at) = event.post_at else {
-            continue;
-        };
-        if post_at > now {
-            continue;
         }
         if store::channel(conn, event.channel_id)?.is_none() {
             fail_post(conn, event)?;
@@ -90,12 +89,7 @@ fn tick_guild(
         .extend(super::routine::maintain(conn, guild_id, now)?);
 
     let mut people = None;
-    let events = store::list_events(conn, guild_id)?;
-    let posted: Vec<Event> = events
-        .iter()
-        .filter(|event| event.status == "posted")
-        .cloned()
-        .collect();
+    let posted = store::events_with_status(conn, guild_id, "posted")?;
     let reminder_groups = store::reminders_by_event(conn, &posted)?;
     let option_groups = store::options_by_event(conn, &posted)?;
     let signup_groups = store::signups_by_event(conn, &posted)?;
@@ -216,12 +210,8 @@ fn tick_guild(
         if due_day && local.time().hour() >= 9 {
             let key = format!("digest:{guild_id}:{}", local.date_naive());
             if store::meta(conn, &key)?.is_none() {
-                let events = store::list_events(conn, guild_id)?;
                 let mut names = Vec::new();
-                for event in &events {
-                    if event.status != "posted" {
-                        continue;
-                    }
+                for event in &store::events_with_status(conn, guild_id, "posted")? {
                     let start = event.starts_at;
                     if start.with_timezone(&tz).date_naive() == local.date_naive() {
                         names.push(format!(
