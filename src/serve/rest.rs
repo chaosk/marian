@@ -91,8 +91,8 @@ impl From<OpError> for Problem {
             OpError::NotFound => Problem(StatusCode::NOT_FOUND, "That isn't here.".into()),
             OpError::Message(text) => Problem(StatusCode::UNPROCESSABLE_ENTITY, text),
             OpError::Text(msg) => Problem(StatusCode::UNPROCESSABLE_ENTITY, msg.to_string()),
-            OpError::Db(err) => {
-                tracing::warn!("database: {err}");
+            OpError::Db(_) | OpError::Internal(_) => {
+                tracing::error!(error = %err, "internal error");
                 Problem(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong.".into())
             }
         }
@@ -370,7 +370,7 @@ async fn open_channel(state: &AppState, viewer: &Session, name: &str) -> Result<
     let http = poise::serenity_prelude::Http::new(&state.bot_token);
     crate::gateway::open_event_channel(&http, &state.db, viewer.guild_id, viewer.membership_id, name)
         .await
-        .map_err(|err| Problem(StatusCode::UNPROCESSABLE_ENTITY, err.to_string()))
+        .map_err(Problem::from)
 }
 
 async fn events(

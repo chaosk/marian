@@ -875,7 +875,7 @@ fn build_pool(url: &str, schema: Option<String>, max_size: u32) -> Result<Db, Op
         .test_on_check_out(true)
         .connection_customizer(Box::new(Prepare { schema }))
         .build(manager)
-        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))
+        .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))
 }
 
 #[derive(Debug)]
@@ -939,7 +939,7 @@ pub fn open_memory() -> Result<Connection, OpError> {
     });
     admin
         .batch_execute(&format!("CREATE SCHEMA {schema}"))
-        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))?;
+        .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))?;
     drop(admin);
     let mut conn = match connect(&admin_url) {
         Ok(conn) => conn,
@@ -951,7 +951,7 @@ pub fn open_memory() -> Result<Connection, OpError> {
     if let Err(err) = conn.batch_execute(&format!("SET search_path TO {schema}")) {
         drop(conn);
         drop_schema(&admin_url, &schema);
-        return Err(OpError::message(format!("Could not open the database: {err}")));
+        return Err(OpError::internal(format!("Could not open the database: {err}")));
     }
     crate::observe::install_query_trace(&mut conn, "postgresql");
     if let Err(err) = migrate(&mut conn) {
@@ -969,7 +969,7 @@ pub fn open_memory() -> Result<Connection, OpError> {
 
 fn connect(url: &str) -> Result<Connection, OpError> {
     Connection::establish(url)
-        .map_err(|err| OpError::message(format!("Could not open the database: {err}")))
+        .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))
 }
 
 fn drop_schema(admin_url: &str, schema: &str) {
@@ -1075,7 +1075,7 @@ fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
 
 pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
     conn.run_pending_migrations(MIGRATIONS)
-        .map_err(|err| OpError::message(format!("Could not update the database: {err}")))?;
+        .map_err(|err| OpError::internal(format!("Could not update the database: {err}")))?;
     Ok(())
 }
 

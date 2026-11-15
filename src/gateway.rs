@@ -297,6 +297,7 @@ async fn connect(
             event_handler: |ctx, event, framework, data| {
                 Box::pin(on_event(ctx, event, framework, data))
             },
+            on_error: |error| Box::pin(on_error(error)),
             ..Default::default()
         })
         .setup(move |ctx, ready, _framework| {
@@ -1455,6 +1456,48 @@ fn bind_clicker(conn: &mut Connection, jobs: &UnboundedSender<DiscordJob>, click
         sync_roles(conn, guild.id, user.id, roles)?;
     }
     Ok((user.id, i18n::lang_of(conn, guild.id)))
+}
+
+/// A command that failed says so without database detail, which goes to the
+/// log. Poise's own handler would put the error's text in the reply.
+async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
+    match error {
+        poise::FrameworkError::Command { ctx, error, .. } => {
+            let lang = command_lang(&ctx);
+            let text = crate::error::user_text(error.as_ref(), lang);
+            tracing::warn!(command = %ctx.command().qualified_name, "command failed: {error}");
+            if let Err(err) = ctx
+                .send(
+                    poise::CreateReply::default()
+                        .content(clip(&text, 1800))
+                        .allowed_mentions(serenity::CreateAllowedMentions::new())
+                        .ephemeral(true),
+                )
+                .await
+            {
+                tracing::warn!("could not say a command failed: {err}");
+            }
+        }
+        other => {
+            if let Err(err) = poise::builtins::on_error(other).await {
+                tracing::warn!("could not handle a Discord error: {err}");
+            }
+        }
+    }
+}
+
+/// The language of the server a command was used in; English outside one.
+fn command_lang(ctx: &Context<'_>) -> Lang {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Lang::En;
+    };
+    let Ok(mut conn) = ctx.data().db.get() else {
+        return Lang::En;
+    };
+    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()) {
+        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id),
+        _ => Lang::En,
+    }
 }
 
 /// The language of the server a button is in; English outside one.
