@@ -501,20 +501,6 @@ pub struct ThreadMessage {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
-#[diesel(table_name = crate::schema::command_log)]
-#[diesel(belongs_to(Guild))]
-#[diesel(treat_none_as_null = true)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct CommandRow {
-    pub id: i64,
-    pub guild_id: i64,
-    pub membership_id: Option<i64>,
-    pub line: String,
-    pub reply: String,
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations)]
 #[diesel(table_name = crate::schema::membership_roles)]
 #[diesel(primary_key(membership_id, role_id))]
@@ -1989,18 +1975,6 @@ pub fn clear_applied(
     )
     .execute(conn)?;
     Ok(())
-}
-
-pub fn list_commands(
-    conn: &mut Connection,
-    guild_id: i64,
-    limit: i64,
-) -> Result<Vec<CommandRow>, OpError> {
-    Ok(CommandRow::query()
-        .filter(schema::command_log::guild_id.eq(guild_id))
-        .order(schema::command_log::id.desc())
-        .limit(limit)
-        .load(conn)?)
 }
 
 pub fn count_status(conn: &mut Connection, guild_id: i64, status: &str) -> Result<i64, OpError> {

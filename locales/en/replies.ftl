@@ -14,7 +14,6 @@ reply-dm-web = You can always create the event on the web.
 reply-help = /event starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats.
 reply-help-more-page = The other commands are explained on the Help page.
 reply-help-more-at = The other commands are explained at { $url }.
-reply-sort-where = Run /sort inside an event channel. It reverses the order of the posts there.
 reply-sorted = Reversed the posts in #{ $channel }.
 reply-event-updated = Updated { $title }. Open { $path }.
 reply-reminders-get = { $name } gets reminders.

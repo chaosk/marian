@@ -172,7 +172,6 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("routines/:id") view=pages::routines::RoutinePage/>
                     <Route path=path!("presets") view=|| view! { <ManagersOnly heading="Presets"><pages::presets::Presets/></ManagersOnly> }/>
                     <Route path=path!("channels") view=|| view! { <ManagersOnly heading="Channels"><pages::channels::Channels/></ManagersOnly> }/>
-                    <Route path=path!("commands") view=|| view! { <ManagersOnly heading="Command desk"><pages::commands::Commands/></ManagersOnly> }/>
                     <Route path=path!("settings") view=|| view! { <ManagersOnly heading="Settings"><pages::settings::Settings/></ManagersOnly> }/>
                     <Route path=path!("google") view=pages::settings::Google/>
                 </ParentRoute>

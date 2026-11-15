@@ -436,66 +436,6 @@ fn parse_clock(text: &str) -> Option<(u32, u32)> {
     Some((hour, minute))
 }
 
-pub fn tokenize(input: &str) -> Vec<(Option<String>, String)> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-        if i >= chars.len() {
-            break;
-        }
-        let start = i;
-        if chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '-' {
-            let mut j = i;
-            while j < chars.len()
-                && (chars[j].is_ascii_alphanumeric() || chars[j] == '_' || chars[j] == '-')
-            {
-                j += 1;
-            }
-            if j < chars.len() && chars[j] == ':' {
-                let key: String = chars[start..j].iter().collect();
-                i = j + 1;
-                let value = read_value(&chars, &mut i);
-                out.push((Some(key.to_lowercase()), value));
-                continue;
-            }
-        }
-        i = start;
-        let value = read_value(&chars, &mut i);
-        if !value.is_empty() {
-            out.push((None, value));
-        }
-    }
-    out
-}
-
-fn read_value(chars: &[char], i: &mut usize) -> String {
-    if *i >= chars.len() {
-        return String::new();
-    }
-    if chars[*i] == '"' {
-        *i += 1;
-        let mut value = String::new();
-        while *i < chars.len() && chars[*i] != '"' {
-            value.push(chars[*i]);
-            *i += 1;
-        }
-        if *i < chars.len() && chars[*i] == '"' {
-            *i += 1;
-        }
-        return value;
-    }
-    let mut value = String::new();
-    while *i < chars.len() && !chars[*i].is_whitespace() {
-        value.push(chars[*i]);
-        *i += 1;
-    }
-    value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,13 +498,5 @@ mod tests {
         assert_eq!(next.weekday(), Weekday::Fri);
         assert_eq!(at("1 maja o 12").unwrap().date_naive().to_string(), "2027-05-01");
         assert_eq!(normalize("Friday at 9pm"), "friday at 9pm", "English stays as it is");
-    }
-
-    #[test]
-    fn tokenizer_keeps_quoted_values() {
-        let tokens = tokenize(r#"title:"Shore cleanup" start:"tomorrow at 4pm" channel:social"#);
-        assert_eq!(tokens[0], (Some("title".into()), "Shore cleanup".into()));
-        assert_eq!(tokens[1].1, "tomorrow at 4pm");
-        assert_eq!(tokens[2], (Some("channel".into()), "social".into()));
     }
 }

@@ -589,23 +589,6 @@ pub struct Activity {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CommandLog {
-    pub user: String,
-    pub line: String,
-    pub reply: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct CommandRun {
-    pub line: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CommandReply {
-    pub reply: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DayCheck {
     pub n: u8,
     pub name: String,

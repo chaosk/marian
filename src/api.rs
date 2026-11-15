@@ -1646,24 +1646,6 @@ pub fn delete_library(conn: &mut Connection, viewer: &Viewer, public_id: &str) -
     Ok(Outcome::ok())
 }
 
-pub fn commands(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::CommandLog>, OpError> {
-    must_manager(conn, viewer)?;
-    let people = store::list_memberships(conn, viewer.guild_id)?;
-    Ok(store::list_commands(conn, viewer.guild_id, 30)?
-        .into_iter()
-        .rev()
-        .map(|row| dto::CommandLog {
-            user: people
-                .iter()
-                .find(|p| row.membership_id == Some(p.id))
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "Marian".into()),
-            line: row.line,
-            reply: row.reply,
-        })
-        .collect())
-}
-
 pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::RoutineSummary>, OpError> {
     use diesel::prelude::*;
     must_manager(conn, viewer)?;
@@ -2542,10 +2524,8 @@ mod tests {
         let (mut conn, nell) = world();
         let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
         assert!(activity(&mut conn, &nell, 1, 25).is_ok());
-        assert!(commands(&mut conn, &nell).is_ok());
         assert!(routines(&mut conn, &nell).is_ok());
         assert!(activity(&mut conn, &june, 1, 25).is_err());
-        assert!(commands(&mut conn, &june).is_err());
         assert!(routines(&mut conn, &june).is_err());
     }
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use diesel::prelude::*;
 
 use super::access::{can_create, can_edit, holds_any};
@@ -141,35 +141,6 @@ pub fn manual_calendar_sync(
     let notice = format!("Marked {} for the calendar feed.", event.title);
     log(conn, event.guild_id, Some(event.id), &notice)?;
     Ok(notice)
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = schema::command_log)]
-struct NewCommand<'a> {
-    guild_id: i64,
-    membership_id: i64,
-    line: &'a str,
-    reply: &'a str,
-    created_at: DateTime<Utc>,
-}
-
-pub fn record_command(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    line: &str,
-    reply: &str,
-) -> Result<(), OpError> {
-    diesel::insert_into(schema::command_log::table)
-        .values(&NewCommand {
-            guild_id,
-            membership_id,
-            line,
-            reply,
-            created_at: Utc::now(),
-        })
-        .execute(conn)?;
-    Ok(())
 }
 
 #[cfg(test)]
