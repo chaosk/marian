@@ -406,6 +406,7 @@ button:disabled,
 .day h2 { font-size: 22px; margin-bottom: 10px; }
 .day.today h2 { color: var(--blue); }
 .stack { display: flex; flex-direction: column; gap: 10px; }
+.week-more { margin: -8px 0 22px; font-weight: 600; }
 /* An event's colour runs down the left as an SVG stripe (see `paint`): the
    page's CSP allows no inline styles. The card's rounded corners clip it. */
 .card, .hero { border-left: 4px solid var(--blue); }
@@ -914,15 +915,27 @@ form.channel-create .field { flex: 0 1 280px; min-width: 0; }
 }
 @media (max-width: 900px) {
   .app { display: block; }
-  .sidebar { height: auto; overflow: visible; z-index: 2; }
+  /* On a phone the sidebar is a short block at the top that scrolls away with
+     the page; kept on screen it took half of it. Its menus open downward, over
+     the page, since nothing sits below them to cover. */
+  .sidebar { position: relative; top: auto; height: auto; overflow: visible; z-index: 2; padding: 14px 16px; gap: 12px; }
+  .sidebar-body { gap: 10px; }
   .mark { width: 56px; height: 56px; border-radius: 14px; }
-  .nav { flex: none; flex-direction: row; min-height: 0; overflow: auto; }
+  .sidebar .mark { width: 40px; height: 40px; border-radius: 10px; }
+  .sidebar .brand { align-items: center; }
+  .sidebar .brand p { font-size: 22px; }
+  .sidebar .brand em { font-size: 12px; margin-top: 2px; }
+  .nav { flex: none; flex-direction: row; align-items: center; min-height: 0; overflow: auto; }
+  .nav a { white-space: nowrap; }
+  .nav a.nav-sub { margin-left: 0; }
+  .account-menu .switcher-menu { top: calc(100% + 6px); bottom: auto; }
   .hero, .split, .event-layout, .attend-grid, .connection-grid, .columns, .grid, .option-fields, .rem-row, .d-fields { display: block; }
   .event-top { display: block; }
   .event-top h1 { font-size: 34px; }
   .q-choices { grid-template-columns: 1fr; }
   .main { padding: 20px 16px 48px; }
   .page-head { display: block; }
+  .page-head > * + * { margin-top: 12px; }
   .page-head h1 { font-size: 34px; }
   .span-2 { grid-column: auto; }
   .gate-card { margin: 32px 16px; }
