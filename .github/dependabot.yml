@@ -23,6 +23,11 @@ updates:
       day: monday
       time: "06:00"
       timezone: Europe/Warsaw
+    # dtolnay/rust-toolchain's ref is the Rust release CI installs, kept with
+    # rust-toolchain.toml and the Dockerfile's rust image. Its repository has
+    # refs for releases that don't exist yet, which Dependabot offers (#18).
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions-minor-and-patch:
         update-types:
