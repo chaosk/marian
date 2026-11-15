@@ -15,7 +15,6 @@ reply-dm-web = Wydarzenie możesz też utworzyć w przeglądarce.
 reply-help = /event tworzy wydarzenie. Marian zapyta w wiadomości prywatnej, gdzie je opublikować, o tytuł, opis, początek, koniec i o to, jak często ma się powtarzać.
 reply-help-more-page = Pozostałe komendy są opisane na stronie Pomoc.
 reply-help-more-at = Pozostałe komendy są opisane na { $url }.
-reply-sort-where = Wpisz /sort na kanale wydarzeń. Odwraca kolejność postów na tym kanale.
 reply-sorted = Odwrócono kolejność postów na #{ $channel }.
 reply-event-updated = Zaktualizowano { $title }. Otwórz { $path }.
 reply-reminders-get = { $name } dostaje przypomnienia.

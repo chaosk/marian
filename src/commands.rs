@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -14,38 +13,9 @@ use crate::tr;
 use crate::logic::{
     self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction,
 };
-use crate::parse::{self, tokenize};
+use crate::parse;
 use crate::schema;
 use crate::store::{self, Connection, Event};
-
-pub const HELP: &str = "\
-/event starts an event. Marian asks in a DM where to post it, the title, the description, when it starts, when it ends, and how often it repeats.
-
-The other commands are explained at /help.
-";
-
-pub fn execute(conn: &mut Connection, guild_id: i64, membership_id: i64, line: &str) -> String {
-    let line = line.trim();
-    let reply = if line.is_empty() {
-        "Type /help to see the command desk.".to_string()
-    } else if !line.starts_with('/') {
-        match desk_answer(conn, membership_id, line) {
-            Ok(Some(text)) => text,
-            Ok(None) => match dispatch(conn, guild_id, membership_id, line) {
-                Ok(text) => text,
-                Err(err) => err.to_string(),
-            },
-            Err(err) => err.to_string(),
-        }
-    } else {
-        match dispatch(conn, guild_id, membership_id, line) {
-            Ok(text) => text,
-            Err(err) => err.to_string(),
-        }
-    };
-    let _ = logic::record_command(conn, guild_id, membership_id, line, &reply);
-    reply
-}
 
 fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String {
     match guild.discord_id.as_deref().filter(|id| !id.is_empty()) {
@@ -142,30 +112,6 @@ pub fn channel_posts_waiting(
     }
 }
 
-fn dispatch(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    line: &str,
-) -> Result<String, OpError> {
-    let (cmd, rest) = split_cmd(line);
-    let (pos, map) = fields(rest);
-    match cmd {
-        "help" | "" => Ok(HELP.to_string()),
-        "event" => cmd_event(conn, guild_id, membership_id, rest),
-        "edit" => cmd_edit(conn, guild_id, membership_id, &pos, &map),
-        "reminders" => cmd_reminders(conn, membership_id, &pos, &map),
-        "response" => cmd_response(conn, membership_id, &pos, &map),
-        "settings" => cmd_settings(conn, guild_id, membership_id, &pos, &map),
-        "signup_options" => cmd_signup_options(conn, guild_id, membership_id, &pos, &map),
-        "signup_presets" => cmd_presets(conn, guild_id, membership_id, &pos, &map),
-        "channel" => Err(OpError::from(crate::msg!("err-channel-where"))),
-        "google" => cmd_google(conn, guild_id, membership_id, &pos, &map),
-        "sort" => Ok(tr!(Lang::En, "reply-sort-where")),
-        other => Err(OpError::from(crate::msg!("err-unknown-command", command = other))),
-    }
-}
-
 #[derive(Insertable)]
 #[diesel(table_name = schema::event_prompts)]
 #[diesel(treat_none_as_default_value = false)]
@@ -180,67 +126,6 @@ struct NewEventPrompt<'a> {
     source_channel: Option<&'a str>,
     source_discord: Option<&'a str>,
     draft: Option<serde_json::Value>,
-}
-
-fn cmd_event(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    rest: &str,
-) -> Result<String, OpError> {
-    if !rest.trim().is_empty() {
-        return Err(OpError::from(crate::msg!("err-event-no-options")));
-    }
-    if store::list_channels(conn, guild_id)?.is_empty() {
-        return Err(OpError::from(crate::msg!("err-no-channels")));
-    }
-    let discord_user_id = prompt_key(conn, membership_id)?;
-    diesel::insert_into(schema::event_prompts::table)
-        .values(&NewEventPrompt {
-            discord_user_id: &discord_user_id,
-            guild_id,
-            membership_id,
-            step: "channel",
-            title: None,
-            start_raw: None,
-            channel_name: None,
-            source_channel: None,
-            source_discord: None,
-            draft: None,
-        })
-        .on_conflict(schema::event_prompts::discord_user_id)
-        .do_update()
-        .set((
-            schema::event_prompts::guild_id.eq(excluded(schema::event_prompts::guild_id)),
-            schema::event_prompts::membership_id.eq(excluded(schema::event_prompts::membership_id)),
-            schema::event_prompts::step.eq("channel"),
-            schema::event_prompts::title.eq(None::<&str>),
-            schema::event_prompts::start_raw.eq(None::<&str>),
-            schema::event_prompts::channel_name.eq(None::<&str>),
-            schema::event_prompts::source_channel.eq(None::<&str>),
-            schema::event_prompts::source_discord.eq(None::<&str>),
-            schema::event_prompts::draft.eq(None::<serde_json::Value>),
-        ))
-        .execute(conn)?;
-    Ok(where_to_post(conn, guild_id, &discord_user_id, &None, &None, Lang::En)?.to_string())
-}
-
-fn prompt_key(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
-    store::discord_id_for_membership(conn, membership_id)
-}
-
-fn desk_answer(conn: &mut Connection, membership_id: i64, line: &str) -> Result<Option<String>, OpError> {
-    let key = prompt_key(conn, membership_id)?;
-    let Some(replies) = answer_event_dm_in(conn, &key, line, "", Some(Lang::En))? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        replies
-            .into_iter()
-            .map(|reply| reply.to_string())
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    ))
 }
 
 #[derive(Debug)]
@@ -356,17 +241,6 @@ pub fn answer_event_dm(
     text: &str,
     public_url: &str,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    answer_event_dm_in(conn, discord_user_id, text, public_url, None)
-}
-
-/// As `answer_event_dm`, in `lang` when given.
-fn answer_event_dm_in(
-    conn: &mut Connection,
-    discord_user_id: &str,
-    text: &str,
-    public_url: &str,
-    lang: Option<Lang>,
-) -> Result<Option<Vec<DmReply>>, OpError> {
     let row = schema::event_prompts::table
         .filter(schema::event_prompts::discord_user_id.eq(discord_user_id))
         .select((
@@ -422,7 +296,7 @@ fn answer_event_dm_in(
     let mut draft = draft
         .and_then(|raw| serde_json::from_value::<EventDraft>(raw).ok())
         .unwrap_or_default();
-    let lang = lang.unwrap_or_else(|| i18n::lang_of(conn, guild_id));
+    let lang = i18n::lang_of(conn, guild_id);
     let text = text.trim();
     if said(text, &CANCEL) {
         cancel_event_dm(conn, discord_user_id)?;
@@ -1655,34 +1529,6 @@ pub fn edit_event(
     ))
 }
 
-fn cmd_edit(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let event = map
-        .get("id")
-        .or_else(|| pos.first())
-        .cloned()
-        .ok_or_else(|| OpError::from(crate::msg!("err-edit-which")))?;
-    edit_event(
-        conn,
-        guild_id,
-        membership_id,
-        EditChange {
-            event,
-            title: map.get("title").cloned(),
-            description: map.get("description").cloned(),
-            start: map.get("start").cloned(),
-            duration: map.get("duration").and_then(|value| value.parse().ok()),
-            channel: map.get("channel").cloned(),
-        },
-        Lang::En,
-    )
-}
-
 pub fn set_reminders(
     conn: &mut Connection,
     membership_id: i64,
@@ -1700,57 +1546,6 @@ pub fn set_reminders(
             })
         }
     }
-}
-
-fn cmd_reminders(
-    conn: &mut Connection,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let raw = map
-        .get("state")
-        .cloned()
-        .or_else(|| pos.first().cloned())
-        .unwrap_or_else(|| "status".into());
-    let enabled = match raw.to_lowercase().as_str() {
-        "off" | "no" | "false" => Some(false),
-        "on" | "yes" | "true" => Some(true),
-        _ => None,
-    };
-    set_reminders(conn, membership_id, enabled, Lang::En)
-}
-
-fn cmd_response(
-    conn: &mut Connection,
-    actor_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let action = map
-        .get("action")
-        .cloned()
-        .or_else(|| pos.first().cloned())
-        .unwrap_or_else(|| "add".into());
-    let token = map
-        .get("event")
-        .or_else(|| pos.get(1))
-        .map(String::as_str)
-        .ok_or_else(|| OpError::from(crate::msg!("err-name-event")))?;
-    let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
-    let handle = map
-        .get("user")
-        .cloned()
-        .or_else(|| pos.get(2).cloned())
-        .ok_or_else(|| OpError::from(crate::msg!("err-name-person")))?;
-    let user = store::membership_by_handle(conn, actor.guild_id, &handle)?
-        .ok_or_else(|| OpError::from(crate::msg!("err-no-handle", handle = handle.as_str())))?;
-    let option_name = map
-        .get("option")
-        .cloned()
-        .or_else(|| pos.get(3).cloned())
-        .ok_or_else(|| OpError::from(crate::msg!("err-name-option")))?;
-    Ok(roster_action(conn, actor_id, token, user.id, &option_name, &action, None, Lang::En)?.0)
 }
 
 pub struct Choice {
@@ -2049,63 +1844,6 @@ pub fn apply_setting(
     Ok(tr!(lang, "reply-setting-updated", key = key))
 }
 
-fn cmd_settings(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    require_server_manager(conn, membership_id)?;
-    let key = map
-        .keys()
-        .next()
-                .cloned()
-        .or_else(|| pos.first().cloned())
-        .ok_or_else(|| OpError::from(crate::msg!("err-name-setting")))?;
-    let value = map
-        .get(&key)
-                .cloned()
-                .or_else(|| pos.get(1).cloned())
-                .unwrap_or_default();
-    let extra = pos.get(2).cloned().unwrap_or_default();
-    let setting = match key.as_str() {
-        "reminder_interval" => Setting::ReminderInterval(
-            value
-                .parse()
-                .map_err(|_| OpError::from(crate::msg!("err-number-minutes")))?,
-        ),
-        "24_hour_time" => Setting::Hour24(on(&value)?),
-        "auto_archive" => Setting::AutoArchive(on(&value)?),
-        "auto_archive_interval" => Setting::AutoArchiveHours(
-            value
-                .parse()
-                .map_err(|_| OpError::from(crate::msg!("err-number-hours")))?,
-        ),
-        "auto_join_threads" => Setting::AutoJoinThreads(on(&value)?),
-        "event_threads" => Setting::EventThreads(on(&value)?),
-        "localize_time" => Setting::LocalizeTime(on(&value)?),
-        "purge" => Setting::PurgeChannels(on(&value)?),
-        "thread_reminders" => Setting::ThreadReminders(on(&value)?),
-        "show_attendees" => Setting::ShowAttendees(on(&value)?),
-        "temp_roles" => Setting::TempRoles(on(&value)?),
-        "waitlist" => Setting::Waitlist(on(&value)?),
-        "digest" => Setting::Digest(value),
-        "post_lead" => Setting::PostLeadHours(
-            value
-                .parse()
-                .map_err(|_| OpError::from(crate::msg!("err-number-hours")))?,
-        ),
-        "role" => Setting::Role {
-            which: value,
-            name: extra,
-        },
-        "language" => Setting::Language(value),
-        other => return Err(OpError::from(crate::msg!("err-unknown-setting", name = other))),
-    };
-    apply_setting(conn, guild_id, membership_id, setting, Lang::En)
-}
-
 pub fn library_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
     let lines: Vec<_> = store::list_library(conn, guild_id)?
         .into_iter()
@@ -2173,39 +1911,6 @@ pub fn remove_library_option(
     Ok(tr!(lang, "reply-library-removed", name = &kind.name))
 }
 
-fn cmd_signup_options(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let action = pos.first().map(String::as_str).unwrap_or("list");
-    match action {
-        "add" => {
-            let name = map
-                .get("name")
-                .cloned()
-                .or_else(|| pos.get(2).cloned())
-                .or_else(|| pos.get(1).cloned())
-                .ok_or_else(|| OpError::from(crate::msg!("err-name-library-option")))?;
-            let emoji = map.get("emoji").cloned().unwrap_or_else(|| "•".into());
-            // A new type counts as attending unless told otherwise.
-            let attending = !matches!(map.get("attending").map(|value| value.trim().to_lowercase()).as_deref(), Some("no" | "false"));
-            add_library_option(conn, guild_id, membership_id, &name, &emoji, attending, Lang::En)
-        }
-        "remove" => {
-            let name = map
-                .get("name")
-                .cloned()
-                .or_else(|| pos.get(1).cloned())
-                .unwrap_or_default();
-            remove_library_option(conn, guild_id, membership_id, &name, Lang::En)
-        }
-        _ => library_text(conn, guild_id, Lang::En),
-    }
-}
-
 pub fn preset_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
     let lines: Vec<_> = store::list_presets(conn, guild_id)?
         .into_iter()
@@ -2262,50 +1967,6 @@ pub fn remove_preset(
     Ok(tr!(lang, "reply-preset-removed", name = name))
 }
 
-fn cmd_presets(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let action = pos.first().map(String::as_str).unwrap_or("list");
-    match action {
-        "add" => {
-    let name = map
-        .get("name")
-                .cloned()
-                .or_else(|| pos.get(1).cloned())
-                .ok_or_else(|| OpError::from(crate::msg!("err-name-preset")))?;
-            let raw = map.get("options").cloned().unwrap_or_default();
-            add_preset(conn, guild_id, membership_id, &name, &raw, Lang::En)
-        }
-        "remove" => {
-            let name = map
-                .get("name")
-                .cloned()
-                .or_else(|| pos.get(1).cloned())
-                .unwrap_or_default();
-            remove_preset(conn, guild_id, membership_id, &name, Lang::En)
-        }
-        _ => preset_text(conn, guild_id, Lang::En),
-    }
-}
-
-pub fn channel_request(line: &str) -> Option<String> {
-    let (cmd, rest) = split_cmd(line);
-    if cmd != "channel" {
-        return None;
-    }
-    let (pos, map) = fields(rest);
-    Some(
-        map.get("name")
-        .cloned()
-        .or_else(|| pos.first().cloned())
-            .unwrap_or_default(),
-    )
-}
-
 fn public_base() -> String {
     std::env::var("MARIAN_PUBLIC_URL")
         .unwrap_or_default()
@@ -2340,11 +2001,6 @@ pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<S
         return Err(OpError::from(crate::msg!("err-google-link-long")));
     }
     Ok(url)
-}
-
-pub fn google_authorize(conn: &mut Connection, membership_id: i64, lang: Lang) -> Result<String, OpError> {
-    let url = google_sign_in_url(conn, membership_id)?;
-    Ok(format!("{}\n{url}", tr!(lang, "reply-google-click")))
 }
 
 pub fn google_auto_sync(
@@ -2391,37 +2047,6 @@ pub fn google_sync(
     let user_id = person_user_id(conn, membership_id)?;
     crate::google::queue_event(conn, user_id, event.id)?;
     Ok(tr!(lang, "reply-google-sync", title = &event.title))
-}
-
-fn cmd_google(
-    conn: &mut Connection,
-    guild_id: i64,
-    membership_id: i64,
-    pos: &[String],
-    map: &HashMap<String, String>,
-) -> Result<String, OpError> {
-    let action = pos.first().map(String::as_str).unwrap_or("authorize");
-    match action {
-        "authorize" => google_authorize(conn, membership_id, Lang::En),
-        "auto_sync" => {
-            let value = map
-                .get("state")
-                .cloned()
-                .or_else(|| pos.get(1).cloned())
-                .unwrap_or_else(|| "on".into());
-            google_auto_sync(conn, guild_id, membership_id, on(&value)?, Lang::En)
-        }
-        "revoke" => google_revoke(conn, guild_id, membership_id, Lang::En),
-        "sync" => {
-            let token = map
-                .get("event")
-                .map(String::as_str)
-                .or_else(|| pos.get(1).map(String::as_str))
-                .ok_or_else(|| OpError::from(crate::msg!("err-sync-which")))?;
-            google_sync(conn, guild_id, membership_id, token, Lang::En)
-        }
-        other => Err(OpError::from(crate::msg!("err-unknown-google", name = other))),
-    }
 }
 
 fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<EventInput, OpError> {
@@ -2477,35 +2102,6 @@ fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(
     } else {
         Err(OpError::from(crate::msg!("err-managers-only")))
     }
-}
-
-fn on(value: &str) -> Result<bool, OpError> {
-    match value.to_lowercase().as_str() {
-        "on" | "yes" | "true" | "1" => Ok(true),
-        "off" | "no" | "false" | "0" => Ok(false),
-        _ => Err(OpError::from(crate::msg!("err-on-off"))),
-    }
-}
-
-fn split_cmd(line: &str) -> (&str, &str) {
-    let line = line.trim().trim_start_matches('/');
-    let mut parts = line.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").trim();
-    let rest = parts.next().unwrap_or("").trim();
-    (cmd, rest)
-}
-
-fn fields(rest: &str) -> (Vec<String>, HashMap<String, String>) {
-    let mut pos = Vec::new();
-    let mut map = HashMap::new();
-    for (key, value) in tokenize(rest) {
-        if let Some(key) = key {
-            map.insert(key, value);
-        } else {
-            pos.push(value);
-        }
-    }
-    (pos, map)
 }
 
 #[cfg(test)]
@@ -2582,48 +2178,6 @@ mod tests {
         assert!(store::signups_for(&mut conn, &event).unwrap().iter().any(|s| s.option_id == healer.id && s.membership_id == 2));
         // A typed name still works.
         roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En).unwrap();
-    }
-
-    #[test]
-    fn help_points_at_the_guide() {
-        assert!(HELP.contains("/event starts an event"));
-        assert!(HELP.contains("/help"));
-        assert!(!HELP.contains("Healer"));
-        assert!(!HELP.contains("event:12"));
-        assert!(!HELP.contains("title:"));
-    }
-
-    #[test]
-    fn event_on_the_desk_asks_the_same_questions() {
-        let mut conn = store::open_memory().unwrap();
-        conn.batch_execute(
-            "
-            INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
-            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'social', 'text', 0);
-            INSERT INTO users (discord_id) VALUES ('nell');
-            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
-            SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
-            ",
-        )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
-        let rejected = execute(
-            &mut conn,
-            1,
-            1,
-            r#"/event title:"Shore cleanup" start:"tomorrow at 4pm" channel:social"#,
-        );
-        assert!(rejected.contains("doesn't take options"), "{rejected}");
-        let first = execute(&mut conn, 1, 1, "/event");
-        assert!(
-            first.contains("Where would you like to post this event?"),
-            "{first}"
-        );
-        assert!(first.contains("#social"), "{first}");
-        let title = execute(&mut conn, 1, 1, "1");
-        assert!(title.contains("Enter the event title"), "{title}");
-        let missing = execute(&mut conn, 1, 1, "/events");
-        assert!(missing.contains("Unknown command /events"), "{missing}");
     }
 
     #[test]

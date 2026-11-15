@@ -16,7 +16,7 @@ mod tick;
 
 pub use access::{can_create, can_delete, can_edit, sees_channel, sight, sight_for_discord, Overwrite, Sight};
 pub use catalog::{
-    bind_channel_discord, create_channel, discard_channel, manual_calendar_sync, record_command,
+    bind_channel_discord, create_channel, discard_channel, manual_calendar_sync,
     set_user_reminders, slug_channel,
 };
 pub use library::{

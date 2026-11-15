@@ -482,10 +482,6 @@ pub mod path {
         format!("{}/{kind}", library(server))
     }
 
-    pub fn commands(server: &str) -> String {
-        format!("{}/commands", on(server))
-    }
-
     pub fn routines(server: &str) -> String {
         format!("{}/routines", on(server))
     }
@@ -635,10 +631,6 @@ pub async fn preset(server: &str, id: &str) -> Result<dto::Preset, Failure> {
 
 pub async fn library(server: &str) -> Result<Vec<dto::LibraryItem>, Failure> {
     resource!(server, path::library(server), marian::api::library)
-}
-
-pub async fn commands(server: &str) -> Result<Vec<dto::CommandLog>, Failure> {
-    resource!(server, path::commands(server), marian::api::commands)
 }
 
 pub async fn routines(server: &str) -> Result<Vec<dto::RoutineSummary>, Failure> {
