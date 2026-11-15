@@ -1,2492 +1,1602 @@
-{
-  "en": [
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Start an event. Marian asks for the details in a DM",
-      "description_localizations": {},
-      "name": "event",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
+[
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Start an event. Marian asks for the details in a DM",
+    "description_localizations": {
+      "en-US": "Start an event. Marian asks for the details in a DM",
+      "pl": "Utwórz wydarzenie. Marian zapyta o szczegóły w wiadomości prywatnej"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Change an event",
-      "description_localizations": {},
-      "name": "edit",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": true,
-          "channel_types": [],
-          "choices": [],
-          "description": "The event to change",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "event",
-          "options": [],
-          "required": true,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "New title",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "title",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "New description",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "description",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "New start, such as friday 7pm",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "start",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Length in minutes",
-          "max_length": null,
-          "max_value": 9007199254740991.0,
-          "min_length": null,
-          "min_value": -9007199254740991.0,
-          "name": "duration",
-          "options": [],
-          "required": false,
-          "type": 4
-        },
-        {
-          "autocomplete": true,
-          "channel_types": [],
-          "choices": [],
-          "description": "Channel to post in",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "channel",
-          "options": [],
-          "required": false,
-          "type": 3
-        }
-      ]
+    "name": "event",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": []
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Change an event",
+    "description_localizations": {
+      "en-US": "Change an event",
+      "pl": "Zmień wydarzenie"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Turn your reminders on or off",
-      "description_localizations": {},
-      "name": "reminders",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "On or off. Leave empty to see the current choice",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "enabled",
-          "options": [],
-          "required": false,
-          "type": 5
-        }
-      ]
+    "name": "edit",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": true,
+        "channel_types": [],
+        "choices": [],
+        "description": "The event to change",
+        "description_localizations": {
+          "en-US": "The event to change",
+          "pl": "Wydarzenie do zmiany"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "event",
+        "options": [],
+        "required": true,
+        "type": 3
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "New title",
+        "description_localizations": {
+          "en-US": "New title",
+          "pl": "Nowy tytuł"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "title",
+        "options": [],
+        "required": false,
+        "type": 3
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "New description",
+        "description_localizations": {
+          "en-US": "New description",
+          "pl": "Nowy opis"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "description",
+        "options": [],
+        "required": false,
+        "type": 3
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "New start, such as friday 7pm",
+        "description_localizations": {
+          "en-US": "New start, such as friday 7pm",
+          "pl": "Nowy początek, np. piątek 19:00"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "start",
+        "options": [],
+        "required": false,
+        "type": 3
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Length in minutes",
+        "description_localizations": {
+          "en-US": "Length in minutes",
+          "pl": "Długość w minutach"
+        },
+        "max_length": null,
+        "max_value": 9007199254740991.0,
+        "min_length": null,
+        "min_value": -9007199254740991.0,
+        "name": "duration",
+        "options": [],
+        "required": false,
+        "type": 4
+      },
+      {
+        "autocomplete": true,
+        "channel_types": [],
+        "choices": [],
+        "description": "Channel to post in",
+        "description_localizations": {
+          "en-US": "Channel to post in",
+          "pl": "Kanał, na którym opublikować"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "channel",
+        "options": [],
+        "required": false,
+        "type": 3
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Turn your reminders on or off",
+    "description_localizations": {
+      "en-US": "Turn your reminders on or off",
+      "pl": "Włącz lub wyłącz swoje przypomnienia"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Add, remove, or move a response",
-      "description_localizations": {},
-      "name": "response",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Add someone to a signup option",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The event to add an attendee",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "The person to add",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The signup option",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Guests they bring, when the option takes guests",
-              "max_length": null,
-              "max_value": 10.0,
-              "min_length": null,
-              "min_value": 0.0,
-              "name": "guests",
-              "options": [],
-              "required": false,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
+    "name": "reminders",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "On or off. Leave empty to see the current choice",
+        "description_localizations": {
+          "en-US": "On or off. Leave empty to see the current choice",
+          "pl": "Włączone lub wyłączone. Zostaw puste, żeby zobaczyć obecny wybór"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Remove someone from a signup option",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The event to remove them from",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "The person to remove",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The signup option",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Move someone to another signup option",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "move",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The event to move them on",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "The person to move",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The option to move them to",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Guests they bring, when the option takes guests",
-              "max_length": null,
-              "max_value": 10.0,
-              "min_length": null,
-              "min_value": 0.0,
-              "name": "guests",
-              "options": [],
-              "required": false,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "enabled",
+        "options": [],
+        "required": false,
+        "type": 5
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Add, remove, or move a response",
+    "description_localizations": {
+      "en-US": "Add, remove, or move a response",
+      "pl": "Dodaj, usuń lub przenieś odpowiedź"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Change a server setting",
-      "description_localizations": {},
-      "name": "settings",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Default reminder, in minutes",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "reminder_interval",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Minutes before the event",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "minutes",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
+    "name": "response",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Add someone to a signup option",
+        "description_localizations": {
+          "en-US": "Add someone to a signup option",
+          "pl": "Dodaj kogoś do opcji zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Use a 24-hour clock",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "hour_24",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "On uses a 24-hour clock",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "add",
+        "options": [
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The event to add an attendee",
+            "description_localizations": {
+              "en-US": "The event to add an attendee",
+              "pl": "Wydarzenie, do którego dodać uczestnika"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "event",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "The person to add",
+            "description_localizations": {
+              "en-US": "The person to add",
+              "pl": "Osoba do dodania"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "user",
+            "options": [],
+            "required": true,
+            "type": 6
+          },
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The signup option",
+            "description_localizations": {
+              "en-US": "The signup option",
+              "pl": "Opcja zapisu"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "option",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Guests they bring, when the option takes guests",
+            "description_localizations": {
+              "en-US": "Guests they bring, when the option takes guests",
+              "pl": "Liczba gości tej osoby, jeśli opcja przyjmuje gości"
+            },
+            "max_length": null,
+            "max_value": 10.0,
+            "min_length": null,
+            "min_value": 0.0,
+            "name": "guests",
+            "options": [],
+            "required": false,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Remove someone from a signup option",
+        "description_localizations": {
+          "en-US": "Remove someone from a signup option",
+          "pl": "Usuń kogoś z opcji zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Archive posted events on a timer",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_archive",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Archive posted events after they end",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "remove",
+        "options": [
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The event to remove them from",
+            "description_localizations": {
+              "en-US": "The event to remove them from",
+              "pl": "Wydarzenie, z którego usunąć osobę"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "event",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "The person to remove",
+            "description_localizations": {
+              "en-US": "The person to remove",
+              "pl": "Osoba do usunięcia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "user",
+            "options": [],
+            "required": true,
+            "type": 6
+          },
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The signup option",
+            "description_localizations": {
+              "en-US": "The signup option",
+              "pl": "Opcja zapisu"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "option",
+            "options": [],
+            "required": true,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Move someone to another signup option",
+        "description_localizations": {
+          "en-US": "Move someone to another signup option",
+          "pl": "Przenieś kogoś do innej opcji zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Hours after which a posted event archives",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_archive_interval",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Hours after the event ends",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "hours",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "move",
+        "options": [
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The event to move them on",
+            "description_localizations": {
+              "en-US": "The event to move them on",
+              "pl": "Wydarzenie, na którym przenieść osobę"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "event",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "The person to move",
+            "description_localizations": {
+              "en-US": "The person to move",
+              "pl": "Osoba do przeniesienia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "user",
+            "options": [],
+            "required": true,
+            "type": 6
+          },
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The option to move them to",
+            "description_localizations": {
+              "en-US": "The option to move them to",
+              "pl": "Opcja, do której przenieść"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "option",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Guests they bring, when the option takes guests",
+            "description_localizations": {
+              "en-US": "Guests they bring, when the option takes guests",
+              "pl": "Liczba gości tej osoby, jeśli opcja przyjmuje gości"
+            },
+            "max_length": null,
+            "max_value": 10.0,
+            "min_length": null,
+            "min_value": 0.0,
+            "name": "guests",
+            "options": [],
+            "required": false,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Change a server setting",
+    "description_localizations": {
+      "en-US": "Change a server setting",
+      "pl": "Zmień ustawienie serwera"
+    },
+    "name": "settings",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Default reminder, in minutes",
+        "description_localizations": {
+          "en-US": "Default reminder, in minutes",
+          "pl": "Domyślne przypomnienie, w minutach"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Join event threads for attendees",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_join_threads",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Add attendees to the event thread",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "reminder_interval",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Minutes before the event",
+            "description_localizations": {
+              "en-US": "Minutes before the event",
+              "pl": "Minuty przed wydarzeniem"
+            },
+            "max_length": null,
+            "max_value": 9007199254740991.0,
+            "min_length": null,
+            "min_value": -9007199254740991.0,
+            "name": "minutes",
+            "options": [],
+            "required": true,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Use a 24-hour clock",
+        "description_localizations": {
+          "en-US": "Use a 24-hour clock",
+          "pl": "Używaj zegara 24-godzinnego"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Open a thread for each posted event",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "event_threads",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Open a thread when an event is posted",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "hour_24",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "On uses a 24-hour clock",
+            "description_localizations": {
+              "en-US": "On uses a 24-hour clock",
+              "pl": "Włączone oznacza zegar 24-godzinny"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Archive posted events on a timer",
+        "description_localizations": {
+          "en-US": "Archive posted events on a timer",
+          "pl": "Archiwizuj opublikowane wydarzenia po czasie"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Show the start in each member's own zone",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "localize_time",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Members see the start in their own zone",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "auto_archive",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Archive posted events after they end",
+            "description_localizations": {
+              "en-US": "Archive posted events after they end",
+              "pl": "Archiwizuj opublikowane wydarzenia po ich zakończeniu"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Hours after which a posted event archives",
+        "description_localizations": {
+          "en-US": "Hours after which a posted event archives",
+          "pl": "Po ilu godzinach archiwizować opublikowane wydarzenie"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Purge other messages from event channels",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "purge",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "On removes other messages when an event is posted or deleted",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "auto_archive_interval",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Hours after the event ends",
+            "description_localizations": {
+              "en-US": "Hours after the event ends",
+              "pl": "Godziny po zakończeniu wydarzenia"
+            },
+            "max_length": null,
+            "max_value": 9007199254740991.0,
+            "min_length": null,
+            "min_value": -9007199254740991.0,
+            "name": "hours",
+            "options": [],
+            "required": true,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Join event threads for attendees",
+        "description_localizations": {
+          "en-US": "Join event threads for attendees",
+          "pl": "Dodawaj uczestników do wątków wydarzeń"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Post reminders in the event thread",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "thread_reminders",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Reminders post in the event thread",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "auto_join_threads",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Add attendees to the event thread",
+            "description_localizations": {
+              "en-US": "Add attendees to the event thread",
+              "pl": "Dodawaj uczestników do wątku wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Open a thread for each posted event",
+        "description_localizations": {
+          "en-US": "Open a thread for each posted event",
+          "pl": "Otwieraj wątek dla każdego opublikowanego wydarzenia"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "List names on the Discord post",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "show_attendees",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "The post lists who accepted each option",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "event_threads",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Open a thread when an event is posted",
+            "description_localizations": {
+              "en-US": "Open a thread when an event is posted",
+              "pl": "Otwieraj wątek przy publikacji wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Show the start in each member's own zone",
+        "description_localizations": {
+          "en-US": "Show the start in each member's own zone",
+          "pl": "Pokazuj początek w strefie czasowej każdego członka"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Give attendees a temporary role",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "temp_roles",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Create an attendee role for the event",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "localize_time",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Members see the start in their own zone",
+            "description_localizations": {
+              "en-US": "Members see the start in their own zone",
+              "pl": "Członkowie widzą początek w swojej strefie czasowej"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Purge other messages from event channels",
+        "description_localizations": {
+          "en-US": "Purge other messages from event channels",
+          "pl": "Usuwaj inne wiadomości z kanałów wydarzeń"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Let full options take a waitlist",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "waitlist",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Sign people up to a waitlist when an option is full",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "purge",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "On removes other messages when an event is posted or deleted",
+            "description_localizations": {
+              "en-US": "On removes other messages when an event is posted or deleted",
+              "pl": "Włączone usuwa inne wiadomości przy publikacji lub usunięciu wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Post reminders in the event thread",
+        "description_localizations": {
+          "en-US": "Post reminders in the event thread",
+          "pl": "Publikuj przypomnienia w wątku wydarzenia"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "How often Marian posts a digest",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "digest",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "off",
-                  "name_localizations": {},
-                  "value": 0
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "thread_reminders",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Reminders post in the event thread",
+            "description_localizations": {
+              "en-US": "Reminders post in the event thread",
+              "pl": "Przypomnienia trafiają do wątku wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "List names on the Discord post",
+        "description_localizations": {
+          "en-US": "List names on the Discord post",
+          "pl": "Pokazuj uczestników w poście na Discordzie"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "show_attendees",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "The post lists who accepted each option",
+            "description_localizations": {
+              "en-US": "The post lists who accepted each option",
+              "pl": "Post pokazuje, kto wybrał każdą opcję"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Give attendees a temporary role",
+        "description_localizations": {
+          "en-US": "Give attendees a temporary role",
+          "pl": "Nadawaj uczestnikom tymczasową rolę"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "temp_roles",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Create an attendee role for the event",
+            "description_localizations": {
+              "en-US": "Create an attendee role for the event",
+              "pl": "Utwórz rolę uczestnika dla wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Let full options take a waitlist",
+        "description_localizations": {
+          "en-US": "Let full options take a waitlist",
+          "pl": "Pozwól na listę oczekujących, gdy opcja jest pełna"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "waitlist",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Sign people up to a waitlist when an option is full",
+            "description_localizations": {
+              "en-US": "Sign people up to a waitlist when an option is full",
+              "pl": "Zapisuj na listę oczekujących, gdy opcja jest pełna"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "How often Marian posts a digest",
+        "description_localizations": {
+          "en-US": "How often Marian posts a digest",
+          "pl": "Jak często Marian publikuje podsumowanie"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "digest",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [
+              {
+                "name": "off",
+                "name_localizations": {
+                  "en-US": "off",
+                  "pl": "wyłączone"
                 },
-                {
-                  "name": "daily",
-                  "name_localizations": {},
-                  "value": 1
+                "value": 0
+              },
+              {
+                "name": "daily",
+                "name_localizations": {
+                  "en-US": "daily",
+                  "pl": "codziennie"
                 },
-                {
-                  "name": "weekly",
-                  "name_localizations": {},
-                  "value": 2
-                }
-              ],
-              "description": "Off, daily, or weekly",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "schedule",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "How early a series date is posted",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "post_lead",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Hours before the start",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "hours",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Choose which role may do something",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "role",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "event",
-                  "name_localizations": {},
-                  "value": 0
+                "value": 1
+              },
+              {
+                "name": "weekly",
+                "name_localizations": {
+                  "en-US": "weekly",
+                  "pl": "co tydzień"
                 },
-                {
-                  "name": "edit",
-                  "name_localizations": {},
-                  "value": 1
+                "value": 2
+              }
+            ],
+            "description": "Off, daily, or weekly",
+            "description_localizations": {
+              "en-US": "Off, daily, or weekly",
+              "pl": "Wyłączone, codziennie lub co tydzień"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "schedule",
+            "options": [],
+            "required": true,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "How early a series date is posted",
+        "description_localizations": {
+          "en-US": "How early a series date is posted",
+          "pl": "Jak wcześnie publikować termin z serii"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "post_lead",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Hours before the start",
+            "description_localizations": {
+              "en-US": "Hours before the start",
+              "pl": "Godziny przed rozpoczęciem"
+            },
+            "max_length": null,
+            "max_value": 9007199254740991.0,
+            "min_length": null,
+            "min_value": -9007199254740991.0,
+            "name": "hours",
+            "options": [],
+            "required": true,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Choose which role may do something",
+        "description_localizations": {
+          "en-US": "Choose which role may do something",
+          "pl": "Wybierz, która rola może coś robić"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "role",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [
+              {
+                "name": "event",
+                "name_localizations": {
+                  "en-US": "event",
+                  "pl": "tworzyć wydarzenia"
                 },
-                {
-                  "name": "delete",
-                  "name_localizations": {},
-                  "value": 2
+                "value": 0
+              },
+              {
+                "name": "edit",
+                "name_localizations": {
+                  "en-US": "edit",
+                  "pl": "edytować wydarzenia"
                 },
-                {
-                  "name": "channel",
-                  "name_localizations": {},
-                  "value": 3
+                "value": 1
+              },
+              {
+                "name": "delete",
+                "name_localizations": {
+                  "en-US": "delete",
+                  "pl": "usuwać wydarzenia"
                 },
-                {
-                  "name": "signup",
-                  "name_localizations": {},
-                  "value": 4
-                }
-              ],
-              "description": "What this role is allowed to do",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "which",
-              "options": [],
-              "required": true,
-              "type": 4
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Role name. Leave empty to clear it",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": false,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "The language Marian writes in on this server",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "language",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "English",
-                  "name_localizations": {},
-                  "value": 0
+                "value": 2
+              },
+              {
+                "name": "channel",
+                "name_localizations": {
+                  "en-US": "channel",
+                  "pl": "tworzyć kanały"
                 },
-                {
-                  "name": "Polski",
-                  "name_localizations": {},
-                  "value": 1
-                }
-              ],
-              "description": "English or Polski",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "language",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "List, add, or remove a library option",
-      "description_localizations": {},
-      "name": "signup_options",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "List the option library",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "list",
-          "options": [],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Save an option in the library",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Option name",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Emoji shown with the name",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "emoji",
-              "options": [],
-              "required": false,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "People on it get reminders and the attendee role (default yes)",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "attending",
-              "options": [],
-              "required": false,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Remove an option from the library",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Option name",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "List, save, or remove a signup preset",
-      "description_localizations": {},
-      "name": "signup_presets",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "List signup presets",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "list",
-          "options": [],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Save a signup preset",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Preset name",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Option names, separated by commas",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "options",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Remove a signup preset",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Preset name",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Create an event channel",
-      "description_localizations": {},
-      "name": "channel",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Channel name",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "name",
-          "options": [],
-          "required": true,
-          "type": 3
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Connect, update, or disconnect a Google Calendar",
-      "description_localizations": {},
-      "name": "google",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Sign in with Google",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "authorize",
-          "options": [],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Keep your Google Calendar updated",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_sync",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Keep adding and updating events",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Add one event to your Google Calendar",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "sync",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "The event to add",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Disconnect Google Calendar",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "revoke",
-          "options": [],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Reverse the posts in this event channel",
-      "description_localizations": {},
-      "name": "sort",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "How /event works, and where the other commands are explained",
-      "description_localizations": {},
-      "name": "help",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
-    }
-  ],
-  "pl": [
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Utwórz wydarzenie. Marian zapyta o szczegóły w wiadomości prywatnej",
-      "description_localizations": {},
-      "name": "event",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Zmień wydarzenie",
-      "description_localizations": {},
-      "name": "edit",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": true,
-          "channel_types": [],
-          "choices": [],
-          "description": "Wydarzenie do zmiany",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "event",
-          "options": [],
-          "required": true,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Nowy tytuł",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "title",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Nowy opis",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "description",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Nowy początek, np. piątek 19:00",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "start",
-          "options": [],
-          "required": false,
-          "type": 3
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Długość w minutach",
-          "max_length": null,
-          "max_value": 9007199254740991.0,
-          "min_length": null,
-          "min_value": -9007199254740991.0,
-          "name": "duration",
-          "options": [],
-          "required": false,
-          "type": 4
-        },
-        {
-          "autocomplete": true,
-          "channel_types": [],
-          "choices": [],
-          "description": "Kanał, na którym opublikować",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "channel",
-          "options": [],
-          "required": false,
-          "type": 3
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Włącz lub wyłącz swoje przypomnienia",
-      "description_localizations": {},
-      "name": "reminders",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Włączone lub wyłączone. Zostaw puste, żeby zobaczyć obecny wybór",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "enabled",
-          "options": [],
-          "required": false,
-          "type": 5
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Dodaj, usuń lub przenieś odpowiedź",
-      "description_localizations": {},
-      "name": "response",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Dodaj kogoś do opcji zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Wydarzenie, do którego dodać uczestnika",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Osoba do dodania",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Opcja zapisu",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Liczba gości tej osoby, jeśli opcja przyjmuje gości",
-              "max_length": null,
-              "max_value": 10.0,
-              "min_length": null,
-              "min_value": 0.0,
-              "name": "guests",
-              "options": [],
-              "required": false,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Usuń kogoś z opcji zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Wydarzenie, z którego usunąć osobę",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Osoba do usunięcia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Opcja zapisu",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Przenieś kogoś do innej opcji zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "move",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Wydarzenie, na którym przenieść osobę",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Osoba do przeniesienia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "user",
-              "options": [],
-              "required": true,
-              "type": 6
-            },
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Opcja, do której przenieść",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "option",
-              "options": [],
-              "required": true,
-              "type": 3
-            },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Liczba gości tej osoby, jeśli opcja przyjmuje gości",
-              "max_length": null,
-              "max_value": 10.0,
-              "min_length": null,
-              "min_value": 0.0,
-              "name": "guests",
-              "options": [],
-              "required": false,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Zmień ustawienie serwera",
-      "description_localizations": {},
-      "name": "settings",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Domyślne przypomnienie, w minutach",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "reminder_interval",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Minuty przed wydarzeniem",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "minutes",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Używaj zegara 24-godzinnego",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "hour_24",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Włączone oznacza zegar 24-godzinny",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Archiwizuj opublikowane wydarzenia po czasie",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_archive",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Archiwizuj opublikowane wydarzenia po ich zakończeniu",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Po ilu godzinach archiwizować opublikowane wydarzenie",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_archive_interval",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Godziny po zakończeniu wydarzenia",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "hours",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Dodawaj uczestników do wątków wydarzeń",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_join_threads",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Dodawaj uczestników do wątku wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Otwieraj wątek dla każdego opublikowanego wydarzenia",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "event_threads",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Otwieraj wątek przy publikacji wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Pokazuj początek w strefie czasowej każdego członka",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "localize_time",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Członkowie widzą początek w swojej strefie czasowej",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Usuwaj inne wiadomości z kanałów wydarzeń",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "purge",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Włączone usuwa inne wiadomości przy publikacji lub usunięciu wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Publikuj przypomnienia w wątku wydarzenia",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "thread_reminders",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Przypomnienia trafiają do wątku wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Pokazuj uczestników w poście na Discordzie",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "show_attendees",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Post pokazuje, kto wybrał każdą opcję",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Nadawaj uczestnikom tymczasową rolę",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "temp_roles",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Utwórz rolę uczestnika dla wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Pozwól na listę oczekujących, gdy opcja jest pełna",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "waitlist",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Zapisuj na listę oczekujących, gdy opcja jest pełna",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Jak często Marian publikuje podsumowanie",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "digest",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "wyłączone",
-                  "name_localizations": {},
-                  "value": 0
+                "value": 3
+              },
+              {
+                "name": "signup",
+                "name_localizations": {
+                  "en-US": "signup",
+                  "pl": "zmieniać opcje zapisu"
                 },
-                {
-                  "name": "codziennie",
-                  "name_localizations": {},
-                  "value": 1
-                },
-                {
-                  "name": "co tydzień",
-                  "name_localizations": {},
-                  "value": 2
-                }
-              ],
-              "description": "Wyłączone, codziennie lub co tydzień",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "schedule",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Jak wcześnie publikować termin z serii",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "post_lead",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Godziny przed rozpoczęciem",
-              "max_length": null,
-              "max_value": 9007199254740991.0,
-              "min_length": null,
-              "min_value": -9007199254740991.0,
-              "name": "hours",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Wybierz, która rola może coś robić",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "role",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "tworzyć wydarzenia",
-                  "name_localizations": {},
-                  "value": 0
-                },
-                {
-                  "name": "edytować wydarzenia",
-                  "name_localizations": {},
-                  "value": 1
-                },
-                {
-                  "name": "usuwać wydarzenia",
-                  "name_localizations": {},
-                  "value": 2
-                },
-                {
-                  "name": "tworzyć kanały",
-                  "name_localizations": {},
-                  "value": 3
-                },
-                {
-                  "name": "zmieniać opcje zapisu",
-                  "name_localizations": {},
-                  "value": 4
-                }
-              ],
-              "description": "Co ta rola może robić",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "which",
-              "options": [],
-              "required": true,
-              "type": 4
+                "value": 4
+              }
+            ],
+            "description": "What this role is allowed to do",
+            "description_localizations": {
+              "en-US": "What this role is allowed to do",
+              "pl": "Co ta rola może robić"
             },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwa roli. Zostaw puste, żeby wyczyścić",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": false,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "which",
+            "options": [],
+            "required": true,
+            "type": 4
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Role name. Leave empty to clear it",
+            "description_localizations": {
+              "en-US": "Role name. Leave empty to clear it",
+              "pl": "Nazwa roli. Zostaw puste, żeby wyczyścić"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "name",
+            "options": [],
+            "required": false,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "The language Marian writes in on this server",
+        "description_localizations": {
+          "en-US": "The language Marian writes in on this server",
+          "pl": "Język, w którym Marian pisze na tym serwerze"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Język, w którym Marian pisze na tym serwerze",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "language",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [
-                {
-                  "name": "English",
-                  "name_localizations": {},
-                  "value": 0
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "language",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [
+              {
+                "name": "English",
+                "name_localizations": {
+                  "en-US": "English"
                 },
-                {
-                  "name": "Polski",
-                  "name_localizations": {},
-                  "value": 1
-                }
-              ],
-              "description": "English albo Polski",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "language",
-              "options": [],
-              "required": true,
-              "type": 4
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Pokaż, dodaj lub usuń opcję z biblioteki",
-      "description_localizations": {},
-      "name": "signup_options",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Pokaż bibliotekę opcji",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "list",
-          "options": [],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Zapisz opcję w bibliotece",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwa opcji",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
+                "value": 0
+              },
+              {
+                "name": "Polski",
+                "name_localizations": {
+                  "en-US": "Polski"
+                },
+                "value": 1
+              }
+            ],
+            "description": "English or Polski",
+            "description_localizations": {
+              "en-US": "English or Polski",
+              "pl": "English albo Polski"
             },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Emoji pokazywane przy nazwie",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "emoji",
-              "options": [],
-              "required": false,
-              "type": 3
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "language",
+            "options": [],
+            "required": true,
+            "type": 4
+          }
+        ],
+        "required": false,
+        "type": 1
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "List, add, or remove a library option",
+    "description_localizations": {
+      "en-US": "List, add, or remove a library option",
+      "pl": "Pokaż, dodaj lub usuń opcję z biblioteki"
+    },
+    "name": "signup_options",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "List the option library",
+        "description_localizations": {
+          "en-US": "List the option library",
+          "pl": "Pokaż bibliotekę opcji"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "list",
+        "options": [],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Save an option in the library",
+        "description_localizations": {
+          "en-US": "Save an option in the library",
+          "pl": "Zapisz opcję w bibliotece"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "add",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Option name",
+            "description_localizations": {
+              "en-US": "Option name",
+              "pl": "Nazwa opcji"
             },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Osoby z tą opcją dostają przypomnienia i rolę uczestnika (domyślnie tak)",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "attending",
-              "options": [],
-              "required": false,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Usuń opcję z biblioteki",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwa opcji",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Pokaż, zapisz lub usuń szablon zapisu",
-      "description_localizations": {},
-      "name": "signup_presets",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Pokaż szablony zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "list",
-          "options": [],
-          "required": false,
-          "type": 1
-        },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Zapisz szablon zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "add",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwa szablonu",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "name",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Emoji shown with the name",
+            "description_localizations": {
+              "en-US": "Emoji shown with the name",
+              "pl": "Emoji pokazywane przy nazwie"
             },
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwy opcji oddzielone przecinkami",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "options",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "emoji",
+            "options": [],
+            "required": false,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "People on it get reminders and the attendee role (default yes)",
+            "description_localizations": {
+              "en-US": "People on it get reminders and the attendee role (default yes)",
+              "pl": "Osoby z tą opcją dostają przypomnienia i rolę uczestnika (domyślnie tak)"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "attending",
+            "options": [],
+            "required": false,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Remove an option from the library",
+        "description_localizations": {
+          "en-US": "Remove an option from the library",
+          "pl": "Usuń opcję z biblioteki"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Usuń szablon zapisu",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "remove",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Nazwa szablonu",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "name",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
-        }
-      ]
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "remove",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Option name",
+            "description_localizations": {
+              "en-US": "Option name",
+              "pl": "Nazwa opcji"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "name",
+            "options": [],
+            "required": true,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "List, save, or remove a signup preset",
+    "description_localizations": {
+      "en-US": "List, save, or remove a signup preset",
+      "pl": "Pokaż, zapisz lub usuń szablon zapisu"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Utwórz kanał wydarzeń",
-      "description_localizations": {},
-      "name": "channel",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Nazwa kanału",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "name",
-          "options": [],
-          "required": true,
-          "type": 3
-        }
-      ]
-    },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Połącz, zaktualizuj lub odłącz Kalendarz Google",
-      "description_localizations": {},
-      "name": "google",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": [
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Zaloguj się przez Google",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "authorize",
-          "options": [],
-          "required": false,
-          "type": 1
+    "name": "signup_presets",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "List signup presets",
+        "description_localizations": {
+          "en-US": "List signup presets",
+          "pl": "Pokaż szablony zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Aktualizuj Kalendarz Google na bieżąco",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "auto_sync",
-          "options": [
-            {
-              "autocomplete": false,
-              "channel_types": [],
-              "choices": [],
-              "description": "Dodawaj i aktualizuj wydarzenia",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "enabled",
-              "options": [],
-              "required": true,
-              "type": 5
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "list",
+        "options": [],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Save a signup preset",
+        "description_localizations": {
+          "en-US": "Save a signup preset",
+          "pl": "Zapisz szablon zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Dodaj jedno wydarzenie do Kalendarza Google",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "sync",
-          "options": [
-            {
-              "autocomplete": true,
-              "channel_types": [],
-              "choices": [],
-              "description": "Wydarzenie do dodania",
-              "max_length": null,
-              "max_value": null,
-              "min_length": null,
-              "min_value": null,
-              "name": "event",
-              "options": [],
-              "required": true,
-              "type": 3
-            }
-          ],
-          "required": false,
-          "type": 1
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "add",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Preset name",
+            "description_localizations": {
+              "en-US": "Preset name",
+              "pl": "Nazwa szablonu"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "name",
+            "options": [],
+            "required": true,
+            "type": 3
+          },
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Option names, separated by commas",
+            "description_localizations": {
+              "en-US": "Option names, separated by commas",
+              "pl": "Nazwy opcji oddzielone przecinkami"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "options",
+            "options": [],
+            "required": true,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Remove a signup preset",
+        "description_localizations": {
+          "en-US": "Remove a signup preset",
+          "pl": "Usuń szablon zapisu"
         },
-        {
-          "autocomplete": false,
-          "channel_types": [],
-          "choices": [],
-          "description": "Odłącz Kalendarz Google",
-          "max_length": null,
-          "max_value": null,
-          "min_length": null,
-          "min_value": null,
-          "name": "revoke",
-          "options": [],
-          "required": false,
-          "type": 1
-        }
-      ]
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "remove",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Preset name",
+            "description_localizations": {
+              "en-US": "Preset name",
+              "pl": "Nazwa szablonu"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "name",
+            "options": [],
+            "required": true,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Create an event channel",
+    "description_localizations": {
+      "en-US": "Create an event channel",
+      "pl": "Utwórz kanał wydarzeń"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Odwróć kolejność postów na tym kanale wydarzeń",
-      "description_localizations": {},
-      "name": "sort",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
+    "name": "channel",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Channel name",
+        "description_localizations": {
+          "en-US": "Channel name",
+          "pl": "Nazwa kanału"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "name",
+        "options": [],
+        "required": true,
+        "type": 3
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Connect, update, or disconnect a Google Calendar",
+    "description_localizations": {
+      "en-US": "Connect, update, or disconnect a Google Calendar",
+      "pl": "Połącz, zaktualizuj lub odłącz Kalendarz Google"
     },
-    {
-      "contexts": [
-        0
-      ],
-      "description": "Jak działa /event i gdzie są opisane pozostałe komendy",
-      "description_localizations": {},
-      "name": "help",
-      "name_localizations": {},
-      "nsfw": false,
-      "options": []
-    }
-  ]
-}
+    "name": "google",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": [
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Sign in with Google",
+        "description_localizations": {
+          "en-US": "Sign in with Google",
+          "pl": "Zaloguj się przez Google"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "authorize",
+        "options": [],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Keep your Google Calendar updated",
+        "description_localizations": {
+          "en-US": "Keep your Google Calendar updated",
+          "pl": "Aktualizuj Kalendarz Google na bieżąco"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "auto_sync",
+        "options": [
+          {
+            "autocomplete": false,
+            "channel_types": [],
+            "choices": [],
+            "description": "Keep adding and updating events",
+            "description_localizations": {
+              "en-US": "Keep adding and updating events",
+              "pl": "Dodawaj i aktualizuj wydarzenia"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "enabled",
+            "options": [],
+            "required": true,
+            "type": 5
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Add one event to your Google Calendar",
+        "description_localizations": {
+          "en-US": "Add one event to your Google Calendar",
+          "pl": "Dodaj jedno wydarzenie do Kalendarza Google"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "sync",
+        "options": [
+          {
+            "autocomplete": true,
+            "channel_types": [],
+            "choices": [],
+            "description": "The event to add",
+            "description_localizations": {
+              "en-US": "The event to add",
+              "pl": "Wydarzenie do dodania"
+            },
+            "max_length": null,
+            "max_value": null,
+            "min_length": null,
+            "min_value": null,
+            "name": "event",
+            "options": [],
+            "required": true,
+            "type": 3
+          }
+        ],
+        "required": false,
+        "type": 1
+      },
+      {
+        "autocomplete": false,
+        "channel_types": [],
+        "choices": [],
+        "description": "Disconnect Google Calendar",
+        "description_localizations": {
+          "en-US": "Disconnect Google Calendar",
+          "pl": "Odłącz Kalendarz Google"
+        },
+        "max_length": null,
+        "max_value": null,
+        "min_length": null,
+        "min_value": null,
+        "name": "revoke",
+        "options": [],
+        "required": false,
+        "type": 1
+      }
+    ]
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "Reverse the posts in this event channel",
+    "description_localizations": {
+      "en-US": "Reverse the posts in this event channel",
+      "pl": "Odwróć kolejność postów na tym kanale wydarzeń"
+    },
+    "name": "sort",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": []
+  },
+  {
+    "contexts": [
+      0
+    ],
+    "description": "How /event works, and where the other commands are explained",
+    "description_localizations": {
+      "en-US": "How /event works, and where the other commands are explained",
+      "pl": "Jak działa /event i gdzie są opisane pozostałe komendy"
+    },
+    "name": "help",
+    "name_localizations": {},
+    "nsfw": false,
+    "options": []
+  }
+]

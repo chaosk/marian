@@ -456,16 +456,7 @@ async fn register_guild(ctx: &serenity::Context, data: &Data, guild_id: serenity
     if !fresh {
         return;
     }
-    let lang = data
-        .db
-        .get()
-        .ok()
-        .and_then(|mut conn| {
-            let guild = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).ok()??;
-            Some(i18n::lang_of(&mut conn, guild.id))
-        })
-        .unwrap_or_default();
-    if let Err(err) = register_commands(ctx, guild_id, lang).await {
+    if let Err(err) = register_commands(ctx, guild_id).await {
         if let Ok(mut seen) = data.registered.lock() {
             seen.remove(&guild_id.get());
         }

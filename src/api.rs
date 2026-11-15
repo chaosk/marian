@@ -432,15 +432,12 @@ pub fn put_settings(
     s.temp_roles = next.temp_roles;
     s.waitlist = next.waitlist;
     s.calendar_auto_sync = next.calendar_auto_sync;
-    let mut outcome = Outcome::ok();
+    let outcome = Outcome::ok();
     if !next.language.is_empty() {
         let picked = crate::i18n::Lang::from_code(&next.language)
             .ok_or_else(|| OpError::message("That language isn't one Marian writes in."))?;
-        if picked != s.language {
-            s.language = picked;
-            // The slash commands are described in the server's language.
-            outcome.jobs.push(DiscordJob::commands(viewer.guild_id));
-        }
+        // The slash commands list every language, so nothing to register.
+        s.language = picked;
     }
     store::with_tx(conn, |tx| {
         store::set_guild_timezone(tx, viewer.guild_id, &next.timezone)?;
@@ -3271,17 +3268,8 @@ mod tests {
         let changed = put_settings(&mut conn, &viewer, &next).unwrap();
         assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl");
         assert!(
-            matches!(
-                changed.jobs.as_slice(),
-                [DiscordJob::Commands { guild_id: 1, .. }]
-            ),
-            "the commands are described again in Polish"
-        );
-
-        let same = put_settings(&mut conn, &viewer, &next).unwrap();
-        assert!(
-            same.jobs.is_empty(),
-            "nothing to register when the language stays"
+            changed.jobs.is_empty(),
+            "the commands already list Polish, so nothing to register"
         );
 
         next.language = String::new();

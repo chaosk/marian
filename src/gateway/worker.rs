@@ -10,7 +10,6 @@ use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::Instrument;
 
-use crate::i18n;
 use crate::jobs::DiscordJob;
 use crate::leader::Term;
 use crate::store::{self, Connection};
@@ -358,20 +357,16 @@ fn job_kind(job: &DiscordJob) -> (&'static str, i64) {
     }
 }
 
-/// Registers a server's slash commands again, after its language changed on
-/// the web.
+/// Registers a server's slash commands again. Nothing asks for this since the
+/// commands list every language; a job saved before that still runs.
 async fn push_commands(
     db: &store::Db,
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     guild_id: i64,
 ) -> Result<(), Error> {
-    let (discord, lang) = {
+    let discord = {
         let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        let guild = store::guild(&mut conn, guild_id)?;
-        (
-            guild.and_then(|guild| guild.discord_id),
-            i18n::lang_of(&mut conn, guild_id),
-        )
+        store::guild(&mut conn, guild_id)?.and_then(|guild| guild.discord_id)
     };
     let Some(discord) = discord.and_then(|id| id.parse::<u64>().ok()) else {
         return Ok(());
@@ -381,7 +376,7 @@ async fn push_commands(
         .ok()
         .and_then(|slot| slot.clone())
         .ok_or("the bot is not connected")?;
-    register_commands(&http, serenity::GuildId::new(discord), lang).await?;
+    register_commands(&http, serenity::GuildId::new(discord)).await?;
     Ok(())
 }
 
