@@ -1071,8 +1071,7 @@ async fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
     }
     let claimed = {
         let mut db = state.db.get().await.expect("database");
-        store::claim_session_guilds_check(&mut db, &token, Utc::now() - SESSION_GUILDS_TTL)
-            .await
+        store::claim_session_guilds_check(&mut db, &token, Utc::now() - SESSION_GUILDS_TTL).await
     };
     match claimed {
         Ok(true) => {}

@@ -217,10 +217,10 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
 }
 
 async fn complete_channel(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(channel_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(channel_choices(ctx, partial).await)
 }
 
-fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
@@ -279,10 +279,10 @@ async fn deliver(
 }
 
 async fn complete_event(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(event_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(event_choices(ctx, partial).await)
 }
 
-fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
@@ -310,10 +310,10 @@ fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteC
 }
 
 async fn complete_option(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(option_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(option_choices(ctx, partial).await)
 }
 
-fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };

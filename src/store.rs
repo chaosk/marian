@@ -3206,7 +3206,11 @@ mod tests {
         // A page's requests arrive together; only the first asks Discord.
         let mut claims = Vec::new();
         for _ in 0..5 {
-            claims.push(claim_session_guilds_check(&mut conn, "t", stale).await.unwrap());
+            claims.push(
+                claim_session_guilds_check(&mut conn, "t", stale)
+                    .await
+                    .unwrap(),
+            );
         }
         assert_eq!(claims, [true, false, false, false, false]);
         assert!(!claim_session_guilds_check(&mut conn, "missing", stale)
@@ -3214,7 +3218,9 @@ mod tests {
             .unwrap());
         // Five minutes on, the next request claims it again.
         let later = Utc::now() + chrono::Duration::seconds(1);
-        assert!(claim_session_guilds_check(&mut conn, "t", later).await.unwrap());
+        assert!(claim_session_guilds_check(&mut conn, "t", later)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
