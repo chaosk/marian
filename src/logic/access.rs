@@ -17,11 +17,15 @@ pub fn can_create(user: &Membership, settings: &Settings, roles: &[i64]) -> bool
 }
 
 pub fn can_edit(user: &Membership, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
-    user.server_manager || event.created_by == Some(user.id) || holds_any(&settings.role_edit, roles)
+    user.server_manager
+        || event.created_by == Some(user.id)
+        || holds_any(&settings.role_edit, roles)
 }
 
 pub fn can_delete(user: &Membership, event: &Event, settings: &Settings, roles: &[i64]) -> bool {
-    user.server_manager || event.created_by == Some(user.id) || holds_any(&settings.role_delete, roles)
+    user.server_manager
+        || event.created_by == Some(user.id)
+        || holds_any(&settings.role_delete, roles)
 }
 
 /// Whether `actor` may make `role` an event's attendee role. Marian gives
@@ -33,7 +37,11 @@ pub fn may_pick_attendee_role(actor: &Membership, role: &Role) -> bool {
 
 /// Whether Marian may give `role` as `event`'s attendee role: one it made, or
 /// one picked by someone who still manages the server.
-pub fn gives_attendee_role(conn: &mut Connection, event: &Event, role: &Role) -> Result<bool, OpError> {
+pub fn gives_attendee_role(
+    conn: &mut Connection,
+    event: &Event,
+    role: &Role,
+) -> Result<bool, OpError> {
     if role.made_by_marian {
         return Ok(true);
     }
@@ -60,13 +68,22 @@ pub struct Overwrite {
 /// Whether Discord shows a channel to a member whose server-wide permissions
 /// are `base` (@everyone's and their roles' together): @everyone's overwrite
 /// first, then their roles' together, then their own.
-pub fn sees_channel(base: u64, everyone: &str, member: &str, roles: &[String], overwrites: &[Overwrite]) -> bool {
+pub fn sees_channel(
+    base: u64,
+    everyone: &str,
+    member: &str,
+    roles: &[String],
+    overwrites: &[Overwrite],
+) -> bool {
     if base & ADMINISTRATOR != 0 {
         return true;
     }
     let apply = |perms: u64, allow: u64, deny: u64| (perms & !deny) | allow;
     let mut perms = base;
-    if let Some(all) = overwrites.iter().find(|o| !o.member && o.target == everyone) {
+    if let Some(all) = overwrites
+        .iter()
+        .find(|o| !o.member && o.target == everyone)
+    {
         perms = apply(perms, all.allow, all.deny);
     }
     let (allow, deny) = overwrites
@@ -128,7 +145,11 @@ pub fn sight(conn: &mut Connection, member: &Membership) -> Result<Sight, OpErro
 
 /// What a Discord member can see. Someone Marian doesn't know yet sees only
 /// what @everyone does, besides their own overwrites.
-pub fn sight_for_discord(conn: &mut Connection, guild_id: i64, discord_user: &str) -> Result<Sight, OpError> {
+pub fn sight_for_discord(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_user: &str,
+) -> Result<Sight, OpError> {
     match store::membership_by_discord(conn, guild_id, discord_user)? {
         Some(member) => sight(conn, &member),
         None => sight_of(conn, guild_id, 0, discord_user, Vec::new()),
@@ -149,12 +170,17 @@ fn sight_of(
     };
     let (guild_discord, everyone): (Option<String>, Option<i64>) = schema::guilds::table
         .find(guild_id)
-        .select((schema::guilds::discord_id, schema::guilds::everyone_permissions))
+        .select((
+            schema::guilds::discord_id,
+            schema::guilds::everyone_permissions,
+        ))
         .first(conn)?;
     let (Some(guild_discord), Some(everyone)) = (guild_discord, everyone) else {
         return Ok(sight);
     };
-    let base = held.iter().fold(everyone as u64, |base, (_, perms)| base | *perms as u64);
+    let base = held
+        .iter()
+        .fold(everyone as u64, |base, (_, perms)| base | *perms as u64);
     if base & ADMINISTRATOR != 0 {
         return Ok(sight);
     }
@@ -186,7 +212,10 @@ fn sight_of(
         });
     }
     for channel_id in channels {
-        let these = overwrites.get(&channel_id).map(Vec::as_slice).unwrap_or(&[]);
+        let these = overwrites
+            .get(&channel_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if !sees_channel(base, &guild_discord, member_discord, &roles, these) {
             sight.hidden.insert(channel_id);
         }
@@ -201,11 +230,21 @@ mod tests {
     const SEND: u64 = 1 << 11;
 
     fn role(target: &str, allow: u64, deny: u64) -> Overwrite {
-        Overwrite { member: false, target: target.into(), allow, deny }
+        Overwrite {
+            member: false,
+            target: target.into(),
+            allow,
+            deny,
+        }
     }
 
     fn member(target: &str, allow: u64, deny: u64) -> Overwrite {
-        Overwrite { member: true, target: target.into(), allow, deny }
+        Overwrite {
+            member: true,
+            target: target.into(),
+            allow,
+            deny,
+        }
     }
 
     #[test]
@@ -218,20 +257,44 @@ mod tests {
     fn a_private_channel_shows_only_to_the_roles_it_lets_in() {
         let private = [role("1", 0, VIEW_CHANNEL), role("5", VIEW_CHANNEL, 0)];
         assert!(!sees_channel(VIEW_CHANNEL, "1", "9", &[], &private));
-        assert!(!sees_channel(VIEW_CHANNEL, "1", "9", &["6".into()], &private));
-        assert!(sees_channel(VIEW_CHANNEL, "1", "9", &["5".into()], &private));
+        assert!(!sees_channel(
+            VIEW_CHANNEL,
+            "1",
+            "9",
+            &["6".into()],
+            &private
+        ));
+        assert!(sees_channel(
+            VIEW_CHANNEL,
+            "1",
+            "9",
+            &["5".into()],
+            &private
+        ));
     }
 
     #[test]
     fn one_role_letting_in_beats_another_keeping_out() {
         let split = [role("5", VIEW_CHANNEL, 0), role("6", 0, VIEW_CHANNEL)];
-        assert!(sees_channel(VIEW_CHANNEL, "1", "9", &["5".into(), "6".into()], &split));
+        assert!(sees_channel(
+            VIEW_CHANNEL,
+            "1",
+            "9",
+            &["5".into(), "6".into()],
+            &split
+        ));
     }
 
     #[test]
     fn the_members_own_overwrite_comes_last() {
         let kept_out = [role("5", VIEW_CHANNEL, 0), member("9", 0, VIEW_CHANNEL)];
-        assert!(!sees_channel(VIEW_CHANNEL, "1", "9", &["5".into()], &kept_out));
+        assert!(!sees_channel(
+            VIEW_CHANNEL,
+            "1",
+            "9",
+            &["5".into()],
+            &kept_out
+        ));
         let let_in = [role("1", 0, VIEW_CHANNEL), member("9", VIEW_CHANNEL, 0)];
         assert!(sees_channel(VIEW_CHANNEL, "1", "9", &[], &let_in));
         assert!(!sees_channel(VIEW_CHANNEL, "1", "8", &[], &let_in));

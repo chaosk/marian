@@ -4,13 +4,21 @@ use leptos_router::components::Redirect;
 use leptos_router::params::ParamsMap;
 use marian_types as dto;
 
+use crate::cache::{self, show, when, Ready};
 use crate::format::{self, clock_of, status_label, window};
 use crate::widgets::Finder;
-use crate::cache::{self, show, when, Ready};
 use crate::{api, base, head, query, title, A};
 
 /// Statuses an event can have, in the order the Status filter lists them.
-const STATUSES: &[&str] = &["draft", "scheduled", "failed", "posted", "archived", "cancelled", "skipped"];
+const STATUSES: &[&str] = &[
+    "draft",
+    "scheduled",
+    "failed",
+    "posted",
+    "archived",
+    "cancelled",
+    "skipped",
+];
 
 /// The Events page's filters, as the address holds them:
 /// `?status=draft,scheduled&when=upcoming&from=2026-10-01&to=2026-10-31`.
@@ -25,7 +33,10 @@ pub(crate) struct Filters {
 impl Filters {
     pub fn read(map: &ParamsMap) -> Self {
         let listed = map.get("status").unwrap_or_default();
-        let day = |key: &str| map.get(key).and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok());
+        let day = |key: &str| {
+            map.get(key)
+                .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
+        };
         Self {
             status: STATUSES
                 .iter()
@@ -52,20 +63,30 @@ impl Filters {
     }
 
     pub fn drafts() -> Self {
-        Self { status: vec!["draft"], ..Self::default() }
+        Self {
+            status: vec!["draft"],
+            ..Self::default()
+        }
     }
 
     /// Queued posts, including ones that failed to post.
     pub fn scheduled() -> Self {
-        Self { status: vec!["scheduled", "failed"], ..Self::default() }
+        Self {
+            status: vec!["scheduled", "failed"],
+            ..Self::default()
+        }
     }
 
     /// The sidebar's name for these filters, when they are one of its shortcuts.
     fn shortcut(&self) -> Option<&'static str> {
-        [(Self::upcoming(), "Upcoming"), (Self::drafts(), "Drafts"), (Self::scheduled(), "Scheduled posts")]
-            .into_iter()
-            .find(|(filters, _)| filters == self)
-            .map(|(_, name)| name)
+        [
+            (Self::upcoming(), "Upcoming"),
+            (Self::drafts(), "Drafts"),
+            (Self::scheduled(), "Scheduled posts"),
+        ]
+        .into_iter()
+        .find(|(filters, _)| filters == self)
+        .map(|(_, name)| name)
     }
 
     fn is_empty(&self) -> bool {
@@ -181,33 +202,35 @@ pub fn AllEvents() -> impl IntoView {
             },
         )
     });
-    when(move || (server.get(), membership.get(), events.get()).ready(), move |(server, membership, rows)| {
-        let q = query("q");
-        let filters = leptos_router::hooks::use_query_map().with_untracked(Filters::read);
-        let clock = clock_of(&server);
-        let base = base();
-        let lines = rows
-            .items
-            .iter()
-            .cloned()
-            .map(|event| {
-                let href = format!("{base}/events/{}", event.id);
-                let stripe = crate::paint("stripe", event.color.clone());
-                let when = clock.when(event.starts_at);
-                let status = status_label(event.status.as_str());
-                view! {
-                    <tr>
-                        <td class="event-title">{stripe}
-                            <A href=href>{event.title}</A>
-                        </td>
-                        <td class="fit">{when}</td>
-                        <td class="fit"><span class="badge">{status}</span></td>
-                    </tr>
-                }
-            })
-            .collect_view();
-        let narrowed = !filters.is_empty() || !q.is_empty();
-        let empty = rows.items.is_empty().then(|| {
+    when(
+        move || (server.get(), membership.get(), events.get()).ready(),
+        move |(server, membership, rows)| {
+            let q = query("q");
+            let filters = leptos_router::hooks::use_query_map().with_untracked(Filters::read);
+            let clock = clock_of(&server);
+            let base = base();
+            let lines = rows
+                .items
+                .iter()
+                .cloned()
+                .map(|event| {
+                    let href = format!("{base}/events/{}", event.id);
+                    let stripe = crate::paint("stripe", event.color.clone());
+                    let when = clock.when(event.starts_at);
+                    let status = status_label(event.status.as_str());
+                    view! {
+                        <tr>
+                            <td class="event-title">{stripe}
+                                <A href=href>{event.title}</A>
+                            </td>
+                            <td class="fit">{when}</td>
+                            <td class="fit"><span class="badge">{status}</span></td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            let narrowed = !filters.is_empty() || !q.is_empty();
+            let empty = rows.items.is_empty().then(|| {
             let (headline, note) = if narrowed {
                 ("No events match.", "Change the filters or the search above.")
             } else if membership.can_create_event {
@@ -219,47 +242,51 @@ pub fn AllEvents() -> impl IntoView {
                 <tr><td colspan="3" class="empty-row"><strong>{headline}</strong>" "{note}</td></tr>
             }
         });
-        let clear = narrowed.then(|| {
-            let href = format!("{base}/events");
-            view! { <A href=href attr:class="ghost">"Clear filters"</A> }
-        });
-        let heading = filters.shortcut().filter(|_| q.is_empty()).unwrap_or("Events");
-        title(heading);
-        let go_to = {
-            let (base, q) = (base.clone(), q.clone());
-            move |next: Filters| format!("{base}/events{}", next.link(&q, 1))
-        };
-        let pages = {
-            let (base, q, filters) = (base.clone(), q.clone(), filters.clone());
-            move |page: u32| format!("{base}/events{}", filters.link(&q, page))
-        };
-        view! {
-            <div class="page-head">
-                <div><h1>{heading}</h1></div>
-                <div class="page-tools">{clear}<Finder q=q.clone()/></div>
-            </div>
-            <div class="sheet filtered">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>"Title"</th>
-                            <th class="fit">
-                                <WhenFilter filters=filters.clone() go_to=Callback::new({
-                                    let go_to = go_to.clone();
-                                    move |next: Filters| go_to(next)
-                                })/>
-                            </th>
-                            <th class="fit">
-                                <StatusFilter filters=filters.clone() go_to=Callback::new(move |next: Filters| go_to(next))/>
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody>{lines}{empty}</tbody>
-                </table>
-            </div>
-            {pager_with(&rows, pages)}
-        }
-    })
+            let clear = narrowed.then(|| {
+                let href = format!("{base}/events");
+                view! { <A href=href attr:class="ghost">"Clear filters"</A> }
+            });
+            let heading = filters
+                .shortcut()
+                .filter(|_| q.is_empty())
+                .unwrap_or("Events");
+            title(heading);
+            let go_to = {
+                let (base, q) = (base.clone(), q.clone());
+                move |next: Filters| format!("{base}/events{}", next.link(&q, 1))
+            };
+            let pages = {
+                let (base, q, filters) = (base.clone(), q.clone(), filters.clone());
+                move |page: u32| format!("{base}/events{}", filters.link(&q, page))
+            };
+            view! {
+                <div class="page-head">
+                    <div><h1>{heading}</h1></div>
+                    <div class="page-tools">{clear}<Finder q=q.clone()/></div>
+                </div>
+                <div class="sheet filtered">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>"Title"</th>
+                                <th class="fit">
+                                    <WhenFilter filters=filters.clone() go_to=Callback::new({
+                                        let go_to = go_to.clone();
+                                        move |next: Filters| go_to(next)
+                                    })/>
+                                </th>
+                                <th class="fit">
+                                    <StatusFilter filters=filters.clone() go_to=Callback::new(move |next: Filters| go_to(next))/>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody>{lines}{empty}</tbody>
+                    </table>
+                </div>
+                {pager_with(&rows, pages)}
+            }
+        },
+    )
 }
 
 /// A column heading that opens a filter. `on_close` runs whenever it closes,
@@ -322,8 +349,14 @@ fn WhenFilter(filters: Filters, go_to: Callback<Filters, String>) -> impl IntoVi
             }
         }
     };
-    let choices = [(None, "Any time"), (Some(dto::EventWhen::Upcoming), "Upcoming"), (Some(dto::EventWhen::Past), "Past")];
-    let day_input = move |label: &'static str, read: fn(&Filters) -> Option<NaiveDate>, write: fn(&mut Filters, Option<NaiveDate>)| {
+    let choices = [
+        (None, "Any time"),
+        (Some(dto::EventWhen::Upcoming), "Upcoming"),
+        (Some(dto::EventWhen::Past), "Past"),
+    ];
+    let day_input = move |label: &'static str,
+                          read: fn(&Filters) -> Option<NaiveDate>,
+                          write: fn(&mut Filters, Option<NaiveDate>)| {
         view! {
             <label class="field">
                 {label}
@@ -441,33 +474,35 @@ fn event_list(
             },
         )
     });
-    when(move || (server.get(), events.get()).ready(), move |(server, rows)| {
+    when(
+        move || (server.get(), events.get()).ready(),
+        move |(server, rows)| {
             let q = query("q");
-        let clock = clock_of(&server);
-        let base = base();
-        let searchable = !rows.items.is_empty() || !q.is_empty();
-        let body = if !rows.items.is_empty() {
-            let lines = rows
-                .items
-                .iter()
-                .cloned()
-                .map(|event| {
-                    let href = format!("{base}/events/{}", event.id);
-                    let stripe = crate::paint("stripe", event.color.clone());
-                    let when = clock.when(event.starts_at);
-                    let status = status_label(event.status.as_str());
-                    view! {
-                        <tr>
-                            <td class="event-title">{stripe}
-                                <A href=href>{event.title}</A>
-                            </td>
-                            <td class="fit">{when}</td>
-                            <td class="fit"><span class="badge">{status}</span></td>
-                        </tr>
-                    }
-                })
-                .collect_view();
-            view! {
+            let clock = clock_of(&server);
+            let base = base();
+            let searchable = !rows.items.is_empty() || !q.is_empty();
+            let body = if !rows.items.is_empty() {
+                let lines = rows
+                    .items
+                    .iter()
+                    .cloned()
+                    .map(|event| {
+                        let href = format!("{base}/events/{}", event.id);
+                        let stripe = crate::paint("stripe", event.color.clone());
+                        let when = clock.when(event.starts_at);
+                        let status = status_label(event.status.as_str());
+                        view! {
+                            <tr>
+                                <td class="event-title">{stripe}
+                                    <A href=href>{event.title}</A>
+                                </td>
+                                <td class="fit">{when}</td>
+                                <td class="fit"><span class="badge">{status}</span></td>
+                            </tr>
+                        }
+                    })
+                    .collect_view();
+                view! {
                 <div class="sheet">
                     <table>
                         <thead>
@@ -479,20 +514,22 @@ fn event_list(
                 {pager(&rows, &q)}
             }
             .into_any()
-        } else if !q.is_empty() {
-            view! { <section class="empty"><h2>"No matches."</h2></section> }.into_any()
-        } else {
-            view! { <section class="empty"><h2>{empty_title}</h2><p>{empty_body}</p></section> }.into_any()
-        };
-        title(heading);
-        view! {
-            <div class="page-head">
-                <div><h1>{heading}</h1></div>
-                {searchable.then(|| view! { <Finder q=q.clone()/> })}
-            </div>
-            {body}
-        }
-    })
+            } else if !q.is_empty() {
+                view! { <section class="empty"><h2>"No matches."</h2></section> }.into_any()
+            } else {
+                view! { <section class="empty"><h2>{empty_title}</h2><p>{empty_body}</p></section> }
+                    .into_any()
+            };
+            title(heading);
+            view! {
+                <div class="page-head">
+                    <div><h1>{heading}</h1></div>
+                    {searchable.then(|| view! { <Finder q=q.clone()/> })}
+                </div>
+                {body}
+            }
+        },
+    )
 }
 
 #[component]
@@ -520,25 +557,36 @@ pub fn EventActivity() -> impl IntoView {
             .unwrap_or(1);
         (server, id, page)
     });
-    when(move || (event.get(), rows.get()).ready(), move |(event, rows)| {
-        let href = format!("{}/events/{}", base(), event.id);
-        title(format!("Activity · {}", event.title));
-        let body = activity_list(rows, false, "Signups, edits, and posts for this event will show up here.");
-        view! {
-            <div class="page-head">
-                <div>
-                    <h1>"Activity"</h1>
-                    <p class="lede">"For "<A href=href>{event.title.clone()}</A></p>
+    when(
+        move || (event.get(), rows.get()).ready(),
+        move |(event, rows)| {
+            let href = format!("{}/events/{}", base(), event.id);
+            title(format!("Activity · {}", event.title));
+            let body = activity_list(
+                rows,
+                false,
+                "Signups, edits, and posts for this event will show up here.",
+            );
+            view! {
+                <div class="page-head">
+                    <div>
+                        <h1>"Activity"</h1>
+                        <p class="lede">"For "<A href=href>{event.title.clone()}</A></p>
+                    </div>
                 </div>
-            </div>
-            {body}
-        }
-    })
+                {body}
+            }
+        },
+    )
 }
 
 /// A page of activity. On the server's log each line opens its event; an
 /// event's own log has nowhere else to send it.
-fn activity_list(rows: dto::Paged<dto::Activity>, linked: bool, empty_note: &'static str) -> AnyView {
+fn activity_list(
+    rows: dto::Paged<dto::Activity>,
+    linked: bool,
+    empty_note: &'static str,
+) -> AnyView {
     if rows.items.is_empty() {
         return view! { <section class="empty"><h2>"The log is empty."</h2><p>{empty_note}</p></section> }.into_any();
     }
@@ -550,8 +598,12 @@ fn activity_list(rows: dto::Paged<dto::Activity>, linked: bool, empty_note: &'st
         .cloned()
         .map(|row| {
             let line = match row.event_id.filter(|_| linked) {
-                Some(id) => view! { <A href=format!("{base}/events/{id}")>{row.body}</A> }.into_any(),
-                None if linked => view! { <A href=format!("{base}/activity")>{row.body}</A> }.into_any(),
+                Some(id) => {
+                    view! { <A href=format!("{base}/events/{id}")>{row.body}</A> }.into_any()
+                }
+                None if linked => {
+                    view! { <A href=format!("{base}/activity")>{row.body}</A> }.into_any()
+                }
                 None => view! { <span>{row.body}</span> }.into_any(),
             };
             view! {

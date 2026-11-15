@@ -78,7 +78,11 @@ pub mod public {
             .load::<(i64, Uuid)>(conn)?
             .into_iter()
             .collect();
-        Ok(ids.iter().filter_map(|id| found.get(id)).map(Uuid::to_string).collect())
+        Ok(ids
+            .iter()
+            .filter_map(|id| found.get(id))
+            .map(Uuid::to_string)
+            .collect())
     }
 
     pub fn role(conn: &mut Connection, id: Option<i64>) -> Result<Option<String>, OpError> {
@@ -90,7 +94,11 @@ pub mod public {
 
     /// Public role ids from a request, as keys. One that isn't a role in this
     /// server is refused rather than dropped.
-    pub fn role_ids(conn: &mut Connection, guild_id: i64, public: &[String]) -> Result<Vec<i64>, OpError> {
+    pub fn role_ids(
+        conn: &mut Connection,
+        guild_id: i64,
+        public: &[String],
+    ) -> Result<Vec<i64>, OpError> {
         if public.is_empty() {
             return Ok(Vec::new());
         }
@@ -111,9 +119,15 @@ pub mod public {
             .collect()
     }
 
-    pub fn role_id(conn: &mut Connection, guild_id: i64, public: Option<&str>) -> Result<Option<i64>, OpError> {
+    pub fn role_id(
+        conn: &mut Connection,
+        guild_id: i64,
+        public: Option<&str>,
+    ) -> Result<Option<i64>, OpError> {
         match public.filter(|id| !id.trim().is_empty()) {
-            Some(id) => Ok(role_ids(conn, guild_id, &[id.to_string()])?.into_iter().next()),
+            Some(id) => Ok(role_ids(conn, guild_id, &[id.to_string()])?
+                .into_iter()
+                .next()),
             None => Ok(None),
         }
     }
@@ -150,10 +164,16 @@ pub mod public {
     }
 
     /// The keys of an event's options, by public id, for a list sent back to save.
-    pub fn option_ids(conn: &mut Connection, event_id: i64) -> Result<HashMap<String, i64>, OpError> {
+    pub fn option_ids(
+        conn: &mut Connection,
+        event_id: i64,
+    ) -> Result<HashMap<String, i64>, OpError> {
         Ok(schema::signup_options::table
             .filter(schema::signup_options::event_id.eq(event_id))
-            .select((schema::signup_options::public_id, schema::signup_options::id))
+            .select((
+                schema::signup_options::public_id,
+                schema::signup_options::id,
+            ))
             .load::<(Uuid, i64)>(conn)?
             .into_iter()
             .map(|(public, id)| (public.to_string(), id))

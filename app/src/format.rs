@@ -3,7 +3,9 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use marian_types as dto;
 pub use marian_types::labels::{cadence_label, color_name, spots, status_label, weekday_name};
-pub use marian_types::time::{format_day, format_long_date, format_rel, human_duration, human_offset, Clock};
+pub use marian_types::time::{
+    format_day, format_long_date, format_rel, human_duration, human_offset, Clock,
+};
 
 pub fn clock_of(server: &dto::Server) -> Clock {
     Clock::new(&server.timezone, server.hour_24)
@@ -28,7 +30,10 @@ pub fn week_of(clock: &Clock, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Ut
     use chrono::Datelike;
     let today = clock.day(now);
     let monday = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
-    (midnight(clock, monday), midnight(clock, monday + Duration::days(7)))
+    (
+        midnight(clock, monday),
+        midnight(clock, monday + Duration::days(7)),
+    )
 }
 
 fn midnight(clock: &Clock, date: NaiveDate) -> DateTime<Utc> {
@@ -108,7 +113,14 @@ mod tests {
             per_page: 25,
         };
         assert_eq!(window(&first), "1–2 of 2");
-        assert_eq!(time_line(&clock_utc(), Utc.with_ymd_and_hms(2026, 1, 1, 19, 0, 0).unwrap(), 120), "19:00 – 21:00 (2 hours)");
+        assert_eq!(
+            time_line(
+                &clock_utc(),
+                Utc.with_ymd_and_hms(2026, 1, 1, 19, 0, 0).unwrap(),
+                120
+            ),
+            "19:00 – 21:00 (2 hours)"
+        );
     }
 
     fn clock_utc() -> Clock {

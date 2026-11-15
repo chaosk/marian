@@ -3,8 +3,8 @@ use marian_types as dto;
 
 use crate::cache::{self, when};
 use crate::client;
-use crate::widgets::Flash;
 use crate::shell::Brand;
+use crate::widgets::Flash;
 use crate::{api, query, status, title, A};
 
 const GUIDE: &str = include_str!("../guide.html");
@@ -71,7 +71,10 @@ fn server_picker(me: dto::Me) -> impl IntoView {
         match open {
             Some(id) => navigate(
                 &format!("/servers/{id}"),
-                leptos_router::NavigateOptions { replace: true, ..Default::default() },
+                leptos_router::NavigateOptions {
+                    replace: true,
+                    ..Default::default()
+                },
             ),
             None => {
                 // Gone from Marian, or no longer theirs: no reason to keep it.
@@ -88,7 +91,13 @@ fn server_picker(me: dto::Me) -> impl IntoView {
             .get_value()
             .into_iter()
             .map(|server| {
-                let initial = server.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let initial = server
+                    .name
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
                 view! {
                     <li>
                         <A href=format!("/servers/{}", server.id) attr:class="server-pick">
@@ -146,7 +155,11 @@ pub fn Help() -> impl IntoView {
 pub fn NotFound() -> impl IntoView {
     status(404);
     title("Missing");
-    crate::shell::lost("That page isn't here.", "The address may be mistyped, or the page has moved.", false)
+    crate::shell::lost(
+        "That page isn't here.",
+        "The address may be mistyped, or the page has moved.",
+        false,
+    )
 }
 
 /// Something a page asked for that isn't there, said where the page would have shown it.

@@ -1,4 +1,3 @@
-
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -9,13 +8,11 @@ use diesel::upsert::excluded;
 use crate::clock;
 use crate::error::OpError;
 use crate::i18n::{self, Lang};
-use crate::tr;
-use crate::logic::{
-    self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction,
-};
+use crate::logic::{self, EventInput, OptionInput, ReminderInput, RepeatSpec, SaveAction};
 use crate::parse;
 use crate::schema;
 use crate::store::{self, Connection, Event};
+use crate::tr;
 use crate::values::{Cadence, ChannelKind, Digest, EventRoleKind, EventStatus, PromptStep};
 
 fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String {
@@ -26,7 +23,12 @@ fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String
 }
 
 /// An event in the server named by public id, if `sight` takes in its channel.
-fn find_event(conn: &mut Connection, guild_id: i64, sight: &logic::Sight, token: &str) -> Result<Event, OpError> {
+fn find_event(
+    conn: &mut Connection,
+    guild_id: i64,
+    sight: &logic::Sight,
+    token: &str,
+) -> Result<Event, OpError> {
     if crate::ids::parse_event_id(token).is_some() {
         if let Some(event) = store::event_by_public(conn, token)? {
             if event.guild_id == guild_id && sight.sees_event(&event) {
@@ -43,7 +45,11 @@ fn member_sight(conn: &mut Connection, membership_id: i64) -> Result<logic::Sigh
 }
 
 /// The server's channels the Discord member can see.
-fn seen_channels(conn: &mut Connection, guild_id: i64, discord_user_id: &str) -> Result<Vec<store::Channel>, OpError> {
+fn seen_channels(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_user_id: &str,
+) -> Result<Vec<store::Channel>, OpError> {
     let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
     Ok(store::list_channels(conn, guild_id)?
         .into_iter()
@@ -164,7 +170,9 @@ const ZONE: [&str; 2] = ["timezone", "strefa"];
 const EVERYONE: [&str; 2] = ["everyone", "wszyscy"];
 
 fn said(text: &str, words: &[&str]) -> bool {
-    words.iter().any(|word| text.trim().eq_ignore_ascii_case(word))
+    words
+        .iter()
+        .any(|word| text.trim().eq_ignore_ascii_case(word))
 }
 
 impl std::fmt::Display for DmReply {
@@ -314,12 +322,18 @@ pub fn answer_event_dm(
             lang,
         ),
         PromptStep::ChannelOther => {
-            let others = other_channels(conn, guild_id, discord_user_id, source_channel.as_deref())?;
+            let others =
+                other_channels(conn, guild_id, discord_user_id, source_channel.as_deref())?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(channel) = choice.and_then(|n| others.get(n - 1)) else {
                 return just(other_channel_prompt(&others, lang));
             };
-            just(advance_to_title(conn, discord_user_id, &channel.name, lang)?)
+            just(advance_to_title(
+                conn,
+                discord_user_id,
+                &channel.name,
+                lang,
+            )?)
         }
         PromptStep::Title => {
             if text.is_empty() || text.chars().count() > 120 {
@@ -338,7 +352,10 @@ pub fn answer_event_dm(
         }
         PromptStep::Description => {
             if text.chars().count() > 2000 {
-                return just(note(&description_card(lang), &tr!(lang, "err-description-length")));
+                return just(note(
+                    &description_card(lang),
+                    &tr!(lang, "err-description-length"),
+                ));
             }
             draft.description = if said(text, &NONE) {
                 String::new()
@@ -430,7 +447,9 @@ pub fn answer_event_dm(
             public_url,
             lang,
         ),
-        PromptStep::Signup => answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        PromptStep::Signup => {
+            answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang)
+        }
         PromptStep::SignupCustom => {
             let names: Vec<&str> = text
                 .split(',')
@@ -469,7 +488,9 @@ pub fn answer_event_dm(
             save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        PromptStep::Mention => answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        PromptStep::Mention => {
+            answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang)
+        }
         PromptStep::Image => {
             if said(text, &NONE) {
                 draft.image_url = None;
@@ -492,8 +513,12 @@ pub fn answer_event_dm(
             save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        PromptStep::Restrict => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang),
-        PromptStep::Role => answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang),
+        PromptStep::Restrict => {
+            answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang)
+        }
+        PromptStep::Role => {
+            answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang)
+        }
         PromptStep::Cutoff => answer_clock_field(
             conn,
             discord_user_id,
@@ -529,8 +554,18 @@ pub fn answer_event_dm(
             save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
             just(finish_card(&draft, lang))
         }
-        PromptStep::Next => answer_next(conn, discord_user_id, membership_id, text, &draft, public_url, lang),
-        PromptStep::Respond => answer_respond(conn, discord_user_id, membership_id, text, &draft, lang),
+        PromptStep::Next => answer_next(
+            conn,
+            discord_user_id,
+            membership_id,
+            text,
+            &draft,
+            public_url,
+            lang,
+        ),
+        PromptStep::Respond => {
+            answer_respond(conn, discord_user_id, membership_id, text, &draft, lang)
+        }
     }
 }
 
@@ -633,11 +668,19 @@ fn note(card: &DmReply, line: &str) -> DmReply {
 }
 
 fn title_card(lang: Lang) -> DmReply {
-    ask(&tr!(lang, "dm-title-title"), &tr!(lang, "dm-title-body"), lang)
+    ask(
+        &tr!(lang, "dm-title-title"),
+        &tr!(lang, "dm-title-body"),
+        lang,
+    )
 }
 
 fn description_card(lang: Lang) -> DmReply {
-    ask(&tr!(lang, "dm-description-title"), &tr!(lang, "dm-description-body"), lang)
+    ask(
+        &tr!(lang, "dm-description-title"),
+        &tr!(lang, "dm-description-body"),
+        lang,
+    )
 }
 
 fn end_card(lang: Lang) -> DmReply {
@@ -645,18 +688,34 @@ fn end_card(lang: Lang) -> DmReply {
 }
 
 fn image_card(lang: Lang) -> DmReply {
-    ask(&tr!(lang, "dm-image-title"), &tr!(lang, "dm-image-body"), lang)
+    ask(
+        &tr!(lang, "dm-image-title"),
+        &tr!(lang, "dm-image-body"),
+        lang,
+    )
 }
 
 fn reminder_card(lang: Lang) -> DmReply {
-    ask(&tr!(lang, "dm-reminder-title"), &tr!(lang, "dm-reminder-body"), lang)
+    ask(
+        &tr!(lang, "dm-reminder-title"),
+        &tr!(lang, "dm-reminder-body"),
+        lang,
+    )
 }
 
 fn clock_card(cutoff: bool, lang: Lang) -> DmReply {
     if cutoff {
-        ask(&tr!(lang, "dm-cutoff-title"), &tr!(lang, "dm-cutoff-body"), lang)
+        ask(
+            &tr!(lang, "dm-cutoff-title"),
+            &tr!(lang, "dm-cutoff-body"),
+            lang,
+        )
     } else {
-        ask(&tr!(lang, "dm-post-title"), &tr!(lang, "dm-post-body"), lang)
+        ask(
+            &tr!(lang, "dm-post-title"),
+            &tr!(lang, "dm-post-body"),
+            lang,
+        )
     }
 }
 
@@ -683,7 +742,10 @@ struct DraftType {
 
 fn draft_type(conn: &mut Connection, type_id: i64) -> Result<DraftType, OpError> {
     let kind = store::library_type(conn, type_id)?.ok_or(OpError::NotFound)?;
-    Ok(DraftType { type_id, name: kind.name })
+    Ok(DraftType {
+        type_id,
+        name: kind.name,
+    })
 }
 
 fn finish_card(draft: &EventDraft, lang: Lang) -> DmReply {
@@ -765,7 +827,11 @@ fn next_card(note_line: Option<&str>, lang: Lang) -> DmReply {
     };
     DmReply::card(
         tr!(lang, "dm-next-title"),
-        format!("{body}\n\n{}\n{}", tr!(lang, "dm-pick-number"), tr!(lang, "dm-exit")),
+        format!(
+            "{body}\n\n{}\n{}",
+            tr!(lang, "dm-pick-number"),
+            tr!(lang, "dm-exit")
+        ),
     )
 }
 
@@ -815,7 +881,10 @@ fn preset_card(presets: &[store::Preset], lang: Lang) -> DmReply {
 fn role_step(step: PromptStep, lang: Lang) -> (String, String) {
     match step {
         PromptStep::Mention => (tr!(lang, "dm-finish-mention"), tr!(lang, "dm-mention-hint")),
-        PromptStep::Restrict => (tr!(lang, "dm-finish-restrict"), tr!(lang, "dm-restrict-hint")),
+        PromptStep::Restrict => (
+            tr!(lang, "dm-finish-restrict"),
+            tr!(lang, "dm-restrict-hint"),
+        ),
         _ => (tr!(lang, "dm-finish-role"), tr!(lang, "dm-role-hint")),
     }
 }
@@ -885,9 +954,21 @@ fn answer_channel(
         let channels = seen_channels(conn, guild_id, discord_user_id)?;
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(channel) = choice.and_then(|n| channels.get(n - 1)) else {
-            return just(where_to_post(conn, guild_id, discord_user_id, &None, &None, lang)?);
+            return just(where_to_post(
+                conn,
+                guild_id,
+                discord_user_id,
+                &None,
+                &None,
+                lang,
+            )?);
         };
-        return just(advance_to_title(conn, discord_user_id, &channel.name, lang)?);
+        return just(advance_to_title(
+            conn,
+            discord_user_id,
+            &channel.name,
+            lang,
+        )?);
     };
     let source_owned = Some(source.to_string());
     let discord_owned = source_discord.map(str::to_string);
@@ -1146,7 +1227,10 @@ fn answer_clock_field(
             draft.post_raw = None;
         }
     } else if parse::parse_when(text, Utc::now(), tz).is_none() {
-        return just(note(&clock_card(cutoff, lang), &tr!(lang, "dm-time-unreadable")));
+        return just(note(
+            &clock_card(cutoff, lang),
+            &tr!(lang, "dm-time-unreadable"),
+        ));
     } else if cutoff {
         if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz)) {
             if let Some(when) = parse::parse_when(text, Utc::now(), tz) {
@@ -1206,7 +1290,14 @@ fn finish_event(
     let (options, multiple) = if draft.types.is_empty() {
         logic::starting_options(conn, guild_id)?
     } else {
-        (draft.types.iter().map(|kind| OptionInput::of_type(kind.type_id)).collect(), draft.multiple)
+        (
+            draft
+                .types
+                .iter()
+                .map(|kind| OptionInput::of_type(kind.type_id))
+                .collect(),
+            draft.multiple,
+        )
     };
     let duration = if draft.duration_minutes == 0 {
         60
@@ -1221,7 +1312,9 @@ fn finish_event(
             guild_id,
             actor_id: membership_id,
             channel_id: channel.id,
-            title: title.map(str::to_string).unwrap_or_else(|| tr!(lang, "post-event-fallback")),
+            title: title
+                .map(str::to_string)
+                .unwrap_or_else(|| tr!(lang, "post-event-fallback")),
             description: draft.description.clone(),
             location: String::new(),
             starts_at,
@@ -1357,9 +1450,7 @@ fn picked_roles(text: &str, roles: &[store::Role], lang: Lang) -> Result<Vec<i64
         if part.is_empty() {
             continue;
         }
-        let n: usize = part
-            .parse()
-            .map_err(|_| tr!(lang, "dm-send-numbers"))?;
+        let n: usize = part.parse().map_err(|_| tr!(lang, "dm-send-numbers"))?;
         if n == 0 {
             return Err(tr!(lang, "dm-pick-from-list"));
         }
@@ -1483,7 +1574,11 @@ fn numbered_prompt(heading: &str, lines: &[String], lang: Lang) -> DmReply {
         .join("\n");
     DmReply::card(
         heading,
-        format!("{body}\n\n{}\n{}", tr!(lang, "dm-pick-number"), tr!(lang, "dm-exit")),
+        format!(
+            "{body}\n\n{}\n{}",
+            tr!(lang, "dm-pick-number"),
+            tr!(lang, "dm-exit")
+        ),
     )
 }
 
@@ -1667,7 +1762,9 @@ pub fn roster_action(
     let sight = logic::sight(conn, &actor)?;
     let event = find_event(conn, actor.guild_id, &sight, event_token)?;
     let option = resolve_option(conn, &event, option_token)?;
-    let notice = logic::editor_response(conn, event.id, actor_id, target_id, option.id, action, guests)?;
+    let notice = logic::editor_response(
+        conn, event.id, actor_id, target_id, option.id, action, guests,
+    )?;
     Ok((notice.render(lang), event.id))
 }
 
@@ -1681,7 +1778,11 @@ fn resolve_option(
     if let Some(opt) = options
         .iter()
         .find(|opt| opt.public_id.to_string() == token.trim())
-        .or_else(|| options.iter().find(|opt| opt.name.eq_ignore_ascii_case(token)))
+        .or_else(|| {
+            options
+                .iter()
+                .find(|opt| opt.name.eq_ignore_ascii_case(token))
+        })
     {
         return Ok(opt.clone());
     }
@@ -1838,7 +1939,9 @@ pub fn apply_setting(
             } else {
                 vec![
                     store::role_by_name(conn, guild_id, &name)?
-                        .ok_or_else(|| OpError::from(crate::msg!("err-no-role", name = name.as_str())))?
+                        .ok_or_else(|| {
+                            OpError::from(crate::msg!("err-no-role", name = name.as_str()))
+                        })?
                         .id,
                 ]
             };
@@ -1848,13 +1951,19 @@ pub fn apply_setting(
                 "delete" => settings.role_delete = role_id,
                 "channel" => settings.role_channel = role_id,
                 "signup_options" | "signup" => settings.role_signup = role_id,
-                other => return Err(OpError::from(crate::msg!("err-unknown-role-setting", name = other))),
+                other => {
+                    return Err(OpError::from(crate::msg!(
+                        "err-unknown-role-setting",
+                        name = other
+                    )))
+                }
             }
             "role"
         }
         Setting::Language(code) => {
-            let picked = Lang::from_code(&code)
-                .ok_or_else(|| OpError::from(crate::msg!("err-unknown-language", code = code.as_str())))?;
+            let picked = Lang::from_code(&code).ok_or_else(|| {
+                OpError::from(crate::msg!("err-unknown-language", code = code.as_str()))
+            })?;
             settings.language = picked;
             // The reply is in the language just picked.
             lang = picked;
@@ -1887,7 +1996,11 @@ pub fn add_library_option(
     attending: bool,
     lang: Lang,
 ) -> Result<String, OpError> {
-    let emoji = if emoji.trim().is_empty() { "•" } else { emoji.trim() };
+    let emoji = if emoji.trim().is_empty() {
+        "•"
+    } else {
+        emoji.trim()
+    };
     match store::library_type_named(conn, guild_id, name)? {
         Some(existing) => {
             logic::update_type(
@@ -1900,7 +2013,12 @@ pub fn add_library_option(
                     attending: existing.attending,
                 },
             )?;
-            Ok(tr!(lang, "reply-library-kept", emoji = emoji, name = &existing.name))
+            Ok(tr!(
+                lang,
+                "reply-library-kept",
+                emoji = emoji,
+                name = &existing.name
+            ))
         }
         None => {
             let made = logic::add_type(
@@ -1913,7 +2031,12 @@ pub fn add_library_option(
                     attending,
                 },
             )?;
-            Ok(tr!(lang, "reply-library-saved", emoji = &made.emoji, name = &made.name))
+            Ok(tr!(
+                lang,
+                "reply-library-saved",
+                emoji = &made.emoji,
+                name = &made.name
+            ))
         }
     }
 }
@@ -1955,8 +2078,14 @@ pub fn add_preset(
     lang: Lang,
 ) -> Result<String, OpError> {
     let mut types = Vec::new();
-    for part in options.split(',').map(str::trim).filter(|part| !part.is_empty()) {
-        types.push(OptionInput::of_type(logic::ensure_type(conn, guild_id, part, "•", true)?));
+    for part in options
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        types.push(OptionInput::of_type(logic::ensure_type(
+            conn, guild_id, part, "•", true,
+        )?));
     }
     logic::save_preset(
         conn,
@@ -1999,9 +2128,7 @@ fn public_base() -> String {
 fn person_user_id(conn: &mut Connection, membership_id: i64) -> Result<i64, OpError> {
     store::membership(conn, membership_id)?
         .map(|membership| membership.user_id)
-        .ok_or_else(|| {
-            OpError::from(crate::msg!("err-google-needs-account"))
-        })
+        .ok_or_else(|| OpError::from(crate::msg!("err-google-needs-account")))
 }
 
 pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
@@ -2062,7 +2189,10 @@ pub fn google_sync(
 ) -> Result<String, OpError> {
     let sight = member_sight(conn, membership_id)?;
     let event = find_event(conn, guild_id, &sight, event)?;
-    if !matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived) {
+    if !matches!(
+        event.status,
+        EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
+    ) {
         return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
     let user_id = person_user_id(conn, membership_id)?;
@@ -2193,10 +2323,21 @@ mod tests {
         let choices = response_options(&mut conn, 1, "100", &token, "heal").unwrap();
         assert_eq!(choices.len(), 1);
         let picked = &choices[0].value;
-        assert_eq!(uuid::Uuid::parse_str(picked).unwrap().get_version_num(), 7, "not a row number");
+        assert_eq!(
+            uuid::Uuid::parse_str(picked).unwrap().get_version_num(),
+            7,
+            "not a row number"
+        );
         roster_action(&mut conn, 1, &token, 2, picked, "add", None, Lang::En).unwrap();
-        let healer = store::options_for(&mut conn, &event).unwrap().into_iter().find(|opt| opt.name == "Healer").unwrap();
-        assert!(store::signups_for(&mut conn, &event).unwrap().iter().any(|s| s.option_id == healer.id && s.membership_id == 2));
+        let healer = store::options_for(&mut conn, &event)
+            .unwrap()
+            .into_iter()
+            .find(|opt| opt.name == "Healer")
+            .unwrap();
+        assert!(store::signups_for(&mut conn, &event)
+            .unwrap()
+            .iter()
+            .any(|s| s.option_id == healer.id && s.membership_id == 2));
         // A typed name still works.
         roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En).unwrap();
     }
@@ -2215,33 +2356,58 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
-        let switched = apply_setting(&mut conn, 1, 1, Setting::Language("pl".into()), Lang::En).unwrap();
-        assert_eq!(switched, "Zaktualizowano ustawienie language.", "the reply is in the new language");
+        let switched =
+            apply_setting(&mut conn, 1, 1, Setting::Language("pl".into()), Lang::En).unwrap();
+        assert_eq!(
+            switched, "Zaktualizowano ustawienie language.",
+            "the reply is in the new language"
+        );
         assert_eq!(i18n::lang_of(&mut conn, 1), Lang::Pl);
 
         let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::Pl).unwrap();
-        assert_eq!(first.title.as_deref(), Some("Gdzie opublikować to wydarzenie?"));
-        assert!(first.body.contains("**1** Na obecnym kanale, <#99>"), "{first}");
+        assert_eq!(
+            first.title.as_deref(),
+            Some("Gdzie opublikować to wydarzenie?")
+        );
+        assert!(
+            first.body.contains("**1** Na obecnym kanale, <#99>"),
+            "{first}"
+        );
         assert!(first.body.ends_with("Aby wyjść, wpisz „anuluj”"), "{first}");
         let title = only(answer_event_dm(&mut conn, "u1", "1", ""));
         assert_eq!(title.title.as_deref(), Some("Podaj tytuł wydarzenia"));
         only(answer_event_dm(&mut conn, "u1", "Sprzątanie plaży", ""));
         let start = only(answer_event_dm(&mut conn, "u1", "brak", ""));
-        assert_eq!(start.title.as_deref(), Some("Kiedy wydarzenie ma się zacząć?"));
+        assert_eq!(
+            start.title.as_deref(),
+            Some("Kiedy wydarzenie ma się zacząć?")
+        );
         let again = only(answer_event_dm(&mut conn, "u1", "kiedyś", ""));
-        assert!(again.body.starts_with("Marian nie rozumie tej godziny."), "{again}");
+        assert!(
+            again.body.starts_with("Marian nie rozumie tej godziny."),
+            "{again}"
+        );
         let end = only(answer_event_dm(&mut conn, "u1", "jutro o 16", ""));
         assert_eq!(end.title.as_deref(), Some("Kiedy wydarzenie się kończy?"));
         let repeat = only(answer_event_dm(&mut conn, "u1", "2 godziny", ""));
-        assert_eq!(repeat.title.as_deref(), Some("Jak często wydarzenie ma się powtarzać?"));
+        assert_eq!(
+            repeat.title.as_deref(),
+            Some("Jak często wydarzenie ma się powtarzać?")
+        );
         assert!(repeat.body.contains("**3** Co tydzień"), "{repeat}");
         let finish = only(answer_event_dm(&mut conn, "u1", "1", ""));
         assert_eq!(finish.title.as_deref(), Some("Zakończ albo dostosuj"));
-        assert!(finish.body.contains("**11** Ustaw przypomnienia"), "{finish}");
+        assert!(
+            finish.body.contains("**11** Ustaw przypomnienia"),
+            "{finish}"
+        );
         let posted = answer_event_dm(&mut conn, "u1", "1", "https://marian.example.com")
             .unwrap()
             .unwrap();
-        assert_eq!(posted[0].title.as_deref(), Some("Wydarzenie zostało utworzone!"));
+        assert_eq!(
+            posted[0].title.as_deref(),
+            Some("Wydarzenie zostało utworzone!")
+        );
         assert_eq!(posted[0].created, Some(Lang::Pl));
         assert_eq!(posted[1].title.as_deref(), Some("Co chcesz zrobić?"));
 
@@ -2250,12 +2416,20 @@ mod tests {
         assert_eq!(event.title, "Sprzątanie plaży");
         assert_eq!(event.duration_minutes, 120);
         let local = event.starts_at.with_timezone(&chrono_tz::Europe::Warsaw);
-        assert_eq!(chrono::Timelike::hour(&local), 16, "jutro o 16 is 16:00 in Warsaw");
+        assert_eq!(
+            chrono::Timelike::hour(&local),
+            16,
+            "jutro o 16 is 16:00 in Warsaw"
+        );
         let view = logic::discord_view(&mut conn, id, "https://marian.example.com")
             .unwrap()
             .unwrap();
         assert!(view.body.contains("**Czas**"), "{}", view.body);
-        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
+        assert!(
+            !view.body.contains("marian.example.com"),
+            "the web link is a button: {}",
+            view.body
+        );
         assert_eq!(view.footer, "Utworzone przez Nell");
 
         let mut sent = posted;
@@ -2266,8 +2440,15 @@ mod tests {
         );
 
         let unknown = find_event(&mut conn, 1, &logic::Sight::default(), "nope").unwrap_err();
-        assert_eq!(unknown.to_string(), "That event isn't in this server.", "the web reads English");
-        assert_eq!(unknown.localized(Lang::Pl), "Tego wydarzenia nie ma na tym serwerze.");
+        assert_eq!(
+            unknown.to_string(),
+            "That event isn't in this server.",
+            "the web reads English"
+        );
+        assert_eq!(
+            unknown.localized(Lang::Pl),
+            "Tego wydarzenia nie ma na tym serwerze."
+        );
     }
 
     #[test]
@@ -2364,7 +2545,11 @@ mod tests {
             .unwrap();
         assert_eq!(view.channel_id, "100");
         assert!(view.body.contains("**Time**"), "{}", view.body);
-        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
+        assert!(
+            !view.body.contains("marian.example.com"),
+            "the web link is a button: {}",
+            view.body
+        );
         assert!(view
             .body
             .contains("[+](http://www.google.com/calendar/event"),);
@@ -2382,14 +2567,22 @@ mod tests {
                 && button.emoji == "✅"
                 && button.tone == logic::ButtonTone::Secondary
         }));
-        let web = format!("https://marian.example.com/servers/4242/events/{}", event.public_id);
+        let web = format!(
+            "https://marian.example.com/servers/4242/events/{}",
+            event.public_id
+        );
         assert_eq!(
-            view.buttons.last().map(|button| (&button.role, button.label.as_str())),
+            view.buttons
+                .last()
+                .map(|button| (&button.role, button.label.as_str())),
             Some((&logic::ButtonRole::Web(web), "↗")),
             "the event's page is the last button"
         );
         assert!(view.buttons[..view.buttons.len() - 1].iter().all(|button| {
-            matches!(button.role, logic::ButtonRole::Signup(_) | logic::ButtonRole::Guests(_))
+            matches!(
+                button.role,
+                logic::ButtonRole::Signup(_) | logic::ButtonRole::Guests(_)
+            )
         }));
         assert_eq!(
             posted[1].title.as_deref(),
@@ -2403,7 +2596,12 @@ mod tests {
         );
         assert_eq!(sent[1].title.as_deref(), Some("What would you like to do?"));
 
-        let duplicated = only(answer_event_dm(&mut conn, "u1", "4", "https://marian.example.com"));
+        let duplicated = only(answer_event_dm(
+            &mut conn,
+            "u1",
+            "4",
+            "https://marian.example.com",
+        ));
         let copy = store::list_events(&mut conn, 1)
             .unwrap()
             .into_iter()

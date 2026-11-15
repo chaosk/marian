@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::access::can_edit;
-use super::db::{lock_event, log, must_event, must_option, must_role, must_membership, role_names};
+use super::db::{lock_event, log, must_event, must_membership, must_option, must_role, role_names};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event};
@@ -18,7 +18,9 @@ pub fn signup(
     option_id: i64,
     membership_id: i64,
 ) -> Result<crate::i18n::Msg, OpError> {
-    store::with_tx(conn, |tx| signup_tx(tx, event_id, option_id, membership_id, None))
+    store::with_tx(conn, |tx| {
+        signup_tx(tx, event_id, option_id, membership_id, None)
+    })
 }
 
 /// A "+X" signup: signs the person up with `guests`, or changes how many guests
@@ -30,7 +32,9 @@ pub fn signup_guests(
     membership_id: i64,
     guests: i64,
 ) -> Result<crate::i18n::Msg, OpError> {
-    store::with_tx(conn, |tx| signup_tx(tx, event_id, option_id, membership_id, Some(guests)))
+    store::with_tx(conn, |tx| {
+        signup_tx(tx, event_id, option_id, membership_id, Some(guests))
+    })
 }
 
 fn signup_tx(
@@ -56,7 +60,10 @@ fn signup_tx(
     if let Some(existing) = find_signup(conn, option_id, membership_id)? {
         if let Some(guests) = guests {
             if event.signups_closed || cutoff_passed(&event, now) {
-                return Err(OpError::from(crate::msg!("err-signups-closed", title = &event.title)));
+                return Err(OpError::from(crate::msg!(
+                    "err-signups-closed",
+                    title = &event.title
+                )));
             }
             return set_guests(conn, &event, &option, &user, existing, guests, now);
         }
@@ -66,7 +73,11 @@ fn signup_tx(
         fill_all(conn, &event)?;
         sync_access(conn, event.id)?;
         let notice = if state == SignupState::Waitlisted {
-            crate::msg!("notice-left-waitlist", name = &user.name, option = &option.name)
+            crate::msg!(
+                "notice-left-waitlist",
+                name = &user.name,
+                option = &option.name
+            )
         } else {
             crate::msg!("notice-left", name = &user.name, option = &option.name)
         };
@@ -74,7 +85,10 @@ fn signup_tx(
         return Ok(notice);
     }
     if event.signups_closed || cutoff_passed(&event, now) {
-        return Err(OpError::from(crate::msg!("err-signups-closed", title = &event.title)));
+        return Err(OpError::from(crate::msg!(
+            "err-signups-closed",
+            title = &event.title
+        )));
     }
     let restricts = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
     if !restricts.is_empty() && !user.server_manager {
@@ -128,12 +142,29 @@ fn signup_tx(
     sync_access(conn, event.id)?;
     let (name, option_name) = (&user.name, &option.name);
     let notice = match (state, moved, guests) {
-        (SignupState::Waitlisted, _, 0) => crate::msg!("notice-waiting", name = name, option = option_name),
-        (SignupState::Waitlisted, _, _) => crate::msg!("notice-waiting-guests", name = name, option = option_name, guests = guests),
+        (SignupState::Waitlisted, _, 0) => {
+            crate::msg!("notice-waiting", name = name, option = option_name)
+        }
+        (SignupState::Waitlisted, _, _) => crate::msg!(
+            "notice-waiting-guests",
+            name = name,
+            option = option_name,
+            guests = guests
+        ),
         (_, true, 0) => crate::msg!("notice-moved", name = name, option = option_name),
-        (_, true, _) => crate::msg!("notice-moved-guests", name = name, option = option_name, guests = guests),
+        (_, true, _) => crate::msg!(
+            "notice-moved-guests",
+            name = name,
+            option = option_name,
+            guests = guests
+        ),
         (_, false, 0) => crate::msg!("notice-signed-up", name = name, option = option_name),
-        (_, false, _) => crate::msg!("notice-signed-up-guests", name = name, option = option_name, guests = guests),
+        (_, false, _) => crate::msg!(
+            "notice-signed-up-guests",
+            name = name,
+            option = option_name,
+            guests = guests
+        ),
     };
     log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
     Ok(notice)
@@ -189,9 +220,19 @@ fn set_guests(
     fill_all(conn, event)?;
     sync_access(conn, event.id)?;
     let notice = if state == SignupState::Waitlisted && existing.state == SignupState::Confirmed {
-        crate::msg!("notice-guests-waiting", name = &user.name, option = &option.name, size = size)
+        crate::msg!(
+            "notice-guests-waiting",
+            name = &user.name,
+            option = &option.name,
+            size = size
+        )
     } else {
-        crate::msg!("notice-guests", name = &user.name, option = &option.name, guests = guests)
+        crate::msg!(
+            "notice-guests",
+            name = &user.name,
+            option = &option.name,
+            guests = guests
+        )
     };
     log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
     Ok(notice)
@@ -205,7 +246,11 @@ pub struct GuestsForm {
     pub current: Option<i64>,
 }
 
-pub fn guests_form(conn: &mut Connection, option_id: i64, membership_id: i64) -> Result<GuestsForm, OpError> {
+pub fn guests_form(
+    conn: &mut Connection,
+    option_id: i64,
+    membership_id: i64,
+) -> Result<GuestsForm, OpError> {
     let option = must_option(conn, option_id)?;
     let current = find_signup(conn, option_id, membership_id)?.map(|signup| signup.guests);
     Ok(GuestsForm {
@@ -220,7 +265,10 @@ fn check_guests(option: &store::SignupOption, guests: i64) -> Result<(), OpError
         return Ok(());
     }
     if option.max_guests == 0 {
-        return Err(OpError::from(crate::msg!("err-guests-off", option = &option.name)));
+        return Err(OpError::from(crate::msg!(
+            "err-guests-off",
+            option = &option.name
+        )));
     }
     if !(0..=option.max_guests).contains(&guests) {
         return Err(OpError::from(crate::msg!(
@@ -262,7 +310,10 @@ fn place(
             left = cap - used,
         )));
     }
-    Err(OpError::from(crate::msg!("err-option-full", option = &option.name)))
+    Err(OpError::from(crate::msg!(
+        "err-option-full",
+        option = &option.name
+    )))
 }
 
 fn too_big(option: &store::SignupOption, cap: i64, size: i64) -> OpError {
@@ -312,13 +363,18 @@ pub fn editor_response(
         match action {
             "remove" => {
                 let Some(existing) = find_signup(tx, option.id, target.id)? else {
-                    return Ok(crate::msg!("notice-was-not-on", name = &target.name, option = &option.name));
+                    return Ok(crate::msg!(
+                        "notice-was-not-on",
+                        name = &target.name,
+                        option = &option.name
+                    ));
                 };
                 diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
                     .execute(tx)?;
                 fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
-                let notice = crate::msg!("notice-removed", name = &target.name, option = &option.name);
+                let notice =
+                    crate::msg!("notice-removed", name = &target.name, option = &option.name);
                 log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
                 Ok(notice)
             }
@@ -339,18 +395,29 @@ pub fn editor_response(
                 if let Some(existing) = find_signup(tx, option.id, target.id)? {
                     // An editor's change keeps the party where it is, full or not.
                     if let Some(guests) = guests.filter(|guests| *guests != existing.guests) {
-                        diesel::update(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
-                            .set(schema::signups::guests.eq(guests))
-                            .execute(tx)?;
+                        diesel::update(
+                            schema::signups::table.filter(schema::signups::id.eq(existing.id)),
+                        )
+                        .set(schema::signups::guests.eq(guests))
+                        .execute(tx)?;
                         fill_all(tx, &event)?;
                         sync_access(tx, event.id)?;
-                        let notice = crate::msg!("notice-guests", name = &target.name, option = &option.name, guests = guests);
+                        let notice = crate::msg!(
+                            "notice-guests",
+                            name = &target.name,
+                            option = &option.name,
+                            guests = guests
+                        );
                         log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
                         return Ok(notice);
                     }
                     fill_all(tx, &event)?;
                     sync_access(tx, event.id)?;
-                    return Ok(crate::msg!("notice-already-on", name = &target.name, option = &option.name));
+                    return Ok(crate::msg!(
+                        "notice-already-on",
+                        name = &target.name,
+                        option = &option.name
+                    ));
                 }
                 diesel::insert_into(schema::signups::table)
                     .values(&NewSignup {
@@ -364,7 +431,8 @@ pub fn editor_response(
                     .execute(tx)?;
                 fill_all(tx, &event)?;
                 sync_access(tx, event.id)?;
-                let notice = crate::msg!("notice-added", name = &target.name, option = &option.name);
+                let notice =
+                    crate::msg!("notice-added", name = &target.name, option = &option.name);
                 log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
                 Ok(notice)
             }
@@ -419,7 +487,11 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
             .filter(schema::signups::option_id.eq(option_id))
             .filter(schema::signups::state.eq(SignupState::Waitlisted))
             .order((schema::signups::created_at.asc(), schema::signups::id.asc()))
-            .select((schema::signups::id, schema::signups::membership_id, schema::signups::guests))
+            .select((
+                schema::signups::id,
+                schema::signups::membership_id,
+                schema::signups::guests,
+            ))
             .first(conn)
             .optional()?;
         let Some((signup_id, membership_id, guests)) = next else {

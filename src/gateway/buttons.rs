@@ -368,7 +368,10 @@ async fn ask_delete(
             Some(event)
                 if !matches!(
                     event.status,
-                    EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed | EventStatus::Posted
+                    EventStatus::Draft
+                        | EventStatus::Scheduled
+                        | EventStatus::Failed
+                        | EventStatus::Posted
                 ) =>
             {
                 Err(tr!(lang, "err-event-closed"))

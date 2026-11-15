@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::format::spots;
 use super::focus_left;
+use crate::format::spots;
 use crate::{api, cache, client};
 
 const MAX_OPTIONS: usize = 8;
@@ -74,7 +74,8 @@ impl Panel {
 /// event's options can be told apart before they are saved. The server takes an
 /// id it doesn't know as a new option.
 pub fn numbered(list: Vec<dto::SignupOption>) -> Vec<dto::SignupOption> {
-    let taken: std::collections::HashSet<String> = list.iter().filter_map(|opt| opt.id.clone()).collect();
+    let taken: std::collections::HashSet<String> =
+        list.iter().filter_map(|opt| opt.id.clone()).collect();
     let mut next = 1;
     list.into_iter()
         .map(|mut opt| {
@@ -135,8 +136,10 @@ fn apply_sent(now: &mut dto::Signups, list: &[dto::SignupOption]) {
         opt.max_guests = sent.max_guests;
         opt.role_id = sent.role_id.clone();
     }
-    now.options
-        .sort_by_key(|opt| list.iter().position(|sent| sent.id.as_ref() == Some(&opt.id)));
+    now.options.sort_by_key(|opt| {
+        list.iter()
+            .position(|sent| sent.id.as_ref() == Some(&opt.id))
+    });
 }
 
 fn wire(opt: &dto::OptionSignups) -> dto::SignupOption {
@@ -168,7 +171,11 @@ fn from_library(item: &dto::LibraryItem) -> dto::SignupOption {
 
 /// "1 response goes" or "3 responses go", for a confirm that says what goes.
 fn responses_go(count: i64) -> String {
-    if count == 1 { "1 response goes".into() } else { format!("{count} responses go") }
+    if count == 1 {
+        "1 response goes".into()
+    } else {
+        format!("{count} responses go")
+    }
 }
 
 /// Moves option `from` to where option `to` is. False when nothing moved.
@@ -194,43 +201,44 @@ pub fn SignupPanel(
     /// People who can be added; empty for anyone who can't edit the event.
     #[prop(optional)]
     members: Vec<dto::Member>,
-    #[prop(optional)]
-    roles: Vec<dto::Role>,
+    #[prop(optional)] roles: Vec<dto::Role>,
 ) -> impl IntoView {
     let state = RwSignal::new(signups);
     let problem = RwSignal::new(String::new());
     let editing = RwSignal::new(Edit::Off);
     let ids = StoredValue::new((server, event));
-    let saving = client::action(move |(list, undo): &(Vec<dto::SignupOption>, Option<Vec<String>>)| {
-        let (list, undo) = (list.clone(), undo.clone());
-        let (server, event) = ids.get_value();
-        let url = api::path::event_options(&server, &event);
-        let key = (server.clone(), event);
-        let queries = cache::client();
-        async move {
-            match api::send::<dto::Done, _>("PUT", &url, Some(&list)).await {
-                Ok(_) => {
-                    problem.try_set(String::new());
-                    editing.try_set(Edit::Off);
-                    state.try_update(|now| apply_sent(now, &list));
-                    if let Some(now) = state.try_get_untracked() {
-                        cache::apply_signups(queries, &key, &now);
+    let saving = client::action(
+        move |(list, undo): &(Vec<dto::SignupOption>, Option<Vec<String>>)| {
+            let (list, undo) = (list.clone(), undo.clone());
+            let (server, event) = ids.get_value();
+            let url = api::path::event_options(&server, &event);
+            let key = (server.clone(), event);
+            let queries = cache::client();
+            async move {
+                match api::send::<dto::Done, _>("PUT", &url, Some(&list)).await {
+                    Ok(_) => {
+                        problem.try_set(String::new());
+                        editing.try_set(Edit::Off);
+                        state.try_update(|now| apply_sent(now, &list));
+                        if let Some(now) = state.try_get_untracked() {
+                            cache::apply_signups(queries, &key, &now);
+                        }
+                        cache::refresh_in(queries, &server);
                     }
-                    cache::refresh_in(queries, &server);
-                }
-                Err(failure) => {
-                    problem.try_set(failure.message);
-                    cache::refresh_in(queries, &server);
-                    if let Some(order) = undo {
-                        state.try_update(|now| {
-                            now.options
-                                .sort_by_key(|opt| order.iter().position(|id| *id == opt.id))
-                        });
+                    Err(failure) => {
+                        problem.try_set(failure.message);
+                        cache::refresh_in(queries, &server);
+                        if let Some(order) = undo {
+                            state.try_update(|now| {
+                                now.options
+                                    .sort_by_key(|opt| order.iter().position(|id| *id == opt.id))
+                            });
+                        }
                     }
                 }
             }
-        }
-    });
+        },
+    );
     let panel = Panel {
         state,
         problem,
@@ -367,7 +375,11 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
         let Some(at) = before.iter().position(|other| *other == id.get_value()) else {
             return;
         };
-        let Some(to) = at.checked_add_signed(step).and_then(|next| before.get(next)).cloned() else {
+        let Some(to) = at
+            .checked_add_signed(step)
+            .and_then(|next| before.get(next))
+            .cloned()
+        else {
             return;
         };
         panel.state.update(|now| {
@@ -466,7 +478,13 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
 
 /// One person on an option: their name, the guests they bring, and for someone
 /// who can edit the event, a control to change that count up to `most`.
-fn person_row(panel: Panel, option: String, person: dto::Person, waiting: bool, most: Option<i64>) -> impl IntoView {
+fn person_row(
+    panel: Panel,
+    option: String,
+    person: dto::Person,
+    waiting: bool,
+    most: Option<i64>,
+) -> impl IntoView {
     let label = match (person.guests, waiting) {
         (0, false) => person.name.clone(),
         (0, true) => format!("{} · waiting", person.name),
@@ -508,7 +526,11 @@ fn guest_setter(panel: Panel, option: String, member: String) -> impl Fn(i64) + 
         panel.state.update(|now| {
             if let Some(opt) = now.options.iter_mut().find(|opt| opt.id == option) {
                 let mut change = 0;
-                for person in opt.confirmed.iter_mut().filter(|person| person.id == member) {
+                for person in opt
+                    .confirmed
+                    .iter_mut()
+                    .filter(|person| person.id == member)
+                {
                     change = guests - person.guests;
                     person.guests = guests;
                 }
@@ -518,7 +540,10 @@ fn guest_setter(panel: Panel, option: String, member: String) -> impl Fn(i64) + 
                 opt.confirmed_count += change;
             }
         });
-        let url = format!("{}?guests={guests}", api::path::member_signup(&server, &event, &member, &option));
+        let url = format!(
+            "{}?guests={guests}",
+            api::path::member_signup(&server, &event, &member, &option)
+        );
         let server = server.clone();
         client::spawn(async move {
             if let Err(failure) = api::send::<dto::Done, ()>("PUT", &url, None).await {
@@ -537,7 +562,14 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
     let id = StoredValue::new(opt.id.clone());
     let capacity = RwSignal::new(opt.capacity.map(|n| n.to_string()).unwrap_or_default());
     let guests_on = RwSignal::new(opt.max_guests > 0);
-    let guests_most = RwSignal::new(if opt.max_guests > 0 { opt.max_guests } else { 3 }.to_string());
+    let guests_most = RwSignal::new(
+        if opt.max_guests > 0 {
+            opt.max_guests
+        } else {
+            3
+        }
+        .to_string(),
+    );
     let limit = RwSignal::new(opt.role_id.clone());
     let removable = panel.state.with_untracked(|now| now.options.len() > 1);
     let held = opt.confirmed_count + opt.waiting_count;
@@ -569,7 +601,9 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
             match guests_most.get_untracked().trim().parse::<i64>() {
                 Ok(n) if (1..=10).contains(&n) => n,
                 _ => {
-                    panel.problem.set("Guests each is a number from 1 to 10.".into());
+                    panel
+                        .problem
+                        .set("Guests each is a number from 1 to 10.".into());
                     return;
                 }
             }
@@ -589,8 +623,14 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
     let focus = super::FocusBack::new();
     let remove = move || {
         let id = id.get_value();
-        let list: Vec<dto::SignupOption> = panel.wire().into_iter().filter(|opt| opt.id.as_ref() != Some(&id)).collect();
-        panel.state.update(|now| now.options.retain(|opt| opt.id != id));
+        let list: Vec<dto::SignupOption> = panel
+            .wire()
+            .into_iter()
+            .filter(|opt| opt.id.as_ref() != Some(&id))
+            .collect();
+        panel
+            .state
+            .update(|now| now.options.retain(|opt| opt.id != id));
         panel.save(list, None);
     };
     let input = NodeRef::<leptos::html::Input>::new();
@@ -709,36 +749,44 @@ fn TypePicker(panel: Panel) -> impl IntoView {
     // panel before the answer comes back. So the list goes along with the
     // request, and the new type joins it without the panel: in the page's draft,
     // or saved straight to the event.
-    let create = client::action(move |(draft, list): &(dto::TypeDraft, Vec<dto::SignupOption>)| {
-        let (draft, mut list) = (draft.clone(), list.clone());
-        let library_url = api::path::library(&server);
-        let options_url = api::path::event_options(&server, &event);
-        let queries = cache::client();
-        let server = server.clone();
-        async move {
-            let made = match api::send::<dto::LibraryItem, _>("POST", &library_url, Some(&draft)).await {
-                Ok(made) => made,
-                Err(failure) => {
-                    panel.problem.try_set(failure.message);
-                    return;
-                }
-            };
-            list.push(from_library(&made));
-            match local {
-                Some(local) => {
-                    local.options.try_set(numbered(list));
-                    local.changed();
-                }
-                None => {
-                    if let Err(failure) = api::send::<dto::Done, _>("PUT", &options_url, Some(&list)).await {
-                        panel.problem.try_set(failure.message);
+    let create =
+        client::action(
+            move |(draft, list): &(dto::TypeDraft, Vec<dto::SignupOption>)| {
+                let (draft, mut list) = (draft.clone(), list.clone());
+                let library_url = api::path::library(&server);
+                let options_url = api::path::event_options(&server, &event);
+                let queries = cache::client();
+                let server = server.clone();
+                async move {
+                    let made =
+                        match api::send::<dto::LibraryItem, _>("POST", &library_url, Some(&draft))
+                            .await
+                        {
+                            Ok(made) => made,
+                            Err(failure) => {
+                                panel.problem.try_set(failure.message);
+                                return;
+                            }
+                        };
+                    list.push(from_library(&made));
+                    match local {
+                        Some(local) => {
+                            local.options.try_set(numbered(list));
+                            local.changed();
+                        }
+                        None => {
+                            if let Err(failure) =
+                                api::send::<dto::Done, _>("PUT", &options_url, Some(&list)).await
+                            {
+                                panel.problem.try_set(failure.message);
+                            }
+                        }
                     }
+                    panel.editing.try_set(Edit::Off);
+                    cache::refresh_in(queries, &server);
                 }
-            }
-            panel.editing.try_set(Edit::Off);
-            cache::refresh_in(queries, &server);
-        }
-    });
+            },
+        );
     let make = move || {
         create.dispatch((
             dto::TypeDraft {
@@ -750,7 +798,9 @@ fn TypePicker(panel: Panel) -> impl IntoView {
         ));
     };
     let rows = move || {
-        let on_event: Vec<String> = panel.state.with(|now| now.options.iter().map(|opt| opt.type_id.clone()).collect());
+        let on_event: Vec<String> = panel
+            .state
+            .with(|now| now.options.iter().map(|opt| opt.type_id.clone()).collect());
         let text = needle.get().trim().to_lowercase();
         let Some(Ok(items)) = library.get() else {
             return view! { <p class="pick-empty">"Loading the library…"</p> }.into_any();
@@ -847,7 +897,9 @@ fn PresetChooser(panel: Panel) -> impl IntoView {
     let (server, event) = panel.ids.get_value();
     let applying = client::action(move |preset: &dto::Preset| {
         let url = api::path::event_preset(&server, &event);
-        let body = dto::ApplyPreset { preset: preset.id.clone() };
+        let body = dto::ApplyPreset {
+            preset: preset.id.clone(),
+        };
         let queries = cache::client();
         let server = server.clone();
         async move {
@@ -865,7 +917,9 @@ fn PresetChooser(panel: Panel) -> impl IntoView {
         match panel.local {
             Some(local) => {
                 local.options.set(numbered(preset.options.clone()));
-                local.event.update(|event| event.multiple_signups = preset.multiple_signups);
+                local
+                    .event
+                    .update(|event| event.multiple_signups = preset.multiple_signups);
                 local.changed();
             }
             None => {
@@ -878,7 +932,12 @@ fn PresetChooser(panel: Panel) -> impl IntoView {
         let dropped: Vec<(String, i64)> = panel.state.with_untracked(|now| {
             now.options
                 .iter()
-                .filter(|opt| !preset.options.iter().any(|kept| kept.type_id == opt.type_id))
+                .filter(|opt| {
+                    !preset
+                        .options
+                        .iter()
+                        .any(|kept| kept.type_id == opt.type_id)
+                })
                 .map(|opt| (opt.name.clone(), opt.confirmed_count + opt.waiting_count))
                 .filter(|(_, held)| *held > 0)
                 .collect()
@@ -888,12 +947,21 @@ fn PresetChooser(panel: Panel) -> impl IntoView {
         } else {
             let held: i64 = dropped.iter().map(|(_, held)| held).sum();
             let names: Vec<String> = dropped.into_iter().map(|(name, _)| name).collect();
-            let question = format!("Use {}? {} from {}.", preset.name, responses_go(held), names.join(", "));
+            let question = format!(
+                "Use {}? {} from {}.",
+                preset.name,
+                responses_go(held),
+                names.join(", ")
+            );
             asking.set(Some((preset, question)));
         }
     };
     // A question about dropped responses waits for its answer.
-    super::close_on_outside_press(root, move || open.get_untracked() && asking.get_untracked().is_none(), move || open.set(false));
+    super::close_on_outside_press(
+        root,
+        move || open.get_untracked() && asking.get_untracked().is_none(),
+        move || open.set(false),
+    );
     view! {
         <div class="inline-anchor preset-chooser" node_ref=root
             on:focusout=move |ev| {
@@ -1078,8 +1146,16 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
         move || {
             let now = picks.lock().map(|list| list.clone()).unwrap_or_default();
             let everyone = known.lock().map(|list| list.clone()).unwrap_or_default();
-            let adds: Vec<String> = now.iter().filter(|id| !here.contains(id)).cloned().collect();
-            let drops: Vec<String> = here.iter().filter(|id| !now.contains(id)).cloned().collect();
+            let adds: Vec<String> = now
+                .iter()
+                .filter(|id| !here.contains(id))
+                .cloned()
+                .collect();
+            let drops: Vec<String> = here
+                .iter()
+                .filter(|id| !now.contains(id))
+                .cloned()
+                .collect();
             if adds.is_empty() && drops.is_empty() {
                 return;
             }
@@ -1169,15 +1245,25 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
             return Some(view! { <p class="pick-empty">"Searching the server…"</p> }.into_any());
         }
         if text.is_empty() {
-            let none = chosen.with(|list| list.is_empty()) && others.with_value(|list| list.is_empty());
+            let none =
+                chosen.with(|list| list.is_empty()) && others.with_value(|list| list.is_empty());
             return none.then(|| view! { <p class="pick-empty">"No one has responded yet. Search to add someone."</p> }.into_any());
         }
         let any = found.with(|found| !found.is_empty())
-            || everyone.with(|list| list.iter().any(|person| person.name.to_lowercase().contains(&text)));
-        (!any).then(|| view! { <p class="pick-empty">"No one in this server matches."</p> }.into_any())
+            || everyone.with(|list| {
+                list.iter()
+                    .any(|person| person.name.to_lowercase().contains(&text))
+            });
+        (!any).then(|| {
+            view! { <p class="pick-empty">"No one in this server matches."</p> }.into_any()
+        })
     };
 
-    super::close_on_outside_press(root, move || panel.picking.with_untracked(Option::is_some), move || panel.picking.set(None));
+    super::close_on_outside_press(
+        root,
+        move || panel.picking.with_untracked(Option::is_some),
+        move || panel.picking.set(None),
+    );
     view! {
         <div class="picker" node_ref=root
             on:mousedown=|ev| ev.prevent_default()

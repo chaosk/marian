@@ -3,13 +3,14 @@ use leptos::prelude::*;
 use crate::api::path;
 use marian_types as dto;
 
+use crate::cache::{self, show, when, Ready};
 use crate::format::{self, clock_of, spots, status_label};
 use crate::widgets::{
-    numbered, unsaved_signups, ActionButton, LeaveGuard, ApplyToSeries, EventAttendeeRole, EventChannel, EventColor, EventCutoff,
-    EventDescription, EventLocation, EventMentions, EventReminders, EventRepeat, EventRestrictions, EventTitle, EventWhen,
-    LocalDraft, MultipleToggle, PostButtons, SignupPanel, ThreadToggle,
+    numbered, unsaved_signups, ActionButton, ApplyToSeries, EventAttendeeRole, EventChannel,
+    EventColor, EventCutoff, EventDescription, EventLocation, EventMentions, EventReminders,
+    EventRepeat, EventRestrictions, EventTitle, EventWhen, LeaveGuard, LocalDraft, MultipleToggle,
+    PostButtons, SignupPanel, ThreadToggle,
 };
-use crate::cache::{self, show, when, Ready};
 use crate::{base, title, A};
 use marian_types::{Cadence, EventStatus};
 
@@ -28,7 +29,12 @@ struct Slots {
     activity: Option<AnyView>,
 }
 
-fn layout(key: (String, String), event: &dto::Event, clock: format::Clock, slots: Slots) -> impl IntoView {
+fn layout(
+    key: (String, String),
+    event: &dto::Event,
+    clock: format::Clock,
+    slots: Slots,
+) -> impl IntoView {
     let image = event.image_url.clone();
     view! {
         <div class="event-top">
@@ -170,7 +176,9 @@ pub fn EventPage() -> impl IntoView {
 #[component]
 pub fn NewEvent() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
-    let start = cache::listen(cache::new_event_scope(), || (cache::server_key(), crate::query("preset")));
+    let start = cache::listen(cache::new_event_scope(), || {
+        (cache::server_key(), crate::query("preset"))
+    });
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
     // The draft lives in this page, so a refresh must not redraw it.
@@ -204,7 +212,9 @@ pub fn NewEvent() -> impl IntoView {
                 color: "#1e3a6e".into(),
                 image_url: None,
                 channel_id: first.map(|channel| channel.id.clone()).unwrap_or_default(),
-                channel: first.map(|channel| channel.name.clone()).unwrap_or_default(),
+                channel: first
+                    .map(|channel| channel.name.clone())
+                    .unwrap_or_default(),
                 attendee_role_id: None,
                 mention_everyone: false,
                 mention_role_ids: Vec::new(),
@@ -330,7 +340,11 @@ fn roles_cell(
     show(roles, move |roles| role_cells(key.clone(), &event, roles))
 }
 
-pub(crate) fn role_cells(key: (String, String), event: &dto::Event, roles: Vec<dto::Role>) -> impl IntoView {
+pub(crate) fn role_cells(
+    key: (String, String),
+    event: &dto::Event,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     view! {
         <div>
             <p class="kicker">"Mentions"</p>
@@ -348,7 +362,10 @@ pub(crate) fn role_cells(key: (String, String), event: &dto::Event, roles: Vec<d
 }
 
 /// The same time on the clock a week on, as a duplicate is made.
-fn week_later(clock: &format::Clock, start: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+fn week_later(
+    clock: &format::Clock,
+    start: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
     use chrono::TimeZone;
     let local = start.with_timezone(&clock.tz).naive_local() + chrono::Duration::days(7);
     clock
@@ -369,9 +386,12 @@ fn embed_cell(
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> impl IntoView {
-    when(move || (signups.get(), roles.get()).ready(), move |(signups, roles)| {
-        embed_view(&signups, &roles, &event, clock, here.clone(), localize, now)
-    })
+    when(
+        move || (signups.get(), roles.get()).ready(),
+        move |(signups, roles)| {
+            embed_view(&signups, &roles, &event, clock, here.clone(), localize, now)
+        },
+    )
 }
 
 /// The Discord post as it reads. `here`, the event's page, is empty for an
@@ -391,7 +411,10 @@ fn embed_view(
     let image = event.image_url.clone();
     let color = event.color.clone();
     // A finished event's post keeps only its link to the web, as on Discord.
-    let finished = matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped);
+    let finished = matches!(
+        event.status,
+        EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped
+    );
     // The message text above the embed, as the post words it: @everyone, then each role.
     let mentions: Vec<String> = event
         .mention_everyone
@@ -406,7 +429,11 @@ fn embed_view(
         )
         .collect();
     // Discord draws <t:…:F>, <t:…:t>, and <t:…:R> in place, each on a grey pill.
-    let start_full = format!("{} {}", format::format_long_date(clock.day(event.starts_at)), clock.clock(event.starts_at));
+    let start_full = format!(
+        "{} {}",
+        format::format_long_date(clock.day(event.starts_at)),
+        clock.clock(event.starts_at)
+    );
     let end_time = clock.end(event.starts_at, event.duration_minutes);
     {
         let fields = signups
@@ -420,7 +447,9 @@ fn embed_view(
                         0 => person.name.clone(),
                         guests => format!("{} (+{guests})", person.name),
                     })
-                    .chain((opt.waiting_count > 0).then(|| format!("{} waiting", opt.waiting_count)))
+                    .chain(
+                        (opt.waiting_count > 0).then(|| format!("{} waiting", opt.waiting_count)),
+                    )
                     .collect();
                 let value = if lines.is_empty() {
                     view! { "-" }.into_any()

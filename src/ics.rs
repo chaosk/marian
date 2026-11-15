@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use diesel::prelude::*;
 
 use crate::error::OpError;
-use crate::schema::{events, signup_options, signups, memberships};
+use crate::schema::{events, memberships, signup_options, signups};
 use crate::store::{self, Connection, Event};
 use crate::values::{EventStatus, SignupState};
 
@@ -40,7 +40,11 @@ pub(crate) fn events_for_person(
             )),
         )
         .filter(memberships::user_id.eq(user_id))
-        .filter(events::status.eq_any([EventStatus::Posted, EventStatus::Scheduled, EventStatus::Archived]))
+        .filter(events::status.eq_any([
+            EventStatus::Posted,
+            EventStatus::Scheduled,
+            EventStatus::Archived,
+        ]))
         .filter(
             events::created_by
                 .eq(memberships::id.nullable())
@@ -61,7 +65,11 @@ pub(crate) fn events_for_person(
     }
     Ok(events
         .into_iter()
-        .filter(|event| sights.get(&event.guild_id).is_some_and(|sight| sight.sees_event(event)))
+        .filter(|event| {
+            sights
+                .get(&event.guild_id)
+                .is_some_and(|sight| sight.sees_event(event))
+        })
         .collect())
 }
 
@@ -125,7 +133,6 @@ fn google_time(dt: DateTime<Utc>) -> String {
 }
 
 fn fold_escape(value: &str) -> String {
-    
     value
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
@@ -204,7 +211,10 @@ mod tests {
         assert!(!feed.contains("June hosts declined"), "{feed}");
         let token = store::ensure_calendar_token(&mut conn, person).unwrap();
         assert_eq!(token.len(), 64);
-        assert_eq!(store::ensure_calendar_token(&mut conn, person).unwrap(), token);
+        assert_eq!(
+            store::ensure_calendar_token(&mut conn, person).unwrap(),
+            token
+        );
         assert_eq!(
             store::calendar_user_id(&mut conn, &token).unwrap(),
             Some(person)

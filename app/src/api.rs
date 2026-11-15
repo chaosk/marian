@@ -449,7 +449,10 @@ pub mod path {
     }
 
     pub fn event_activity(server: &str, event: &str, page: u32, limit: u32) -> String {
-        format!("{}/activity?page={page}&limit={limit}", self::event(server, event))
+        format!(
+            "{}/activity?page={page}&limit={limit}",
+            self::event(server, event)
+        )
     }
 
     pub fn series_list(server: &str) -> String {
@@ -573,14 +576,19 @@ pub async fn channels(server: &str) -> Result<Vec<dto::Channel>, Failure> {
     resource!(server, path::channels(server), marian::api::channels)
 }
 
-pub async fn events(server: &str, query: &dto::EventQuery) -> Result<dto::Paged<dto::EventSummary>, Failure> {
+pub async fn events(
+    server: &str,
+    query: &dto::EventQuery,
+) -> Result<dto::Paged<dto::EventSummary>, Failure> {
     resource!(server, path::events_where(server, query), |db, v| {
         marian::api::events(db, v, query)
     })
 }
 
 pub async fn event(server: &str, id: &str) -> Result<dto::Event, Failure> {
-    resource!(server, path::event(server, id), |db, v| marian::api::event(db, v, id))
+    resource!(server, path::event(server, id), |db, v| marian::api::event(
+        db, v, id
+    ))
 }
 
 pub async fn event_reminders(server: &str, id: &str) -> Result<Vec<dto::Reminder>, Failure> {
@@ -589,26 +597,37 @@ pub async fn event_reminders(server: &str, id: &str) -> Result<Vec<dto::Reminder
     })
 }
 
-
 pub async fn signups(server: &str, id: &str) -> Result<dto::Signups, Failure> {
-    resource!(server, path::event_signups(server, id), |db, v| marian::api::signups(db, v, id))
+    resource!(server, path::event_signups(server, id), |db, v| {
+        marian::api::signups(db, v, id)
+    })
 }
 
-pub async fn pending_reminders(server: &str, limit: usize) -> Result<Vec<dto::PendingReminder>, Failure> {
+pub async fn pending_reminders(
+    server: &str,
+    limit: usize,
+) -> Result<Vec<dto::PendingReminder>, Failure> {
     resource!(server, path::pending_reminders(server, limit), |db, v| {
         marian::api::pending_reminders(db, v, limit)
     })
 }
 
-pub async fn activity(server: &str, page: u32, limit: u32) -> Result<dto::Paged<dto::Activity>, Failure> {
-    resource!(
-        server,
-        path::activity(server, page, limit),
-        |db, v| { marian::api::activity(db, v, page, i64::from(limit)) }
-    )
+pub async fn activity(
+    server: &str,
+    page: u32,
+    limit: u32,
+) -> Result<dto::Paged<dto::Activity>, Failure> {
+    resource!(server, path::activity(server, page, limit), |db, v| {
+        marian::api::activity(db, v, page, i64::from(limit))
+    })
 }
 
-pub async fn event_activity(server: &str, event: &str, page: u32, limit: u32) -> Result<dto::Paged<dto::Activity>, Failure> {
+pub async fn event_activity(
+    server: &str,
+    event: &str,
+    page: u32,
+    limit: u32,
+) -> Result<dto::Paged<dto::Activity>, Failure> {
     resource!(
         server,
         path::event_activity(server, event, page, limit),
@@ -621,7 +640,9 @@ pub async fn series_list(server: &str) -> Result<Vec<dto::Series>, Failure> {
 }
 
 pub async fn series(server: &str, id: &str) -> Result<dto::Series, Failure> {
-    resource!(server, path::series(server, id), |db, v| marian::api::series(db, v, id))
+    resource!(server, path::series(server, id), |db, v| {
+        marian::api::series(db, v, id)
+    })
 }
 
 pub async fn presets(server: &str) -> Result<Vec<dto::Preset>, Failure> {
@@ -629,7 +650,9 @@ pub async fn presets(server: &str) -> Result<Vec<dto::Preset>, Failure> {
 }
 
 pub async fn preset(server: &str, id: &str) -> Result<dto::Preset, Failure> {
-    resource!(server, path::preset(server, id), |db, v| marian::api::preset(db, v, id))
+    resource!(server, path::preset(server, id), |db, v| {
+        marian::api::preset(db, v, id)
+    })
 }
 
 pub async fn library(server: &str) -> Result<Vec<dto::LibraryItem>, Failure> {
@@ -641,7 +664,9 @@ pub async fn routines(server: &str) -> Result<Vec<dto::RoutineSummary>, Failure>
 }
 
 pub async fn routine(server: &str, id: &str) -> Result<dto::RoutineView, Failure> {
-    resource!(server, path::routine(server, id), |db, v| marian::api::routine(db, v, id))
+    resource!(server, path::routine(server, id), |db, v| {
+        marian::api::routine(db, v, id)
+    })
 }
 
 /// A change from the browser. It only runs there.

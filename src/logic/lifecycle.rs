@@ -2,14 +2,14 @@ use chrono::Utc;
 use diesel::prelude::*;
 
 use super::access::{can_delete, can_edit, may_pick_attendee_role};
-use super::db::{log, must_event, must_role, must_series, must_membership};
+use super::db::{log, must_event, must_membership, must_role, must_series};
 use super::event::save_event;
 use super::model::*;
 use super::series;
 use super::template;
 use crate::error::OpError;
 use crate::schema;
-use crate::store::{self, Connection, Event, Series, Membership};
+use crate::store::{self, Connection, Event, Membership, Series};
 use crate::values::{Cadence, EventRoleKind, EventStatus};
 
 pub fn archive_event(
@@ -62,8 +62,10 @@ pub fn delete_event(
         if !can_delete(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-delete")));
         }
-        if matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed)
-            && series_keeps_its_dates(tx, &event)?
+        if matches!(
+            event.status,
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+        ) && series_keeps_its_dates(tx, &event)?
         {
             // Deleting the row would leave a gap the series fills straight back in,
             // so a date of a series stays behind as skipped.
@@ -76,7 +78,10 @@ pub fn delete_event(
             let notice = crate::msg!("notice-deleted-series-date", title = &event.title);
             log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
             Ok(notice)
-        } else if matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
+        } else if matches!(
+            event.status,
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+        ) {
             let title = event.title.clone();
             diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .execute(tx)?;
@@ -124,11 +129,18 @@ pub fn duplicate_event(
     let zone = store::guild(conn, event.guild_id)?
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
-    let starts_at = crate::clock::occurrence_start(event.starts_at, 2, Cadence::Weekly, crate::clock::zone(&zone)?);
+    let starts_at = crate::clock::occurrence_start(
+        event.starts_at,
+        2,
+        Cadence::Weekly,
+        crate::clock::zone(&zone)?,
+    );
     // The copy keeps one of the server's roles only for someone who may pick it.
     let actor = must_membership(conn, actor_id)?;
     let attendee_role_id = match event.attendee_role_id {
-        Some(role_id) if may_pick_attendee_role(&actor, &must_role(conn, role_id)?) => Some(role_id),
+        Some(role_id) if may_pick_attendee_role(&actor, &must_role(conn, role_id)?) => {
+            Some(role_id)
+        }
         _ => None,
     };
     let input = EventInput {
@@ -233,7 +245,9 @@ pub fn end_series(conn: &mut Connection, series_id: i64, actor_id: i64) -> Resul
         diesel::update(
             schema::events::table
                 .filter(schema::events::series_id.eq(series_id))
-                .filter(schema::events::status.eq_any([EventStatus::Scheduled, EventStatus::Draft])),
+                .filter(
+                    schema::events::status.eq_any([EventStatus::Scheduled, EventStatus::Draft]),
+                ),
         )
         .set((
             schema::events::status.eq(EventStatus::Skipped),

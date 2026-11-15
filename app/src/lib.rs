@@ -9,13 +9,13 @@ use leptos_router::hooks::{use_params_map, use_query_map};
 use leptos_router::path;
 
 pub mod api;
+mod cache;
 mod client;
 mod format;
-mod widgets;
 mod markdown;
 mod pages;
-mod cache;
 mod shell;
+mod widgets;
 
 use api::Failure;
 use widgets::{CreatorsOnly, ManagersOnly};
@@ -54,7 +54,10 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 /// one from the server.
 #[cfg(feature = "ssr")]
 fn send_page_policy() {
-    let (Some(nonce), Some(response)) = (leptos::nonce::use_nonce(), use_context::<leptos_axum::ResponseOptions>()) else {
+    let (Some(nonce), Some(response)) = (
+        leptos::nonce::use_nonce(),
+        use_context::<leptos_axum::ResponseOptions>(),
+    ) else {
         return;
     };
     // `cargo leptos watch` reloads the page over a websocket to its own port.
@@ -96,14 +99,26 @@ mod policy_tests {
     #[test]
     fn scripts_need_the_nonce_and_the_reload_socket_only_comes_with_watch() {
         let policy = page_policy("abc", false);
-        assert!(policy.contains("script-src 'nonce-abc' 'strict-dynamic' 'wasm-unsafe-eval'"), "{policy}");
-        assert!(!policy.contains("unsafe-inline' 'nonce") && !policy.contains("script-src 'self'"), "{policy}");
+        assert!(
+            policy.contains("script-src 'nonce-abc' 'strict-dynamic' 'wasm-unsafe-eval'"),
+            "{policy}"
+        );
+        assert!(
+            !policy.contains("unsafe-inline' 'nonce") && !policy.contains("script-src 'self'"),
+            "{policy}"
+        );
         assert!(policy.contains("connect-src 'self';"), "{policy}");
         assert!(policy.contains("frame-ancestors 'none'"), "{policy}");
-        assert!(policy.contains("style-src 'self' https://fonts.googleapis.com;"), "no inline styles: {policy}");
+        assert!(
+            policy.contains("style-src 'self' https://fonts.googleapis.com;"),
+            "no inline styles: {policy}"
+        );
         let watching = page_policy("abc", true);
         assert!(watching.contains("connect-src 'self' ws: wss:;"));
-        assert!(watching.contains("style-src 'self' 'unsafe-inline' "), "{watching}");
+        assert!(
+            watching.contains("style-src 'self' 'unsafe-inline' "),
+            "{watching}"
+        );
     }
 }
 

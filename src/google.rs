@@ -161,11 +161,7 @@ pub fn status(conn: &mut Connection, user_id: i64) -> Result<Option<Status>, OpE
     }))
 }
 
-pub fn on_calendar(
-    conn: &mut Connection,
-    user_id: i64,
-    event_id: i64,
-) -> Result<bool, OpError> {
+pub fn on_calendar(conn: &mut Connection, user_id: i64, event_id: i64) -> Result<bool, OpError> {
     let id: Option<Option<String>> = schema::google_events::table
         .filter(schema::google_events::user_id.eq(user_id))
         .filter(schema::google_events::event_id.eq(event_id))
@@ -235,11 +231,8 @@ pub fn save_account(
 }
 
 pub fn begin_link(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
-    diesel::delete(
-        schema::google_oauth::table
-            .filter(schema::google_oauth::user_id.eq(user_id)),
-    )
-    .execute(conn)?;
+    diesel::delete(schema::google_oauth::table.filter(schema::google_oauth::user_id.eq(user_id)))
+        .execute(conn)?;
     let state = auth::random_token()?;
     diesel::insert_into(schema::google_oauth::table)
         .values(&NewGoogleOauth {
@@ -285,11 +278,7 @@ pub fn finish_oauth(conn: &mut Connection, state: &str) -> Result<(), OpError> {
     Ok(())
 }
 
-pub fn set_auto_sync(
-    conn: &mut Connection,
-    user_id: i64,
-    on: bool,
-) -> Result<(), OpError> {
+pub fn set_auto_sync(conn: &mut Connection, user_id: i64, on: bool) -> Result<(), OpError> {
     let Some(account) = account(conn, user_id)? else {
         return Err(OpError::from(crate::msg!("err-google-connect-first")));
     };
@@ -297,8 +286,7 @@ pub fn set_auto_sync(
         return Err(OpError::from(crate::msg!("err-google-disconnecting")));
     }
     diesel::update(
-        schema::google_accounts::table
-            .filter(schema::google_accounts::user_id.eq(user_id)),
+        schema::google_accounts::table.filter(schema::google_accounts::user_id.eq(user_id)),
     )
     .set(schema::google_accounts::auto_sync.eq(on))
     .execute(conn)?;
@@ -307,19 +295,14 @@ pub fn set_auto_sync(
 
 pub fn queue_revoke(conn: &mut Connection, user_id: i64) -> Result<bool, OpError> {
     let updated = diesel::update(
-        schema::google_accounts::table
-            .filter(schema::google_accounts::user_id.eq(user_id)),
+        schema::google_accounts::table.filter(schema::google_accounts::user_id.eq(user_id)),
     )
     .set(schema::google_accounts::revoking.eq(true))
     .execute(conn)?;
     Ok(updated > 0)
 }
 
-pub fn queue_event(
-    conn: &mut Connection,
-    user_id: i64,
-    event_id: i64,
-) -> Result<(), OpError> {
+pub fn queue_event(conn: &mut Connection, user_id: i64, event_id: i64) -> Result<(), OpError> {
     let Some(account) = account(conn, user_id)? else {
         return Err(OpError::from(crate::msg!("err-google-connect-first")));
     };
@@ -379,10 +362,7 @@ pub fn ready_revokes(conn: &mut Connection) -> Result<Vec<RemoteAccess>, OpError
     Ok(ready)
 }
 
-pub fn remote_access(
-    conn: &mut Connection,
-    user_id: i64,
-) -> Result<Option<RemoteAccess>, OpError> {
+pub fn remote_access(conn: &mut Connection, user_id: i64) -> Result<Option<RemoteAccess>, OpError> {
     let Some(account) = account(conn, user_id)? else {
         return Ok(None);
     };
@@ -413,8 +393,7 @@ pub fn delete_account(conn: &mut Connection, user_id: i64) -> Result<(), OpError
 
 pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpError> {
     let now = Utc::now();
-    let users = Account::query()
-        .load(conn)?;
+    let users = Account::query().load(conn)?;
     let mut jobs = Vec::new();
     for account in users {
         if jobs.len() >= BATCH {
@@ -465,7 +444,10 @@ pub fn plan(conn: &mut Connection, public_base: &str) -> Result<Vec<Job>, OpErro
 }
 
 fn calendar_status(status: EventStatus) -> bool {
-    matches!(status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived)
+    matches!(
+        status,
+        EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
+    )
 }
 
 fn job_event(job: &Job) -> Option<i64> {
@@ -573,11 +555,7 @@ fn drop_link(conn: &mut Connection, link: &Link) -> Result<(), OpError> {
     Ok(())
 }
 
-fn clear_forced(
-    conn: &mut Connection,
-    user_id: i64,
-    event_id: i64,
-) -> Result<(), OpError> {
+fn clear_forced(conn: &mut Connection, user_id: i64, event_id: i64) -> Result<(), OpError> {
     diesel::update(
         schema::google_events::table
             .filter(schema::google_events::user_id.eq(user_id))
@@ -620,10 +598,7 @@ pub fn record(conn: &mut Connection, outcome: Outcome) -> Result<(), OpError> {
                 ))
                 .execute(conn)?;
         }
-        Outcome::Removed {
-            user_id,
-            event_id,
-        } => {
+        Outcome::Removed { user_id, event_id } => {
             diesel::delete(
                 schema::google_events::table
                     .filter(schema::google_events::user_id.eq(&user_id))
@@ -762,10 +737,7 @@ pub async fn push(
         Job::Delete {
             google_event_id, ..
         } => match delete_event(http, &access, &google_event_id).await {
-            Ok(()) => Outcome::Removed {
-                user_id,
-                event_id,
-            },
+            Ok(()) => Outcome::Removed { user_id, event_id },
             Err((message, auth_dead)) => Outcome::Failed {
                 user_id,
                 event_id,
@@ -1361,10 +1333,12 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        diesel::update(schema::events::table.filter(schema::events::status.eq(EventStatus::Posted)))
-            .set(schema::events::status.eq(EventStatus::Draft))
-            .execute(&mut conn)
-            .unwrap();
+        diesel::update(
+            schema::events::table.filter(schema::events::status.eq(EventStatus::Posted)),
+        )
+        .set(schema::events::status.eq(EventStatus::Draft))
+        .execute(&mut conn)
+        .unwrap();
         diesel::update(
             schema::google_events::table.filter(schema::google_events::event_id.eq(*event_id)),
         )

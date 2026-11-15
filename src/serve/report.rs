@@ -171,12 +171,20 @@ mod tests {
                 .find(|kv| kv.key.as_str() == key)
                 .map(|kv| kv.value.to_string())
         };
-        assert_eq!(attribute("url.path").as_deref(), Some("/servers/99/events/abc"));
-        let event = span.events.iter().find(|event| event.name == "exception").expect("an exception");
+        assert_eq!(
+            attribute("url.path").as_deref(),
+            Some("/servers/99/events/abc")
+        );
+        let event = span
+            .events
+            .iter()
+            .find(|event| event.name == "exception")
+            .expect("an exception");
         assert!(event
             .attributes
             .iter()
-            .any(|kv| kv.key.as_str() == "exception.stacktrace" && kv.value.to_string().contains("event.rs:12:5")));
+            .any(|kv| kv.key.as_str() == "exception.stacktrace"
+                && kv.value.to_string().contains("event.rs:12:5")));
     }
 
     #[test]

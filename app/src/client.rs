@@ -126,7 +126,13 @@ fn push(list: RwSignal<Vec<Toast>>, text: String, error: bool) -> Option<u64> {
     let leaving = ArcRwSignal::new(false);
     let held = ArcRwSignal::new(false);
     list.update(|rows| {
-        rows.push(Toast { id, text, error, leaving: leaving.clone(), held: held.clone() });
+        rows.push(Toast {
+            id,
+            text,
+            error,
+            leaving: leaving.clone(),
+            held: held.clone(),
+        });
     });
     // Past three, the oldest goes, a notice before an error.
     let live: Vec<(u64, bool, ArcRwSignal<bool>)> = list.with_untracked(|rows| {
@@ -136,7 +142,11 @@ fn push(list: RwSignal<Vec<Toast>>, text: String, error: bool) -> Option<u64> {
             .collect()
     });
     if live.len() > 3 {
-        let oldest = live.iter().find(|(_, error, _)| !error).or(live.first()).cloned();
+        let oldest = live
+            .iter()
+            .find(|(_, error, _)| !error)
+            .or(live.first())
+            .cloned();
         if let Some((old, _, flag)) = oldest {
             dismiss_toast(list, old, flag);
         }
@@ -149,7 +159,13 @@ fn push(list: RwSignal<Vec<Toast>>, text: String, error: bool) -> Option<u64> {
 
 /// Lets a notice go after `ms`, unless the pointer or focus is on it then;
 /// letting go of it starts a shorter wait.
-fn expire_toast(list: RwSignal<Vec<Toast>>, id: u64, leaving: ArcRwSignal<bool>, held: ArcRwSignal<bool>, ms: i32) {
+fn expire_toast(
+    list: RwSignal<Vec<Toast>>,
+    id: u64,
+    leaving: ArcRwSignal<bool>,
+    held: ArcRwSignal<bool>,
+    ms: i32,
+) {
     later(ms, move || {
         if !held.get_untracked() {
             dismiss_toast(list, id, leaving);
@@ -160,7 +176,8 @@ fn expire_toast(list: RwSignal<Vec<Toast>>, id: u64, leaving: ArcRwSignal<bool>,
 /// The pointer or focus came to a toast (`true`) or left it.
 pub(crate) fn hold_toast(id: u64, on: bool) {
     let Some(list) = toast_list() else { return };
-    let Some(row) = list.with_untracked(|rows| rows.iter().find(|row| row.id == id).cloned()) else {
+    let Some(row) = list.with_untracked(|rows| rows.iter().find(|row| row.id == id).cloned())
+    else {
         return;
     };
     row.held.set(on);
@@ -172,7 +189,11 @@ pub(crate) fn hold_toast(id: u64, on: bool) {
 /// Closes a toast now.
 pub(crate) fn close_toast(id: u64) {
     let Some(list) = toast_list() else { return };
-    if let Some(leaving) = list.with_untracked(|rows| rows.iter().find(|row| row.id == id).map(|row| row.leaving.clone())) {
+    if let Some(leaving) = list.with_untracked(|rows| {
+        rows.iter()
+            .find(|row| row.id == id)
+            .map(|row| row.leaving.clone())
+    }) {
         dismiss_toast(list, id, leaving);
     }
 }
@@ -199,10 +220,8 @@ pub(crate) fn later(ms: i32, work: impl FnOnce() + 'static) {
         use wasm_bindgen::prelude::Closure;
         use wasm_bindgen::JsCast;
         let cb = Closure::once_into_js(work);
-        let _ = leptos::prelude::window().set_timeout_with_callback_and_timeout_and_arguments_0(
-            cb.unchecked_ref(),
-            ms,
-        );
+        let _ = leptos::prelude::window()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ms);
     }
     #[cfg(not(feature = "hydrate"))]
     {
@@ -236,7 +255,11 @@ pub fn forget_server() {
 pub fn last_server() -> Option<String> {
     #[cfg(feature = "hydrate")]
     if let Ok(Some(storage)) = leptos::prelude::window().local_storage() {
-        return storage.get_item(LAST_SERVER).ok().flatten().filter(|id| !id.is_empty());
+        return storage
+            .get_item(LAST_SERVER)
+            .ok()
+            .flatten()
+            .filter(|id| !id.is_empty());
     }
     None
 }
@@ -281,13 +304,11 @@ pub fn use_go() -> impl Fn(&str) + Clone + Send + Sync + 'static {
 pub fn use_follow() -> impl Fn(Done) + Clone + Send + Sync + 'static {
     let go = use_go();
     let params = leptos_router::hooks::use_params_map();
-    move |done: Done| {
-        match done.location {
-            Some(to) => go(&to),
-            None => {
-                let server = params.with_untracked(|params| params.get("server").unwrap_or_default());
-                crate::cache::refresh(&server);
-            }
+    move |done: Done| match done.location {
+        Some(to) => go(&to),
+        None => {
+            let server = params.with_untracked(|params| params.get("server").unwrap_or_default());
+            crate::cache::refresh(&server);
         }
     }
 }

@@ -6,9 +6,9 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
+use crate::api::path;
 use crate::cache::{self, when, Ready};
 use crate::widgets::{ActionButton, Choice, InlineConfirm};
-use crate::api::path;
 use crate::{api, base, client, head, A};
 
 #[component]
@@ -18,10 +18,12 @@ pub fn Presets() -> impl IntoView {
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
     // Which preset is open for editing: its id, or "new".
     let editing = RwSignal::new(None::<String>);
-    when(move || (presets.get(), library.get(), roles.get()).ready(), move |(presets, library, roles)| {
-        let library = StoredValue::new(library);
-        let roles = StoredValue::new(roles);
-        let cards = presets
+    when(
+        move || (presets.get(), library.get(), roles.get()).ready(),
+        move |(presets, library, roles)| {
+            let library = StoredValue::new(library);
+            let roles = StoredValue::new(roles);
+            let cards = presets
             .into_iter()
             .map(|preset| {
                 let id = preset.id.clone();
@@ -35,24 +37,25 @@ pub fn Presets() -> impl IntoView {
                 }
             })
             .collect_view();
-        view! {
-            {head("Presets")}
-            <section class="stack preset-list">
-                <div class="section-head">
-                    <h2>"Presets"</h2>
-                    <button type="button" class="ghost"
-                        class:keep-space=move || editing.get().as_deref() == Some("new")
-                        on:click=move |_| editing.set(Some("new".into()))>"New preset"</button>
-                </div>
-                <p class="settings-note">"A new event starts with the default preset. Any event can switch to another from its Attendance section."</p>
-                {move || (editing.get().as_deref() == Some("new")).then(|| view! {
-                    <PresetForm preset=None library roles editing/>
-                })}
-                {cards}
-            </section>
-            <LibraryPanel library=library.get_value()/>
-        }
-    })
+            view! {
+                {head("Presets")}
+                <section class="stack preset-list">
+                    <div class="section-head">
+                        <h2>"Presets"</h2>
+                        <button type="button" class="ghost"
+                            class:keep-space=move || editing.get().as_deref() == Some("new")
+                            on:click=move |_| editing.set(Some("new".into()))>"New preset"</button>
+                    </div>
+                    <p class="settings-note">"A new event starts with the default preset. Any event can switch to another from its Attendance section."</p>
+                    {move || (editing.get().as_deref() == Some("new")).then(|| view! {
+                        <PresetForm preset=None library roles editing/>
+                    })}
+                    {cards}
+                </section>
+                <LibraryPanel library=library.get_value()/>
+            }
+        },
+    )
 }
 
 /// A preset as a card: its types in order, and what can be done with it.
@@ -112,8 +115,17 @@ fn PresetForm(
     editing: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let id = preset.as_ref().map(|preset| preset.id.clone());
-    let name = RwSignal::new(preset.as_ref().map(|preset| preset.name.clone()).unwrap_or_default());
-    let multiple = RwSignal::new(preset.as_ref().is_some_and(|preset| preset.multiple_signups));
+    let name = RwSignal::new(
+        preset
+            .as_ref()
+            .map(|preset| preset.name.clone())
+            .unwrap_or_default(),
+    );
+    let multiple = RwSignal::new(
+        preset
+            .as_ref()
+            .is_some_and(|preset| preset.multiple_signups),
+    );
     let types = RwSignal::new(preset.map(|preset| preset.options).unwrap_or_default());
     let problem = RwSignal::new(String::new());
     let rows = Rows {
@@ -151,7 +163,8 @@ fn PresetForm(
         });
     };
     let addable = Signal::derive(move || {
-        let chosen: Vec<String> = types.with(|list| list.iter().map(|opt| opt.type_id.clone()).collect());
+        let chosen: Vec<String> =
+            types.with(|list| list.iter().map(|opt| opt.type_id.clone()).collect());
         library.with_value(|items| {
             items
                 .iter()
@@ -161,18 +174,22 @@ fn PresetForm(
         })
     });
     let add = Callback::new(move |picked: Option<String>| {
-        let item = picked.and_then(|picked| library.with_value(|items| items.iter().find(|item| item.id == picked).cloned()));
+        let item = picked.and_then(|picked| {
+            library.with_value(|items| items.iter().find(|item| item.id == picked).cloned())
+        });
         if let Some(item) = item {
-            types.update(|list| list.push(dto::SignupOption {
-                id: None,
-                type_id: item.id,
-                name: item.name,
-                emoji: item.emoji,
-                attending: item.attending,
-                capacity: None,
-                max_guests: 0,
-                role_id: None,
-            }));
+            types.update(|list| {
+                list.push(dto::SignupOption {
+                    id: None,
+                    type_id: item.id,
+                    name: item.name,
+                    emoji: item.emoji,
+                    attending: item.attending,
+                    capacity: None,
+                    max_guests: 0,
+                    role_id: None,
+                })
+            });
         }
     });
     view! {
@@ -228,7 +245,8 @@ struct Rows {
 
 impl Rows {
     fn at(self, type_id: &str) -> Option<usize> {
-        self.types.with_untracked(|list| list.iter().position(|opt| opt.type_id == type_id))
+        self.types
+            .with_untracked(|list| list.iter().position(|opt| opt.type_id == type_id))
     }
 
     /// Moves row `from` to where `to` is.
@@ -256,15 +274,32 @@ impl Rows {
 fn PresetTypeRow(rows: Rows, type_id: String) -> impl IntoView {
     let key = StoredValue::new(type_id);
     let row = Memo::new(move |_| {
-        key.with_value(|key| rows.types.with(|list| list.iter().find(|opt| &opt.type_id == key).cloned()))
+        key.with_value(|key| {
+            rows.types
+                .with(|list| list.iter().find(|opt| &opt.type_id == key).cloned())
+        })
     });
-    let label = move || row.with(|row| row.as_ref().map(|opt| format!("{} {}", opt.emoji, opt.name)).unwrap_or_default());
+    let label = move || {
+        row.with(|row| {
+            row.as_ref()
+                .map(|opt| format!("{} {}", opt.emoji, opt.name))
+                .unwrap_or_default()
+        })
+    };
     let held = move || rows.grab.get() == Some(key.get_value());
     let role_choices = Signal::derive(move || {
-        rows.roles.with_value(|roles| roles.iter().map(|role| (role.id.clone(), role.name.clone())).collect::<Vec<_>>())
+        rows.roles.with_value(|roles| {
+            roles
+                .iter()
+                .map(|role| (role.id.clone(), role.name.clone()))
+                .collect::<Vec<_>>()
+        })
     });
-    let role = Signal::derive(move || row.with(|row| row.as_ref().and_then(|opt| opt.role_id.clone())));
-    let pick_role = Callback::new(move |picked: Option<String>| key.with_value(|key| rows.change(key, |opt| opt.role_id = picked)));
+    let role =
+        Signal::derive(move || row.with(|row| row.as_ref().and_then(|opt| opt.role_id.clone())));
+    let pick_role = Callback::new(move |picked: Option<String>| {
+        key.with_value(|key| rows.change(key, |opt| opt.role_id = picked))
+    });
     let nudge = move |ev: leptos::ev::KeyboardEvent| {
         let step: isize = match ev.key().as_str() {
             "ArrowUp" => -1,
@@ -404,8 +439,16 @@ fn type_row(item: dto::LibraryItem, editing: RwSignal<Option<String>>) -> impl I
 fn TypeForm(item: Option<dto::LibraryItem>, editing: RwSignal<Option<String>>) -> impl IntoView {
     let id = item.as_ref().map(|item| item.id.clone());
     let used = item.as_ref().is_some_and(|item| !item.used_by.is_empty());
-    let name = RwSignal::new(item.as_ref().map(|item| item.name.clone()).unwrap_or_default());
-    let emoji = RwSignal::new(item.as_ref().map(|item| item.emoji.clone()).unwrap_or_default());
+    let name = RwSignal::new(
+        item.as_ref()
+            .map(|item| item.name.clone())
+            .unwrap_or_default(),
+    );
+    let emoji = RwSignal::new(
+        item.as_ref()
+            .map(|item| item.emoji.clone())
+            .unwrap_or_default(),
+    );
     let attending = RwSignal::new(item.as_ref().is_none_or(|item| item.attending));
     let problem = RwSignal::new(String::new());
     let asking = RwSignal::new(false);
@@ -416,12 +459,18 @@ fn TypeForm(item: Option<dto::LibraryItem>, editing: RwSignal<Option<String>>) -
         let id = id.clone();
         async move {
             let sent = match &id {
-                Some(id) => api::send::<dto::Done, _>("PATCH", &path::library_type(&server, id), Some(&draft))
-                    .await
-                    .map(|_| ()),
-                None => api::send::<dto::LibraryItem, _>("POST", &path::library(&server), Some(&draft))
-                    .await
-                    .map(|_| ()),
+                Some(id) => api::send::<dto::Done, _>(
+                    "PATCH",
+                    &path::library_type(&server, id),
+                    Some(&draft),
+                )
+                .await
+                .map(|_| ()),
+                None => {
+                    api::send::<dto::LibraryItem, _>("POST", &path::library(&server), Some(&draft))
+                        .await
+                        .map(|_| ())
+                }
             };
             match sent {
                 Ok(()) => {

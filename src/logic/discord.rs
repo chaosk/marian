@@ -10,9 +10,11 @@ use crate::clock;
 use crate::error::OpError;
 use crate::i18n::{self, Lang};
 use crate::schema;
-use crate::tr;
 use crate::store::{self, Channel, Connection, Membership, Role};
-use crate::values::{AccessKind, ChannelKind, EventRoleKind, EventStatus, OverwriteKind, SignupState};
+use crate::tr;
+use crate::values::{
+    AccessKind, ChannelKind, EventRoleKind, EventStatus, OverwriteKind, SignupState,
+};
 
 #[allow(
     clippy::large_enum_variant,
@@ -57,7 +59,11 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
     let Some(message_id) = event.discord_message_id.clone() else {
         // A posted event's message is on its way, so wait for it. One that
         // isn't posted (a draft, or a scheduled post) has no roles to give yet.
-        return Ok(if event.status == EventStatus::Posted { Attendance::Waiting } else { Attendance::Idle });
+        return Ok(if event.status == EventStatus::Posted {
+            Attendance::Waiting
+        } else {
+            Attendance::Idle
+        });
     };
     let settings = store::settings(conn, event.guild_id)?;
     let thread_discord_id = store::thread_discord_id(conn, event_id)?;
@@ -121,13 +127,22 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
 
 /// Discord thread title: the event name, then its date in the guild's zone.
 /// Discord allows 100 characters, so a long name is shortened and the date stays.
-pub fn event_thread_name(lang: Lang, title: &str, starts_at: DateTime<Utc>, timezone: &str) -> String {
+pub fn event_thread_name(
+    lang: Lang,
+    title: &str,
+    starts_at: DateTime<Utc>,
+    timezone: &str,
+) -> String {
     let date = clock::zone(timezone)
         .ok()
         .map(|tz| i18n::format_day(lang, starts_at.with_timezone(&tz).date_naive()));
     let fallback = tr!(lang, "post-event-fallback");
     let title = title.trim();
-    let title = if title.is_empty() { fallback.as_str() } else { title };
+    let title = if title.is_empty() {
+        fallback.as_str()
+    } else {
+        title
+    };
     let Some(date) = date else {
         return trim_chars(title, 100);
     };
@@ -144,7 +159,12 @@ pub(super) fn stored_thread_name(
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
     let lang = i18n::lang_of(conn, event.guild_id);
-    Ok(event_thread_name(lang, &event.title, event.starts_at, &timezone))
+    Ok(event_thread_name(
+        lang,
+        &event.title,
+        event.starts_at,
+        &timezone,
+    ))
 }
 
 fn id_diff(desired: &[String], applied: &[String]) -> (Vec<String>, Vec<String>) {
@@ -173,9 +193,16 @@ pub fn delete_confirm_body(
 ) -> String {
     let fallback = tr!(lang, "post-event-fallback");
     let name = title.trim();
-    let name = if name.is_empty() { fallback.as_str() } else { name };
+    let name = if name.is_empty() {
+        fallback.as_str()
+    } else {
+        name
+    };
     let label = trim_chars(&name.replace(['\n', '\r'], " "), 200);
-    let label = label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let label = label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
     let head = match url.map(str::trim).filter(|url| !url.is_empty()) {
         Some(url) => format!("[{label}]({url})"),
         None => label,
@@ -213,7 +240,10 @@ pub fn mention_line(everyone: bool, role_discord_ids: &[String]) -> String {
     line
 }
 
-fn mention_discord_roles(conn: &mut Connection, event: &store::Event) -> Result<Vec<String>, OpError> {
+fn mention_discord_roles(
+    conn: &mut Connection,
+    event: &store::Event,
+) -> Result<Vec<String>, OpError> {
     let ids = store::event_role_ids(conn, event, EventRoleKind::Mention)?;
     mention_role_ids(conn, &ids)
 }
@@ -268,7 +298,10 @@ pub fn discord_view(
     }
     let location = event.location.trim();
     if !location.is_empty() {
-        body.push_str(&format!("**{}**\n📍 {location}\n", tr!(lang, "post-location")));
+        body.push_str(&format!(
+            "**{}**\n📍 {location}\n",
+            tr!(lang, "post-location")
+        ));
     }
     body.push_str(&format!(
         "**{}**\n<t:{}:F> - <t:{}:t>\n",
@@ -285,12 +318,18 @@ pub fn discord_view(
     let options = store::options_for(conn, &event)?;
     let signups = store::signups_for(conn, &event)?;
     let memberships = store::list_memberships(conn, event.guild_id)?;
-    let names: HashMap<i64, String> = memberships.into_iter().map(|user| (user.id, user.name)).collect();
+    let names: HashMap<i64, String> = memberships
+        .into_iter()
+        .map(|user| (user.id, user.name))
+        .collect();
     let mut fields = Vec::new();
     let mut buttons = Vec::new();
     let closed = event.status != EventStatus::Posted || event.signups_closed;
     // A finished event's post is a record; nothing on it can be pressed.
-    let finished = matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped);
+    let finished = matches!(
+        event.status,
+        EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped
+    );
     for opt in &options {
         let confirmed: Vec<_> = signups
             .iter()
@@ -310,10 +349,12 @@ pub fn discord_view(
         let mut lines = Vec::new();
         if settings.show_attendees {
             lines.extend(confirmed.iter().filter_map(|signup| {
-                names.get(&signup.membership_id).map(|name| match signup.guests {
-                    0 => name.clone(),
-                    guests => format!("{name} (+{guests})"),
-                })
+                names
+                    .get(&signup.membership_id)
+                    .map(|name| match signup.guests {
+                        0 => name.clone(),
+                        guests => format!("{name} (+{guests})"),
+                    })
             }));
         }
         if waiting > 0 {
@@ -553,7 +594,10 @@ pub fn ensure_discord_user(
 ) -> Result<(Membership, Vec<i64>), OpError> {
     match follow_discord_name(conn, guild_id, discord_id, name)? {
         Some(found) => Ok(found),
-        None => Ok((new_discord_user(conn, guild_id, discord_id, name)?, Vec::new())),
+        None => Ok((
+            new_discord_user(conn, guild_id, discord_id, name)?,
+            Vec::new(),
+        )),
     }
 }
 
@@ -598,7 +642,11 @@ pub fn follow_discord_name(
 
 /// Keeps a member's picture as Discord has it; `None` clears one they took
 /// down. Posts don't show pictures, so nothing needs redrawing.
-pub fn follow_discord_avatar(conn: &mut Connection, member: &Membership, avatar: Option<&str>) -> Result<(), OpError> {
+pub fn follow_discord_avatar(
+    conn: &mut Connection,
+    member: &Membership,
+    avatar: Option<&str>,
+) -> Result<(), OpError> {
     if member.avatar.as_deref() == avatar {
         return Ok(());
     }
@@ -611,7 +659,11 @@ pub fn follow_discord_avatar(conn: &mut Connection, member: &Membership, avatar:
 /// Events whose Discord post lists the member among the people signed up and
 /// hasn't ended. A post for an event that's over keeps the names it was last
 /// drawn with, even while it still takes signups.
-fn posts_listing(conn: &mut Connection, membership_id: i64, now: DateTime<Utc>) -> Result<Vec<i64>, OpError> {
+fn posts_listing(
+    conn: &mut Connection,
+    membership_id: i64,
+    now: DateTime<Utc>,
+) -> Result<Vec<i64>, OpError> {
     let signed_up = schema::signups::table
         .filter(schema::signups::membership_id.eq(membership_id))
         .filter(schema::signups::state.eq(SignupState::Confirmed))
@@ -620,7 +672,11 @@ fn posts_listing(conn: &mut Connection, membership_id: i64, now: DateTime<Utc>) 
         .filter(schema::events::id.eq_any(signed_up))
         .filter(schema::events::status.eq(EventStatus::Posted))
         .filter(schema::events::discord_message_id.is_not_null())
-        .select((schema::events::id, schema::events::starts_at, schema::events::duration_minutes))
+        .select((
+            schema::events::id,
+            schema::events::starts_at,
+            schema::events::duration_minutes,
+        ))
         .load(conn)?;
     Ok(events
         .into_iter()
@@ -663,7 +719,11 @@ fn new_discord_user(
     store::membership(conn, id)?.ok_or(OpError::NotFound)
 }
 
-pub fn set_server_manager(conn: &mut Connection, membership_id: i64, server_manager: bool) -> Result<(), OpError> {
+pub fn set_server_manager(
+    conn: &mut Connection,
+    membership_id: i64,
+    server_manager: bool,
+) -> Result<(), OpError> {
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
         .set(schema::memberships::server_manager.eq(server_manager))
         .execute(conn)?;
@@ -749,9 +809,11 @@ pub fn sync_discord_channel(
     name: &str,
 ) -> Result<Channel, OpError> {
     let Some(channel) = store::channel_by_discord(conn, guild_id, discord_id)? else {
-        let pending = store::channel_by_name(conn, guild_id, &slug_channel(name))?.filter(|channel| {
-            channel.kind == ChannelKind::Event && channel.discord_id.as_deref().is_none_or(str::is_empty)
-        });
+        let pending =
+            store::channel_by_name(conn, guild_id, &slug_channel(name))?.filter(|channel| {
+                channel.kind == ChannelKind::Event
+                    && channel.discord_id.as_deref().is_none_or(str::is_empty)
+            });
         let Some(pending) = pending else {
             return ensure_discord_channel(conn, guild_id, discord_id, name);
         };
@@ -779,7 +841,11 @@ pub fn sync_discord_channel(
 }
 
 /// Marks the channel for a deleted Discord channel as gone.
-pub fn discord_channel_gone(conn: &mut Connection, guild_id: i64, discord_id: &str) -> Result<(), OpError> {
+pub fn discord_channel_gone(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+) -> Result<(), OpError> {
     diesel::update(
         schema::channels::table
             .filter(schema::channels::guild_id.eq(guild_id))
@@ -880,7 +946,11 @@ pub fn sync_discord_role(
 }
 
 /// Marks the role for a deleted Discord role as gone; nobody holds it any more.
-pub fn discord_role_gone(conn: &mut Connection, guild_id: i64, discord_id: &str) -> Result<(), OpError> {
+pub fn discord_role_gone(
+    conn: &mut Connection,
+    guild_id: i64,
+    discord_id: &str,
+) -> Result<(), OpError> {
     store::with_tx(conn, |tx| {
         let Some(role) = store::role_by_discord(tx, guild_id, discord_id)? else {
             return Ok(());
@@ -954,14 +1024,21 @@ pub fn sync_channel_overwrites(
     let Some(channel) = store::channel_by_discord(conn, guild_id, channel_discord_id)? else {
         return Ok(());
     };
-    diesel::delete(schema::channel_overwrites::table.filter(schema::channel_overwrites::channel_id.eq(channel.id)))
-        .execute(conn)?;
+    diesel::delete(
+        schema::channel_overwrites::table
+            .filter(schema::channel_overwrites::channel_id.eq(channel.id)),
+    )
+    .execute(conn)?;
     let rows: Vec<_> = overwrites
         .iter()
         .map(|o| {
             (
                 schema::channel_overwrites::channel_id.eq(channel.id),
-                schema::channel_overwrites::kind.eq(if o.member { OverwriteKind::Member } else { OverwriteKind::Role }),
+                schema::channel_overwrites::kind.eq(if o.member {
+                    OverwriteKind::Member
+                } else {
+                    OverwriteKind::Role
+                }),
                 schema::channel_overwrites::target.eq(&o.target),
                 schema::channel_overwrites::allow.eq(o.allow as i64),
                 schema::channel_overwrites::deny.eq(o.deny as i64),
@@ -1028,11 +1105,19 @@ pub fn event_channel_purge(
         .load(conn)?;
     // A routine's results reply sits under its event's post and stays with it.
     let results: Vec<Option<String>> = schema::routine_runs::table
-        .inner_join(schema::events::table.on(schema::routine_runs::event_id.eq(schema::events::id.nullable())))
+        .inner_join(
+            schema::events::table
+                .on(schema::routine_runs::event_id.eq(schema::events::id.nullable())),
+        )
         .filter(schema::events::channel_id.eq(channel.id))
         .select(schema::routine_runs::results_message_id)
         .load(conn)?;
-    let keep = ids.into_iter().chain(results).flatten().filter(|id| !id.is_empty()).collect();
+    let keep = ids
+        .into_iter()
+        .chain(results)
+        .flatten()
+        .filter(|id| !id.is_empty())
+        .collect();
     Ok(Some(EventChannelPurge {
         channel_id: channel.id,
         discord_channel_id,
@@ -1124,7 +1209,10 @@ mod tests {
     fn a_renamed_role_keeps_its_row() {
         let mut conn = one_role();
         let role = sync_discord_role(&mut conn, 1, "700", "Veteran", "aa0000").unwrap();
-        assert_eq!((role.id, role.name.as_str(), role.color.as_str()), (51, "Veteran", "#aa0000"));
+        assert_eq!(
+            (role.id, role.name.as_str(), role.color.as_str()),
+            (51, "Veteran", "#aa0000")
+        );
         assert_eq!(role_names(&mut conn), vec!["Veteran"]);
         assert!(store::membership_has_role(&mut conn, 71, 51).unwrap());
     }
@@ -1142,7 +1230,11 @@ mod tests {
         discord_role_gone(&mut conn, 1, "700").unwrap();
         assert!(role_names(&mut conn).is_empty());
         assert!(!store::membership_has_role(&mut conn, 71, 51).unwrap());
-        assert!(store::role(&mut conn, 51).unwrap().unwrap().gone_at.is_some());
+        assert!(store::role(&mut conn, 51)
+            .unwrap()
+            .unwrap()
+            .gone_at
+            .is_some());
 
         let back = sync_discord_role(&mut conn, 1, "700", "Raider", "112233").unwrap();
         assert_eq!(back.id, 51);
@@ -1156,10 +1248,18 @@ mod tests {
             "INSERT INTO roles (id, guild_id, name, color) VALUES (52, 1, 'Race attendee', '#1e3a6e');",
         )
         .unwrap();
-        sync_discord_roles(&mut conn, 1, &[("800".into(), "Race attendee".into(), "1e3a6e".into())]).unwrap();
+        sync_discord_roles(
+            &mut conn,
+            1,
+            &[("800".into(), "Race attendee".into(), "1e3a6e".into())],
+        )
+        .unwrap();
         let roles = store::list_roles(&mut conn, 1).unwrap();
         assert_eq!(roles.len(), 1);
-        assert_eq!((roles[0].id, roles[0].discord_id.as_deref()), (52, Some("800")));
+        assert_eq!(
+            (roles[0].id, roles[0].discord_id.as_deref()),
+            (52, Some("800"))
+        );
     }
 
     #[test]
@@ -1189,7 +1289,11 @@ mod tests {
         let mut conn = one_channel();
         discord_channel_gone(&mut conn, 1, "100").unwrap();
         assert!(names(&mut conn).is_empty());
-        assert!(store::channel(&mut conn, 41).unwrap().unwrap().gone_at.is_some());
+        assert!(store::channel(&mut conn, 41)
+            .unwrap()
+            .unwrap()
+            .gone_at
+            .is_some());
 
         let fresh = sync_discord_channel(&mut conn, 1, "300", "raids").unwrap();
         assert_ne!(fresh.id, 41);
@@ -1242,10 +1346,22 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
-        assert!(matches!(attendance(&mut conn, 1).unwrap(), Attendance::Idle), "a draft has nothing to give");
-        assert!(matches!(attendance(&mut conn, 2).unwrap(), Attendance::Idle), "nor does a scheduled post");
-        assert!(matches!(attendance(&mut conn, 3).unwrap(), Attendance::Waiting), "a posted event waits for its message");
-        assert!(matches!(attendance(&mut conn, 4).unwrap(), Attendance::Ready(_)));
+        assert!(
+            matches!(attendance(&mut conn, 1).unwrap(), Attendance::Idle),
+            "a draft has nothing to give"
+        );
+        assert!(
+            matches!(attendance(&mut conn, 2).unwrap(), Attendance::Idle),
+            "nor does a scheduled post"
+        );
+        assert!(
+            matches!(attendance(&mut conn, 3).unwrap(), Attendance::Waiting),
+            "a posted event waits for its message"
+        );
+        assert!(matches!(
+            attendance(&mut conn, 4).unwrap(),
+            Attendance::Ready(_)
+        ));
     }
 
     #[test]
@@ -1286,7 +1402,11 @@ mod tests {
         let now = clock::parse_stamp("2026-10-14T18:30:00Z").unwrap();
         let mut redraw = posts_listing(&mut conn, 1, now).unwrap();
         redraw.sort();
-        assert_eq!(redraw, vec![1, 2], "a post that's over keeps its names, even while it takes signups");
+        assert_eq!(
+            redraw,
+            vec![1, 2],
+            "a post that's over keeps its names, even while it takes signups"
+        );
     }
 
     #[test]
@@ -1329,8 +1449,17 @@ mod tests {
             "{}",
             view.body
         );
-        assert!(view.body.contains("[+](http://www.google.com/calendar/event"), "{}", view.body);
-        assert!(!view.body.contains("marian.example.com"), "the web link is a button: {}", view.body);
+        assert!(
+            view.body
+                .contains("[+](http://www.google.com/calendar/event"),
+            "{}",
+            view.body
+        );
+        assert!(
+            !view.body.contains("marian.example.com"),
+            "the web link is a button: {}",
+            view.body
+        );
         assert!(view.body.contains("🕐 <t:"), "{}", view.body);
         assert!(!view.body.contains("**Location**"), "{}", view.body);
         conn.batch_execute("UPDATE events SET location = 'The dock' WHERE id = 1")
@@ -1354,10 +1483,21 @@ mod tests {
             view.buttons[2].role,
             ButtonRole::Web("https://marian.example.com/servers/4242/events/01900000-0000-7000-8000-000000000010".into())
         );
-        conn.batch_execute("UPDATE events SET status = 'archived', discord_message_id = '55' WHERE id = 1").unwrap();
-        let finished = discord_view(&mut conn, 1, "https://marian.example.com").unwrap().unwrap();
+        conn.batch_execute(
+            "UPDATE events SET status = 'archived', discord_message_id = '55' WHERE id = 1",
+        )
+        .unwrap();
+        let finished = discord_view(&mut conn, 1, "https://marian.example.com")
+            .unwrap()
+            .unwrap();
         assert!(
-            matches!(finished.buttons.as_slice(), [DiscordButton { role: ButtonRole::Web(_), .. }]),
+            matches!(
+                finished.buttons.as_slice(),
+                [DiscordButton {
+                    role: ButtonRole::Web(_),
+                    ..
+                }]
+            ),
             "a finished event keeps only the link: {:?}",
             finished.buttons
         );
@@ -1401,7 +1541,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(view.mention_everyone);
-        assert_eq!(view.mention_roles, vec!["111".to_string(), "333".to_string()]);
+        assert_eq!(
+            view.mention_roles,
+            vec!["111".to_string(), "333".to_string()]
+        );
         assert_eq!(
             mention_line(view.mention_everyone, &view.mention_roles),
             "@everyone <@&111> <@&333>"
@@ -1440,13 +1583,20 @@ mod tests {
         )
         .unwrap();
         store::insert_default_settings(&mut conn, 1).unwrap();
-        let view = discord_view(&mut conn, 1, "https://marian.example.com").unwrap().unwrap();
+        let view = discord_view(&mut conn, 1, "https://marian.example.com")
+            .unwrap()
+            .unwrap();
         assert_eq!(view.fields[0].name, "✅ **Yes** (4/10)");
         assert_eq!(view.fields[0].value, "Nell (+2)\nJune");
         let roles: Vec<&ButtonRole> = view.buttons.iter().map(|button| &button.role).collect();
         assert!(matches!(
             roles.as_slice(),
-            [ButtonRole::Signup(_), ButtonRole::Guests(_), ButtonRole::Signup(_), ButtonRole::Web(_)]
+            [
+                ButtonRole::Signup(_),
+                ButtonRole::Guests(_),
+                ButtonRole::Signup(_),
+                ButtonRole::Web(_)
+            ]
         ));
         assert_eq!(view.buttons[1].emoji, "✅");
         assert_eq!(view.buttons[1].label, "+X");
@@ -1463,12 +1613,12 @@ mod tests {
             true,
         );
         assert!(
-            posted.starts_with(
-                "[Test](https://marian.example.com/servers/1/events/abc) · <t:"
-            ),
+            posted.starts_with("[Test](https://marian.example.com/servers/1/events/abc) · <t:"),
             "{posted}"
         );
-        assert!(posted.contains(":R>\n\nThis removes the Discord post. The event is marked cancelled."));
+        assert!(
+            posted.contains(":R>\n\nThis removes the Discord post. The event is marked cancelled.")
+        );
         let draft = delete_confirm_body(Lang::En, "Shore", when, None, false);
         assert!(draft.starts_with("Shore · <t:"), "{draft}");
         assert!(draft.contains("This deletes the event."));
@@ -1477,47 +1627,67 @@ mod tests {
     #[test]
     fn signing_in_does_not_make_the_first_member_a_server_manager() {
         let mut conn = store::open_memory().unwrap();
-        conn.batch_execute(
-            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
-        )
-        .unwrap();
+        conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .unwrap();
         let (first, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
         assert!(!first.server_manager);
         let (second, _) = ensure_discord_user(&mut conn, 1, "200", "June").unwrap();
         assert!(!second.server_manager);
         set_server_manager(&mut conn, first.id, true).unwrap();
-        assert!(store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
+        assert!(
+            store::membership(&mut conn, first.id)
+                .unwrap()
+                .unwrap()
+                .server_manager
+        );
         set_server_manager(&mut conn, first.id, false).unwrap();
-        assert!(!store::membership(&mut conn, first.id).unwrap().unwrap().server_manager);
+        assert!(
+            !store::membership(&mut conn, first.id)
+                .unwrap()
+                .unwrap()
+                .server_manager
+        );
     }
 
     #[test]
     fn a_server_nickname_stays_through_a_web_sign_in() {
         let mut conn = store::open_memory().unwrap();
-        conn.batch_execute(
-            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
-        )
-        .unwrap();
-        assert!(follow_discord_name(&mut conn, 1, "100", "Nellie").unwrap().is_none(), "nobody new is added");
+        conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .unwrap();
+        assert!(
+            follow_discord_name(&mut conn, 1, "100", "Nellie")
+                .unwrap()
+                .is_none(),
+            "nobody new is added"
+        );
         let signed_in = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
-        assert_eq!(signed_in.name, "Nell", "a new member starts with the name they signed in with");
+        assert_eq!(
+            signed_in.name, "Nell",
+            "a new member starts with the name they signed in with"
+        );
 
         let (clicked, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
-        assert_eq!((clicked.id, clicked.name.as_str()), (signed_in.id, "Nellie"));
+        assert_eq!(
+            (clicked.id, clicked.name.as_str()),
+            (signed_in.id, "Nellie")
+        );
         let again = admit_discord_user(&mut conn, 1, "100", "Nell").unwrap();
-        assert_eq!(again.name, "Nellie", "the global name doesn't replace the nickname");
+        assert_eq!(
+            again.name, "Nellie",
+            "the global name doesn't replace the nickname"
+        );
 
-        let (renamed, _) = follow_discord_name(&mut conn, 1, "100", "Nells").unwrap().unwrap();
+        let (renamed, _) = follow_discord_name(&mut conn, 1, "100", "Nells")
+            .unwrap()
+            .unwrap();
         assert_eq!(renamed.name, "Nells");
     }
 
     #[test]
     fn a_member_picture_follows_discord_and_can_be_taken_down() {
         let mut conn = store::open_memory().unwrap();
-        conn.batch_execute(
-            "INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');",
-        )
-        .unwrap();
+        conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');")
+            .unwrap();
         let (member, _) = ensure_discord_user(&mut conn, 1, "100", "Nell").unwrap();
         assert_eq!(member.avatar, None, "a new member shows their initial");
 
@@ -1527,10 +1697,20 @@ mod tests {
         assert_eq!(member.avatar.as_deref(), Some(url));
 
         let (renamed, _) = ensure_discord_user(&mut conn, 1, "100", "Nellie").unwrap();
-        assert_eq!(renamed.avatar.as_deref(), Some(url), "a rename keeps the picture");
+        assert_eq!(
+            renamed.avatar.as_deref(),
+            Some(url),
+            "a rename keeps the picture"
+        );
 
         follow_discord_avatar(&mut conn, &renamed, None).unwrap();
-        assert_eq!(store::membership(&mut conn, member.id).unwrap().unwrap().avatar, None);
+        assert_eq!(
+            store::membership(&mut conn, member.id)
+                .unwrap()
+                .unwrap()
+                .avatar,
+            None
+        );
     }
 
     #[test]
@@ -1618,7 +1798,10 @@ mod tests {
         assert_eq!(plan.discord_channel_id, "100");
         let mut keep: Vec<_> = plan.keep.into_iter().collect();
         keep.sort();
-        assert_eq!(keep, vec!["10".to_string(), "20".to_string(), "21".to_string()]);
+        assert_eq!(
+            keep,
+            vec!["10".to_string(), "20".to_string(), "21".to_string()]
+        );
         assert!(event_channel_purge(&mut conn, 3).unwrap().is_none());
         assert!(event_channel_purge(&mut conn, 4).unwrap().is_none());
         diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))

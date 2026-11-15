@@ -54,7 +54,10 @@ pub fn create_channel(
         if existing.kind == ChannelKind::Event && !linked {
             return Ok(existing.id);
         }
-        return Err(OpError::from(crate::msg!("err-channel-exists", name = slug.as_str())));
+        return Err(OpError::from(crate::msg!(
+            "err-channel-exists",
+            name = slug.as_str()
+        )));
     }
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
@@ -172,7 +175,10 @@ mod tests {
         let notice = bind_channel_discord(&mut conn, id, "900").unwrap();
         assert_eq!(notice.to_string(), "Created #this-is-an-event-channel.");
         let again = create_channel(&mut conn, 1, 1, "this-is-an-event-channel").unwrap_err();
-        assert_eq!(again.to_string(), "#this-is-an-event-channel already exists.");
+        assert_eq!(
+            again.to_string(),
+            "#this-is-an-event-channel already exists."
+        );
         let channel = store::channel(&mut conn, id).unwrap().unwrap();
         assert_eq!(channel.discord_id.as_deref(), Some("900"));
         assert_eq!(channel.kind, ChannelKind::Event);

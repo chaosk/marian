@@ -473,7 +473,9 @@ pub struct PostAt {
 pub enum Cutoff {
     Never,
     /// This many minutes before the event starts.
-    Before { minutes: i64 },
+    Before {
+        minutes: i64,
+    },
 }
 
 /// One or more details changed in place on the event page. Unset fields stay as
@@ -518,7 +520,11 @@ pub struct EventPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restrict_role_ids: Option<Vec<String>>,
     /// Unset leaves the role; `null` takes it away.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub attendee_role_id: Option<Option<String>>,
 }
 

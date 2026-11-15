@@ -25,8 +25,8 @@ pub const ZONES: &[&str] = &[
 
 pub use marian_types::labels::{cadence_label, weekday_name, weekday_short};
 pub use marian_types::time::{
-    date_local, datetime_local, format_clock, format_day, format_end, format_long_date,
-    format_rel, format_when, human_duration, human_offset, zone_groups, ZoneGroup, ZoneRow,
+    date_local, datetime_local, format_clock, format_day, format_end, format_long_date, format_rel,
+    format_when, human_duration, human_offset, zone_groups, ZoneGroup, ZoneRow,
 };
 
 pub fn zone(name: &str) -> Result<Tz, OpError> {
@@ -126,7 +126,12 @@ fn at_local_result(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, OpError> {
         .ok_or_else(|| OpError::from(crate::msg!("err-date-missing")))
 }
 
-pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: Cadence, tz: Tz) -> DateTime<Utc> {
+pub fn occurrence_start(
+    anchor: DateTime<Utc>,
+    index: i64,
+    cadence: Cadence,
+    tz: Tz,
+) -> DateTime<Utc> {
     let delta = (index - 1).max(0);
     let local = anchor.with_timezone(&tz);
     let time = local.time();
