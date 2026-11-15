@@ -301,17 +301,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    command_log (id) {
-        id -> BigInt,
-        guild_id -> BigInt,
-        membership_id -> Nullable<BigInt>,
-        line -> Text,
-        reply -> Text,
-        created_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
     event_prompts (discord_user_id) {
         discord_user_id -> Text,
         guild_id -> BigInt,
@@ -518,7 +507,6 @@ diesel::joinable!(presets -> guilds (guild_id));
 diesel::joinable!(option_library -> guilds (guild_id));
 diesel::joinable!(activity -> guilds (guild_id));
 diesel::joinable!(activity -> events (event_id));
-diesel::joinable!(command_log -> guilds (guild_id));
 diesel::joinable!(web_session_guilds -> web_sessions (token));
 diesel::joinable!(routines -> guilds (guild_id));
 diesel::joinable!(routines -> event_templates (template_id));
@@ -540,7 +528,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     calendar_feeds,
     channel_overwrites,
     channels,
-    command_log,
     event_prompts,
     event_roles,
     event_templates,
