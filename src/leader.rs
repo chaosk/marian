@@ -20,9 +20,16 @@ use crate::store::Connection;
 pub const LEADER_KEY: i64 = 0x6d61_7269_616e_0001;
 
 /// How often a follower tries for the lock, and how often the leader checks
-/// that its lock connection still answers.
+/// that its lock connection still answers. Tests use the same steps at a
+/// fraction of the time, so a takeover takes under a second there.
+#[cfg(not(test))]
 const RETRY: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
 const CHECK: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RETRY: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const CHECK: Duration = Duration::from_millis(250);
 /// How long the leader waits on its lock connection before it counts as lost.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
