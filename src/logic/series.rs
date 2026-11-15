@@ -314,7 +314,8 @@ pub(super) fn fill_series(
         if series.max_occurrences.is_none() && start > now + Duration::days(120) {
             break;
         }
-        if !have.contains(&index) {
+        // A date already past is never added, so it can't go out late.
+        if !have.contains(&index) && start >= now {
             if series.max_occurrences.is_none() && scheduled >= 8 {
                 break;
             }

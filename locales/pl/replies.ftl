@@ -64,6 +64,7 @@ notice-guests = Liczba gości { $name } w opcji { $option }: { $guests }.
 notice-guests-waiting = Grupa { $name } ({ $size } os.) nie mieści się już w opcji { $option } i czeka na miejsca.
 notice-was-not-on = W opcji { $option } nie było { $name }.
 notice-deleted = Usunięto { $title }.
+notice-deleted-series-date = Pominięto { $title }. Ten termin zostaje w serii jako pominięty, więc seria go nie przywróci.
 notice-cancelled = Odwołano { $title }.
 guests-form-title = Goście: { $option }
 guests-form-label = Ilu gości? (0–{ $most })

@@ -1347,8 +1347,9 @@ fn save_stored(
 
 pub fn delete_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
-    let gone = matches!(event.status.as_str(), "draft" | "scheduled" | "failed");
     logic::delete_event(conn, event.id, viewer.membership_id)?;
+    // A date of a series stays behind as skipped, so only a removed event leaves its page.
+    let gone = store::event(conn, event.id)?.is_none();
     let location = if gone {
         path(conn, viewer, "")?
     } else {
