@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::event::{insert_event_roles, replace_children};
 use super::model::{OptionInput, ReminderInput, SeriesTemplate};
@@ -65,7 +66,7 @@ struct NewTemplate<'a> {
     created_at: DateTime<Utc>,
 }
 
-pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, OpError> {
+pub async fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, OpError> {
     let id = diesel::insert_into(schema::event_templates::table)
         .values(&NewTemplate {
             guild_id: template.guild_id,
@@ -87,13 +88,14 @@ pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, Op
             created_at: Utc::now(),
         })
         .returning(schema::event_templates::id)
-        .get_result(conn)?;
-    write_types(conn, id, &template.options)?;
+        .get_result(conn)
+        .await?;
+    write_types(conn, id, &template.options).await?;
     Ok(id)
 }
 
 /// A template's attendance types, in order, replacing what it had.
-fn write_types(
+async fn write_types(
     conn: &mut Connection,
     template_id: i64,
     options: &[OptionInput],
@@ -102,7 +104,8 @@ fn write_types(
         schema::template_options::table
             .filter(schema::template_options::template_id.eq(template_id)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     let rows: Vec<_> = options
         .iter()
         .enumerate()
@@ -119,11 +122,12 @@ fn write_types(
         .collect();
     diesel::insert_into(schema::template_options::table)
         .values(&rows)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-fn read_types(conn: &mut Connection, template_id: i64) -> Result<Vec<OptionInput>, OpError> {
+async fn read_types(conn: &mut Connection, template_id: i64) -> Result<Vec<OptionInput>, OpError> {
     let rows: Vec<super::library::ListedType> = schema::template_options::table
         .filter(schema::template_options::template_id.eq(template_id))
         .order(schema::template_options::position.asc())
@@ -133,11 +137,16 @@ fn read_types(conn: &mut Connection, template_id: i64) -> Result<Vec<OptionInput
             schema::template_options::role_id,
             schema::template_options::max_guests,
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(rows.into_iter().map(super::library::listed).collect())
 }
 
-pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Result<(), OpError> {
+pub async fn update(
+    conn: &mut Connection,
+    id: i64,
+    template: &EventTemplate,
+) -> Result<(), OpError> {
     diesel::update(schema::event_templates::table.filter(schema::event_templates::id.eq(id)))
         .set((
             schema::event_templates::channel_id.eq(template.channel_id),
@@ -156,12 +165,13 @@ pub fn update(conn: &mut Connection, id: i64, template: &EventTemplate) -> Resul
             schema::event_templates::mention_role_ids.eq(&template.mention_role_ids),
             schema::event_templates::restrict_role_ids.eq(&template.restrict_role_ids),
         ))
-        .execute(conn)?;
-    write_types(conn, id, &template.options)?;
+        .execute(conn)
+        .await?;
+    write_types(conn, id, &template.options).await?;
     Ok(())
 }
 
-pub fn update_wording(
+pub async fn update_wording(
     conn: &mut Connection,
     id: i64,
     channel_id: i64,
@@ -176,31 +186,35 @@ pub fn update_wording(
             schema::event_templates::description.eq(description),
             schema::event_templates::duration_minutes.eq(duration_minutes),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// Who picked a template's attendee role.
-pub fn role_by(conn: &mut Connection, id: i64) -> Result<Option<i64>, OpError> {
+pub async fn role_by(conn: &mut Connection, id: i64) -> Result<Option<i64>, OpError> {
     Ok(schema::event_templates::table
         .filter(schema::event_templates::id.eq(id))
         .select(schema::event_templates::attendee_role_by)
         .first(conn)
+        .await
         .optional()?
         .flatten())
 }
 
-pub fn set_role_by(conn: &mut Connection, id: i64, by: Option<i64>) -> Result<(), OpError> {
+pub async fn set_role_by(conn: &mut Connection, id: i64, by: Option<i64>) -> Result<(), OpError> {
     diesel::update(schema::event_templates::table.filter(schema::event_templates::id.eq(id)))
         .set(schema::event_templates::attendee_role_by.eq(by))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
+pub async fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
     let row = StoredTemplate::query()
         .filter(schema::event_templates::id.eq(id))
         .first(conn)
+        .await
         .optional()?
         .ok_or(OpError::NotFound)?;
     Ok(EventTemplate {
@@ -217,15 +231,18 @@ pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
         mention_everyone: row.mention_everyone,
         attendee_role_id: row.attendee_role_id,
         cutoff_offset_minutes: row.cutoff_offset_minutes,
-        options: read_types(conn, row.id)?,
+        options: read_types(conn, row.id).await?,
         reminders: serde_json::from_value(row.reminders_json).unwrap_or_default(),
         mention_role_ids: row.mention_role_ids,
         restrict_role_ids: row.restrict_role_ids,
     })
 }
 
-pub fn series_template(conn: &mut Connection, series: &Series) -> Result<SeriesTemplate, OpError> {
-    let template = load(conn, series.template_id)?;
+pub async fn series_template(
+    conn: &mut Connection,
+    series: &Series,
+) -> Result<SeriesTemplate, OpError> {
+    let template = load(conn, series.template_id).await?;
     Ok(as_series(&template))
 }
 
@@ -300,7 +317,7 @@ struct NewSpawnedEvent<'a> {
     updated_at: DateTime<Utc>,
 }
 
-pub fn spawn(
+pub async fn spawn(
     conn: &mut Connection,
     template: &EventTemplate,
     spec: &Spawn,
@@ -336,14 +353,16 @@ pub fn spawn(
             updated_at: stamp,
         })
         .returning(schema::events::id)
-        .get_result(conn)?;
-    replace_children(conn, id, &template.options, &template.reminders)?;
+        .get_result(conn)
+        .await?;
+    replace_children(conn, id, &template.options, &template.reminders).await?;
     insert_event_roles(
         conn,
         id,
         &template.mention_role_ids,
         &template.restrict_role_ids,
-    )?;
+    )
+    .await?;
     Ok(id)
 }
 

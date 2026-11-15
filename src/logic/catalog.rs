@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::access::{can_create, can_edit, holds_any};
 use super::db::{log, must_event, must_membership};
@@ -8,15 +9,16 @@ use crate::schema;
 use crate::store::{self, Connection};
 use crate::values::{ChannelKind, EventStatus};
 
-pub fn set_user_reminders(
+pub async fn set_user_reminders(
     conn: &mut Connection,
     membership_id: i64,
     enabled: bool,
 ) -> Result<crate::i18n::Msg, OpError> {
-    let user = must_membership(conn, membership_id)?;
+    let user = must_membership(conn, membership_id).await?;
     diesel::update(schema::memberships::table.filter(schema::memberships::id.eq(membership_id)))
         .set(schema::memberships::reminders_enabled.eq(enabled))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(if enabled {
         crate::msg!("notice-reminders-on", name = &user.name)
     } else {
@@ -24,15 +26,15 @@ pub fn set_user_reminders(
     })
 }
 
-pub fn create_channel(
+pub async fn create_channel(
     conn: &mut Connection,
     guild_id: i64,
     actor_id: i64,
     name: &str,
 ) -> Result<i64, OpError> {
-    let actor = must_membership(conn, actor_id)?;
-    let settings = store::settings(conn, guild_id)?;
-    let roles = store::membership_role_ids(conn, &actor)?;
+    let actor = must_membership(conn, actor_id).await?;
+    let settings = store::settings(conn, guild_id).await?;
+    let roles = store::membership_role_ids(conn, &actor).await?;
     let allowed = actor.server_manager
         || if settings.role_channel.is_empty() {
             can_create(&actor, &settings, &roles)
@@ -46,7 +48,7 @@ pub fn create_channel(
     if slug.is_empty() {
         return Err(OpError::from(crate::msg!("err-channel-name")));
     }
-    if let Some(existing) = store::channel_by_name(conn, guild_id, &slug)? {
+    if let Some(existing) = store::channel_by_name(conn, guild_id, &slug).await? {
         let linked = existing
             .discord_id
             .as_deref()
@@ -62,7 +64,8 @@ pub fn create_channel(
     let position = schema::channels::table
         .filter(schema::channels::guild_id.eq(guild_id))
         .select(diesel::dsl::max(schema::channels::position))
-        .first::<Option<i64>>(conn)?
+        .first::<Option<i64>>(conn)
+        .await?
         .unwrap_or(0)
         + 1;
     let id = diesel::insert_into(schema::channels::table)
@@ -73,27 +76,32 @@ pub fn create_channel(
             position,
         })
         .returning(schema::channels::id)
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     Ok(id)
 }
 
-pub fn bind_channel_discord(
+pub async fn bind_channel_discord(
     conn: &mut Connection,
     channel_id: i64,
     discord_id: &str,
 ) -> Result<crate::i18n::Msg, OpError> {
-    let channel = store::channel(conn, channel_id)?.ok_or(OpError::NotFound)?;
+    let channel = store::channel(conn, channel_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
         .set(schema::channels::discord_id.eq(discord_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     let notice = crate::msg!("notice-channel-created", name = &channel.name);
-    log(conn, channel.guild_id, None, &notice.to_string())?;
+    log(conn, channel.guild_id, None, &notice.to_string()).await?;
     Ok(notice)
 }
 
-pub fn discard_channel(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
+pub async fn discard_channel(conn: &mut Connection, channel_id: i64) -> Result<(), OpError> {
     diesel::delete(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -123,15 +131,15 @@ pub fn slug_channel(name: &str) -> String {
     out.trim_matches('-').chars().take(40).collect()
 }
 
-pub fn manual_calendar_sync(
+pub async fn manual_calendar_sync(
     conn: &mut Connection,
     event_id: i64,
     actor_id: i64,
 ) -> Result<String, OpError> {
-    let event = must_event(conn, event_id)?;
-    let actor = must_membership(conn, actor_id)?;
-    let settings = store::settings(conn, event.guild_id)?;
-    let roles = store::membership_role_ids(conn, &actor)?;
+    let event = must_event(conn, event_id).await?;
+    let actor = must_membership(conn, actor_id).await?;
+    let settings = store::settings(conn, event.guild_id).await?;
+    let roles = store::membership_role_ids(conn, &actor).await?;
     if !can_edit(&actor, &event, &settings, &roles) {
         return Err(OpError::from(crate::msg!("err-cant-sync")));
     }
@@ -141,21 +149,22 @@ pub fn manual_calendar_sync(
     let stamp = Utc::now();
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
         .set(schema::events::calendar_synced_at.eq(stamp))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     let notice = format!("Marked {} for the calendar feed.", event.title);
-    log(conn, event.guild_id, Some(event.id), &notice)?;
+    log(conn, event.guild_id, Some(event.id), &notice).await?;
     Ok(notice)
 }
 
 #[cfg(test)]
 mod tests {
-    use diesel::connection::SimpleConnection;
+    use diesel_async::SimpleAsyncConnection;
 
     use super::*;
 
-    #[test]
-    fn an_event_channel_keeps_its_discord_id() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn an_event_channel_keeps_its_discord_id() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -164,25 +173,32 @@ mod tests {
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true FROM users WHERE discord_id = 'nell';
             ",
         )
+        .await
         .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
-        let id = create_channel(&mut conn, 1, 1, "This is an event channel").unwrap();
-        let channel = store::channel(&mut conn, id).unwrap().unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
+        let id = create_channel(&mut conn, 1, 1, "This is an event channel")
+            .await
+            .unwrap();
+        let channel = store::channel(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(channel.name, "this-is-an-event-channel");
         assert!(channel.discord_id.is_none());
-        let same = create_channel(&mut conn, 1, 1, "#This is an event channel").unwrap();
+        let same = create_channel(&mut conn, 1, 1, "#This is an event channel")
+            .await
+            .unwrap();
         assert_eq!(same, id);
-        let notice = bind_channel_discord(&mut conn, id, "900").unwrap();
+        let notice = bind_channel_discord(&mut conn, id, "900").await.unwrap();
         assert_eq!(notice.to_string(), "Created #this-is-an-event-channel.");
-        let again = create_channel(&mut conn, 1, 1, "this-is-an-event-channel").unwrap_err();
+        let again = create_channel(&mut conn, 1, 1, "this-is-an-event-channel")
+            .await
+            .unwrap_err();
         assert_eq!(
             again.to_string(),
             "#this-is-an-event-channel already exists."
         );
-        let channel = store::channel(&mut conn, id).unwrap().unwrap();
+        let channel = store::channel(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(channel.discord_id.as_deref(), Some("900"));
         assert_eq!(channel.kind, ChannelKind::Event);
-        discard_channel(&mut conn, id).unwrap();
-        assert!(store::channel(&mut conn, id).unwrap().is_none());
+        discard_channel(&mut conn, id).await.unwrap();
+        assert!(store::channel(&mut conn, id).await.unwrap().is_none());
     }
 }

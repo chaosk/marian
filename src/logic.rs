@@ -61,14 +61,18 @@ pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
 
 /// An option of the named type, put in the server's library if it isn't there.
 #[cfg(test)]
-pub(crate) fn test_option(
+pub(crate) async fn test_option(
     conn: &mut crate::store::Connection,
     guild_id: i64,
     name: &str,
     emoji: &str,
     attending: bool,
 ) -> OptionInput {
-    OptionInput::of_type(library::ensure_type(conn, guild_id, name, emoji, attending).unwrap())
+    OptionInput::of_type(
+        library::ensure_type(conn, guild_id, name, emoji, attending)
+            .await
+            .unwrap(),
+    )
 }
 
 #[cfg(test)]
@@ -78,11 +82,12 @@ mod tests {
     use crate::store::{self, Connection};
     use crate::values::{AccessKind, Cadence, EventStatus, SignupState, TaskKind};
     use chrono::{DateTime, Duration, TimeZone, Utc};
-    use diesel::connection::SimpleConnection;
     use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+    use diesel_async::SimpleAsyncConnection;
 
-    fn world() -> Connection {
-        let mut conn = store::open_memory().unwrap();
+    async fn world() -> Connection {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Test', 'UTC');
@@ -106,7 +111,7 @@ mod tests {
             INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 2);
             ",
         )
-        .unwrap();
+        .await.unwrap();
         conn
     }
 
@@ -152,35 +157,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn waitlist_promotes_the_next_person() {
-        let mut conn = world();
-        let mut settings = store::settings(&mut conn, 1).unwrap();
+    #[tokio::test]
+    async fn waitlist_promotes_the_next_person() {
+        let mut conn = world().await;
+        let mut settings = store::settings(&mut conn, 1).await.unwrap();
         settings.waitlist = true;
-        store::update_settings(&mut conn, &settings).unwrap();
+        store::update_settings(&mut conn, &settings).await.unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
             capacity: Some(1),
             ..OptionInput::of_type(DPS)
         }];
-        let id = save_event(&mut conn, event).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
-        signup(&mut conn, id, option, 2).unwrap();
-        let waiting = signup(&mut conn, id, option, 3).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).await.unwrap()[0].id;
+        signup(&mut conn, id, option, 2).await.unwrap();
+        let waiting = signup(&mut conn, id, option, 3).await.unwrap();
         assert!(waiting.to_string().contains("waiting"));
-        signup(&mut conn, id, option, 2).unwrap();
-        let signups = store::signups_for(&mut conn, &event).unwrap();
+        signup(&mut conn, id, option, 2).await.unwrap();
+        let signups = store::signups_for(&mut conn, &event).await.unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].membership_id, 3);
         assert_eq!(signups[0].state, SignupState::Confirmed);
     }
 
-    #[test]
-    fn without_the_waitlist_a_full_option_turns_people_away() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn without_the_waitlist_a_full_option_turns_people_away() {
+        let mut conn = world().await;
         assert!(
-            !store::settings(&mut conn, 1).unwrap().waitlist,
+            !store::settings(&mut conn, 1).await.unwrap().waitlist,
             "off by default"
         );
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
@@ -188,26 +193,32 @@ mod tests {
             capacity: Some(1),
             ..OptionInput::of_type(DPS)
         }];
-        let id = save_event(&mut conn, event).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
-        signup(&mut conn, id, option, 2).unwrap();
-        let err = signup(&mut conn, id, option, 3).unwrap_err().to_string();
+        let id = save_event(&mut conn, event).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).await.unwrap()[0].id;
+        signup(&mut conn, id, option, 2).await.unwrap();
+        let err = signup(&mut conn, id, option, 3)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("full"), "{err}");
-        assert_eq!(store::signups_for(&mut conn, &event).unwrap().len(), 1);
+        assert_eq!(
+            store::signups_for(&mut conn, &event).await.unwrap().len(),
+            1
+        );
     }
 
     /// A posted event with one option of `capacity` that takes up to
     /// `max_guests`, and the option's id.
-    fn party_event(
+    async fn party_event(
         conn: &mut Connection,
         capacity: i64,
         max_guests: i64,
         waitlist: bool,
     ) -> (i64, i64) {
-        let mut settings = store::settings(conn, 1).unwrap();
+        let mut settings = store::settings(conn, 1).await.unwrap();
         settings.waitlist = waitlist;
-        store::update_settings(conn, &settings).unwrap();
+        store::update_settings(conn, &settings).await.unwrap();
         let mut event = input(
             "Dinner",
             Utc::now() + Duration::hours(5),
@@ -218,15 +229,16 @@ mod tests {
             max_guests,
             ..OptionInput::of_type(YES)
         }];
-        let id = save_event(conn, event).unwrap();
-        let event = store::event(conn, id).unwrap().unwrap();
-        (id, store::options_for(conn, &event).unwrap()[0].id)
+        let id = save_event(conn, event).await.unwrap();
+        let event = store::event(conn, id).await.unwrap().unwrap();
+        (id, store::options_for(conn, &event).await.unwrap()[0].id)
     }
 
     /// Each person's state and guests on an event, by membership id.
-    fn parties(conn: &mut Connection, id: i64) -> Vec<(i64, SignupState, i64)> {
-        let event = store::event(conn, id).unwrap().unwrap();
+    async fn parties(conn: &mut Connection, id: i64) -> Vec<(i64, SignupState, i64)> {
+        let event = store::event(conn, id).await.unwrap().unwrap();
         let mut rows: Vec<_> = store::signups_for(conn, &event)
+            .await
             .unwrap()
             .into_iter()
             .map(|s| (s.membership_id, s.state, s.guests))
@@ -235,76 +247,88 @@ mod tests {
         rows
     }
 
-    #[test]
-    fn a_party_takes_a_place_for_each_guest() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 4, 3, false);
+    #[tokio::test]
+    async fn a_party_takes_a_place_for_each_guest() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 4, 3, false).await;
         let notice = signup_guests(&mut conn, id, option, 2, 2)
+            .await
             .unwrap()
             .to_string();
         assert_eq!(notice, "June signed up as Yes, bringing 2 guests.");
         // One place left: a party of two doesn't fit, and nothing is waiting.
         let err = signup_guests(&mut conn, id, option, 3, 1)
+            .await
             .unwrap_err()
             .to_string();
         assert_eq!(err, "Yes has only one spot left.");
-        signup(&mut conn, id, option, 3).unwrap();
+        signup(&mut conn, id, option, 3).await.unwrap();
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (2, SignupState::Confirmed, 2),
                 (3, SignupState::Confirmed, 0)
             ]
         );
         // A plain click on the option takes June off it, guests and all.
-        signup(&mut conn, id, option, 2).unwrap();
-        assert_eq!(parties(&mut conn, id), [(3, SignupState::Confirmed, 0)]);
+        signup(&mut conn, id, option, 2).await.unwrap();
+        assert_eq!(
+            parties(&mut conn, id).await,
+            [(3, SignupState::Confirmed, 0)]
+        );
     }
 
-    #[test]
-    fn a_party_bigger_than_the_option_is_refused_even_with_a_waitlist() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 3, 5, true);
+    #[tokio::test]
+    async fn a_party_bigger_than_the_option_is_refused_even_with_a_waitlist() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 3, 5, true).await;
         let err = signup_guests(&mut conn, id, option, 2, 4)
+            .await
             .unwrap_err()
             .to_string();
         assert_eq!(err, "Yes has 3 spots, too few for a party of 5.");
-        assert!(parties(&mut conn, id).is_empty());
+        assert!(parties(&mut conn, id).await.is_empty());
     }
 
-    #[test]
-    fn guests_need_an_option_that_takes_them() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 10, 0, false);
+    #[tokio::test]
+    async fn guests_need_an_option_that_takes_them() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 10, 0, false).await;
         let err = signup_guests(&mut conn, id, option, 2, 1)
+            .await
             .unwrap_err()
             .to_string();
         assert_eq!(err, "Yes doesn't take guests.");
-        let (id, option) = party_event(&mut conn, 10, 2, false);
+        let (id, option) = party_event(&mut conn, 10, 2, false).await;
         let err = signup_guests(&mut conn, id, option, 2, 3)
+            .await
             .unwrap_err()
             .to_string();
         assert_eq!(err, "Yes lets each person bring at most 2 guests.");
         // Zero is a plain signup.
-        signup_guests(&mut conn, id, option, 2, 0).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 0)]);
+        signup_guests(&mut conn, id, option, 2, 0).await.unwrap();
+        assert_eq!(
+            parties(&mut conn, id).await,
+            [(2, SignupState::Confirmed, 0)]
+        );
     }
 
-    #[test]
-    fn the_waitlist_keeps_its_order_for_parties() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 3, 3, true);
-        signup_guests(&mut conn, id, option, 2, 1).unwrap();
+    #[tokio::test]
+    async fn the_waitlist_keeps_its_order_for_parties() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 3, 3, true).await;
+        signup_guests(&mut conn, id, option, 2, 1).await.unwrap();
         // Two places are taken; Samir's party of three waits.
         let notice = signup_guests(&mut conn, id, option, 3, 2)
+            .await
             .unwrap()
             .to_string();
         assert_eq!(notice, "Samir and 2 guests are waiting for Yes spots.");
         // Nell alone would fit in the last place, but Samir's party is ahead.
-        let notice = signup(&mut conn, id, option, 1).unwrap().to_string();
+        let notice = signup(&mut conn, id, option, 1).await.unwrap().to_string();
         assert!(notice.contains("waiting"), "{notice}");
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (1, SignupState::Waitlisted, 0),
                 (2, SignupState::Confirmed, 1),
@@ -312,9 +336,9 @@ mod tests {
             ]
         );
         // June leaves: Samir's party fits and moves up; Nell still waits.
-        signup(&mut conn, id, option, 2).unwrap();
+        signup(&mut conn, id, option, 2).await.unwrap();
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (1, SignupState::Waitlisted, 0),
                 (3, SignupState::Confirmed, 2)
@@ -322,18 +346,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn changing_guests_keeps_the_place_while_the_party_fits() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 3, 3, true);
-        signup(&mut conn, id, option, 2).unwrap();
-        signup(&mut conn, id, option, 3).unwrap();
+    #[tokio::test]
+    async fn changing_guests_keeps_the_place_while_the_party_fits() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 3, 3, true).await;
+        signup(&mut conn, id, option, 2).await.unwrap();
+        signup(&mut conn, id, option, 3).await.unwrap();
         let notice = signup_guests(&mut conn, id, option, 2, 1)
+            .await
             .unwrap()
             .to_string();
         assert_eq!(notice, "June now brings one guest to Yes.");
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (2, SignupState::Confirmed, 1),
                 (3, SignupState::Confirmed, 0)
@@ -341,6 +366,7 @@ mod tests {
         );
         // A third would need four places with Samir's; June's party waits.
         let notice = signup_guests(&mut conn, id, option, 2, 2)
+            .await
             .unwrap()
             .to_string();
         assert_eq!(
@@ -348,16 +374,16 @@ mod tests {
             "June's party of 3 no longer fits on Yes and is waiting for spots."
         );
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (2, SignupState::Waitlisted, 2),
                 (3, SignupState::Confirmed, 0)
             ]
         );
         // Back to one guest: the party fits again and moves up.
-        signup_guests(&mut conn, id, option, 2, 1).unwrap();
+        signup_guests(&mut conn, id, option, 2, 1).await.unwrap();
         assert_eq!(
-            parties(&mut conn, id),
+            parties(&mut conn, id).await,
             [
                 (2, SignupState::Confirmed, 1),
                 (3, SignupState::Confirmed, 0)
@@ -365,31 +391,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_editor_sets_a_partys_size_wherever_it_stands() {
-        let mut conn = world();
-        let (id, option) = party_event(&mut conn, 2, 3, false);
-        editor_response(&mut conn, id, 1, 2, option, "add", Some(1)).unwrap();
+    #[tokio::test]
+    async fn an_editor_sets_a_partys_size_wherever_it_stands() {
+        let mut conn = world().await;
+        let (id, option) = party_event(&mut conn, 2, 3, false).await;
+        editor_response(&mut conn, id, 1, 2, option, "add", Some(1))
+            .await
+            .unwrap();
         // An editor's change can go past capacity, as an editor's add can.
         let notice = editor_response(&mut conn, id, 1, 2, option, "add", Some(3))
+            .await
             .unwrap()
             .to_string();
         assert_eq!(notice, "June now brings 3 guests to Yes.");
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 3)]);
+        assert_eq!(
+            parties(&mut conn, id).await,
+            [(2, SignupState::Confirmed, 3)]
+        );
         let err = editor_response(&mut conn, id, 1, 2, option, "add", Some(4))
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("at most 3"), "{err}");
     }
 
-    #[test]
-    fn a_posted_event_gains_reorders_and_drops_options() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_posted_event_gains_reorders_and_drops_options() {
+        let mut conn = world().await;
         let event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
-        let id = save_event(&mut conn, event).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        signup(&mut conn, id, options[0].id, 2).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        signup(&mut conn, id, options[0].id, 2).await.unwrap();
         let keep = |opt: &store::SignupOption| OptionInput {
             id: Some(opt.id),
             type_id: opt.type_id,
@@ -400,83 +433,93 @@ mod tests {
         let mut next = vec![keep(&options[1]), keep(&options[0])];
         next[1].capacity = Some(4);
         next.push(OptionInput::of_type(MAYBE));
-        save_options(&mut conn, id, 1, &next).unwrap();
-        let saved = store::options_for(&mut conn, &event).unwrap();
+        save_options(&mut conn, id, 1, &next).await.unwrap();
+        let saved = store::options_for(&mut conn, &event).await.unwrap();
         let names: Vec<&str> = saved.iter().map(|opt| opt.name.as_str()).collect();
         assert_eq!(names, ["No", "Yes", "Maybe"]);
         assert_eq!(saved[1].capacity, Some(4));
         assert_eq!(saved[2].emoji, "•");
-        let signups = store::signups_for(&mut conn, &event).unwrap();
+        let signups = store::signups_for(&mut conn, &event).await.unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[0].id);
 
         // A posted event can lose a type too; the responses on it go with it.
         let dropped = vec![keep(&saved[0]), keep(&saved[2])];
-        save_options(&mut conn, id, 1, &dropped).unwrap();
+        save_options(&mut conn, id, 1, &dropped).await.unwrap();
         let names: Vec<String> = store::options_for(&mut conn, &event)
+            .await
             .unwrap()
             .into_iter()
             .map(|opt| opt.name)
             .collect();
         assert_eq!(names, ["No", "Maybe"]);
         assert!(
-            store::signups_for(&mut conn, &event).unwrap().is_empty(),
+            store::signups_for(&mut conn, &event)
+                .await
+                .unwrap()
+                .is_empty(),
             "Yes went, and June's response with it"
         );
         let err = save_options(&mut conn, id, 3, &next)
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("You can edit events you created"));
     }
 
-    #[test]
-    fn an_archived_post_has_no_buttons() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn an_archived_post_has_no_buttons() {
+        let mut conn = world().await;
         let event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
             .set(schema::channels::discord_id.eq("c1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::discord_message_id.eq("m1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         let view = discord_view(&mut conn, id, "https://marian.test")
+            .await
             .unwrap()
             .unwrap();
         assert!(!view.buttons.is_empty());
-        archive_event(&mut conn, id, 1).unwrap();
+        archive_event(&mut conn, id, 1).await.unwrap();
         let view = discord_view(&mut conn, id, "https://marian.test")
+            .await
             .unwrap()
             .unwrap();
         assert!(view.buttons.is_empty());
     }
 
-    #[test]
-    fn any_of_several_roles_grants_a_permission() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn any_of_several_roles_grants_a_permission() {
+        let mut conn = world().await;
         let id = save_event(
             &mut conn,
             input("Raid", Utc::now() + Duration::hours(5), SaveAction::Draft),
         )
+        .await
         .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let mut settings = store::settings(&mut conn, 1).unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let mut settings = store::settings(&mut conn, 1).await.unwrap();
         settings.role_edit = vec![2, 1, 2];
-        store::update_settings(&mut conn, &settings).unwrap();
-        let settings = store::settings(&mut conn, 1).unwrap();
+        store::update_settings(&mut conn, &settings).await.unwrap();
+        let settings = store::settings(&mut conn, 1).await.unwrap();
         assert_eq!(settings.role_edit, [1, 2], "saved once each, in order");
         assert!(settings.role_delete.is_empty());
 
-        let june = store::membership(&mut conn, 2).unwrap().unwrap();
-        let june_roles = store::membership_role_ids(&mut conn, &june).unwrap();
+        let june = store::membership(&mut conn, 2).await.unwrap().unwrap();
+        let june_roles = store::membership_role_ids(&mut conn, &june).await.unwrap();
         assert!(
             can_edit(&june, &event, &settings, &june_roles),
             "June holds role 2, the second one listed"
         );
-        let samir = store::membership(&mut conn, 3).unwrap().unwrap();
-        let samir_roles = store::membership_role_ids(&mut conn, &samir).unwrap();
+        let samir = store::membership(&mut conn, 3).await.unwrap().unwrap();
+        let samir_roles = store::membership_role_ids(&mut conn, &samir).await.unwrap();
         assert!(!can_edit(&samir, &event, &settings, &samir_roles));
         assert!(
             can_create(&samir, &settings, &samir_roles),
@@ -484,18 +527,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_duplicate_keeps_the_clock_time_across_a_daylight_saving_change() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_duplicate_keeps_the_clock_time_across_a_daylight_saving_change() {
+        let mut conn = world().await;
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
             .set(schema::guilds::timezone.eq("Europe/Warsaw"))
             .execute(&mut conn)
+            .await
             .unwrap();
         // 19:00 in Warsaw on a Friday before the clocks go back on the last Sunday of October.
         let start = Utc.with_ymd_and_hms(2030, 10, 25, 17, 0, 0).unwrap();
-        let id = save_event(&mut conn, input("Raid", start, SaveAction::Draft)).unwrap();
-        let copy = duplicate_event(&mut conn, id, 1).unwrap();
-        let copy = store::event(&mut conn, copy).unwrap().unwrap();
+        let id = save_event(&mut conn, input("Raid", start, SaveAction::Draft))
+            .await
+            .unwrap();
+        let copy = duplicate_event(&mut conn, id, 1).await.unwrap();
+        let copy = store::event(&mut conn, copy).await.unwrap().unwrap();
         let warsaw: chrono_tz::Tz = "Europe/Warsaw".parse().unwrap();
         let local = copy.starts_at.with_timezone(&warsaw);
         assert_eq!(
@@ -505,101 +551,116 @@ mod tests {
         assert_eq!(copy.status, EventStatus::Draft);
     }
 
-    #[test]
-    fn the_default_reminder_can_be_turned_off() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn the_default_reminder_can_be_turned_off() {
+        let mut conn = world().await;
         let bare = |title: &str| EventInput {
             reminders: Vec::new(),
             ..input(title, Utc::now() + Duration::hours(5), SaveAction::Publish)
         };
-        let id = save_event(&mut conn, bare("On")).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let id = save_event(&mut conn, bare("On")).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(
-            store::reminders_for(&mut conn, &event).unwrap().len(),
+            store::reminders_for(&mut conn, &event).await.unwrap().len(),
             1,
             "on by default"
         );
 
-        let mut settings = store::settings(&mut conn, 1).unwrap();
+        let mut settings = store::settings(&mut conn, 1).await.unwrap();
         settings.default_reminder_minutes = 0;
-        store::update_settings(&mut conn, &settings).unwrap();
-        let id = save_event(&mut conn, bare("Off")).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        assert!(store::reminders_for(&mut conn, &event).unwrap().is_empty());
+        store::update_settings(&mut conn, &settings).await.unwrap();
+        let id = save_event(&mut conn, bare("Off")).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        assert!(store::reminders_for(&mut conn, &event)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
-    #[test]
-    fn role_and_cutoff_block_signups() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn role_and_cutoff_block_signups() {
+        let mut conn = world().await;
         let mut gated = input(
             "Briefing",
             Utc::now() + Duration::hours(3),
             SaveAction::Publish,
         );
         gated.options[0].role_id = Some(2);
-        let gated_id = save_event(&mut conn, gated).unwrap();
-        let gated = store::event(&mut conn, gated_id).unwrap().unwrap();
-        let gated_option = store::options_for(&mut conn, &gated).unwrap()[0].id;
+        let gated_id = save_event(&mut conn, gated).await.unwrap();
+        let gated = store::event(&mut conn, gated_id).await.unwrap().unwrap();
+        let gated_option = store::options_for(&mut conn, &gated).await.unwrap()[0].id;
         let err = signup(&mut conn, gated_id, gated_option, 3)
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("limited"), "{err}");
         assert!(signup(&mut conn, gated_id, gated_option, 2)
+            .await
             .unwrap()
             .to_string()
             .contains("signed up"));
 
         let mut closed = input("Late", Utc::now() + Duration::hours(4), SaveAction::Publish);
         closed.cutoff_at = Some(Utc::now() - Duration::minutes(1));
-        let closed_id = save_event(&mut conn, closed).unwrap();
-        let closed = store::event(&mut conn, closed_id).unwrap().unwrap();
-        let closed_option = store::options_for(&mut conn, &closed).unwrap()[0].id;
+        let closed_id = save_event(&mut conn, closed).await.unwrap();
+        let closed = store::event(&mut conn, closed_id).await.unwrap().unwrap();
+        let closed_option = store::options_for(&mut conn, &closed).await.unwrap()[0].id;
         let err = signup(&mut conn, closed_id, closed_option, 2)
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("closed"), "{err}");
     }
 
-    #[test]
-    fn marking_attendance_is_what_discord_hears() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn marking_attendance_is_what_discord_hears() {
+        let mut conn = world().await;
         // This server asks Marian to pull attendees into the thread.
         diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(1)))
             .set(schema::settings::auto_join_threads.eq(true))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
             .set(schema::guilds::discord_id.eq("g1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
             .set(schema::channels::discord_id.eq("c1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::roles::table.filter(schema::roles::id.eq(2)))
             .set(schema::roles::discord_id.eq("r2"))
             .execute(&mut conn)
+            .await
             .unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.attendee_role_id = Some(2);
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::discord_message_id.eq("m1"))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        signup(&mut conn, id, options[0].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        signup(&mut conn, id, options[0].id, 2).await.unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert_eq!(work.thread_add, vec!["u2".to_string()]);
         assert_eq!(work.role_add, vec!["u2".to_string()]);
         assert_eq!(work.role_discord_id.as_deref(), Some("r2"));
-        store::mark_applied(&mut conn, id, AccessKind::Thread, "u2").unwrap();
-        store::mark_applied(&mut conn, id, AccessKind::Role, "u2").unwrap();
-        signup(&mut conn, id, options[1].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        store::mark_applied(&mut conn, id, AccessKind::Thread, "u2")
+            .await
+            .unwrap();
+        store::mark_applied(&mut conn, id, AccessKind::Role, "u2")
+            .await
+            .unwrap();
+        signup(&mut conn, id, options[1].id, 2).await.unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert!(work.thread_add.is_empty());
@@ -607,27 +668,28 @@ mod tests {
         assert_eq!(work.role_remove, vec!["u2".to_string()]);
     }
 
-    #[test]
-    fn only_a_server_manager_picks_one_of_the_servers_roles_for_attendees() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn only_a_server_manager_picks_one_of_the_servers_roles_for_attendees() {
+        let mut conn = world().await;
         // June doesn't manage the server, and anyone may make events.
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.actor_id = 2;
         event.attendee_role_id = Some(1);
         let err = save_event(&mut conn, event.clone())
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("server managers"), "{err}");
 
         // Her event without one; Nell, who manages the server, gives it one.
         event.attendee_role_id = None;
-        let id = save_event(&mut conn, event.clone()).unwrap();
+        let id = save_event(&mut conn, event.clone()).await.unwrap();
         let mut edit = event.clone();
         edit.id = Some(id);
         edit.actor_id = 1;
         edit.attendee_role_id = Some(1);
-        save_event(&mut conn, edit.clone()).unwrap();
-        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        save_event(&mut conn, edit.clone()).await.unwrap();
+        let saved = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(
             (saved.attendee_role_id, saved.attendee_role_by),
             (Some(1), Some(1))
@@ -636,21 +698,25 @@ mod tests {
         // June renames her event: the role stays, as Nell's pick.
         edit.actor_id = 2;
         edit.title = "Raid night".into();
-        save_event(&mut conn, edit.clone()).unwrap();
-        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        save_event(&mut conn, edit.clone()).await.unwrap();
+        let saved = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(
             (saved.attendee_role_id, saved.attendee_role_by),
             (Some(1), Some(1))
         );
         // She can't swap it for another of the server's roles.
         edit.attendee_role_id = Some(2);
-        let err = save_event(&mut conn, edit.clone()).unwrap_err().to_string();
+        let err = save_event(&mut conn, edit.clone())
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("server managers"), "{err}");
 
         // Her copy of the event leaves the server's role behind.
-        let copy = duplicate_event(&mut conn, id, 2).unwrap();
+        let copy = duplicate_event(&mut conn, id, 2).await.unwrap();
         assert_eq!(
             store::event(&mut conn, copy)
+                .await
                 .unwrap()
                 .unwrap()
                 .attendee_role_id,
@@ -658,34 +724,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn anyone_picks_a_role_marian_made_for_attendees() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn anyone_picks_a_role_marian_made_for_attendees() {
+        let mut conn = world().await;
         conn.batch_execute(
             "INSERT INTO roles (id, guild_id, name, color, made_by_marian) VALUES (3, 1, 'Raid attendee', '#1e3a6e', true);",
         )
-        .unwrap();
+        .await.unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.actor_id = 2;
         event.attendee_role_id = Some(3);
-        let id = save_event(&mut conn, event).unwrap();
-        let saved = store::event(&mut conn, id).unwrap().unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
+        let saved = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(
             (saved.attendee_role_id, saved.attendee_role_by),
             (Some(3), Some(2))
         );
     }
 
-    #[test]
-    fn a_routine_takes_one_of_the_servers_roles_for_attendees_only_from_a_manager() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_routine_takes_one_of_the_servers_roles_for_attendees_only_from_a_manager() {
+        let mut conn = world().await;
         let extras = EventExtras {
             color: "#1e3a6e".into(),
             options: yes_no(),
             attendee_role_id: Some(1),
             ..Default::default()
         };
-        let make = |conn: &mut Connection, actor_id| {
+        let make = async |conn: &mut Connection, actor_id| {
             create_routine(
                 conn,
                 1,
@@ -703,26 +769,29 @@ mod tests {
                 Some(extras.clone()),
                 Utc::now(),
             )
+            .await
         };
-        let err = make(&mut conn, 2).unwrap_err().to_string();
+        let err = make(&mut conn, 2).await.unwrap_err().to_string();
         assert!(err.contains("server managers"), "{err}");
-        make(&mut conn, 1).unwrap();
+        make(&mut conn, 1).await.unwrap();
     }
 
-    #[test]
-    fn marian_holds_back_a_servers_role_no_manager_picked() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn marian_holds_back_a_servers_role_no_manager_picked() {
+        let mut conn = world().await;
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
             .set(schema::guilds::discord_id.eq("g1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
             .set(schema::channels::discord_id.eq("c1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.attendee_role_id = Some(1);
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         // As an event from before the check stands: June picked the Officer role.
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set((
@@ -730,11 +799,12 @@ mod tests {
                 schema::events::attendee_role_by.eq(2_i64),
             ))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        signup(&mut conn, id, options[0].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        signup(&mut conn, id, options[0].id, 2).await.unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert!(work.role_add.is_empty(), "{:?}", work.role_add);
@@ -743,35 +813,39 @@ mod tests {
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::attendee_role_by.eq(1_i64))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert_eq!(work.role_add, vec!["u2".to_string()]);
     }
 
-    #[test]
-    fn by_default_a_signup_leaves_the_thread_to_reminders() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn by_default_a_signup_leaves_the_thread_to_reminders() {
+        let mut conn = world().await;
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
             .set(schema::guilds::discord_id.eq("g1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         diesel::update(schema::channels::table.filter(schema::channels::id.eq(1)))
             .set(schema::channels::discord_id.eq("c1"))
             .execute(&mut conn)
+            .await
             .unwrap();
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.thread_enabled = true;
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::discord_message_id.eq("m1"))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        signup(&mut conn, id, options[0].id, 2).unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        signup(&mut conn, id, options[0].id, 2).await.unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert!(work.thread_add.is_empty(), "nobody is pulled in");
@@ -780,13 +854,16 @@ mod tests {
             .filter(schema::activity::event_id.eq(id))
             .select(schema::activity::body)
             .load(&mut conn)
+            .await
             .unwrap();
         assert!(
             !logged.iter().any(|line| line.contains("thread")),
             "{logged:?}"
         );
-        store::set_thread_discord_id(&mut conn, id, "Raid", "t1").unwrap();
-        let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
+        store::set_thread_discord_id(&mut conn, id, "Raid", "t1")
+            .await
+            .unwrap();
+        let Attendance::Ready(work) = attendance(&mut conn, id).await.unwrap() else {
             panic!("expected a Discord attendance plan");
         };
         assert!(
@@ -795,9 +872,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn moving_off_a_full_option_frees_the_seat() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn moving_off_a_full_option_frees_the_seat() {
+        let mut conn = world().await;
         let id = save_event(
             &mut conn,
             input(
@@ -806,13 +883,14 @@ mod tests {
                 SaveAction::Publish,
             ),
         )
+        .await
         .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        signup(&mut conn, id, options[0].id, 2).unwrap();
-        let moved = signup(&mut conn, id, options[1].id, 2).unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        signup(&mut conn, id, options[0].id, 2).await.unwrap();
+        let moved = signup(&mut conn, id, options[1].id, 2).await.unwrap();
         assert!(moved.to_string().contains("moved"));
-        let signups = store::signups_for(&mut conn, &event).unwrap();
+        let signups = store::signups_for(&mut conn, &event).await.unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
     }
@@ -824,25 +902,26 @@ mod tests {
 
     /// When the task for `kind` and `subject` is due, once marks are turned
     /// into tasks.
-    fn task(
+    async fn task(
         conn: &mut Connection,
         now: DateTime<Utc>,
         kind: TaskKind,
         subject: i64,
     ) -> Option<DateTime<Utc>> {
-        schedule::drain(conn, now).unwrap();
+        schedule::drain(conn, now).await.unwrap();
         schema::tasks::table
             .filter(schema::tasks::kind.eq(kind))
             .filter(schema::tasks::subject_id.eq(subject))
             .select(schema::tasks::run_at)
             .first(conn)
+            .await
             .optional()
             .unwrap()
     }
 
-    #[test]
-    fn an_events_tasks_follow_it_whichever_way_it_changes() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn an_events_tasks_follow_it_whichever_way_it_changes() {
+        let mut conn = world().await;
         let now = secs(Utc::now());
         let start = now + Duration::days(2);
         let cutoff = now + Duration::days(1);
@@ -852,69 +931,74 @@ mod tests {
             offset_minutes: 60,
             message: String::new(),
         }];
-        let id = save_event(&mut conn, event).unwrap();
-        let stored = store::event(&mut conn, id).unwrap().unwrap();
-        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        let id = save_event(&mut conn, event).await.unwrap();
+        let stored = store::event(&mut conn, id).await.unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).await.unwrap()[0].id;
         let ends = |start: DateTime<Utc>, hours: i64| {
             start + Duration::minutes(60) + Duration::hours(hours)
         };
         assert_eq!(
-            task(&mut conn, now, TaskKind::Remind, reminder),
+            task(&mut conn, now, TaskKind::Remind, reminder).await,
             Some(start - Duration::minutes(60))
         );
         assert_eq!(
-            task(&mut conn, now, TaskKind::CloseSignups, id),
+            task(&mut conn, now, TaskKind::CloseSignups, id).await,
             Some(cutoff)
         );
         assert_eq!(
-            task(&mut conn, now, TaskKind::Archive, id),
+            task(&mut conn, now, TaskKind::Archive, id).await,
             Some(ends(start, 12))
         );
 
         // A write from anywhere moves them, even one no code path knows about.
         conn.batch_execute("UPDATE events SET starts_at = starts_at + interval '1 day'")
+            .await
             .unwrap();
         let later = start + Duration::days(1);
         assert_eq!(
-            task(&mut conn, now, TaskKind::Remind, reminder),
+            task(&mut conn, now, TaskKind::Remind, reminder).await,
             Some(later - Duration::minutes(60))
         );
         assert_eq!(
-            task(&mut conn, now, TaskKind::Archive, id),
+            task(&mut conn, now, TaskKind::Archive, id).await,
             Some(ends(later, 12))
         );
         conn.batch_execute("UPDATE settings SET auto_archive = false")
+            .await
             .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::Archive, id),
+            task(&mut conn, now, TaskKind::Archive, id).await,
             None,
             "the server stopped archiving"
         );
         conn.batch_execute("UPDATE settings SET auto_archive = true, auto_archive_hours = 2")
+            .await
             .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::Archive, id),
+            task(&mut conn, now, TaskKind::Archive, id).await,
             Some(ends(later, 2))
         );
         conn.batch_execute(&format!(
             "UPDATE reminders SET offset_minutes = 30 WHERE id = {reminder}"
         ))
+        .await
         .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::Remind, reminder),
+            task(&mut conn, now, TaskKind::Remind, reminder).await,
             Some(later - Duration::minutes(30))
         );
 
         conn.batch_execute(&format!("DELETE FROM events WHERE id = {id}"))
+            .await
             .unwrap();
-        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder), None);
-        assert_eq!(task(&mut conn, now, TaskKind::CloseSignups, id), None);
-        assert_eq!(task(&mut conn, now, TaskKind::Archive, id), None);
+        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder).await, None);
+        assert_eq!(task(&mut conn, now, TaskKind::CloseSignups, id).await, None);
+        assert_eq!(task(&mut conn, now, TaskKind::Archive, id).await, None);
     }
 
-    #[test]
-    fn a_scheduled_event_posts_on_time_and_then_reminds() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_scheduled_event_posts_on_time_and_then_reminds() {
+        let mut conn = world().await;
         let now = secs(Utc::now());
         let start = now + Duration::hours(3);
         let mut event = input("Dock", start, SaveAction::Schedule);
@@ -923,55 +1007,58 @@ mod tests {
             offset_minutes: 30,
             message: String::new(),
         }];
-        let id = save_event(&mut conn, event).unwrap();
-        let stored = store::event(&mut conn, id).unwrap().unwrap();
-        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        let id = save_event(&mut conn, event).await.unwrap();
+        let stored = store::event(&mut conn, id).await.unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).await.unwrap()[0].id;
         assert_eq!(
-            task(&mut conn, now, TaskKind::Post, id),
+            task(&mut conn, now, TaskKind::Post, id).await,
             Some(now + Duration::hours(1))
         );
         assert_eq!(
-            task(&mut conn, now, TaskKind::Remind, reminder),
+            task(&mut conn, now, TaskKind::Remind, reminder).await,
             None,
             "nothing to remind of before it posts"
         );
 
-        tick(&mut conn, now + Duration::minutes(30)).unwrap();
+        tick(&mut conn, now + Duration::minutes(30)).await.unwrap();
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Scheduled
         );
-        let report = tick(&mut conn, now + Duration::hours(1)).unwrap();
+        let report = tick(&mut conn, now + Duration::hours(1)).await.unwrap();
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Posted
         );
         assert!(report.guilds.contains(&1), "open pages hear about it");
-        assert_eq!(task(&mut conn, now, TaskKind::Post, id), None);
+        assert_eq!(task(&mut conn, now, TaskKind::Post, id).await, None);
         assert_eq!(
-            task(&mut conn, now, TaskKind::Remind, reminder),
+            task(&mut conn, now, TaskKind::Remind, reminder).await,
             Some(start - Duration::minutes(30))
         );
 
-        tick(&mut conn, start - Duration::minutes(30)).unwrap();
-        let stored = store::event(&mut conn, id).unwrap().unwrap();
-        assert!(store::reminders_for(&mut conn, &stored).unwrap()[0]
+        tick(&mut conn, start - Duration::minutes(30))
+            .await
+            .unwrap();
+        let stored = store::event(&mut conn, id).await.unwrap().unwrap();
+        assert!(store::reminders_for(&mut conn, &stored).await.unwrap()[0]
             .sent_at
             .is_some());
-        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder), None);
+        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder).await, None);
     }
 
-    #[test]
-    fn a_post_whose_channel_is_gone_is_tried_three_times_then_fails() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_post_whose_channel_is_gone_is_tried_three_times_then_fails() {
+        let mut conn = world().await;
         let now = secs(Utc::now());
-        let id = due_post(&mut conn, now);
+        let id = due_post(&mut conn, now).await;
         conn.batch_execute(&format!(
             "ALTER TABLE events DROP CONSTRAINT IF EXISTS events_channel_id_fkey; \
              UPDATE events SET channel_id = 999 WHERE id = {id}"
         ))
+        .await
         .unwrap();
-        let report = tick(&mut conn, now + Duration::minutes(5)).unwrap();
+        let report = tick(&mut conn, now + Duration::minutes(5)).await.unwrap();
         let failed = report
             .notes
             .iter()
@@ -979,24 +1066,25 @@ mod tests {
             .count();
         assert_eq!(failed, 3);
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Failed
         );
-        assert_eq!(task(&mut conn, now, TaskKind::Post, id), None);
+        assert_eq!(task(&mut conn, now, TaskKind::Post, id).await, None);
     }
 
-    #[test]
-    fn the_digest_and_series_fills_keep_their_own_clock() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn the_digest_and_series_fills_keep_their_own_clock() {
+        let mut conn = world().await;
         let noon = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
         conn.batch_execute("UPDATE settings SET digest = 'daily'")
+            .await
             .unwrap();
         assert_eq!(
-            task(&mut conn, noon, TaskKind::Digest, 1),
+            task(&mut conn, noon, TaskKind::Digest, 1).await,
             Some(noon),
             "today's is late, so now"
         );
-        let report = tick(&mut conn, noon).unwrap();
+        let report = tick(&mut conn, noon).await.unwrap();
         assert!(
             report
                 .notes
@@ -1006,22 +1094,31 @@ mod tests {
             report.notes
         );
         let tomorrow = Utc.with_ymd_and_hms(2026, 12, 2, 9, 0, 0).unwrap();
-        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), Some(tomorrow));
+        assert_eq!(
+            task(&mut conn, noon, TaskKind::Digest, 1).await,
+            Some(tomorrow)
+        );
         conn.batch_execute("UPDATE settings SET digest = 'weekly'")
+            .await
             .unwrap();
         let monday = Utc.with_ymd_and_hms(2026, 12, 7, 9, 0, 0).unwrap();
-        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), Some(monday));
+        assert_eq!(
+            task(&mut conn, noon, TaskKind::Digest, 1).await,
+            Some(monday)
+        );
         conn.batch_execute("UPDATE guilds SET timezone = 'Europe/Warsaw'")
+            .await
             .unwrap();
         let warsaw = Utc.with_ymd_and_hms(2026, 12, 7, 8, 0, 0).unwrap();
         assert_eq!(
-            task(&mut conn, noon, TaskKind::Digest, 1),
+            task(&mut conn, noon, TaskKind::Digest, 1).await,
             Some(warsaw),
             "9:00 in the server's zone"
         );
         conn.batch_execute("UPDATE settings SET digest = 'off'")
+            .await
             .unwrap();
-        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), None);
+        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1).await, None);
 
         let now = secs(Utc::now());
         let mut event = input("Raid", now + Duration::hours(1), SaveAction::Publish);
@@ -1030,29 +1127,30 @@ mod tests {
             end_on: None,
             max_occurrences: None,
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::FillSeries, 1),
+            task(&mut conn, now, TaskKind::FillSeries, 1).await,
             Some(now),
             "a new series fills now"
         );
-        tick(&mut conn, now).unwrap();
+        tick(&mut conn, now).await.unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::FillSeries, 1),
+            task(&mut conn, now, TaskKind::FillSeries, 1).await,
             Some(now + Duration::hours(1)),
             "then hourly"
         );
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
             .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert!(dates.len() > 1);
         for date in &dates {
             let due = match date.status {
-                EventStatus::Scheduled => task(&mut conn, now, TaskKind::Post, date.id),
-                _ => task(&mut conn, now, TaskKind::Archive, date.id),
+                EventStatus::Scheduled => task(&mut conn, now, TaskKind::Post, date.id).await,
+                _ => task(&mut conn, now, TaskKind::Archive, date.id).await,
             };
             assert!(
                 due.is_some(),
@@ -1063,126 +1161,156 @@ mod tests {
         }
         // A date taken out leaves room for another: the fill comes now,
         // not within the hour.
-        delete_event(&mut conn, dates[1].id, 1).unwrap();
-        assert_eq!(task(&mut conn, now, TaskKind::FillSeries, 1), Some(now));
+        delete_event(&mut conn, dates[1].id, 1).await.unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::FillSeries, 1).await,
+            Some(now)
+        );
         conn.batch_execute("UPDATE series SET active = false")
+            .await
             .unwrap();
-        assert_eq!(task(&mut conn, now, TaskKind::FillSeries, 1), None);
+        assert_eq!(task(&mut conn, now, TaskKind::FillSeries, 1).await, None);
     }
 
-    #[test]
-    fn calendars_follow_signups_and_changes_to_their_events() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn calendars_follow_signups_and_changes_to_their_events() {
+        let mut conn = world().await;
         conn.batch_execute(
             "INSERT INTO google_accounts (user_id, refresh_token, email, connected_at, last_error, auto_sync, revoking)
              SELECT user_id, 'token', 'june@example.com', now(), '', true, false FROM memberships WHERE id = 2",
         )
-        .unwrap();
+        .await.unwrap();
         let june: i64 = schema::memberships::table
             .find(2)
             .select(schema::memberships::user_id)
             .first(&mut conn)
+            .await
             .unwrap();
         let now = secs(Utc::now());
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             Some(now),
             "connecting marks a sync"
         );
         // The Google loop takes it, syncs, and comes back in six hours.
-        let (user, lease) = schedule::claim_google(&mut conn, now).unwrap().unwrap();
+        let (user, lease) = schedule::claim_google(&mut conn, now)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(user, june);
         assert_eq!(
-            schedule::claim_google(&mut conn, now).unwrap(),
+            schedule::claim_google(&mut conn, now).await.unwrap(),
             None,
             "leased"
         );
-        schedule::finish_google(&mut conn, june, lease, None, now).unwrap();
+        schedule::finish_google(&mut conn, june, lease, None, now)
+            .await
+            .unwrap();
         let full_pass = Some(now + Duration::hours(6));
-        assert_eq!(task(&mut conn, now, TaskKind::GoogleSync, june), full_pass);
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
+            full_pass
+        );
 
         let id = save_event(
             &mut conn,
             input("Raid", now + Duration::days(1), SaveAction::Publish),
         )
+        .await
         .unwrap();
-        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        let stored = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             full_pass,
             "June isn't on it yet"
         );
-        let option = store::options_for(&mut conn, &stored).unwrap()[0].id;
-        signup(&mut conn, id, option, 2).unwrap();
+        let option = store::options_for(&mut conn, &stored).await.unwrap()[0].id;
+        signup(&mut conn, id, option, 2).await.unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             Some(now),
             "her signup puts it in her calendar"
         );
-        let reset = |conn: &mut Connection| {
+        let reset = async |conn: &mut Connection| {
             conn.batch_execute(
                 "UPDATE tasks SET run_at = run_at + interval '6 hours' WHERE kind = 'google_sync'",
             )
+            .await
             .unwrap();
         };
-        reset(&mut conn);
+        reset(&mut conn).await;
         conn.batch_execute(&format!(
             "UPDATE events SET title = 'Raid night' WHERE id = {id}"
         ))
+        .await
         .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             Some(now),
             "a renamed event changes her calendar"
         );
-        reset(&mut conn);
-        conn.batch_execute("UPDATE signups SET guests = 2").unwrap();
+        reset(&mut conn).await;
+        conn.batch_execute("UPDATE signups SET guests = 2")
+            .await
+            .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             Some(now + Duration::hours(6)),
             "guests don't change her calendar"
         );
         conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2")
+            .await
             .unwrap();
         assert_eq!(
-            task(&mut conn, now, TaskKind::GoogleSync, june),
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
             Some(now),
             "what she can see changed"
         );
         // A change while a sync runs isn't lost when it finishes.
-        let (_, lease) = schedule::claim_google(&mut conn, now).unwrap().unwrap();
-        conn.batch_execute("UPDATE channels SET name = 'raids'")
+        let (_, lease) = schedule::claim_google(&mut conn, now)
+            .await
+            .unwrap()
             .unwrap();
-        schedule::drain(&mut conn, now).unwrap();
-        schedule::finish_google(&mut conn, june, lease, None, now).unwrap();
-        assert_eq!(task(&mut conn, now, TaskKind::GoogleSync, june), Some(now));
+        conn.batch_execute("UPDATE channels SET name = 'raids'")
+            .await
+            .unwrap();
+        schedule::drain(&mut conn, now).await.unwrap();
+        schedule::finish_google(&mut conn, june, lease, None, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june).await,
+            Some(now)
+        );
     }
 
     /// An event due to post now, and its tasks set.
-    fn due_post(conn: &mut Connection, now: DateTime<Utc>) -> i64 {
+    async fn due_post(conn: &mut Connection, now: DateTime<Utc>) -> i64 {
         let mut event = input("Q&A", now + Duration::days(3), SaveAction::Schedule);
         event.post_at = Some(now + Duration::hours(2));
-        let id = save_event(conn, event).unwrap();
+        let id = save_event(conn, event).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::post_at.eq(now - Duration::minutes(1)))
             .execute(conn)
+            .await
             .unwrap();
-        schedule::drain(conn, now).unwrap();
+        schedule::drain(conn, now).await.unwrap();
         id
     }
 
-    fn saved_jobs(conn: &mut Connection) -> i64 {
+    async fn saved_jobs(conn: &mut Connection) -> i64 {
         schema::discord_jobs::table
             .count()
             .get_result(conn)
+            .await
             .unwrap()
     }
 
-    #[test]
-    fn a_tasks_discord_jobs_are_saved_in_its_transaction() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_tasks_discord_jobs_are_saved_in_its_transaction() {
+        let mut conn = world().await;
         let now = secs(Utc::now());
-        let id = due_post(&mut conn, now);
+        let id = due_post(&mut conn, now).await;
         // Saving the jobs fails, so the post is undone with them.
         conn.batch_execute(
             "CREATE FUNCTION refuse_jobs() RETURNS trigger LANGUAGE plpgsql AS
@@ -1190,78 +1318,85 @@ mod tests {
              CREATE TRIGGER refuse_jobs BEFORE INSERT ON discord_jobs
                FOR EACH ROW EXECUTE FUNCTION refuse_jobs();",
         )
+        .await
         .unwrap();
-        let report = schedule::run_next(&mut conn, now).unwrap().unwrap();
+        let report = schedule::run_next(&mut conn, now).await.unwrap().unwrap();
         assert!(report.notes.is_empty() && report.jobs.is_empty());
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Scheduled,
             "not marked posted without its jobs"
         );
-        assert_eq!(saved_jobs(&mut conn), 0);
+        assert_eq!(saved_jobs(&mut conn).await, 0);
         assert_eq!(
-            task(&mut conn, now, TaskKind::Post, id),
+            task(&mut conn, now, TaskKind::Post, id).await,
             Some(now + Duration::minutes(1)),
             "tried again in a minute"
         );
-        assert!(schedule::run_next(&mut conn, now).unwrap().is_none());
+        assert!(schedule::run_next(&mut conn, now).await.unwrap().is_none());
 
         conn.batch_execute("DROP TRIGGER refuse_jobs ON discord_jobs")
+            .await
             .unwrap();
-        let report = tick(&mut conn, now + Duration::minutes(1)).unwrap();
+        let report = tick(&mut conn, now + Duration::minutes(1)).await.unwrap();
         assert_eq!(report.jobs.len(), 2);
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Posted
         );
-        assert_eq!(saved_jobs(&mut conn), 2, "posted, and its jobs with it");
+        assert_eq!(
+            saved_jobs(&mut conn).await,
+            2,
+            "posted, and its jobs with it"
+        );
     }
 
-    #[test]
-    fn a_task_claimed_by_one_worker_is_not_run_by_another() {
-        use std::sync::mpsc;
-        let mut conn = world();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_claimed_by_one_worker_is_not_run_by_another() {
+        use tokio::sync::{mpsc, oneshot};
+        let mut conn = world().await;
         let now = secs(Utc::now());
-        let id = due_post(&mut conn, now);
-        let db = store::pool_for(&mut conn).unwrap();
+        let id = due_post(&mut conn, now).await;
+        let db = store::pool_for(&mut conn).await.unwrap();
 
         // The old leader, still running, has claimed the post and is mid-way.
-        let (claimed_tx, claimed) = mpsc::channel();
-        let (go_tx, go) = mpsc::channel::<()>();
+        let (claimed_tx, mut claimed) = mpsc::unbounded_channel();
+        let (go_tx, go) = oneshot::channel::<()>();
         let old = {
             let db = db.clone();
-            std::thread::spawn(move || {
-                let mut conn = db.get().unwrap();
-                store::with_tx(&mut conn, |tx| {
-                    store::lock_tick(tx, 1)?;
-                    let task = schedule::claim(tx, Some(1), now)?.expect("due");
+            tokio::spawn(async move {
+                let mut conn = db.get().await.unwrap();
+                store::with_tx(&mut conn, async |tx| {
+                    store::lock_tick(tx, 1).await?;
+                    let task = schedule::claim(tx, Some(1), now).await?.expect("due");
                     claimed_tx.send(task.kind).unwrap();
-                    go.recv().unwrap();
-                    let report = schedule::perform(tx, task.kind, task.subject, now)?;
-                    crate::jobs::save(tx, &report.jobs)?;
+                    go.await.unwrap();
+                    let report = schedule::perform(tx, task.kind, task.subject, now).await?;
+                    crate::jobs::save(tx, &report.jobs).await?;
                     Ok(report)
                 })
+                .await
                 .unwrap()
             })
         };
-        assert_eq!(claimed.recv().unwrap(), TaskKind::Post);
+        assert_eq!(claimed.recv().await.unwrap(), TaskKind::Post);
         // The new leader looks for due work meanwhile: it waits its turn for
         // the server, then finds the post already done.
         let new = {
             let db = db.clone();
-            std::thread::spawn(move || {
-                let mut conn = db.get().unwrap();
-                let first = schedule::run_next(&mut conn, now).unwrap();
-                let second = schedule::run_next(&mut conn, now).unwrap();
+            tokio::spawn(async move {
+                let mut conn = db.get().await.unwrap();
+                let first = schedule::run_next(&mut conn, now).await.unwrap();
+                let second = schedule::run_next(&mut conn, now).await.unwrap();
                 (first, second)
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!new.is_finished(), "waits for the server's lock");
         go_tx.send(()).unwrap();
-        let old = old.join().unwrap();
+        let old = old.await.unwrap();
         assert!(old.notes.iter().any(|note| note == "Posted Q&A"));
-        let (first, second) = new.join().unwrap();
+        let (first, second) = new.await.unwrap();
         let first = first.expect("the post looked due when it began");
         assert!(
             first.notes.is_empty() && first.jobs.is_empty(),
@@ -1270,21 +1405,26 @@ mod tests {
         );
         assert!(second.is_none(), "nothing left");
         assert_eq!(
-            store::event(&mut conn, id).unwrap().unwrap().status,
+            store::event(&mut conn, id).await.unwrap().unwrap().status,
             EventStatus::Posted
         );
-        assert_eq!(saved_jobs(&mut conn), 2, "one sync and one attend, once");
+        assert_eq!(
+            saved_jobs(&mut conn).await,
+            2,
+            "one sync and one attend, once"
+        );
     }
 
-    #[test]
-    fn tick_posts_and_reminds() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn tick_posts_and_reminds() {
+        let mut conn = world().await;
         let mut scheduled = input("Q&A", Utc::now() + Duration::days(3), SaveAction::Schedule);
         scheduled.post_at = Some(Utc::now() + Duration::hours(2));
-        let scheduled_id = save_event(&mut conn, scheduled).unwrap();
+        let scheduled_id = save_event(&mut conn, scheduled).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
             .set(schema::events::post_at.eq(Utc::now() - Duration::minutes(1)))
             .execute(&mut conn)
+            .await
             .unwrap();
         let mut soon = input(
             "Dock",
@@ -1295,19 +1435,20 @@ mod tests {
             offset_minutes: 15,
             message: "Boots on.".into(),
         }];
-        let soon_id = save_event(&mut conn, soon).unwrap();
-        let soon = store::event(&mut conn, soon_id).unwrap().unwrap();
-        let option_id = store::options_for(&mut conn, &soon).unwrap()[0].id;
-        signup(&mut conn, soon_id, option_id, 2).unwrap();
-        let report = tick(&mut conn, Utc::now()).unwrap();
+        let soon_id = save_event(&mut conn, soon).await.unwrap();
+        let soon = store::event(&mut conn, soon_id).await.unwrap().unwrap();
+        let option_id = store::options_for(&mut conn, &soon).await.unwrap()[0].id;
+        signup(&mut conn, soon_id, option_id, 2).await.unwrap();
+        let report = tick(&mut conn, Utc::now()).await.unwrap();
         assert_eq!(
             store::event(&mut conn, scheduled_id)
+                .await
                 .unwrap()
                 .unwrap()
                 .status,
             EventStatus::Posted
         );
-        let reminder = store::reminders_for(&mut conn, &soon).unwrap();
+        let reminder = store::reminders_for(&mut conn, &soon).await.unwrap();
         assert!(reminder[0].sent_at.is_some());
         assert!(report.notes.iter().any(|note| note.contains("Dock")));
         assert!(report.jobs.iter().any(|job| matches!(
@@ -1317,31 +1458,35 @@ mod tests {
         )));
         // Saved with the changes, so a restart before they run doesn't lose them.
         let mut saved = Vec::new();
-        while let Some((id, job)) =
-            crate::jobs::claim(&mut conn, Utc::now(), crate::jobs::LEASE).unwrap()
+        while let Some((id, job)) = crate::jobs::claim(&mut conn, Utc::now(), crate::jobs::LEASE)
+            .await
+            .unwrap()
         {
-            crate::jobs::done(&mut conn, id).unwrap();
+            crate::jobs::done(&mut conn, id).await.unwrap();
             saved.push(job);
         }
         assert_eq!(saved, report.jobs);
     }
 
-    #[test]
-    fn a_broken_server_does_not_stop_the_tick_for_the_others() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_broken_server_does_not_stop_the_tick_for_the_others() {
+        let mut conn = world().await;
         // Sorted before server 1, and with no settings row, so its tick fails.
         conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (0, 'Broken', 'UTC');")
+            .await
             .unwrap();
         let mut scheduled = input("Q&A", Utc::now() + Duration::days(3), SaveAction::Schedule);
         scheduled.post_at = Some(Utc::now() + Duration::hours(2));
-        let scheduled_id = save_event(&mut conn, scheduled).unwrap();
+        let scheduled_id = save_event(&mut conn, scheduled).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
             .set(schema::events::post_at.eq(Utc::now() - Duration::minutes(1)))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let report = tick(&mut conn, Utc::now()).unwrap();
+        let report = tick(&mut conn, Utc::now()).await.unwrap();
         assert_eq!(
             store::event(&mut conn, scheduled_id)
+                .await
                 .unwrap()
                 .unwrap()
                 .status,
@@ -1350,56 +1495,73 @@ mod tests {
         assert_eq!(report.guilds, vec![1]);
     }
 
-    #[test]
-    fn the_tick_leaves_events_that_are_not_due_alone() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn the_tick_leaves_events_that_are_not_due_alone() {
+        let mut conn = world().await;
         let mut later = input(
             "Later",
             Utc::now() + Duration::days(3),
             SaveAction::Schedule,
         );
         later.post_at = Some(Utc::now() + Duration::hours(2));
-        let later_id = save_event(&mut conn, later).unwrap();
+        let later_id = save_event(&mut conn, later).await.unwrap();
         let mut failed = input(
             "Failed",
             Utc::now() + Duration::days(3),
             SaveAction::Schedule,
         );
         failed.post_at = Some(Utc::now() + Duration::hours(2));
-        let failed_id = save_event(&mut conn, failed).unwrap();
+        let failed_id = save_event(&mut conn, failed).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(failed_id)))
             .set((
                 schema::events::post_at.eq(Utc::now() - Duration::minutes(1)),
                 schema::events::post_attempts.eq(3),
             ))
             .execute(&mut conn)
+            .await
             .unwrap();
-        tick(&mut conn, Utc::now()).unwrap();
+        tick(&mut conn, Utc::now()).await.unwrap();
         assert_eq!(
-            store::event(&mut conn, later_id).unwrap().unwrap().status,
+            store::event(&mut conn, later_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             EventStatus::Scheduled
         );
         assert_eq!(
-            store::event(&mut conn, failed_id).unwrap().unwrap().status,
+            store::event(&mut conn, failed_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             EventStatus::Scheduled
         );
     }
 
-    #[test]
-    fn expired_sign_ins_are_swept() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn expired_sign_ins_are_swept() {
+        let mut conn = world().await;
         conn.batch_execute(
             "INSERT INTO web_sessions (token, membership_id, guild_id, discord_user_id, display_name, created_at)
              VALUES ('old', 1, 1, 'u1', 'Nell', now() - interval '31 days'),
                     ('new', 2, 1, 'u2', 'June', now() - interval '29 days');",
         )
-        .unwrap();
+        .await.unwrap();
         assert_eq!(
-            store::delete_expired_sessions(&mut conn, Utc::now()).unwrap(),
+            store::delete_expired_sessions(&mut conn, Utc::now())
+                .await
+                .unwrap(),
             1
         );
-        assert!(store::web_session(&mut conn, "old").unwrap().is_none());
-        assert!(store::web_session(&mut conn, "new").unwrap().is_some());
+        assert!(store::web_session(&mut conn, "old")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store::web_session(&mut conn, "new")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1444,9 +1606,9 @@ mod tests {
         assert!(name.chars().count() <= 100, "{name}");
     }
 
-    #[test]
-    fn one_date_can_move_without_the_rest_of_the_series() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn one_date_can_move_without_the_rest_of_the_series() {
+        let mut conn = world().await;
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
@@ -1454,26 +1616,28 @@ mod tests {
             end_on: None,
             max_occurrences: Some(3),
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
             .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates.len(), 3);
         let third = dates[2].starts_at;
         diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
             .set(schema::events::starts_at.eq(dates[1].starts_at + Duration::days(1)))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates[2].starts_at, third);
     }
 
-    #[test]
-    fn an_open_series_keeps_going_past_the_old_stop() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn an_open_series_keeps_going_past_the_old_stop() {
+        let mut conn = world().await;
         let anchor = Utc::now();
         let mut event = input("Raid", anchor + Duration::hours(1), SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
@@ -1481,8 +1645,9 @@ mod tests {
             end_on: None,
             max_occurrences: None,
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
@@ -1492,11 +1657,15 @@ mod tests {
             diesel::update(schema::events::table.filter(schema::events::series_id.eq(series_id)))
                 .set(schema::events::status.eq(EventStatus::Posted))
                 .execute(&mut conn)
+                .await
                 .unwrap();
             now += Duration::days(8);
-            series::ensure_series(&mut conn, series_id, now).unwrap();
+            series::ensure_series(&mut conn, series_id, now)
+                .await
+                .unwrap();
         }
         let max_index = store::events_in_series(&mut conn, series_id)
+            .await
             .unwrap()
             .iter()
             .filter_map(|event| event.occurrence_index)
@@ -1505,9 +1674,9 @@ mod tests {
         assert!(max_index > 48, "series stopped at date {max_index}");
     }
 
-    #[test]
-    fn changing_the_cadence_moves_upcoming_dates() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn changing_the_cadence_moves_upcoming_dates() {
+        let mut conn = world().await;
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
@@ -1515,16 +1684,18 @@ mod tests {
             end_on: None,
             max_occurrences: Some(4),
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
             .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
             .set(schema::events::starts_at.eq(anchor + Duration::days(8)))
             .execute(&mut conn)
+            .await
             .unwrap();
         save_series_repeat(
             &mut conn,
@@ -1536,8 +1707,9 @@ mod tests {
                 max_occurrences: Some(4),
             },
         )
+        .await
         .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(dates[0].status, EventStatus::Posted);
         assert_eq!(dates[0].starts_at, anchor);
@@ -1551,9 +1723,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shorter_series_drops_upcoming_dates_and_a_longer_one_brings_them_back() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_shorter_series_drops_upcoming_dates_and_a_longer_one_brings_them_back() {
+        let mut conn = world().await;
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
@@ -1561,8 +1733,9 @@ mod tests {
             end_on: None,
             max_occurrences: Some(4),
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
@@ -1577,9 +1750,13 @@ mod tests {
                 max_occurrences: Some(2),
             },
         )
+        .await
         .unwrap();
         assert_eq!(
-            store::events_in_series(&mut conn, series_id).unwrap().len(),
+            store::events_in_series(&mut conn, series_id)
+                .await
+                .unwrap()
+                .len(),
             2
         );
         save_series_repeat(
@@ -1592,14 +1769,15 @@ mod tests {
                 max_occurrences: Some(4),
             },
         )
+        .await
         .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates.len(), 4);
         assert_eq!(
             dates[2].starts_at,
             Utc.with_ymd_and_hms(2027, 10, 28, 19, 0, 0).unwrap()
         );
-        skip_event(&mut conn, dates[2].id, 1).unwrap();
+        skip_event(&mut conn, dates[2].id, 1).await.unwrap();
         save_series_repeat(
             &mut conn,
             series_id,
@@ -1610,6 +1788,7 @@ mod tests {
                 max_occurrences: Some(2),
             },
         )
+        .await
         .unwrap();
         save_series_repeat(
             &mut conn,
@@ -1621,8 +1800,9 @@ mod tests {
                 max_occurrences: Some(4),
             },
         )
+        .await
         .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates[2].status, EventStatus::Skipped);
         assert_eq!(dates[3].status, EventStatus::Scheduled);
         assert_eq!(
@@ -1631,9 +1811,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_end_date_drops_dates_after_it() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn an_end_date_drops_dates_after_it() {
+        let mut conn = world().await;
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
@@ -1641,8 +1821,9 @@ mod tests {
             end_on: None,
             max_occurrences: Some(4),
         });
-        let id = save_event(&mut conn, event).unwrap();
+        let id = save_event(&mut conn, event).await.unwrap();
         let series_id = store::event(&mut conn, id)
+            .await
             .unwrap()
             .unwrap()
             .series_id
@@ -1657,8 +1838,9 @@ mod tests {
                 max_occurrences: None,
             },
         )
+        .await
         .unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates.len(), 2);
         assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
@@ -1667,27 +1849,32 @@ mod tests {
         );
     }
 
-    fn weekly_series(conn: &mut Connection, start: DateTime<Utc>, max: Option<i64>) -> i64 {
+    async fn weekly_series(conn: &mut Connection, start: DateTime<Utc>, max: Option<i64>) -> i64 {
         let mut event = input("Vault", start, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
             cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: max,
         });
-        let id = save_event(conn, event).unwrap();
-        store::event(conn, id).unwrap().unwrap().series_id.unwrap()
+        let id = save_event(conn, event).await.unwrap();
+        store::event(conn, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap()
     }
 
-    #[test]
-    fn a_deleted_date_stays_out_of_its_series() {
-        let mut conn = world();
-        let series_id = weekly_series(&mut conn, Utc::now() + Duration::days(1), Some(3));
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+    #[tokio::test]
+    async fn a_deleted_date_stays_out_of_its_series() {
+        let mut conn = world().await;
+        let series_id = weekly_series(&mut conn, Utc::now() + Duration::days(1), Some(3)).await;
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         assert_eq!(dates.len(), 3);
         assert_eq!(dates[1].status, EventStatus::Scheduled);
-        delete_event(&mut conn, dates[1].id, 1).unwrap();
-        tick(&mut conn, Utc::now()).unwrap();
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        delete_event(&mut conn, dates[1].id, 1).await.unwrap();
+        tick(&mut conn, Utc::now()).await.unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         let second: Vec<_> = dates
             .iter()
             .filter(|date| date.occurrence_index == Some(2))
@@ -1696,18 +1883,22 @@ mod tests {
         assert_eq!(second, [EventStatus::Skipped]);
     }
 
-    #[test]
-    fn a_series_does_not_bring_back_dates_already_past() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_series_does_not_bring_back_dates_already_past() {
+        let mut conn = world().await;
         let anchor = Utc::now() + Duration::hours(1);
-        let series_id = weekly_series(&mut conn, anchor, None);
-        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let series_id = weekly_series(&mut conn, anchor, None).await;
+        let dates = store::events_in_series(&mut conn, series_id).await.unwrap();
         // A date missing from before deletes were kept as skipped.
         diesel::delete(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
             .execute(&mut conn)
+            .await
             .unwrap();
-        series::ensure_series(&mut conn, series_id, anchor + Duration::days(8)).unwrap();
+        series::ensure_series(&mut conn, series_id, anchor + Duration::days(8))
+            .await
+            .unwrap();
         let indexes: Vec<_> = store::events_in_series(&mut conn, series_id)
+            .await
             .unwrap()
             .iter()
             .filter_map(|date| date.occurrence_index)
@@ -1715,66 +1906,67 @@ mod tests {
         assert!(!indexes.contains(&2), "{indexes:?}");
     }
 
-    #[test]
-    fn a_lone_draft_of_a_series_is_deleted() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn a_lone_draft_of_a_series_is_deleted() {
+        let mut conn = world().await;
         let mut event = input("Vault", Utc::now() + Duration::days(1), SaveAction::Draft);
         event.repeat = Some(RepeatSpec {
             cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(3),
         });
-        let id = save_event(&mut conn, event).unwrap();
-        delete_event(&mut conn, id, 1).unwrap();
-        assert!(store::event(&mut conn, id).unwrap().is_none());
+        let id = save_event(&mut conn, event).await.unwrap();
+        delete_event(&mut conn, id, 1).await.unwrap();
+        assert!(store::event(&mut conn, id).await.unwrap().is_none());
     }
 
     /// Runs `body` twice at once, each turn in its own transaction on its own
     /// connection to the test schema. Each turn holds its commit until the other
     /// is done too, or for half a second if the other is waiting on it.
-    fn race(conn: &mut Connection, body: impl Fn(&mut Connection, usize) + Sync) {
-        use diesel::Connection as _;
+    async fn race(conn: &mut Connection, body: impl AsyncFn(&mut Connection, usize)) {
+        use diesel_async::{AnsiTransactionManager, TransactionManager};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::{Duration as Wait, Instant};
-        let db = store::pool_for(conn).unwrap();
-        let start = std::sync::Barrier::new(2);
+        let db = store::pool_for(conn).await.unwrap();
+        let start = tokio::sync::Barrier::new(2);
         let done = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for turn in 0..2 {
-                let (db, start, done, body) = (&db, &start, &done, &body);
-                scope.spawn(move || {
-                    let mut conn = db.get().unwrap();
-                    conn.transaction::<_, diesel::result::Error, _>(|tx| {
-                        start.wait();
-                        body(tx, turn);
-                        done.fetch_add(1, Ordering::SeqCst);
-                        let deadline = Instant::now() + Wait::from_millis(500);
-                        while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-                            std::thread::sleep(Wait::from_millis(5));
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
-                });
+        // Both turns run in this task, each on its own connection: one
+        // waiting on a row the other locked leaves the other free to go on.
+        let turn = async |turn: usize| {
+            let mut conn = db.get().await.unwrap();
+            let tx: &mut Connection = &mut conn;
+            AnsiTransactionManager::begin_transaction(tx).await.unwrap();
+            start.wait().await;
+            body(tx, turn).await;
+            done.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Wait::from_millis(500);
+            while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                tokio::time::sleep(Wait::from_millis(5)).await;
             }
-        });
+            AnsiTransactionManager::commit_transaction(tx)
+                .await
+                .unwrap();
+        };
+        tokio::join!(turn(0), turn(1));
     }
 
-    #[test]
-    fn two_people_at_once_cannot_both_take_the_last_place() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn two_people_at_once_cannot_both_take_the_last_place() {
+        let mut conn = world().await;
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
             capacity: Some(1),
             ..OptionInput::of_type(DPS)
         }];
-        let id = save_event(&mut conn, event).unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
-        race(&mut conn, |tx, turn| {
-            let _ = signup(tx, id, option, 2 + turn as i64);
-        });
+        let id = save_event(&mut conn, event).await.unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).await.unwrap()[0].id;
+        race(&mut conn, async |tx, turn| {
+            let _ = signup(tx, id, option, 2 + turn as i64).await;
+        })
+        .await;
         let confirmed = store::signups_for(&mut conn, &event)
+            .await
             .unwrap()
             .iter()
             .filter(|signup| signup.state == SignupState::Confirmed)
@@ -1782,19 +1974,24 @@ mod tests {
         assert_eq!(confirmed, 1);
     }
 
-    #[test]
-    fn one_person_clicking_two_options_at_once_lands_on_one() {
-        let mut conn = world();
+    #[tokio::test]
+    async fn one_person_clicking_two_options_at_once_lands_on_one() {
+        let mut conn = world().await;
         let id = save_event(
             &mut conn,
             input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish),
         )
+        .await
         .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
-        let options = store::options_for(&mut conn, &event).unwrap();
-        race(&mut conn, |tx, turn| {
-            let _ = signup(tx, id, options[turn].id, 2);
-        });
-        assert_eq!(store::signups_for(&mut conn, &event).unwrap().len(), 1);
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).await.unwrap();
+        race(&mut conn, async |tx, turn| {
+            let _ = signup(tx, id, options[turn].id, 2).await;
+        })
+        .await;
+        assert_eq!(
+            store::signups_for(&mut conn, &event).await.unwrap().len(),
+            1
+        );
     }
 }

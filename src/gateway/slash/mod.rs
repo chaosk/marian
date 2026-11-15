@@ -192,42 +192,46 @@ async fn remember_actor(ctx: &Context<'_>) -> Result<Option<Actor>, Error> {
         .data()
         .db
         .get()
+        .await
         .map_err(|_| "Could not reach the database.")?;
-    let guild = logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name)?;
-    let (user, renamed) = logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display)?;
+    let guild =
+        logic::ensure_discord_guild(&mut conn, &guild_id.get().to_string(), &guild_name).await?;
+    let (user, renamed) =
+        logic::ensure_discord_user(&mut conn, guild.id, &discord_user, &display).await?;
     redraw(&ctx.data().jobs, renamed);
     if member.is_some() {
-        logic::follow_discord_avatar(&mut conn, &user, avatar.as_deref())?;
+        logic::follow_discord_avatar(&mut conn, &user, avatar.as_deref()).await?;
     }
     if let Some(manage) = manage {
-        logic::set_server_manager(&mut conn, user.id, manage)?;
+        logic::set_server_manager(&mut conn, user.id, manage).await?;
     }
     if let Some(roles) = &roles {
-        sync_roles(&mut conn, guild.id, user.id, roles)?;
+        sync_roles(&mut conn, guild.id, user.id, roles).await?;
     }
     Ok(Some(Actor {
         guild_id: guild.id,
         membership_id: user.id,
         discord_user,
-        lang: i18n::lang_of(&mut conn, guild.id),
+        lang: i18n::lang_of(&mut conn, guild.id).await,
     }))
 }
 
 async fn complete_channel(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(channel_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(channel_choices(ctx, partial).await)
 }
 
-fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.get() else {
+    let Ok(mut conn) = ctx.data().db.get().await else {
         return Vec::new();
     };
-    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await
+    else {
         return Vec::new();
     };
-    let lang = i18n::lang_of(&mut conn, guild.id);
+    let lang = i18n::lang_of(&mut conn, guild.id).await;
     commands::channel_choices(
         &mut conn,
         guild.id,
@@ -235,6 +239,7 @@ fn channel_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomplet
         partial,
         lang,
     )
+    .await
     .unwrap_or_default()
     .into_iter()
     .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -253,8 +258,12 @@ async fn deliver(
         Err(err) => err.localized(actor.lang),
     };
     let refresh = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        crate::serve::events_to_refresh(&mut conn, label, &text)
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        crate::serve::events_to_refresh(&mut conn, label, &text).await
     };
     crate::live::server(actor.guild_id);
     for event_id in refresh {
@@ -270,20 +279,21 @@ async fn deliver(
 }
 
 async fn complete_event(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(event_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(event_choices(ctx, partial).await)
 }
 
-fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.get() else {
+    let Ok(mut conn) = ctx.data().db.get().await else {
         return Vec::new();
     };
-    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await
+    else {
         return Vec::new();
     };
-    let lang = i18n::lang_of(&mut conn, guild.id);
+    let lang = i18n::lang_of(&mut conn, guild.id).await;
     commands::response_events(
         &mut conn,
         guild.id,
@@ -292,6 +302,7 @@ fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteC
         chrono::Utc::now(),
         lang,
     )
+    .await
     .unwrap_or_default()
     .into_iter()
     .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))
@@ -299,20 +310,21 @@ fn event_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteC
 }
 
 async fn complete_option(ctx: Context<'_>, partial: &str) -> serenity::CreateAutocompleteResponse {
-    serenity::CreateAutocompleteResponse::new().set_choices(option_choices(ctx, partial))
+    serenity::CreateAutocompleteResponse::new().set_choices(option_choices(ctx, partial).await)
 }
 
-fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
+async fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::AutocompleteChoice> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
     let Some(event) = slash_arg(&ctx, "event") else {
         return Vec::new();
     };
-    let Ok(mut conn) = ctx.data().db.get() else {
+    let Ok(mut conn) = ctx.data().db.get().await else {
         return Vec::new();
     };
-    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()) else {
+    let Ok(Some(guild)) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await
+    else {
         return Vec::new();
     };
     commands::response_options(
@@ -322,6 +334,7 @@ fn option_choices(ctx: Context<'_>, partial: &str) -> Vec<serenity::Autocomplete
         &event,
         partial,
     )
+    .await
     .unwrap_or_default()
     .into_iter()
     .map(|choice| serenity::AutocompleteChoice::new(choice.label, choice.value))

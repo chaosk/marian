@@ -24,13 +24,12 @@ pub(super) async fn push_sync(
 
 /// Tells open pages about a change made from Discord to one event: to who is
 /// signed up, or to the event itself.
-pub(super) fn tell_pages(db: &store::Db, event_id: i64, signups: bool) {
-    let found = store::blocking(|| {
-        db.get()
-            .ok()
-            .and_then(|mut conn| store::event(&mut conn, event_id).ok())
-    });
-    if let Some(Some(event)) = found {
+pub(super) async fn tell_pages(db: &store::Db, event_id: i64, signups: bool) {
+    let found = match db.get().await {
+        Ok(mut conn) => store::event(&mut conn, event_id).await.ok().flatten(),
+        Err(_) => None,
+    };
+    if let Some(event) = found {
         if signups {
             crate::live::signups(event.guild_id, event.public_id);
         } else {
@@ -46,10 +45,13 @@ pub(super) async fn post_event(
     event_id: i64,
     notify: bool,
 ) -> Result<(), Error> {
-    let view = store::blocking(|| -> Result<_, Error> {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        Ok(logic::discord_view(&mut conn, event_id, public_url)?)
-    })?;
+    let view = {
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::discord_view(&mut conn, event_id, public_url).await?
+    };
     let Some(view) = view else {
         return Ok(());
     };
@@ -144,14 +146,18 @@ pub(super) async fn post_event(
                 .await?,
         )
     };
-    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+    let mut conn = db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
     if let Some(message) = &sent {
-        logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string())?;
+        logic::remember_discord_message(&mut conn, event_id, &message.id.get().to_string()).await?;
     }
-    let cancelled = store::event(&mut conn, event_id)?
+    let cancelled = store::event(&mut conn, event_id)
+        .await?
         .is_some_and(|event| event.status == EventStatus::Cancelled);
     let plan = if sent.is_some() || cancelled {
-        logic::event_channel_purge(&mut conn, event_id)?
+        logic::event_channel_purge(&mut conn, event_id).await?
     } else {
         None
     };
@@ -197,8 +203,11 @@ pub(super) async fn purge_event_channel(
             break;
         }
     }
-    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-    logic::mark_channel_purged(&mut conn, plan.channel_id)?;
+    let mut conn = db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
+    logic::mark_channel_purged(&mut conn, plan.channel_id).await?;
     Ok(())
 }
 
@@ -222,8 +231,11 @@ async fn push_approval(
     run_id: i64,
 ) -> Result<(), Error> {
     let post = {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::approval_post(&mut conn, run_id, public_url, chrono::Utc::now())?
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::approval_post(&mut conn, run_id, public_url, chrono::Utc::now()).await?
     };
     let Some(post) = post else {
         return Ok(());
@@ -256,8 +268,11 @@ async fn push_approval(
     )
     .await?;
     if let Some(message) = sent {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::remember_approval_message(&mut conn, run_id, &message.id.get().to_string())?;
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::remember_approval_message(&mut conn, run_id, &message.id.get().to_string()).await?;
     }
     Ok(())
 }
@@ -268,8 +283,11 @@ async fn push_poll(
     run_id: i64,
 ) -> Result<(), Error> {
     let post = {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::routine_post(&mut conn, run_id)?
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::routine_post(&mut conn, run_id).await?
     };
     let Some(post) = post else {
         return Ok(());
@@ -335,8 +353,11 @@ async fn push_poll(
             }
         }
         let message = target.send_message(&http, message).await?;
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::remember_results_message(&mut conn, run_id, &message.id.get().to_string())?;
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::remember_results_message(&mut conn, run_id, &message.id.get().to_string()).await?;
         return Ok(());
     }
     // As with an event, a mention pings once: when the poll goes up, or when an
@@ -352,8 +373,11 @@ async fn push_poll(
     )
     .await?;
     if let Some(message) = sent {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        logic::remember_routine_message(&mut conn, run_id, &message.id.get().to_string())?;
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::remember_routine_message(&mut conn, run_id, &message.id.get().to_string()).await?;
     }
     Ok(())
 }
@@ -434,10 +458,13 @@ pub(super) async fn push_attendance(
     http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
     event_id: i64,
 ) -> Result<(), Error> {
-    let attendance = store::blocking(|| -> Result<_, Error> {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        Ok(logic::attendance(&mut conn, event_id)?)
-    })?;
+    let attendance = {
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::attendance(&mut conn, event_id).await?
+    };
     let work = match attendance {
         logic::Attendance::Idle => return Ok(()),
         logic::Attendance::Waiting => {
@@ -473,9 +500,13 @@ pub(super) async fn push_attendance(
     };
     if !work.thread_add.is_empty() || !work.thread_remove.is_empty() {
         if work.thread_discord_id.is_none() && opened.is_none() && work.thread_add.is_empty() {
-            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+            let mut conn = db
+                .get()
+                .await
+                .map_err(|_| "Could not reach the database.")?;
             for membership_id in &work.thread_remove {
-                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
+                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)
+                    .await?;
             }
         } else {
             let thread_id = match opened {
@@ -484,20 +515,30 @@ pub(super) async fn push_attendance(
             };
             for membership_id in &work.thread_add {
                 join_thread(&http, thread_id, membership_id).await?;
-                let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-                store::mark_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
+                let mut conn = db
+                    .get()
+                    .await
+                    .map_err(|_| "Could not reach the database.")?;
+                store::mark_applied(&mut conn, event_id, AccessKind::Thread, membership_id).await?;
             }
             for membership_id in &work.thread_remove {
                 leave_thread(&http, thread_id, membership_id).await?;
-                let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)?;
+                let mut conn = db
+                    .get()
+                    .await
+                    .map_err(|_| "Could not reach the database.")?;
+                store::clear_applied(&mut conn, event_id, AccessKind::Thread, membership_id)
+                    .await?;
             }
         }
     }
     if work.role_discord_id.is_none() && work.role_add.is_empty() {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
         for membership_id in &work.role_remove {
-            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
+            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id).await?;
         }
     } else if !work.role_add.is_empty() || !work.role_remove.is_empty() {
         let role_id = open_role(db, &http, &work).await?;
@@ -509,8 +550,11 @@ pub(super) async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            store::mark_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
+            let mut conn = db
+                .get()
+                .await
+                .map_err(|_| "Could not reach the database.")?;
+            store::mark_applied(&mut conn, event_id, AccessKind::Role, membership_id).await?;
         }
         for membership_id in &work.role_remove {
             let user = serenity::UserId::new(membership_id.parse()?);
@@ -519,8 +563,11 @@ pub(super) async fn push_attendance(
                 Err(err) if already_applied(&err) => {}
                 Err(err) => return Err(err.into()),
             }
-            let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id)?;
+            let mut conn = db
+                .get()
+                .await
+                .map_err(|_| "Could not reach the database.")?;
+            store::clear_applied(&mut conn, event_id, AccessKind::Role, membership_id).await?;
         }
     }
     Ok(())
@@ -579,8 +626,11 @@ async fn thread_on_message(
             None => return Err(err.into()),
         },
     };
-    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-    store::set_thread_discord_id(&mut conn, event_id, &name, &thread_id.to_string())?;
+    let mut conn = db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
+    store::set_thread_discord_id(&mut conn, event_id, &name, &thread_id.to_string()).await?;
     Ok(thread_id)
 }
 
@@ -644,8 +694,11 @@ async fn open_role(
                 .colour(work.role_color),
         )
         .await?;
-    let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-    store::set_role_discord_id(&mut conn, stored_role_id, &role.id.get().to_string())?;
+    let mut conn = db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
+    store::set_role_discord_id(&mut conn, stored_role_id, &role.id.get().to_string()).await?;
     Ok(role.id)
 }
 
@@ -663,16 +716,21 @@ pub(super) async fn push_remind(
     message: &str,
 ) -> Result<(), Error> {
     let plan = {
-        let mut conn = db.get().map_err(|_| "Could not reach the database.")?;
-        let event =
-            store::event(&mut conn, event_id)?.ok_or_else(|| "event missing".to_string())?;
-        let channel = store::channel(&mut conn, event.channel_id)?
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let event = store::event(&mut conn, event_id)
+            .await?
+            .ok_or_else(|| "event missing".to_string())?;
+        let channel = store::channel(&mut conn, event.channel_id)
+            .await?
             .ok_or_else(|| "channel missing".to_string())?;
         let Some(channel_id) = channel.discord_id.filter(|id| !id.is_empty()) else {
             return Ok(());
         };
-        let guild = store::guild(&mut conn, event.guild_id)?;
-        let settings = store::settings(&mut conn, event.guild_id)?;
+        let guild = store::guild(&mut conn, event.guild_id).await?;
+        let settings = store::settings(&mut conn, event.guild_id).await?;
         let start = event.starts_at;
         let end = start + chrono::Duration::minutes(event.duration_minutes);
         let message_id = event.discord_message_id.filter(|id| !id.is_empty());
@@ -692,13 +750,13 @@ pub(super) async fn push_remind(
         let link =
             link.or_else(|| logic::web_event_url(public_url, guild_id.as_deref(), event.public_id));
         RemindPlan {
-            lang: i18n::lang_of(&mut conn, event.guild_id),
+            lang: i18n::lang_of(&mut conn, event.guild_id).await,
             channel_id,
-            thread_id: store::thread_discord_id(&mut conn, event_id)?,
+            thread_id: store::thread_discord_id(&mut conn, event_id).await?,
             in_thread: event.thread_enabled && settings.thread_reminders,
             message_id,
             thread_name: logic::event_thread_name(
-                i18n::lang_of(&mut conn, event.guild_id),
+                i18n::lang_of(&mut conn, event.guild_id).await,
                 &event.title,
                 event.starts_at,
                 &timezone,

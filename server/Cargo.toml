@@ -10,9 +10,6 @@ publish = false
 name = "marian"
 path = "src/main.rs"
 
-[features]
-static-libpq = ["marian/static-libpq"]
-
 [dependencies]
 axum = { workspace = true }
 leptos = { workspace = true, features = ["ssr"] }

@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use chrono_tz::Tz;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 
@@ -56,11 +57,12 @@ impl Lang {
 }
 
 /// The language a server picked; English when it hasn't, or can't be read.
-pub fn lang_of(conn: &mut Connection, guild_id: i64) -> Lang {
+pub async fn lang_of(conn: &mut Connection, guild_id: i64) -> Lang {
     schema::settings::table
         .filter(schema::settings::guild_id.eq(guild_id))
         .select(schema::settings::language)
         .first::<Lang>(conn)
+        .await
         .unwrap_or_default()
 }
 

@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use diesel::prelude::*;
 
+use diesel_async::RunQueryDsl;
+
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event, Membership, Role, Settings};
@@ -37,7 +39,7 @@ pub fn may_pick_attendee_role(actor: &Membership, role: &Role) -> bool {
 
 /// Whether Marian may give `role` as `event`'s attendee role: one it made, or
 /// one picked by someone who still manages the server.
-pub fn gives_attendee_role(
+pub async fn gives_attendee_role(
     conn: &mut Connection,
     event: &Event,
     role: &Role,
@@ -48,7 +50,8 @@ pub fn gives_attendee_role(
     let Some(picker) = event.attendee_role_by else {
         return Ok(false);
     };
-    Ok(store::membership(conn, picker)?
+    Ok(store::membership(conn, picker)
+        .await?
         .is_some_and(|picker| picker.guild_id == event.guild_id && picker.server_manager))
 }
 
@@ -123,7 +126,7 @@ impl Sight {
 
 /// What `member` can see, from the permissions Discord last sent. Until the
 /// bot has sent the server's permissions, every channel is shown.
-pub fn sight(conn: &mut Connection, member: &Membership) -> Result<Sight, OpError> {
+pub async fn sight(conn: &mut Connection, member: &Membership) -> Result<Sight, OpError> {
     if member.server_manager {
         return Ok(Sight {
             member_id: member.id,
@@ -133,31 +136,33 @@ pub fn sight(conn: &mut Connection, member: &Membership) -> Result<Sight, OpErro
     let member_discord: String = schema::users::table
         .find(member.user_id)
         .select(schema::users::discord_id)
-        .first(conn)?;
+        .first(conn)
+        .await?;
     let held: Vec<(Option<String>, i64)> = schema::membership_roles::table
         .inner_join(schema::roles::table)
         .filter(schema::membership_roles::membership_id.eq(member.id))
         .filter(schema::roles::gone_at.is_null())
         .select((schema::roles::discord_id, schema::roles::permissions))
-        .load(conn)?;
-    sight_of(conn, member.guild_id, member.id, &member_discord, held)
+        .load(conn)
+        .await?;
+    sight_of(conn, member.guild_id, member.id, &member_discord, held).await
 }
 
 /// What a Discord member can see. Someone Marian doesn't know yet sees only
 /// what @everyone does, besides their own overwrites.
-pub fn sight_for_discord(
+pub async fn sight_for_discord(
     conn: &mut Connection,
     guild_id: i64,
     discord_user: &str,
 ) -> Result<Sight, OpError> {
-    match store::membership_by_discord(conn, guild_id, discord_user)? {
-        Some(member) => sight(conn, &member),
-        None => sight_of(conn, guild_id, 0, discord_user, Vec::new()),
+    match store::membership_by_discord(conn, guild_id, discord_user).await? {
+        Some(member) => sight(conn, &member).await,
+        None => sight_of(conn, guild_id, 0, discord_user, Vec::new()).await,
     }
 }
 
 /// What a member holding `held` roles, as (Discord id, permissions), can see.
-fn sight_of(
+async fn sight_of(
     conn: &mut Connection,
     guild_id: i64,
     member_id: i64,
@@ -174,7 +179,8 @@ fn sight_of(
             schema::guilds::discord_id,
             schema::guilds::everyone_permissions,
         ))
-        .first(conn)?;
+        .first(conn)
+        .await?;
     let (Some(guild_discord), Some(everyone)) = (guild_discord, everyone) else {
         return Ok(sight);
     };
@@ -190,7 +196,8 @@ fn sight_of(
         .filter(schema::channels::discord_id.is_not_null())
         .filter(schema::channels::discord_id.ne(""))
         .select(schema::channels::id)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let rows: Vec<(i64, OverwriteKind, String, i64, i64)> = schema::channel_overwrites::table
         .inner_join(schema::channels::table)
         .filter(schema::channels::guild_id.eq(guild_id))
@@ -201,7 +208,8 @@ fn sight_of(
             schema::channel_overwrites::allow,
             schema::channel_overwrites::deny,
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     let mut overwrites: HashMap<i64, Vec<Overwrite>> = HashMap::new();
     for (channel_id, kind, target, allow, deny) in rows {
         overwrites.entry(channel_id).or_default().push(Overwrite {

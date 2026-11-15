@@ -33,6 +33,7 @@ pub fn parse_event_id(token: &str) -> Option<Uuid> {
 /// always within one server or event, so an id from elsewhere is not found.
 pub mod public {
     use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -44,23 +45,29 @@ pub mod public {
         Uuid::parse_str(public.trim()).ok()
     }
 
-    pub fn channel(conn: &mut Connection, id: i64) -> Result<String, OpError> {
+    pub async fn channel(conn: &mut Connection, id: i64) -> Result<String, OpError> {
         Ok(schema::channels::table
             .find(id)
             .select(schema::channels::public_id)
             .first::<Uuid>(conn)
+            .await
             .optional()?
             .map(|id| id.to_string())
             .unwrap_or_default())
     }
 
-    pub fn channel_id(conn: &mut Connection, guild_id: i64, public: &str) -> Result<i64, OpError> {
+    pub async fn channel_id(
+        conn: &mut Connection,
+        guild_id: i64,
+        public: &str,
+    ) -> Result<i64, OpError> {
         let found = match parse(public) {
             Some(public) => schema::channels::table
                 .filter(schema::channels::guild_id.eq(guild_id))
                 .filter(schema::channels::public_id.eq(public))
                 .select(schema::channels::id)
                 .first::<i64>(conn)
+                .await
                 .optional()?,
             None => None,
         };
@@ -68,14 +75,15 @@ pub mod public {
     }
 
     /// Roles by key, as public ids in the same order. A role gone since is left out.
-    pub fn roles(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
+    pub async fn roles(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let found: HashMap<i64, Uuid> = schema::roles::table
             .filter(schema::roles::id.eq_any(ids))
             .select((schema::roles::id, schema::roles::public_id))
-            .load::<(i64, Uuid)>(conn)?
+            .load::<(i64, Uuid)>(conn)
+            .await?
             .into_iter()
             .collect();
         Ok(ids
@@ -85,16 +93,16 @@ pub mod public {
             .collect())
     }
 
-    pub fn role(conn: &mut Connection, id: Option<i64>) -> Result<Option<String>, OpError> {
+    pub async fn role(conn: &mut Connection, id: Option<i64>) -> Result<Option<String>, OpError> {
         Ok(match id {
-            Some(id) => roles(conn, &[id])?.into_iter().next(),
+            Some(id) => roles(conn, &[id]).await?.into_iter().next(),
             None => None,
         })
     }
 
     /// Public role ids from a request, as keys. One that isn't a role in this
     /// server is refused rather than dropped.
-    pub fn role_ids(
+    pub async fn role_ids(
         conn: &mut Connection,
         guild_id: i64,
         public: &[String],
@@ -110,7 +118,8 @@ pub mod public {
             .filter(schema::roles::guild_id.eq(guild_id))
             .filter(schema::roles::public_id.eq_any(&wanted))
             .select((schema::roles::public_id, schema::roles::id))
-            .load::<(Uuid, i64)>(conn)?
+            .load::<(Uuid, i64)>(conn)
+            .await?
             .into_iter()
             .collect();
         wanted
@@ -119,13 +128,14 @@ pub mod public {
             .collect()
     }
 
-    pub fn role_id(
+    pub async fn role_id(
         conn: &mut Connection,
         guild_id: i64,
         public: Option<&str>,
     ) -> Result<Option<i64>, OpError> {
         match public.filter(|id| !id.trim().is_empty()) {
-            Some(id) => Ok(role_ids(conn, guild_id, &[id.to_string()])?
+            Some(id) => Ok(role_ids(conn, guild_id, &[id.to_string()])
+                .await?
                 .into_iter()
                 .next()),
             None => Ok(None),
@@ -136,7 +146,11 @@ pub mod public {
         OpError::from(crate::msg!("err-role-elsewhere"))
     }
 
-    pub fn member_id(conn: &mut Connection, guild_id: i64, public: &str) -> Result<i64, OpError> {
+    pub async fn member_id(
+        conn: &mut Connection,
+        guild_id: i64,
+        public: &str,
+    ) -> Result<i64, OpError> {
         let Some(public) = parse(public) else {
             return Err(OpError::NotFound);
         };
@@ -145,12 +159,17 @@ pub mod public {
             .filter(schema::memberships::public_id.eq(public))
             .select(schema::memberships::id)
             .first::<i64>(conn)
+            .await
             .optional()?
             .ok_or(OpError::NotFound)
     }
 
     /// A signup option on this event, by its public id.
-    pub fn option_id(conn: &mut Connection, event_id: i64, public: &str) -> Result<i64, OpError> {
+    pub async fn option_id(
+        conn: &mut Connection,
+        event_id: i64,
+        public: &str,
+    ) -> Result<i64, OpError> {
         let Some(public) = parse(public) else {
             return Err(OpError::NotFound);
         };
@@ -159,12 +178,13 @@ pub mod public {
             .filter(schema::signup_options::public_id.eq(public))
             .select(schema::signup_options::id)
             .first::<i64>(conn)
+            .await
             .optional()?
             .ok_or(OpError::NotFound)
     }
 
     /// The keys of an event's options, by public id, for a list sent back to save.
-    pub fn option_ids(
+    pub async fn option_ids(
         conn: &mut Connection,
         event_id: i64,
     ) -> Result<HashMap<String, i64>, OpError> {
@@ -174,7 +194,8 @@ pub mod public {
                 schema::signup_options::public_id,
                 schema::signup_options::id,
             ))
-            .load::<(Uuid, i64)>(conn)?
+            .load::<(Uuid, i64)>(conn)
+            .await?
             .into_iter()
             .map(|(public, id)| (public.to_string(), id))
             .collect())

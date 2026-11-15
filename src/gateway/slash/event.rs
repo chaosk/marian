@@ -52,6 +52,7 @@ pub(super) async fn event(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         let channel = logic::ensure_discord_channel(
             &mut conn,
@@ -62,7 +63,8 @@ pub(super) async fn event(ctx: Context<'_>) -> Result<(), Error> {
             } else {
                 &invoked_name
             },
-        )?;
+        )
+        .await?;
         commands::start_event_dm(
             &mut conn,
             actor.guild_id,
@@ -72,6 +74,7 @@ pub(super) async fn event(ctx: Context<'_>) -> Result<(), Error> {
             Some(&invoked_id),
             actor.lang,
         )
+        .await
     };
     let question = match started {
         Ok(question) => question,
@@ -91,8 +94,9 @@ pub(super) async fn event(ctx: Context<'_>) -> Result<(), Error> {
                         .data()
                         .db
                         .get()
+                        .await
                         .map_err(|_| "Could not reach the database.")?;
-                    commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
+                    commands::cancel_event_dm(&mut conn, &actor.discord_user).await?;
                 }
                 tracing::warn!("could not send the event questions: {err}");
                 ctx.say(dm_blocked(
@@ -112,8 +116,9 @@ pub(super) async fn event(ctx: Context<'_>) -> Result<(), Error> {
                     .data()
                     .db
                     .get()
+                    .await
                     .map_err(|_| "Could not reach the database.")?;
-                commands::cancel_event_dm(&mut conn, &actor.discord_user)?;
+                commands::cancel_event_dm(&mut conn, &actor.discord_user).await?;
             }
             tracing::warn!("could not open a DM: {err}");
             ctx.say(dm_blocked(
@@ -157,6 +162,7 @@ pub(super) async fn edit(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::edit_event(
             &mut conn,
@@ -172,6 +178,7 @@ pub(super) async fn edit(
             },
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, &label, outcome).await
 }
@@ -195,8 +202,9 @@ pub(super) async fn reminders(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        commands::set_reminders(&mut conn, actor.membership_id, enabled, actor.lang)
+        commands::set_reminders(&mut conn, actor.membership_id, enabled, actor.lang).await
     };
     deliver(ctx, &actor, "/reminders", outcome).await
 }
@@ -216,9 +224,10 @@ pub(super) async fn help(ctx: Context<'_>) -> Result<(), Error> {
                 .data()
                 .db
                 .get()
+                .await
                 .map_err(|_| "Could not reach the database.")?;
-            match store::guild_by_discord(&mut conn, &guild_id.get().to_string())? {
-                Some(guild) => i18n::lang_of(&mut conn, guild.id),
+            match store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await? {
+                Some(guild) => i18n::lang_of(&mut conn, guild.id).await,
                 None => Lang::En,
             }
         }

@@ -1,5 +1,6 @@
-# Packages the static binary and site CI already built. Postgres TLS reads
-# Debian's CA bundle; Discord uses rustls and does not.
+# Packages the static binary and site CI already built. Postgres TLS
+# (sslmode=verify-ca or verify-full without sslrootcert) trusts Debian's CA
+# bundle, through SSL_CERT_FILE; Discord uses rustls's own roots and does not.
 FROM debian:bookworm-slim AS certs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

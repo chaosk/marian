@@ -5,13 +5,12 @@
 //! `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is: a trace store like Tempo takes no
 //! metrics, so they don't follow the traces on their own.
 
-use std::cell::RefCell;
 use std::env;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
-use diesel::connection::{Connection, Instrumentation, InstrumentationEvent};
+use diesel::connection::{Instrumentation, InstrumentationEvent};
 use opentelemetry::trace::{Span, SpanKind, Tracer, TracerProvider};
 use opentelemetry::{global, Context, KeyValue};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
@@ -32,10 +31,6 @@ struct PendingQuery {
     statement: String,
     operation: String,
     system: &'static str,
-}
-
-thread_local! {
-    static QUERIES: RefCell<Vec<PendingQuery>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct Telemetry {
@@ -270,50 +265,49 @@ pub fn parent_from(traceparent: &str) -> Option<Context> {
     context.span().span_context().is_valid().then_some(context)
 }
 
-pub fn install_query_trace(conn: &mut impl Connection, system: &'static str) {
-    conn.set_instrumentation(QueryTrace { system });
+pub fn install_query_trace(conn: &mut crate::store::Connection, system: &'static str) {
+    use diesel_async::AsyncConnection;
+    conn.set_instrumentation(QueryTrace {
+        system,
+        pending: None,
+    });
 }
 
+/// Each connection keeps the query it's running: a task's query can start on
+/// one worker thread and finish on another. Marian sends one query at a time
+/// on a connection, so a query that starts while another is pending replaces
+/// it; that one's future was dropped before it finished.
 struct QueryTrace {
     system: &'static str,
+    pending: Option<PendingQuery>,
 }
 
 impl Instrumentation for QueryTrace {
     fn on_connection_event(&mut self, event: InstrumentationEvent<'_>) {
         match event {
             InstrumentationEvent::StartQuery { query, .. } => {
-                start_query(self.system, &query.to_string())
+                self.pending = Some(start_query(self.system, &query.to_string()));
             }
-            InstrumentationEvent::FinishQuery { .. } => finish_query(),
+            InstrumentationEvent::FinishQuery { .. } => {
+                if let Some(pending) = self.pending.take() {
+                    finish_query(pending);
+                }
+            }
             _ => {}
         }
     }
 }
 
-fn start_query(system: &'static str, sql: &str) {
-    let pending = PendingQuery {
+fn start_query(system: &'static str, sql: &str) -> PendingQuery {
+    PendingQuery {
         start: SystemTime::now(),
         statement: statement_shape(sql),
         operation: operation(sql),
         system,
-    };
-    QUERIES.with(|stack| {
-        if let Ok(mut stack) = stack.try_borrow_mut() {
-            stack.push(pending);
-        }
-    });
+    }
 }
 
-fn finish_query() {
-    let pending = QUERIES.with(|stack| {
-        stack
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut stack| stack.pop())
-    });
-    let Some(pending) = pending else {
-        return;
-    };
+fn finish_query(pending: PendingQuery) {
     let duration = pending.start.elapsed().unwrap_or_default();
     let millis = duration.as_secs_f64() * 1000.0;
     tracing::debug!(

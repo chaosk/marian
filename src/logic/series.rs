@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::db::{log, must_channel, must_event, must_guild, must_series};
 use super::event::{insert_event_roles, replace_children};
@@ -30,7 +31,7 @@ struct NewSeries {
     created_at: DateTime<Utc>,
 }
 
-pub(super) fn link_new_series(
+pub(super) async fn link_new_series(
     conn: &mut Connection,
     event: &Event,
     input: &EventInput,
@@ -40,10 +41,11 @@ pub(super) fn link_new_series(
     let Some(repeat) = &input.repeat else {
         return Ok(());
     };
-    let settings = store::settings(conn, event.guild_id)?;
+    let settings = store::settings(conn, event.guild_id).await?;
     let template = template_from(input, clean);
-    let template_id = template::insert(conn, &template::from_series(event.guild_id, &template))?;
-    template::set_role_by(conn, template_id, clean.attendee_role_by)?;
+    let template_id =
+        template::insert(conn, &template::from_series(event.guild_id, &template)).await?;
+    template::set_role_by(conn, template_id, clean.attendee_role_by).await?;
     let series_id: i64 = diesel::insert_into(schema::series::table)
         .values(&NewSeries {
             public_id: crate::ids::series_id(),
@@ -58,13 +60,15 @@ pub(super) fn link_new_series(
             created_at: now,
         })
         .returning(schema::series::id)
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
         .set((
             schema::events::series_id.eq(series_id),
             schema::events::occurrence_index.eq(1_i64),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -106,34 +110,35 @@ fn template_from(input: &EventInput, clean: &CleanInput) -> SeriesTemplate {
     }
 }
 
-pub(super) fn apply_series_template(
+pub(super) async fn apply_series_template(
     conn: &mut Connection,
     series_id: i64,
     source_id: i64,
     input: &EventInput,
     clean: &CleanInput,
 ) -> Result<(), OpError> {
-    let series = must_series(conn, series_id)?;
+    let series = must_series(conn, series_id).await?;
     let template = template_from(input, clean);
     template::update(
         conn,
         series.template_id,
         &template::from_series(series.guild_id, &template),
-    )?;
-    template::set_role_by(conn, series.template_id, clean.attendee_role_by)?;
-    let events = store::events_in_series(conn, series_id)?;
+    )
+    .await?;
+    template::set_role_by(conn, series.template_id, clean.attendee_role_by).await?;
+    let events = store::events_in_series(conn, series_id).await?;
     for event in events {
         if event.id == source_id
             || !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled)
         {
             continue;
         }
-        apply_template_to_event(conn, &event, &template, clean.attendee_role_by)?;
+        apply_template_to_event(conn, &event, &template, clean.attendee_role_by).await?;
     }
     Ok(())
 }
 
-fn apply_template_to_event(
+async fn apply_template_to_event(
     conn: &mut Connection,
     event: &Event,
     template: &SeriesTemplate,
@@ -160,25 +165,28 @@ fn apply_template_to_event(
             schema::events::multiple_signups.eq(template.multiple_signups),
             schema::events::updated_at.eq(Utc::now()),
         ))
-        .execute(conn)?;
-    replace_children(conn, event.id, &template.options, &template.reminders)?;
+        .execute(conn)
+        .await?;
+    replace_children(conn, event.id, &template.options, &template.reminders).await?;
     diesel::delete(schema::event_roles::table.filter(schema::event_roles::event_id.eq(event.id)))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     insert_event_roles(
         conn,
         event.id,
         &template.mention_role_ids,
         &template.restrict_role_ids,
     )
+    .await
 }
 
-pub(super) fn retune_series(
+pub(super) async fn retune_series(
     conn: &mut Connection,
     series_id: i64,
     repeat: &RepeatSpec,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let series = must_series(conn, series_id)?;
+    let series = must_series(conn, series_id).await?;
     if !series.active {
         return Err(OpError::from(crate::msg!("err-series-ended")));
     }
@@ -190,7 +198,7 @@ pub(super) fn retune_series(
             return Err(OpError::from(crate::msg!("err-series-two-dates")));
         }
     }
-    let guild = must_guild(conn, series.guild_id)?;
+    let guild = must_guild(conn, series.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
     let anchor = series.anchor_start;
     if let Some(end) = repeat.end_on {
@@ -205,8 +213,9 @@ pub(super) fn retune_series(
             schema::series::end_on.eq(repeat.end_on),
             schema::series::max_occurrences.eq(repeat.max_occurrences),
         ))
-        .execute(conn)?;
-    for event in store::events_in_series(conn, series_id)? {
+        .execute(conn)
+        .await?;
+    for event in store::events_in_series(conn, series_id).await? {
         let Some(index) = event.occurrence_index else {
             continue;
         };
@@ -220,7 +229,7 @@ pub(super) fn retune_series(
         if cadence_changed {
             let next = occurrence_start(anchor, index, repeat.cadence, tz);
             if next != start {
-                shift_occurrence(conn, &event, start, next, tz)?;
+                shift_occurrence(conn, &event, start, next, tz).await?;
                 start = next;
             }
         }
@@ -228,14 +237,15 @@ pub(super) fn retune_series(
         let past_end = repeat.end_on.is_some_and(|end| start > end);
         if past_count || past_end {
             diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
     }
-    ensure_series(conn, series_id, now)?;
+    ensure_series(conn, series_id, now).await?;
     Ok(())
 }
 
-fn shift_occurrence(
+async fn shift_occurrence(
     conn: &mut Connection,
     event: &Event,
     old: DateTime<Utc>,
@@ -256,24 +266,25 @@ fn shift_occurrence(
             schema::events::cutoff_at.eq(cutoff),
             schema::events::updated_at.eq(Utc::now()),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub(super) fn ensure_series(
+pub(super) async fn ensure_series(
     conn: &mut Connection,
     series_id: i64,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let series = must_series(conn, series_id)?;
-    let existing = store::events_in_series(conn, series_id)?;
-    let guild = must_guild(conn, series.guild_id)?;
+    let series = must_series(conn, series_id).await?;
+    let existing = store::events_in_series(conn, series_id).await?;
+    let guild = must_guild(conn, series.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
-    fill_series(conn, &series, &existing, tz, now)
+    fill_series(conn, &series, &existing, tz, now).await
 }
 
 /// `existing` is that series' dates, oldest occurrence first.
-pub(super) fn fill_series(
+pub(super) async fn fill_series(
     conn: &mut Connection,
     series: &store::Series,
     existing: &[Event],
@@ -329,7 +340,7 @@ pub(super) fn fill_series(
                 break;
             }
             if template.is_none() {
-                template = Some(template::series_template(conn, series)?);
+                template = Some(template::series_template(conn, series).await?);
             }
             insert_occurrence(
                 conn,
@@ -338,7 +349,8 @@ pub(super) fn fill_series(
                 creator,
                 index,
                 start,
-            )?;
+            )
+            .await?;
             scheduled += 1;
         }
         index += 1;
@@ -346,7 +358,7 @@ pub(super) fn fill_series(
     Ok(())
 }
 
-pub(super) fn insert_occurrence(
+pub(super) async fn insert_occurrence(
     conn: &mut Connection,
     series: &store::Series,
     template: &SeriesTemplate,
@@ -356,7 +368,7 @@ pub(super) fn insert_occurrence(
 ) -> Result<i64, OpError> {
     let post_at = start - Duration::hours(series.post_lead_hours);
     let stored = template::from_series(series.guild_id, template);
-    let attendee_role_by = template::role_by(conn, series.template_id)?;
+    let attendee_role_by = template::role_by(conn, series.template_id).await?;
     template::spawn(
         conn,
         &stored,
@@ -370,6 +382,7 @@ pub(super) fn insert_occurrence(
             occurrence_index: Some(index),
         },
     )
+    .await
 }
 
 #[derive(Insertable)]
@@ -379,12 +392,12 @@ struct NewThread<'a> {
     name: &'a str,
 }
 
-pub(super) fn mark_posted(
+pub(super) async fn mark_posted(
     conn: &mut Connection,
     id: i64,
     now: DateTime<Utc>,
 ) -> Result<(), OpError> {
-    let event = must_event(conn, id)?;
+    let event = must_event(conn, id).await?;
     if event.status == EventStatus::Posted {
         return Ok(());
     }
@@ -395,31 +408,35 @@ pub(super) fn mark_posted(
             schema::events::post_attempts.eq(0),
             schema::events::updated_at.eq(now),
         ))
-        .execute(conn)?;
-    let event = must_event(conn, id)?;
+        .execute(conn)
+        .await?;
+    let event = must_event(conn, id).await?;
     if event.thread_enabled {
-        let name = super::discord::stored_thread_name(conn, &event)?;
+        let name = super::discord::stored_thread_name(conn, &event).await?;
         diesel::insert_into(schema::threads::table)
             .values(&NewThread {
                 event_id: id,
                 name: &name,
             })
             .on_conflict_do_nothing()
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
-    let settings = store::settings(conn, event.guild_id)?;
+    let settings = store::settings(conn, event.guild_id).await?;
     if settings.calendar_auto_sync {
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::calendar_synced_at.eq(now))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
-    let channel = must_channel(conn, event.channel_id)?;
+    let channel = must_channel(conn, event.channel_id).await?;
     log(
         conn,
         event.guild_id,
         Some(id),
         &format!("Posted {} in #{}.", event.title, channel.name),
-    )?;
-    sync_access(conn, id)?;
+    )
+    .await?;
+    sync_access(conn, id).await?;
     Ok(())
 }

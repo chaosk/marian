@@ -56,7 +56,7 @@ pub fn user_text(err: &(dyn std::error::Error + 'static), lang: Lang) -> String 
         return err.localized(lang);
     }
     if err.downcast_ref::<diesel::result::Error>().is_some()
-        || err.downcast_ref::<diesel::r2d2::PoolError>().is_some()
+        || err.downcast_ref::<crate::store::PoolError>().is_some()
     {
         tracing::error!(error = %err, "internal error");
         return crate::tr!(lang, "err-db");

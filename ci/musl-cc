@@ -1,5 +1,5 @@
 #!/bin/bash
-# ring and OpenSSL pass -m64, which Debian's musl-gcc rejects. The compiler
+# ring passes -m64, which Debian's musl-gcc rejects. The compiler
 # is already x86_64, so the flag is unnecessary. aws-lc's assembler still
 # gets a 64-bit gcc.
 args=()

@@ -74,29 +74,73 @@ pub(crate) mod local {
         Some((use_context::<Web>()?, use_context::<Parts>()?))
     }
 
-    pub fn signed_in<T>(
-        body: impl FnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
+    pub async fn signed_in<T>(
+        body: impl AsyncFnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
     ) -> Result<T, Failure> {
         let (web, parts) = web().ok_or_else(unsigned)?;
-        marian::store::blocking(|| {
-            let mut db = web.db.get().map_err(|_| Failure {
-                status: 503,
-                message: "The database is busy.".into(),
-            })?;
-            let viewer = api::viewer(&mut db, &parts.headers).ok_or_else(unsigned)?;
-            body(&mut db, &viewer).map_err(failure)
-        })
+        signed_in_as(&web, &parts.headers, body).await
     }
 
-    pub fn with<T>(
-        server: &str,
-        body: impl FnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
+    async fn signed_in_as<T>(
+        web: &Web,
+        headers: &axum::http::HeaderMap,
+        body: impl AsyncFnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
     ) -> Result<T, Failure> {
-        signed_in(|db, viewer| {
+        let mut db = web.db.get().await.map_err(|_| Failure {
+            status: 503,
+            message: "The database is busy.".into(),
+        })?;
+        let viewer = api::viewer(&mut db, headers).await.ok_or_else(unsigned)?;
+        body(&mut db, &viewer).await.map_err(failure)
+    }
+
+    pub async fn with<T>(
+        server: &str,
+        body: impl AsyncFnOnce(&mut Connection, &Viewer) -> Result<T, OpError>,
+    ) -> Result<T, Failure> {
+        signed_in(async |db, viewer| {
             let mut viewer = viewer.clone();
-            api::bind_server(db, &mut viewer, server)?;
-            body(db, &viewer)
+            api::bind_server(db, &mut viewer, server).await?;
+            body(db, &viewer).await
         })
+        .await
+    }
+
+    /// Whether the server a page names can't be opened by whoever asks, decided
+    /// before the page renders: rendering can't wait on the database.
+    #[derive(Clone, Debug)]
+    pub struct ServerGate(pub Option<Failure>);
+
+    /// Decides the [`ServerGate`] for a server page and leaves it in the
+    /// request for the page to read.
+    pub async fn decide_server_gate(
+        axum::extract::State(web): axum::extract::State<Web>,
+        mut request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        let server = request
+            .uri()
+            .path()
+            .strip_prefix("/servers/")
+            .map(|rest| rest.split('/').next().unwrap_or_default().to_string())
+            .filter(|id| !id.is_empty());
+        if let Some(server) = server {
+            let gate = signed_in_as(&web, request.headers(), async |db, viewer| {
+                let mut viewer = viewer.clone();
+                api::bind_server(db, &mut viewer, &server).await
+            })
+            .await
+            .err()
+            .filter(Failure::missing);
+            request.extensions_mut().insert(ServerGate(gate));
+        }
+        next.run(request).await
+    }
+
+    /// The gate [`decide_server_gate`] left for this page.
+    pub fn server_gate() -> Option<Failure> {
+        let (_, parts) = web()?;
+        parts.extensions.get::<ServerGate>()?.0.clone()
     }
 }
 
@@ -520,7 +564,7 @@ macro_rules! resource {
     ($server:expr, $url:expr, $body:expr) => {{
         #[cfg(feature = "ssr")]
         {
-            local::with($server, $body)
+            local::with($server, $body).await
         }
         #[cfg(not(feature = "ssr"))]
         {
@@ -533,7 +577,7 @@ macro_rules! resource {
 pub async fn me() -> Result<dto::Me, Failure> {
     #[cfg(feature = "ssr")]
     {
-        local::signed_in(marian::api::me)
+        local::signed_in(marian::api::me).await
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -580,26 +624,26 @@ pub async fn events(
     server: &str,
     query: &dto::EventQuery,
 ) -> Result<dto::Paged<dto::EventSummary>, Failure> {
-    resource!(server, path::events_where(server, query), |db, v| {
-        marian::api::events(db, v, query)
+    resource!(server, path::events_where(server, query), async |db, v| {
+        marian::api::events(db, v, query).await
     })
 }
 
 pub async fn event(server: &str, id: &str) -> Result<dto::Event, Failure> {
-    resource!(server, path::event(server, id), |db, v| marian::api::event(
-        db, v, id
-    ))
+    resource!(server, path::event(server, id), async |db, v| {
+        marian::api::event(db, v, id).await
+    })
 }
 
 pub async fn event_reminders(server: &str, id: &str) -> Result<Vec<dto::Reminder>, Failure> {
-    resource!(server, path::event_reminders(server, id), |db, v| {
-        marian::api::event_reminders(db, v, id)
+    resource!(server, path::event_reminders(server, id), async |db, v| {
+        marian::api::event_reminders(db, v, id).await
     })
 }
 
 pub async fn signups(server: &str, id: &str) -> Result<dto::Signups, Failure> {
-    resource!(server, path::event_signups(server, id), |db, v| {
-        marian::api::signups(db, v, id)
+    resource!(server, path::event_signups(server, id), async |db, v| {
+        marian::api::signups(db, v, id).await
     })
 }
 
@@ -607,9 +651,11 @@ pub async fn pending_reminders(
     server: &str,
     limit: usize,
 ) -> Result<Vec<dto::PendingReminder>, Failure> {
-    resource!(server, path::pending_reminders(server, limit), |db, v| {
-        marian::api::pending_reminders(db, v, limit)
-    })
+    resource!(
+        server,
+        path::pending_reminders(server, limit),
+        async |db, v| { marian::api::pending_reminders(db, v, limit).await }
+    )
 }
 
 pub async fn activity(
@@ -617,9 +663,11 @@ pub async fn activity(
     page: u32,
     limit: u32,
 ) -> Result<dto::Paged<dto::Activity>, Failure> {
-    resource!(server, path::activity(server, page, limit), |db, v| {
-        marian::api::activity(db, v, page, i64::from(limit))
-    })
+    resource!(
+        server,
+        path::activity(server, page, limit),
+        async |db, v| { marian::api::activity(db, v, page, i64::from(limit)).await }
+    )
 }
 
 pub async fn event_activity(
@@ -631,7 +679,7 @@ pub async fn event_activity(
     resource!(
         server,
         path::event_activity(server, event, page, limit),
-        |db, v| { marian::api::event_activity(db, v, event, page, i64::from(limit)) }
+        async |db, v| { marian::api::event_activity(db, v, event, page, i64::from(limit)).await }
     )
 }
 
@@ -640,8 +688,8 @@ pub async fn series_list(server: &str) -> Result<Vec<dto::Series>, Failure> {
 }
 
 pub async fn series(server: &str, id: &str) -> Result<dto::Series, Failure> {
-    resource!(server, path::series(server, id), |db, v| {
-        marian::api::series(db, v, id)
+    resource!(server, path::series(server, id), async |db, v| {
+        marian::api::series(db, v, id).await
     })
 }
 
@@ -650,8 +698,8 @@ pub async fn presets(server: &str) -> Result<Vec<dto::Preset>, Failure> {
 }
 
 pub async fn preset(server: &str, id: &str) -> Result<dto::Preset, Failure> {
-    resource!(server, path::preset(server, id), |db, v| {
-        marian::api::preset(db, v, id)
+    resource!(server, path::preset(server, id), async |db, v| {
+        marian::api::preset(db, v, id).await
     })
 }
 
@@ -664,8 +712,8 @@ pub async fn routines(server: &str) -> Result<Vec<dto::RoutineSummary>, Failure>
 }
 
 pub async fn routine(server: &str, id: &str) -> Result<dto::RoutineView, Failure> {
-    resource!(server, path::routine(server, id), |db, v| {
-        marian::api::routine(db, v, id)
+    resource!(server, path::routine(server, id), async |db, v| {
+        marian::api::routine(db, v, id).await
     })
 }
 

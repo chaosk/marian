@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 
 use super::access::can_edit;
 use super::db::{lock_event, log, must_event, must_membership, must_option, must_role, role_names};
@@ -12,44 +13,46 @@ use crate::values::{EventRoleKind, EventStatus, SignupState};
 
 /// A signup button: signs the person up, or takes them off an option they're
 /// already on, guests and all.
-pub fn signup(
+pub async fn signup(
     conn: &mut Connection,
     event_id: i64,
     option_id: i64,
     membership_id: i64,
 ) -> Result<crate::i18n::Msg, OpError> {
-    store::with_tx(conn, |tx| {
-        signup_tx(tx, event_id, option_id, membership_id, None)
+    store::with_tx(conn, async |tx| {
+        signup_tx(tx, event_id, option_id, membership_id, None).await
     })
+    .await
 }
 
 /// A "+X" signup: signs the person up with `guests`, or changes how many guests
 /// they bring when they're already on the option. Never takes them off it.
-pub fn signup_guests(
+pub async fn signup_guests(
     conn: &mut Connection,
     event_id: i64,
     option_id: i64,
     membership_id: i64,
     guests: i64,
 ) -> Result<crate::i18n::Msg, OpError> {
-    store::with_tx(conn, |tx| {
-        signup_tx(tx, event_id, option_id, membership_id, Some(guests))
+    store::with_tx(conn, async |tx| {
+        signup_tx(tx, event_id, option_id, membership_id, Some(guests)).await
     })
+    .await
 }
 
-fn signup_tx(
+async fn signup_tx(
     conn: &mut Connection,
     event_id: i64,
     option_id: i64,
     membership_id: i64,
     guests: Option<i64>,
 ) -> Result<crate::i18n::Msg, OpError> {
-    let event = lock_event(conn, event_id)?;
-    let user = must_membership(conn, membership_id)?;
+    let event = lock_event(conn, event_id).await?;
+    let user = must_membership(conn, membership_id).await?;
     if user.guild_id != event.guild_id {
         return Err(OpError::from(crate::msg!("err-person-elsewhere")));
     }
-    let option = must_option(conn, option_id)?;
+    let option = must_option(conn, option_id).await?;
     if option.event_id != event.id {
         return Err(OpError::NotFound);
     }
@@ -57,7 +60,7 @@ fn signup_tx(
         return Err(OpError::from(crate::msg!("err-signups-not-open")));
     }
     let now = Utc::now();
-    if let Some(existing) = find_signup(conn, option_id, membership_id)? {
+    if let Some(existing) = find_signup(conn, option_id, membership_id).await? {
         if let Some(guests) = guests {
             if event.signups_closed || cutoff_passed(&event, now) {
                 return Err(OpError::from(crate::msg!(
@@ -65,13 +68,14 @@ fn signup_tx(
                     title = &event.title
                 )));
             }
-            return set_guests(conn, &event, &option, &user, existing, guests, now);
+            return set_guests(conn, &event, &option, &user, existing, guests, now).await;
         }
         let state = existing.state;
         diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
-            .execute(conn)?;
-        fill_all(conn, &event)?;
-        sync_access(conn, event.id)?;
+            .execute(conn)
+            .await?;
+        fill_all(conn, &event).await?;
+        sync_access(conn, event.id).await?;
         let notice = if state == SignupState::Waitlisted {
             crate::msg!(
                 "notice-left-waitlist",
@@ -81,7 +85,7 @@ fn signup_tx(
         } else {
             crate::msg!("notice-left", name = &user.name, option = &option.name)
         };
-        log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
+        log(conn, event.guild_id, Some(event.id), &notice.to_string()).await?;
         return Ok(notice);
     }
     if event.signups_closed || cutoff_passed(&event, now) {
@@ -90,11 +94,11 @@ fn signup_tx(
             title = &event.title
         )));
     }
-    let restricts = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
+    let restricts = store::event_role_ids(conn, &event, EventRoleKind::Restrict).await?;
     if !restricts.is_empty() && !user.server_manager {
-        let roles = store::membership_role_ids(conn, &user)?;
+        let roles = store::membership_role_ids(conn, &user).await?;
         if !restricts.iter().any(|role| roles.contains(role)) {
-            let names = role_names(conn, &restricts)?;
+            let names = role_names(conn, &restricts).await?;
             return Err(OpError::from(crate::msg!(
                 "err-event-limited",
                 roles = crate::i18n::each(|lang| crate::i18n::list_or(lang, &names)),
@@ -102,8 +106,8 @@ fn signup_tx(
         }
     }
     if let Some(role_id) = option.role_id {
-        if !user.server_manager && !store::membership_has_role(conn, user.id, role_id)? {
-            let role = must_role(conn, role_id)?;
+        if !user.server_manager && !store::membership_has_role(conn, user.id, role_id).await? {
+            let role = must_role(conn, role_id).await?;
             return Err(OpError::from(crate::msg!(
                 "err-option-limited",
                 name = &user.name,
@@ -114,15 +118,16 @@ fn signup_tx(
     }
     let guests = guests.unwrap_or(0);
     check_guests(&option, guests)?;
-    let waitlist = store::settings(conn, event.guild_id)?.waitlist;
+    let waitlist = store::settings(conn, event.guild_id).await?.waitlist;
     // Checked before leaving other options, so a refusal moves no one.
-    let state = place(conn, &option, 1 + guests, waitlist)?;
+    let state = place(conn, &option, 1 + guests, waitlist).await?;
     let moved = if !event.multiple_signups {
-        let others = signups_for_user(conn, event.id, user.id)?;
+        let others = signups_for_user(conn, event.id, user.id).await?;
         let moved = !others.is_empty();
         for other in others {
             diesel::delete(schema::signups::table.filter(schema::signups::id.eq(other.id)))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
         moved
     } else {
@@ -137,9 +142,10 @@ fn signup_tx(
             created_at: now,
             guests,
         })
-        .execute(conn)?;
-    fill_all(conn, &event)?;
-    sync_access(conn, event.id)?;
+        .execute(conn)
+        .await?;
+    fill_all(conn, &event).await?;
+    sync_access(conn, event.id).await?;
     let (name, option_name) = (&user.name, &option.name);
     let notice = match (state, moved, guests) {
         (SignupState::Waitlisted, _, 0) => {
@@ -166,7 +172,7 @@ fn signup_tx(
             guests = guests
         ),
     };
-    log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
+    log(conn, event.guild_id, Some(event.id), &notice.to_string()).await?;
     Ok(notice)
 }
 
@@ -174,7 +180,7 @@ fn signup_tx(
 /// their place. More keeps it while the party still fits; otherwise the party
 /// goes to the back of the waitlist, and a waiting party that grows goes to the
 /// back too.
-fn set_guests(
+async fn set_guests(
     conn: &mut Connection,
     event: &Event,
     option: &store::SignupOption,
@@ -193,9 +199,9 @@ fn set_guests(
                 return Err(too_big(option, cap, size));
             }
             if state == SignupState::Confirmed {
-                let others = places_used(conn, option.id)? - (1 + existing.guests);
+                let others = places_used(conn, option.id).await? - (1 + existing.guests);
                 if others + size > cap {
-                    if !store::settings(conn, event.guild_id)?.waitlist {
+                    if !store::settings(conn, event.guild_id).await?.waitlist {
                         return Err(OpError::from(crate::msg!(
                             "err-party-too-big",
                             option = &option.name,
@@ -216,9 +222,10 @@ fn set_guests(
             schema::signups::state.eq(state),
             schema::signups::created_at.eq(created_at),
         ))
-        .execute(conn)?;
-    fill_all(conn, event)?;
-    sync_access(conn, event.id)?;
+        .execute(conn)
+        .await?;
+    fill_all(conn, event).await?;
+    sync_access(conn, event.id).await?;
     let notice = if state == SignupState::Waitlisted && existing.state == SignupState::Confirmed {
         crate::msg!(
             "notice-guests-waiting",
@@ -234,7 +241,7 @@ fn set_guests(
             guests = guests
         )
     };
-    log(conn, event.guild_id, Some(event.id), &notice.to_string())?;
+    log(conn, event.guild_id, Some(event.id), &notice.to_string()).await?;
     Ok(notice)
 }
 
@@ -246,13 +253,15 @@ pub struct GuestsForm {
     pub current: Option<i64>,
 }
 
-pub fn guests_form(
+pub async fn guests_form(
     conn: &mut Connection,
     option_id: i64,
     membership_id: i64,
 ) -> Result<GuestsForm, OpError> {
-    let option = must_option(conn, option_id)?;
-    let current = find_signup(conn, option_id, membership_id)?.map(|signup| signup.guests);
+    let option = must_option(conn, option_id).await?;
+    let current = find_signup(conn, option_id, membership_id)
+        .await?
+        .map(|signup| signup.guests);
     Ok(GuestsForm {
         option: option.name,
         max_guests: option.max_guests,
@@ -283,7 +292,7 @@ fn check_guests(option: &store::SignupOption, guests: i64) -> Result<(), OpError
 /// Where a new party of `size` lands: confirmed when it fits and no one is
 /// waiting ahead of it, waitlisted otherwise. A party bigger than the whole
 /// option is refused, since it would hold the waitlist up for good.
-fn place(
+async fn place(
     conn: &mut Connection,
     option: &store::SignupOption,
     size: i64,
@@ -295,8 +304,8 @@ fn place(
     if size > cap {
         return Err(too_big(option, cap, size));
     }
-    let used = places_used(conn, option.id)?;
-    let queue = count_state(conn, option.id, SignupState::Waitlisted)? > 0;
+    let used = places_used(conn, option.id).await?;
+    let queue = count_state(conn, option.id, SignupState::Waitlisted).await? > 0;
     if !queue && used + size <= cap {
         return Ok(SignupState::Confirmed);
     }
@@ -326,16 +335,17 @@ fn too_big(option: &store::SignupOption, cap: i64, size: i64) -> OpError {
 }
 
 /// Places the confirmed signups on an option take: each person and their guests.
-pub(crate) fn places_used(conn: &mut Connection, option_id: i64) -> Result<i64, OpError> {
+pub(crate) async fn places_used(conn: &mut Connection, option_id: i64) -> Result<i64, OpError> {
     let guests: Vec<i64> = schema::signups::table
         .filter(schema::signups::option_id.eq(option_id))
         .filter(schema::signups::state.eq(SignupState::Confirmed))
         .select(schema::signups::guests)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(guests.iter().map(|guests| 1 + guests).sum())
 }
 
-pub fn editor_response(
+pub async fn editor_response(
     conn: &mut Connection,
     event_id: i64,
     actor_id: i64,
@@ -344,25 +354,25 @@ pub fn editor_response(
     action: &str,
     guests: Option<i64>,
 ) -> Result<crate::i18n::Msg, OpError> {
-    store::with_tx(conn, |tx| {
-        let event = lock_event(tx, event_id)?;
-        let actor = must_membership(tx, actor_id)?;
-        let settings = store::settings(tx, event.guild_id)?;
-        let roles = store::membership_role_ids(tx, &actor)?;
+    store::with_tx(conn, async |tx| {
+        let event = lock_event(tx, event_id).await?;
+        let actor = must_membership(tx, actor_id).await?;
+        let settings = store::settings(tx, event.guild_id).await?;
+        let roles = store::membership_role_ids(tx, &actor).await?;
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-change-responses")));
         }
         if event.status != EventStatus::Posted {
             return Err(OpError::from(crate::msg!("err-responses-unposted")));
         }
-        let target = must_membership(tx, target_id)?;
-        let option = must_option(tx, option_id)?;
+        let target = must_membership(tx, target_id).await?;
+        let option = must_option(tx, option_id).await?;
         if option.event_id != event.id || target.guild_id != event.guild_id {
             return Err(OpError::NotFound);
         }
         match action {
             "remove" => {
-                let Some(existing) = find_signup(tx, option.id, target.id)? else {
+                let Some(existing) = find_signup(tx, option.id, target.id).await? else {
                     return Ok(crate::msg!(
                         "notice-was-not-on",
                         name = &target.name,
@@ -370,49 +380,52 @@ pub fn editor_response(
                     ));
                 };
                 diesel::delete(schema::signups::table.filter(schema::signups::id.eq(existing.id)))
-                    .execute(tx)?;
-                fill_all(tx, &event)?;
-                sync_access(tx, event.id)?;
+                    .execute(tx)
+                    .await?;
+                fill_all(tx, &event).await?;
+                sync_access(tx, event.id).await?;
                 let notice =
                     crate::msg!("notice-removed", name = &target.name, option = &option.name);
-                log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
+                log(tx, event.guild_id, Some(event.id), &notice.to_string()).await?;
                 Ok(notice)
             }
             "add" | "move" => {
                 if !event.multiple_signups || action == "move" {
-                    for other in signups_for_user(tx, event.id, target.id)? {
+                    for other in signups_for_user(tx, event.id, target.id).await? {
                         if other.option_id != option.id {
                             diesel::delete(
                                 schema::signups::table.filter(schema::signups::id.eq(other.id)),
                             )
-                            .execute(tx)?;
+                            .execute(tx)
+                            .await?;
                         }
                     }
                 }
                 if let Some(guests) = guests {
                     check_guests(&option, guests)?;
                 }
-                if let Some(existing) = find_signup(tx, option.id, target.id)? {
+                if let Some(existing) = find_signup(tx, option.id, target.id).await? {
                     // An editor's change keeps the party where it is, full or not.
                     if let Some(guests) = guests.filter(|guests| *guests != existing.guests) {
                         diesel::update(
                             schema::signups::table.filter(schema::signups::id.eq(existing.id)),
                         )
                         .set(schema::signups::guests.eq(guests))
-                        .execute(tx)?;
-                        fill_all(tx, &event)?;
-                        sync_access(tx, event.id)?;
+                        .execute(tx)
+                        .await?;
+                        fill_all(tx, &event).await?;
+                        sync_access(tx, event.id).await?;
                         let notice = crate::msg!(
                             "notice-guests",
                             name = &target.name,
                             option = &option.name,
                             guests = guests
                         );
-                        log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
+                        log(tx, event.guild_id, Some(event.id), &notice.to_string()).await?;
                         return Ok(notice);
                     }
-                    fill_all(tx, &event)?;
-                    sync_access(tx, event.id)?;
+                    fill_all(tx, &event).await?;
+                    sync_access(tx, event.id).await?;
                     return Ok(crate::msg!(
                         "notice-already-on",
                         name = &target.name,
@@ -428,57 +441,67 @@ pub fn editor_response(
                         created_at: Utc::now(),
                         guests: guests.unwrap_or(0),
                     })
-                    .execute(tx)?;
-                fill_all(tx, &event)?;
-                sync_access(tx, event.id)?;
+                    .execute(tx)
+                    .await?;
+                fill_all(tx, &event).await?;
+                sync_access(tx, event.id).await?;
                 let notice =
                     crate::msg!("notice-added", name = &target.name, option = &option.name);
-                log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
+                log(tx, event.guild_id, Some(event.id), &notice.to_string()).await?;
                 Ok(notice)
             }
             _ => Err(OpError::from(crate::msg!("err-response-action"))),
         }
     })
+    .await
 }
 
-fn find_signup(
+async fn find_signup(
     conn: &mut Connection,
     option_id: i64,
     membership_id: i64,
 ) -> Result<Option<store::Signup>, OpError> {
     Ok(store::Signup::for_option_member(option_id, membership_id)
         .first(conn)
+        .await
         .optional()?)
 }
 
-fn signups_for_user(
+async fn signups_for_user(
     conn: &mut Connection,
     event_id: i64,
     membership_id: i64,
 ) -> Result<Vec<store::Signup>, OpError> {
-    Ok(store::Signup::for_event_member(event_id, membership_id).load(conn)?)
+    Ok(store::Signup::for_event_member(event_id, membership_id)
+        .load(conn)
+        .await?)
 }
 
-fn count_state(conn: &mut Connection, option_id: i64, state: SignupState) -> Result<i64, OpError> {
+async fn count_state(
+    conn: &mut Connection,
+    option_id: i64,
+    state: SignupState,
+) -> Result<i64, OpError> {
     Ok(schema::signups::table
         .filter(schema::signups::option_id.eq(option_id))
         .filter(schema::signups::state.eq(state))
         .count()
-        .get_result(conn)?)
+        .get_result(conn)
+        .await?)
 }
 
-pub(super) fn fill_all(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
-    lock_event(conn, event.id)?;
-    for opt in store::options_for(conn, event)? {
-        fill_option(conn, opt.id)?;
+pub(super) async fn fill_all(conn: &mut Connection, event: &Event) -> Result<(), OpError> {
+    lock_event(conn, event.id).await?;
+    for opt in store::options_for(conn, event).await? {
+        fill_option(conn, opt.id).await?;
     }
     Ok(())
 }
 
 /// Moves waiting parties onto the option in the order they came, while the one
 /// at the front fits. Nobody passes it: a smaller party behind waits too.
-fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
-    let option = must_option(conn, option_id)?;
+async fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
+    let option = must_option(conn, option_id).await?;
     let Some(cap) = option.capacity else {
         return Ok(());
     };
@@ -493,18 +516,20 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
                 schema::signups::guests,
             ))
             .first(conn)
+            .await
             .optional()?;
         let Some((signup_id, membership_id, guests)) = next else {
             break;
         };
-        if places_used(conn, option_id)? + 1 + guests > cap {
+        if places_used(conn, option_id).await? + 1 + guests > cap {
             break;
         }
         diesel::update(schema::signups::table.filter(schema::signups::id.eq(signup_id)))
             .set(schema::signups::state.eq(SignupState::Confirmed))
-            .execute(conn)?;
-        let user = must_membership(conn, membership_id)?;
-        let event = must_event(conn, option.event_id)?;
+            .execute(conn)
+            .await?;
+        let user = must_membership(conn, membership_id).await?;
+        let event = must_event(conn, option.event_id).await?;
         log(
             conn,
             event.guild_id,
@@ -513,16 +538,17 @@ fn fill_option(conn: &mut Connection, option_id: i64) -> Result<(), OpError> {
                 "Marian pulled {} off the {} waitlist.",
                 user.name, option.name
             ),
-        )?;
+        )
+        .await?;
     }
     Ok(())
 }
 
-pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
-    let event = must_event(conn, event_id)?;
-    let settings = store::settings(conn, event.guild_id)?;
-    let options = store::options_for(conn, &event)?;
-    let signups = store::signups_for(conn, &event)?;
+pub(super) async fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
+    let event = must_event(conn, event_id).await?;
+    let settings = store::settings(conn, event.guild_id).await?;
+    let options = store::options_for(conn, &event).await?;
+    let signups = store::signups_for(conn, &event).await?;
     let mut reminding = HashSet::new();
     for signup in &signups {
         if signup.state != SignupState::Confirmed {
@@ -536,29 +562,31 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
         }
     }
     if event.thread_enabled && settings.auto_join_threads {
-        let name = super::discord::stored_thread_name(conn, &event)?;
+        let name = super::discord::stored_thread_name(conn, &event).await?;
         diesel::insert_into(schema::threads::table)
             .values(&NewThread {
                 event_id,
                 name: &name,
             })
             .on_conflict_do_nothing()
-            .execute(conn)?;
-        let members = store::thread_member_ids(conn, &event)?;
+            .execute(conn)
+            .await?;
+        let members = store::thread_member_ids(conn, &event).await?;
         let joining: Vec<i64> = reminding
             .iter()
             .copied()
             .filter(|membership_id| !members.contains(membership_id))
             .collect();
-        insert_thread_members(conn, event_id, &joining)?;
+        insert_thread_members(conn, event_id, &joining).await?;
         for membership_id in joining {
-            let user = must_membership(conn, membership_id)?;
+            let user = must_membership(conn, membership_id).await?;
             log(
                 conn,
                 event.guild_id,
                 Some(event_id),
                 &format!("Marian added {} to the thread.", user.name),
-            )?;
+            )
+            .await?;
         }
         for membership_id in members {
             if !reminding.contains(&membership_id) {
@@ -567,21 +595,23 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
                         .filter(schema::thread_members::event_id.eq(event_id))
                         .filter(schema::thread_members::membership_id.eq(membership_id)),
                 )
-                .execute(conn)?;
-                let user = must_membership(conn, membership_id)?;
+                .execute(conn)
+                .await?;
+                let user = must_membership(conn, membership_id).await?;
                 log(
                     conn,
                     event.guild_id,
                     Some(event_id),
                     &format!("Marian removed {} from the thread.", user.name),
-                )?;
+                )
+                .await?;
             }
         }
     }
 
     let mut role_id = event.attendee_role_id;
     if role_id.is_none() && settings.temp_roles && !reminding.is_empty() {
-        let lang = crate::i18n::lang_of(conn, event.guild_id);
+        let lang = crate::i18n::lang_of(conn, event.guild_id).await;
         let name: String = crate::tr!(lang, "role-attendee", title = &event.title)
             .chars()
             .take(80)
@@ -594,29 +624,32 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
                 made_by_marian: true,
             })
             .returning(schema::roles::id)
-            .get_result(conn)?;
+            .get_result(conn)
+            .await?;
         role_id = Some(new_id);
         diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
             .set(schema::events::attendee_role_id.eq(role_id))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
     if let Some(role_id) = role_id {
-        let role_name = must_role(conn, role_id)?.name;
-        let grants = store::grant_membership_ids(conn, &event)?;
+        let role_name = must_role(conn, role_id).await?.name;
+        let grants = store::grant_membership_ids(conn, &event).await?;
         let granting: Vec<i64> = reminding
             .iter()
             .copied()
             .filter(|membership_id| !grants.contains(membership_id))
             .collect();
-        insert_role_grants(conn, event_id, role_id, &granting)?;
+        insert_role_grants(conn, event_id, role_id, &granting).await?;
         for membership_id in granting {
-            let user = must_membership(conn, membership_id)?;
+            let user = must_membership(conn, membership_id).await?;
             log(
                 conn,
                 event.guild_id,
                 Some(event_id),
                 &format!("Marian gave {} the {} role.", user.name, role_name),
-            )?;
+            )
+            .await?;
         }
         for membership_id in grants {
             if !reminding.contains(&membership_id) {
@@ -625,8 +658,9 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
                         .filter(schema::role_grants::event_id.eq(event_id))
                         .filter(schema::role_grants::membership_id.eq(membership_id)),
                 )
-                .execute(conn)?;
-                let user = must_membership(conn, membership_id)?;
+                .execute(conn)
+                .await?;
+                let user = must_membership(conn, membership_id).await?;
                 log(
                     conn,
                     event.guild_id,
@@ -635,7 +669,8 @@ pub(super) fn sync_access(conn: &mut Connection, event_id: i64) -> Result<(), Op
                         "Marian took the {} role back from {}.",
                         role_name, user.name
                     ),
-                )?;
+                )
+                .await?;
             }
         }
     }
@@ -680,7 +715,7 @@ struct NewThreadMember {
     membership_id: i64,
 }
 
-fn insert_thread_members(
+async fn insert_thread_members(
     conn: &mut Connection,
     event_id: i64,
     membership_ids: &[i64],
@@ -698,7 +733,8 @@ fn insert_thread_members(
     diesel::insert_into(schema::thread_members::table)
         .values(&rows)
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -710,7 +746,7 @@ struct NewRoleGrant {
     role_id: i64,
 }
 
-fn insert_role_grants(
+async fn insert_role_grants(
     conn: &mut Connection,
     event_id: i64,
     role_id: i64,
@@ -730,6 +766,7 @@ fn insert_role_grants(
     diesel::insert_into(schema::role_grants::table)
         .values(&rows)
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }

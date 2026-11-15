@@ -21,21 +21,15 @@ cargo install cargo-leptos --locked
 cargo leptos watch
 ```
 
-`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. `scripts/dev` runs it, first running `cargo clean` when `target/` has grown past 20 GB (`MARIAN_TARGET_LIMIT_GB`): cargo keeps what a toolchain or dependency bump left behind. Dev and test builds keep line tables for Marian's own crates and no debug info for dependencies. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A release build with `LEPTOS_HASH_FILES=true` puts each file's content hash in its name, and browsers keep those files for a year; the build writes the names to `hash.txt` beside the binary, which a deployment keeps next to it and runs with `LEPTOS_HASH_FILES=true`. CI and the image do both. `cargo leptos watch` keeps plain names, which browsers check on each load. A musl image sets `LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl` and passes `--bin-features static-libpq`.
+`cargo leptos watch` rebuilds the pages on save, and listens on `127.0.0.1:8080`. `scripts/dev` runs it, first running `cargo clean` when `target/` has grown past 20 GB (`MARIAN_TARGET_LIMIT_GB`): cargo keeps what a toolchain or dependency bump left behind. Dev and test builds keep line tables for Marian's own crates and no debug info for dependencies. A release build is `cargo leptos build --release --precompress`: `--precompress` writes brotli and gzip copies of the wasm, script, and stylesheet, and the server sends those to browsers that accept them. The binary reads the site from `LEPTOS_SITE_ROOT` (`target/site` during development). A release build with `LEPTOS_HASH_FILES=true` puts each file's content hash in its name, and browsers keep those files for a year; the build writes the names to `hash.txt` beside the binary, which a deployment keeps next to it and runs with `LEPTOS_HASH_FILES=true`. CI and the image do both. `cargo leptos watch` keeps plain names, which browsers check on each load. A musl image sets `LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl`. Marian talks to Postgres in Rust (tokio-postgres through diesel-async), so no libpq or OpenSSL is needed to build or run it.
 
 Pages ask `/api` for the resources they need. Server pages hold one live connection at `/api/servers/<id>/live`. Each message names what changed (someone's signups for an event, an event, or the server), and pages refetch only the reads that change touches. `cargo test --workspace --exclude marian-frontend` runs the server and page tests. `cargo test -p marian-app --features ssr` covers the pages as the server renders them.
-
-If `cargo` cannot find `libpq`, point pkg-config at it. Homebrew keeps it off the default path:
-
-```sh
-export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-```
 
 | Variable | Default | Role |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
-| `DATABASE_URL` | required | Postgres connection string |
-| `MARIAN_DB_POOL` | `10` | How many Postgres connections this process keeps |
+| `DATABASE_URL` | required | Postgres connection string, `postgres://user:password@host:port/database`. `sslmode` works as with libpq; see below |
+| `MARIAN_DB_POOL` | `10` | The most pooled Postgres connections this process opens. They open as needed and stay open |
 | `DISCORD_TOKEN` | required | Bot token. Marian exits if this is empty |
 | `DISCORD_CLIENT_ID` | empty | Application id. Used for the invite link and for dashboard sign-in |
 | `DISCORD_CLIENT_SECRET` | empty | OAuth client secret. The site stays on the landing page until this is set |
@@ -46,6 +40,18 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/postgresql@14/pkgconfig${PKG_CONFIG_PA
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Base URL of an OTLP/HTTP collector, such as `http://tempo:4318`. Empty leaves traces off and keeps logs on stderr. Do not append `/v1/traces` |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | empty | Full OTLP/HTTP URL for metrics, such as `http://mimir:9009/otlp/v1/metrics`, used as given. Empty leaves metrics off. Separate from the traces endpoint because a trace store like Tempo takes no metrics. Metrics are listed below |
 | `OTEL_SERVICE_NAME` | `marian` | Service name on exported spans. `service.version` is the image version |
+
+`sslmode` in `DATABASE_URL` decides TLS to Postgres, much as libpq does:
+
+| `sslmode` | TLS | Certificate checked |
+| --- | --- | --- |
+| `disable` | never | |
+| `allow`, `prefer` (default) | when the server offers it | no |
+| `require` | always | only if `sslrootcert` is set, then as `verify-ca` |
+| `verify-ca` | always | chains to a trusted root |
+| `verify-full` | always | chains to a trusted root and names the host |
+
+The trusted roots are the PEM file `sslrootcert` names, or the system's when it is unset or `system` (the image points `SSL_CERT_FILE` at Debian's bundle). Unlike libpq, `~/.postgresql/root.crt` is not read, `allow` tries TLS first like `prefer`, and client certificates (`sslcert`, `sslkey`) and SCRAM channel binding aren't supported: a URL with `sslcert` or `channel_binding=require` fails at startup rather than connecting without them. Other libpq settings tokio-postgres knows, such as `application_name`, `connect_timeout` and `options`, pass through.
 
 `/healthz` and `/readyz` report the process and the database. Readiness does not wait for Discord. On the leader, `/healthz` fails once the task worker hasn't finished a pass in two minutes (it finishes one at least every minute, even with nothing due); its body says `ok: leader` or `ok: follower`. Logs say when a replica starts or stops leading.
 

@@ -1,8 +1,8 @@
 FROM rust:1.100.0-bookworm AS build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools cmake perl make pkg-config \
+    && apt-get install -y --no-install-recommends musl-tools cmake make \
     && rm -rf /var/lib/apt/lists/*
-# ring and OpenSSL pass -m64, which Debian's musl-gcc rejects. The compiler
+# ring passes -m64, which Debian's musl-gcc rejects. The compiler
 # already matches the host, so the wrapper drops the flag.
 COPY ci/musl-cc /usr/local/bin/musl-cc
 WORKDIR /src
@@ -26,7 +26,7 @@ ENV MARIAN_VERSION=$MARIAN_VERSION
 # --precompress leaves .br and .gz copies of the wasm, script, and stylesheet
 # beside them; the server sends those instead of compressing on each request.
 # cargo-leptos takes the server's target from LEPTOS_BIN_TARGET_TRIPLE; it has no flag for it.
-RUN LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl LEPTOS_HASH_FILES=true cargo leptos build --release --precompress --bin-features static-libpq \
+RUN LEPTOS_BIN_TARGET_TRIPLE=x86_64-unknown-linux-musl LEPTOS_HASH_FILES=true cargo leptos build --release --precompress \
     && cp target/x86_64-unknown-linux-musl/release/marian /marian \
     && cp target/x86_64-unknown-linux-musl/release/hash.txt /hash.txt \
     && file /marian | grep -Eq "statically linked|static-pie linked"

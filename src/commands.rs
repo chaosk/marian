@@ -3,7 +3,9 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use diesel::prelude::*;
+
 use diesel::upsert::excluded;
+use diesel_async::RunQueryDsl;
 
 use crate::clock;
 use crate::error::OpError;
@@ -23,14 +25,14 @@ fn event_path(guild: &store::Guild, public_id: impl std::fmt::Display) -> String
 }
 
 /// An event in the server named by public id, if `sight` takes in its channel.
-fn find_event(
+async fn find_event(
     conn: &mut Connection,
     guild_id: i64,
     sight: &logic::Sight,
     token: &str,
 ) -> Result<Event, OpError> {
     if crate::ids::parse_event_id(token).is_some() {
-        if let Some(event) = store::event_by_public(conn, token)? {
+        if let Some(event) = store::event_by_public(conn, token).await? {
             if event.guild_id == guild_id && sight.sees_event(&event) {
                 return Ok(event);
             }
@@ -39,39 +41,47 @@ fn find_event(
     Err(OpError::from(crate::msg!("err-event-elsewhere")))
 }
 
-fn member_sight(conn: &mut Connection, membership_id: i64) -> Result<logic::Sight, OpError> {
-    let member = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
-    logic::sight(conn, &member)
+async fn member_sight(conn: &mut Connection, membership_id: i64) -> Result<logic::Sight, OpError> {
+    let member = store::membership(conn, membership_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
+    logic::sight(conn, &member).await
 }
 
 /// The server's channels the Discord member can see.
-fn seen_channels(
+async fn seen_channels(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
 ) -> Result<Vec<store::Channel>, OpError> {
-    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
-    Ok(store::list_channels(conn, guild_id)?
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id).await?;
+    Ok(store::list_channels(conn, guild_id)
+        .await?
         .into_iter()
         .filter(|channel| sight.sees_channel(channel.id))
         .collect())
 }
 
 /// Discord URL of the posted event message, once Discord has assigned an id.
-pub fn posted_message_url(conn: &mut Connection, event_id: i64) -> Result<Option<String>, OpError> {
-    let Some(event) = store::event(conn, event_id)? else {
+pub async fn posted_message_url(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<String>, OpError> {
+    let Some(event) = store::event(conn, event_id).await? else {
         return Ok(None);
     };
     let Some(message_id) = event.discord_message_id.filter(|id| !id.is_empty()) else {
         return Ok(None);
     };
-    let Some(channel_id) = store::channel(conn, event.channel_id)?
+    let Some(channel_id) = store::channel(conn, event.channel_id)
+        .await?
         .and_then(|channel| channel.discord_id)
         .filter(|id| !id.is_empty())
     else {
         return Ok(None);
     };
-    let Some(guild_id) = store::guild(conn, event.guild_id)?
+    let Some(guild_id) = store::guild(conn, event.guild_id)
+        .await?
         .and_then(|guild| guild.discord_id)
         .filter(|id| !id.is_empty())
     else {
@@ -92,7 +102,7 @@ pub fn link_created_event(replies: &mut [DmReply], message_url: &str) {
     }
 }
 
-pub fn channel_posts_waiting(
+pub async fn channel_posts_waiting(
     conn: &mut Connection,
     discord_user_id: &str,
 ) -> Result<Vec<i64>, OpError> {
@@ -101,6 +111,7 @@ pub fn channel_posts_waiting(
         .filter(schema::event_prompts::step.eq(PromptStep::Next))
         .select(schema::event_prompts::draft.assume_not_null())
         .first(conn)
+        .await
         .optional()?;
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -109,7 +120,7 @@ pub fn channel_posts_waiting(
     let Some(id) = draft.event_id else {
         return Ok(Vec::new());
     };
-    let Some(event) = store::event(conn, id)? else {
+    let Some(event) = store::event(conn, id).await? else {
         return Ok(Vec::new());
     };
     if event.status == EventStatus::Posted {
@@ -184,7 +195,7 @@ impl std::fmt::Display for DmReply {
     }
 }
 
-pub fn start_event_dm(
+pub async fn start_event_dm(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
@@ -193,11 +204,14 @@ pub fn start_event_dm(
     source_discord: Option<&str>,
     lang: Lang,
 ) -> Result<DmReply, OpError> {
-    let channels = store::list_channels(conn, guild_id)?;
+    let channels = store::list_channels(conn, guild_id).await?;
     if channels.is_empty() {
         return Err(OpError::from(crate::msg!("err-no-channels")));
     }
-    if store::channel_by_name(conn, guild_id, source_channel)?.is_none() {
+    if store::channel_by_name(conn, guild_id, source_channel)
+        .await?
+        .is_none()
+    {
         return Err(OpError::from(crate::msg!("err-no-channels")));
     }
     diesel::insert_into(schema::event_prompts::table)
@@ -228,23 +242,25 @@ pub fn start_event_dm(
                 .eq(excluded(schema::event_prompts::source_discord)),
             schema::event_prompts::draft.eq(None::<serde_json::Value>),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     let source = Some(source_channel.to_string());
     let discord = source_discord.map(str::to_string);
-    where_to_post(conn, guild_id, discord_user_id, &source, &discord, lang)
+    where_to_post(conn, guild_id, discord_user_id, &source, &discord, lang).await
 }
 
-pub fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
+pub async fn cancel_event_dm(conn: &mut Connection, discord_user_id: &str) -> Result<(), OpError> {
     diesel::delete(
         schema::event_prompts::table
             .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
 /// Answers the next question of someone's event DM, in their server's language.
-pub fn answer_event_dm(
+pub async fn answer_event_dm(
     conn: &mut Connection,
     discord_user_id: &str,
     text: &str,
@@ -264,6 +280,7 @@ pub fn answer_event_dm(
             schema::event_prompts::draft,
         ))
         .first(conn)
+        .await
         .optional()?
         .map(
             |(
@@ -305,35 +322,33 @@ pub fn answer_event_dm(
     let mut draft = draft
         .and_then(|raw| serde_json::from_value::<EventDraft>(raw).ok())
         .unwrap_or_default();
-    let lang = i18n::lang_of(conn, guild_id);
+    let lang = i18n::lang_of(conn, guild_id).await;
     let text = text.trim();
     if said(text, &CANCEL) {
-        cancel_event_dm(conn, discord_user_id)?;
+        cancel_event_dm(conn, discord_user_id).await?;
         return just(DmReply::plain(tr!(lang, "dm-cancelled")));
     }
     match step {
-        PromptStep::Channel => answer_channel(
-            conn,
-            discord_user_id,
-            guild_id,
-            text,
-            source_channel.as_deref(),
-            source_discord.as_deref(),
-            lang,
-        ),
+        PromptStep::Channel => {
+            answer_channel(
+                conn,
+                discord_user_id,
+                guild_id,
+                text,
+                source_channel.as_deref(),
+                source_discord.as_deref(),
+                lang,
+            )
+            .await
+        }
         PromptStep::ChannelOther => {
             let others =
-                other_channels(conn, guild_id, discord_user_id, source_channel.as_deref())?;
+                other_channels(conn, guild_id, discord_user_id, source_channel.as_deref()).await?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(channel) = choice.and_then(|n| others.get(n - 1)) else {
                 return just(other_channel_prompt(&others, lang));
             };
-            just(advance_to_title(
-                conn,
-                discord_user_id,
-                &channel.name,
-                lang,
-            )?)
+            just(advance_to_title(conn, discord_user_id, &channel.name, lang).await?)
         }
         PromptStep::Title => {
             if text.is_empty() || text.chars().count() > 120 {
@@ -347,7 +362,8 @@ pub fn answer_event_dm(
                 schema::event_prompts::title.eq(text),
                 schema::event_prompts::step.eq(PromptStep::Description),
             ))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
             just(description_card(lang))
         }
         PromptStep::Description => {
@@ -362,8 +378,8 @@ pub fn answer_event_dm(
             } else {
                 text.to_string()
             };
-            save_draft(conn, discord_user_id, PromptStep::Start, &draft)?;
-            just(start_card(conn, guild_id, lang)?)
+            save_draft(conn, discord_user_id, PromptStep::Start, &draft).await?;
+            just(start_card(conn, guild_id, lang).await?)
         }
         PromptStep::Timezone => {
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
@@ -372,16 +388,19 @@ pub fn answer_event_dm(
             };
             diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
                 .set(schema::guilds::timezone.eq(*name))
-                .execute(conn)?;
-            save_draft(conn, discord_user_id, PromptStep::Start, &draft)?;
-            just(start_card(conn, guild_id, lang)?)
+                .execute(conn)
+                .await?;
+            save_draft(conn, discord_user_id, PromptStep::Start, &draft).await?;
+            just(start_card(conn, guild_id, lang).await?)
         }
         PromptStep::Start => {
             if said(text, &ZONE) {
-                save_draft(conn, discord_user_id, PromptStep::Timezone, &draft)?;
+                save_draft(conn, discord_user_id, PromptStep::Timezone, &draft).await?;
                 return just(timezone_card(lang));
             }
-            let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+            let guild = store::guild(conn, guild_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
             let tz = clock::zone(&guild.timezone)?;
             let stored = if said(text, &NOW) {
                 Some(clock::stamp(Utc::now()))
@@ -392,7 +411,7 @@ pub fn answer_event_dm(
             };
             let Some(stored) = stored else {
                 return just(note(
-                    &start_card(conn, guild_id, lang)?,
+                    &start_card(conn, guild_id, lang).await?,
                     &tr!(lang, "dm-time-unreadable"),
                 ));
             };
@@ -404,18 +423,21 @@ pub fn answer_event_dm(
                 schema::event_prompts::start_raw.eq(&stored),
                 schema::event_prompts::step.eq(PromptStep::End),
             ))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
             just(end_card(lang))
         }
         PromptStep::End => {
-            let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+            let guild = store::guild(conn, guild_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
             let tz = clock::zone(&guild.timezone)?;
             let start = parse::parse_when(start_raw.as_deref().unwrap_or(""), Utc::now(), tz)
                 .ok_or_else(|| OpError::from(crate::msg!("err-start-unreadable")))?;
             match span_minutes(text, start, tz, lang) {
                 Ok(minutes) => {
                     draft.duration_minutes = minutes;
-                    save_draft(conn, discord_user_id, PromptStep::Repeat, &draft)?;
+                    save_draft(conn, discord_user_id, PromptStep::Repeat, &draft).await?;
                     just(repeat_card(lang))
                 }
                 Err(err) => just(note(&end_card(lang), &err)),
@@ -431,24 +453,27 @@ pub fn answer_event_dm(
                 _ => return just(repeat_card(lang)),
             };
             draft.repeat = cadence;
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
-        PromptStep::Finish => answer_finish(
-            conn,
-            discord_user_id,
-            guild_id,
-            membership_id,
-            text,
-            title.as_deref(),
-            start_raw.as_deref(),
-            channel_name.as_deref(),
-            &mut draft,
-            public_url,
-            lang,
-        ),
+        PromptStep::Finish => {
+            answer_finish(
+                conn,
+                discord_user_id,
+                guild_id,
+                membership_id,
+                text,
+                title.as_deref(),
+                start_raw.as_deref(),
+                channel_name.as_deref(),
+                &mut draft,
+                public_url,
+                lang,
+            )
+            .await
+        }
         PromptStep::Signup => {
-            answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang)
+            answer_signup(conn, discord_user_id, guild_id, text, &mut draft, lang).await
         }
         PromptStep::SignupCustom => {
             let names: Vec<&str> = text
@@ -467,29 +492,30 @@ pub fn answer_event_dm(
             let mut types = Vec::new();
             for (index, name) in names.into_iter().enumerate() {
                 let emoji = ["✅", "❌", "❔"].get(index).copied().unwrap_or("•");
-                let type_id = logic::ensure_type(conn, guild_id, name, emoji, index == 0)?;
-                types.push(draft_type(conn, type_id)?);
+                let type_id = logic::ensure_type(conn, guild_id, name, emoji, index == 0).await?;
+                types.push(draft_type(conn, type_id).await?);
             }
             draft.types = types;
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
         PromptStep::SignupPreset => {
-            let presets = store::list_presets(conn, guild_id)?;
+            let presets = store::list_presets(conn, guild_id).await?;
             let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
             let Some(preset) = choice.and_then(|n| presets.get(n - 1)) else {
                 return just(preset_card(&presets, lang));
             };
             draft.multiple = preset.multiple_signups;
-            draft.types = logic::preset_types(conn, preset.id)?
-                .into_iter()
-                .map(|opt| draft_type(conn, opt.type_id))
-                .collect::<Result<_, _>>()?;
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            let mut types = Vec::new();
+            for opt in logic::preset_types(conn, preset.id).await? {
+                types.push(draft_type(conn, opt.type_id).await?);
+            }
+            draft.types = types;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
         PromptStep::Mention => {
-            answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang)
+            answer_mention(conn, discord_user_id, guild_id, text, &mut draft, lang).await
         }
         PromptStep::Image => {
             if said(text, &NONE) {
@@ -501,7 +527,7 @@ pub fn answer_event_dm(
             } else {
                 return just(image_card(lang));
             }
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
         PromptStep::Color => {
@@ -510,35 +536,41 @@ pub fn answer_event_dm(
                 return just(color_card(lang));
             };
             draft.color = (*color).to_string();
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
         PromptStep::Restrict => {
-            answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang)
+            answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang).await
         }
         PromptStep::Role => {
-            answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang)
+            answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang).await
         }
-        PromptStep::Cutoff => answer_clock_field(
-            conn,
-            discord_user_id,
-            guild_id,
-            text,
-            &mut draft,
-            true,
-            start_raw.as_deref(),
-            lang,
-        ),
-        PromptStep::Post => answer_clock_field(
-            conn,
-            discord_user_id,
-            guild_id,
-            text,
-            &mut draft,
-            false,
-            start_raw.as_deref(),
-            lang,
-        ),
+        PromptStep::Cutoff => {
+            answer_clock_field(
+                conn,
+                discord_user_id,
+                guild_id,
+                text,
+                &mut draft,
+                true,
+                start_raw.as_deref(),
+                lang,
+            )
+            .await
+        }
+        PromptStep::Post => {
+            answer_clock_field(
+                conn,
+                discord_user_id,
+                guild_id,
+                text,
+                &mut draft,
+                false,
+                start_raw.as_deref(),
+                lang,
+            )
+            .await
+        }
         PromptStep::Reminder => {
             let minutes = text
                 .parse::<i64>()
@@ -551,20 +583,23 @@ pub fn answer_event_dm(
                 offset_minutes: minutes,
                 message: String::new(),
             }];
-            save_draft(conn, discord_user_id, PromptStep::Finish, &draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, &draft).await?;
             just(finish_card(&draft, lang))
         }
-        PromptStep::Next => answer_next(
-            conn,
-            discord_user_id,
-            membership_id,
-            text,
-            &draft,
-            public_url,
-            lang,
-        ),
+        PromptStep::Next => {
+            answer_next(
+                conn,
+                discord_user_id,
+                membership_id,
+                text,
+                &draft,
+                public_url,
+                lang,
+            )
+            .await
+        }
         PromptStep::Respond => {
-            answer_respond(conn, discord_user_id, membership_id, text, &draft, lang)
+            answer_respond(conn, discord_user_id, membership_id, text, &draft, lang).await
         }
     }
 }
@@ -740,8 +775,10 @@ struct DraftType {
     name: String,
 }
 
-fn draft_type(conn: &mut Connection, type_id: i64) -> Result<DraftType, OpError> {
-    let kind = store::library_type(conn, type_id)?.ok_or(OpError::NotFound)?;
+async fn draft_type(conn: &mut Connection, type_id: i64) -> Result<DraftType, OpError> {
+    let kind = store::library_type(conn, type_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     Ok(DraftType {
         type_id,
         name: kind.name,
@@ -835,8 +872,10 @@ fn next_card(note_line: Option<&str>, lang: Lang) -> DmReply {
     )
 }
 
-fn start_card(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<DmReply, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+async fn start_card(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<DmReply, OpError> {
+    let guild = store::guild(conn, guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let label = clock::zone_label(tz);
     Ok(ask(
@@ -903,7 +942,7 @@ fn role_card(step: PromptStep, roles: &[store::Role], lang: Lang) -> DmReply {
     ask(&title, &format!("{extra}\n\n{lines}"), lang)
 }
 
-fn save_draft(
+async fn save_draft(
     conn: &mut Connection,
     discord_user_id: &str,
     step: PromptStep,
@@ -919,11 +958,12 @@ fn save_draft(
         schema::event_prompts::step.eq(step),
         schema::event_prompts::draft.eq(json),
     ))
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
-fn advance_to_title(
+async fn advance_to_title(
     conn: &mut Connection,
     discord_user_id: &str,
     channel: &str,
@@ -937,11 +977,12 @@ fn advance_to_title(
         schema::event_prompts::channel_name.eq(channel),
         schema::event_prompts::step.eq(PromptStep::Title),
     ))
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(title_card(lang))
 }
 
-fn answer_channel(
+async fn answer_channel(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -951,57 +992,52 @@ fn answer_channel(
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(source) = source_channel else {
-        let channels = seen_channels(conn, guild_id, discord_user_id)?;
+        let channels = seen_channels(conn, guild_id, discord_user_id).await?;
         let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
         let Some(channel) = choice.and_then(|n| channels.get(n - 1)) else {
-            return just(where_to_post(
-                conn,
-                guild_id,
-                discord_user_id,
-                &None,
-                &None,
-                lang,
-            )?);
+            return just(where_to_post(conn, guild_id, discord_user_id, &None, &None, lang).await?);
         };
-        return just(advance_to_title(
-            conn,
-            discord_user_id,
-            &channel.name,
-            lang,
-        )?);
+        return just(advance_to_title(conn, discord_user_id, &channel.name, lang).await?);
     };
     let source_owned = Some(source.to_string());
     let discord_owned = source_discord.map(str::to_string);
     match text {
-        "1" => just(advance_to_title(conn, discord_user_id, source, lang)?),
+        "1" => just(advance_to_title(conn, discord_user_id, source, lang).await?),
         "2" => {
-            let others = other_channels(conn, guild_id, discord_user_id, Some(source))?;
+            let others = other_channels(conn, guild_id, discord_user_id, Some(source)).await?;
             if others.is_empty() {
-                return just(where_to_post(
-                    conn,
-                    guild_id,
-                    discord_user_id,
-                    &source_owned,
-                    &discord_owned,
-                    lang,
-                )?);
+                return just(
+                    where_to_post(
+                        conn,
+                        guild_id,
+                        discord_user_id,
+                        &source_owned,
+                        &discord_owned,
+                        lang,
+                    )
+                    .await?,
+                );
             }
             diesel::update(
                 schema::event_prompts::table
                     .filter(schema::event_prompts::discord_user_id.eq(discord_user_id)),
             )
             .set(schema::event_prompts::step.eq(PromptStep::ChannelOther))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
             just(other_channel_prompt(&others, lang))
         }
-        _ => just(where_to_post(
-            conn,
-            guild_id,
-            discord_user_id,
-            &source_owned,
-            &discord_owned,
-            lang,
-        )?),
+        _ => just(
+            where_to_post(
+                conn,
+                guild_id,
+                discord_user_id,
+                &source_owned,
+                &discord_owned,
+                lang,
+            )
+            .await?,
+        ),
     }
 }
 
@@ -1009,7 +1045,7 @@ fn answer_channel(
     clippy::too_many_arguments,
     reason = "one answer in the event DM and the draft it fills in"
 )]
-fn answer_finish(
+async fn answer_finish(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1036,48 +1072,49 @@ fn answer_finish(
                 public_url,
                 lang,
             )
+            .await
         }
         "2" => {
-            save_draft(conn, discord_user_id, PromptStep::Signup, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Signup, draft).await?;
             return just(signup_card(lang));
         }
         "3" => PromptStep::Mention,
         "4" => {
-            save_draft(conn, discord_user_id, PromptStep::Image, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Image, draft).await?;
             return just(image_card(lang));
         }
         "5" => {
-            save_draft(conn, discord_user_id, PromptStep::Color, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Color, draft).await?;
             return just(color_card(lang));
         }
         "6" => PromptStep::Restrict,
         "7" => {
             draft.multiple = !draft.multiple;
-            save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
             return just(finish_card(draft, lang));
         }
         "8" => PromptStep::Role,
         "9" => {
-            save_draft(conn, discord_user_id, PromptStep::Cutoff, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Cutoff, draft).await?;
             return just(clock_card(true, lang));
         }
         "10" => {
-            save_draft(conn, discord_user_id, PromptStep::Post, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Post, draft).await?;
             return just(clock_card(false, lang));
         }
         "11" => {
-            save_draft(conn, discord_user_id, PromptStep::Reminder, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Reminder, draft).await?;
             return just(reminder_card(lang));
         }
         _ => return just(finish_card(draft, lang)),
     };
     let roles = match step {
-        PromptStep::Role => attendee_roles(conn, membership_id)?,
-        _ => store::list_roles(conn, guild_id)?,
+        PromptStep::Role => attendee_roles(conn, membership_id).await?,
+        _ => store::list_roles(conn, guild_id).await?,
     };
-    save_draft(conn, discord_user_id, step, draft)?;
+    save_draft(conn, discord_user_id, step, draft).await?;
     if roles.is_empty() {
-        save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+        save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
         let why = match step {
             PromptStep::Role => tr!(lang, "dm-no-attendee-roles"),
             _ => tr!(lang, "dm-no-roles"),
@@ -1087,7 +1124,7 @@ fn answer_finish(
     just(role_card(step, &roles, lang))
 }
 
-fn answer_signup(
+async fn answer_signup(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1099,11 +1136,11 @@ fn answer_signup(
         "1" => {
             draft.types.clear();
             draft.multiple = false;
-            save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
             just(finish_card(draft, lang))
         }
         "2" => {
-            save_draft(conn, discord_user_id, PromptStep::SignupCustom, draft)?;
+            save_draft(conn, discord_user_id, PromptStep::SignupCustom, draft).await?;
             just(ask(
                 &tr!(lang, "dm-signup-custom-title"),
                 &tr!(lang, "dm-signup-custom-body"),
@@ -1111,15 +1148,15 @@ fn answer_signup(
             ))
         }
         "3" => {
-            let presets = store::list_presets(conn, guild_id)?;
-            save_draft(conn, discord_user_id, PromptStep::SignupPreset, draft)?;
+            let presets = store::list_presets(conn, guild_id).await?;
+            save_draft(conn, discord_user_id, PromptStep::SignupPreset, draft).await?;
             just(preset_card(&presets, lang))
         }
         _ => just(signup_card(lang)),
     }
 }
 
-fn answer_mention(
+async fn answer_mention(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1127,7 +1164,7 @@ fn answer_mention(
     draft: &mut EventDraft,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let roles = store::list_roles(conn, guild_id)?;
+    let roles = store::list_roles(conn, guild_id).await?;
     if said(text, &NONE) {
         draft.mention_everyone = false;
         draft.mention_role_ids.clear();
@@ -1145,11 +1182,11 @@ fn answer_mention(
             }
         }
     }
-    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
     just(finish_card(draft, lang))
 }
 
-fn answer_restrict(
+async fn answer_restrict(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1157,7 +1194,7 @@ fn answer_restrict(
     draft: &mut EventDraft,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let roles = store::list_roles(conn, guild_id)?;
+    let roles = store::list_roles(conn, guild_id).await?;
     if said(text, &NONE) {
         draft.restrict_role_ids.clear();
     } else {
@@ -1168,21 +1205,27 @@ fn answer_restrict(
             }
         }
     }
-    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
     just(finish_card(draft, lang))
 }
 
 /// The roles someone may make an event's attendee role: any for a server
 /// manager, else only the ones Marian made.
-fn attendee_roles(conn: &mut Connection, membership_id: i64) -> Result<Vec<store::Role>, OpError> {
-    let actor = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
-    Ok(store::list_roles(conn, actor.guild_id)?
+async fn attendee_roles(
+    conn: &mut Connection,
+    membership_id: i64,
+) -> Result<Vec<store::Role>, OpError> {
+    let actor = store::membership(conn, membership_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
+    Ok(store::list_roles(conn, actor.guild_id)
+        .await?
         .into_iter()
         .filter(|role| crate::logic::may_pick_attendee_role(&actor, role))
         .collect())
 }
 
-fn answer_attendee_role(
+async fn answer_attendee_role(
     conn: &mut Connection,
     discord_user_id: &str,
     membership_id: i64,
@@ -1190,7 +1233,7 @@ fn answer_attendee_role(
     draft: &mut EventDraft,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let roles = attendee_roles(conn, membership_id)?;
+    let roles = attendee_roles(conn, membership_id).await?;
     if said(text, &NONE) {
         draft.attendee_role_id = None;
     } else {
@@ -1203,12 +1246,12 @@ fn answer_attendee_role(
         };
         draft.attendee_role_id = Some(role.id);
     }
-    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
     just(finish_card(draft, lang))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn answer_clock_field(
+async fn answer_clock_field(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1218,7 +1261,9 @@ fn answer_clock_field(
     start_raw: Option<&str>,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+    let guild = store::guild(conn, guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     if said(text, &NONE) {
         if cutoff {
@@ -1246,12 +1291,12 @@ fn answer_clock_field(
     } else {
         draft.post_raw = Some(text.to_string());
     }
-    save_draft(conn, discord_user_id, PromptStep::Finish, draft)?;
+    save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
     just(finish_card(draft, lang))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_event(
+async fn finish_event(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
@@ -1263,11 +1308,14 @@ fn finish_event(
     public_url: &str,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+    let guild = store::guild(conn, guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
     let starts_at = parse::parse_when(start_raw.unwrap_or(""), Utc::now(), tz)
         .ok_or_else(|| OpError::from(crate::msg!("err-start-unreadable")))?;
-    let channel = store::channel_by_name(conn, guild_id, channel_name.unwrap_or(""))?
+    let channel = store::channel_by_name(conn, guild_id, channel_name.unwrap_or(""))
+        .await?
         .ok_or_else(|| OpError::from(crate::msg!("err-channel-gone")))?;
     let cutoff_at = draft
         .cutoff_raw
@@ -1288,7 +1336,7 @@ fn finish_event(
         max_occurrences: None,
     });
     let (options, multiple) = if draft.types.is_empty() {
-        logic::starting_options(conn, guild_id)?
+        logic::starting_options(conn, guild_id).await?
     } else {
         (
             draft
@@ -1304,7 +1352,7 @@ fn finish_event(
     } else {
         draft.duration_minutes
     };
-    let thread_enabled = store::settings(conn, guild_id)?.event_threads;
+    let thread_enabled = store::settings(conn, guild_id).await?.event_threads;
     let saved = logic::save_event(
         conn,
         EventInput {
@@ -1336,13 +1384,13 @@ fn finish_event(
             apply_series: false,
         },
     );
-    let id = match saved {
+    let id = match saved.await {
         Ok(id) => id,
         Err(err) => return just(note(&finish_card(draft, lang), &err.localized(lang))),
     };
     draft.event_id = Some(id);
-    save_draft(conn, discord_user_id, PromptStep::Next, draft)?;
-    let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
+    save_draft(conn, discord_user_id, PromptStep::Next, draft).await?;
+    let event = store::event(conn, id).await?.ok_or(OpError::NotFound)?;
     let path = event_path(&guild, event.public_id);
     let body = if public_url.trim().is_empty() {
         tr!(lang, "reply-open-path", path = path)
@@ -1355,7 +1403,7 @@ fn finish_event(
     Ok(Some(vec![created, next_card(None, lang)]))
 }
 
-fn answer_next(
+async fn answer_next(
     conn: &mut Connection,
     discord_user_id: &str,
     membership_id: i64,
@@ -1365,13 +1413,17 @@ fn answer_next(
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(event_id) = draft.event_id else {
-        cancel_event_dm(conn, discord_user_id)?;
+        cancel_event_dm(conn, discord_user_id).await?;
         return Ok(None);
     };
     match text {
         "1" => {
-            let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
-            let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
+            let event = store::event(conn, event_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
+            let guild = store::guild(conn, event.guild_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
             let path = event_path(&guild, event.public_id);
             let line = if public_url.trim().is_empty() {
                 tr!(lang, "reply-open-path", path = path)
@@ -1386,13 +1438,16 @@ fn answer_next(
         }
         "2" => {
             diesel::delete(schema::signups::table.filter(schema::signups::event_id.eq(event_id)))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
             just(next_card(Some(&tr!(lang, "dm-cleared")), lang))
         }
         "3" => {
-            save_draft(conn, discord_user_id, PromptStep::Respond, draft)?;
-            let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
-            let options = store::options_for(conn, &event)?;
+            save_draft(conn, discord_user_id, PromptStep::Respond, draft).await?;
+            let event = store::event(conn, event_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
+            let options = store::options_for(conn, &event).await?;
             let lines = options
                 .iter()
                 .map(|opt| format!("{} {}", opt.emoji, opt.name))
@@ -1400,10 +1455,12 @@ fn answer_next(
             just(numbered_prompt(&tr!(lang, "dm-next-respond"), &lines, lang))
         }
         "4" => {
-            let id = logic::duplicate_event(conn, event_id, membership_id)?;
+            let id = logic::duplicate_event(conn, event_id, membership_id).await?;
             // The copy goes by its public id; the row number stays on the server.
-            let copy = store::event(conn, id)?.ok_or(OpError::NotFound)?;
-            let guild = store::guild(conn, copy.guild_id)?.ok_or(OpError::NotFound)?;
+            let copy = store::event(conn, id).await?.ok_or(OpError::NotFound)?;
+            let guild = store::guild(conn, copy.guild_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
             let path = event_path(&guild, copy.public_id);
             let line = if public_url.trim().is_empty() {
                 tr!(lang, "dm-duplicated", path = path.as_str())
@@ -1417,7 +1474,7 @@ fn answer_next(
     }
 }
 
-fn answer_respond(
+async fn answer_respond(
     conn: &mut Connection,
     discord_user_id: &str,
     membership_id: i64,
@@ -1426,11 +1483,13 @@ fn answer_respond(
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
     let Some(event_id) = draft.event_id else {
-        cancel_event_dm(conn, discord_user_id)?;
+        cancel_event_dm(conn, discord_user_id).await?;
         return Ok(None);
     };
-    let event = store::event(conn, event_id)?.ok_or(OpError::NotFound)?;
-    let options = store::options_for(conn, &event)?;
+    let event = store::event(conn, event_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
+    let options = store::options_for(conn, &event).await?;
     let choice = text.parse::<usize>().ok().filter(|n| *n >= 1);
     let Some(option) = choice.and_then(|n| options.get(n - 1)) else {
         let lines = options
@@ -1439,8 +1498,8 @@ fn answer_respond(
             .collect::<Vec<_>>();
         return just(numbered_prompt(&tr!(lang, "dm-next-respond"), &lines, lang));
     };
-    let reply = logic::signup(conn, event_id, option.id, membership_id)?;
-    save_draft(conn, discord_user_id, PromptStep::Next, draft)?;
+    let reply = logic::signup(conn, event_id, option.id, membership_id).await?;
+    save_draft(conn, discord_user_id, PromptStep::Next, draft).await?;
     just(next_card(Some(&reply.render(lang)), lang))
 }
 
@@ -1508,7 +1567,7 @@ fn fit_span(minutes: i64, lang: Lang) -> Result<i64, String> {
     }
 }
 
-fn where_to_post(
+async fn where_to_post(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
@@ -1516,9 +1575,12 @@ fn where_to_post(
     source_discord: &Option<String>,
     lang: Lang,
 ) -> Result<DmReply, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+    let guild = store::guild(conn, guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let Some(source) = source_channel else {
-        let lines = seen_channels(conn, guild_id, discord_user_id)?
+        let lines = seen_channels(conn, guild_id, discord_user_id)
+            .await?
             .into_iter()
             .map(|channel| channel_label(&channel))
             .collect::<Vec<_>>();
@@ -1539,13 +1601,14 @@ fn where_to_post(
     ))
 }
 
-fn other_channels(
+async fn other_channels(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
     source_channel: Option<&str>,
 ) -> Result<Vec<store::Channel>, OpError> {
-    Ok(seen_channels(conn, guild_id, discord_user_id)?
+    Ok(seen_channels(conn, guild_id, discord_user_id)
+        .await?
         .into_iter()
         .filter(|channel| source_channel != Some(channel.name.as_str()))
         .collect())
@@ -1591,7 +1654,7 @@ pub struct EditChange {
     pub channel: Option<String>,
 }
 
-pub fn edit_event(
+pub async fn edit_event(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
@@ -1606,11 +1669,13 @@ pub fn edit_event(
     {
         return Err(OpError::from(crate::msg!("err-edit-nothing")));
     }
-    let sight = member_sight(conn, membership_id)?;
-    let event = find_event(conn, guild_id, &sight, &change.event)?;
-    let guild = store::guild(conn, event.guild_id)?.ok_or(OpError::NotFound)?;
+    let sight = member_sight(conn, membership_id).await?;
+    let event = find_event(conn, guild_id, &sight, &change.event).await?;
+    let guild = store::guild(conn, event.guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone)?;
-    let mut input = input_from(conn, &event, membership_id)?;
+    let mut input = input_from(conn, &event, membership_id).await?;
     if let Some(title) = change.title {
         input.title = title;
     }
@@ -1626,14 +1691,15 @@ pub fn edit_event(
         input.duration_minutes = duration;
     }
     if let Some(name) = change.channel {
-        input.channel_id = store::channel_by_name(conn, event.guild_id, &name)?
+        input.channel_id = store::channel_by_name(conn, event.guild_id, &name)
+            .await?
             .filter(|channel| sight.sees_channel(channel.id))
             .ok_or_else(|| OpError::from(crate::msg!("err-no-channel", name = name.as_str())))?
             .id;
     }
     input.action = SaveAction::Save;
-    let id = logic::save_event(conn, input)?;
-    let event = store::event(conn, id)?.ok_or(OpError::NotFound)?;
+    let id = logic::save_event(conn, input).await?;
+    let event = store::event(conn, id).await?.ok_or(OpError::NotFound)?;
     Ok(tr!(
         lang,
         "reply-event-updated",
@@ -1642,16 +1708,20 @@ pub fn edit_event(
     ))
 }
 
-pub fn set_reminders(
+pub async fn set_reminders(
     conn: &mut Connection,
     membership_id: i64,
     enabled: Option<bool>,
     lang: Lang,
 ) -> Result<String, OpError> {
     match enabled {
-        Some(value) => Ok(logic::set_user_reminders(conn, membership_id, value)?.render(lang)),
+        Some(value) => Ok(logic::set_user_reminders(conn, membership_id, value)
+            .await?
+            .render(lang)),
         None => {
-            let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
+            let user = store::membership(conn, membership_id)
+                .await?
+                .ok_or(OpError::NotFound)?;
             Ok(if user.reminders_enabled {
                 tr!(lang, "reply-reminders-get", name = &user.name)
             } else {
@@ -1666,7 +1736,7 @@ pub struct Choice {
     pub value: String,
 }
 
-pub fn response_events(
+pub async fn response_events(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
@@ -1674,12 +1744,14 @@ pub fn response_events(
     now: DateTime<Utc>,
     lang: Lang,
 ) -> Result<Vec<Choice>, OpError> {
-    let guild = store::guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+    let guild = store::guild(conn, guild_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     let tz = clock::zone(&guild.timezone).unwrap_or(Tz::UTC);
     let needle = partial.trim().to_lowercase();
-    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id).await?;
     let mut choices = Vec::new();
-    for event in store::list_events(conn, guild_id)? {
+    for event in store::list_events(conn, guild_id).await? {
         if event.status != EventStatus::Posted || !sight.sees_event(&event) {
             continue;
         }
@@ -1710,21 +1782,21 @@ pub fn response_events(
     Ok(choices)
 }
 
-pub fn response_options(
+pub async fn response_options(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
     event_token: &str,
     partial: &str,
 ) -> Result<Vec<Choice>, OpError> {
-    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id)?;
-    let event = match find_event(conn, guild_id, &sight, event_token) {
+    let sight = logic::sight_for_discord(conn, guild_id, discord_user_id).await?;
+    let event = match find_event(conn, guild_id, &sight, event_token).await {
         Ok(event) => event,
         Err(_) => return Ok(Vec::new()),
     };
     let needle = partial.trim().to_lowercase();
     let mut choices = Vec::new();
-    for opt in store::options_for(conn, &event)? {
+    for opt in store::options_for(conn, &event).await? {
         let label = option_menu_label(&opt.emoji, &opt.name);
         if !needle.is_empty()
             && !opt.name.to_lowercase().contains(&needle)
@@ -1748,7 +1820,7 @@ pub fn response_options(
     clippy::too_many_arguments,
     reason = "a roster press names the event, member, option, action and guest count"
 )]
-pub fn roster_action(
+pub async fn roster_action(
     conn: &mut Connection,
     actor_id: i64,
     event_token: &str,
@@ -1758,22 +1830,25 @@ pub fn roster_action(
     guests: Option<i64>,
     lang: Lang,
 ) -> Result<(String, i64), OpError> {
-    let actor = store::membership(conn, actor_id)?.ok_or(OpError::NotFound)?;
-    let sight = logic::sight(conn, &actor)?;
-    let event = find_event(conn, actor.guild_id, &sight, event_token)?;
-    let option = resolve_option(conn, &event, option_token)?;
+    let actor = store::membership(conn, actor_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
+    let sight = logic::sight(conn, &actor).await?;
+    let event = find_event(conn, actor.guild_id, &sight, event_token).await?;
+    let option = resolve_option(conn, &event, option_token).await?;
     let notice = logic::editor_response(
         conn, event.id, actor_id, target_id, option.id, action, guests,
-    )?;
+    )
+    .await?;
     Ok((notice.render(lang), event.id))
 }
 
-fn resolve_option(
+async fn resolve_option(
     conn: &mut Connection,
     event: &Event,
     token: &str,
 ) -> Result<store::SignupOption, OpError> {
-    let options = store::options_for(conn, event)?;
+    let options = store::options_for(conn, event).await?;
     // A pick from the autocomplete list is the option's public id; a typed answer is its name.
     if let Some(opt) = options
         .iter()
@@ -1814,7 +1889,7 @@ fn option_menu_label(emoji: &str, name: &str) -> String {
     label.chars().take(100).collect()
 }
 
-pub fn channel_choices(
+pub async fn channel_choices(
     conn: &mut Connection,
     guild_id: i64,
     discord_user_id: &str,
@@ -1823,7 +1898,7 @@ pub fn channel_choices(
 ) -> Result<Vec<Choice>, OpError> {
     let needle = partial.trim().to_lowercase();
     let mut choices = Vec::new();
-    for channel in seen_channels(conn, guild_id, discord_user_id)? {
+    for channel in seen_channels(conn, guild_id, discord_user_id).await? {
         if !needle.is_empty() && !channel.name.to_lowercase().contains(&needle) {
             continue;
         }
@@ -1863,15 +1938,15 @@ pub enum Setting {
     Language(String),
 }
 
-pub fn apply_setting(
+pub async fn apply_setting(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     setting: Setting,
     lang: Lang,
 ) -> Result<String, OpError> {
-    require_server_manager(conn, membership_id)?;
-    let mut settings = store::settings(conn, guild_id)?;
+    require_server_manager(conn, membership_id).await?;
+    let mut settings = store::settings(conn, guild_id).await?;
     let mut lang = lang;
     let key = match setting {
         Setting::ReminderInterval(minutes) => {
@@ -1938,7 +2013,8 @@ pub fn apply_setting(
                 Vec::new()
             } else {
                 vec![
-                    store::role_by_name(conn, guild_id, &name)?
+                    store::role_by_name(conn, guild_id, &name)
+                        .await?
                         .ok_or_else(|| {
                             OpError::from(crate::msg!("err-no-role", name = name.as_str()))
                         })?
@@ -1970,12 +2046,17 @@ pub fn apply_setting(
             "language"
         }
     };
-    store::update_settings(conn, &settings)?;
+    store::update_settings(conn, &settings).await?;
     Ok(tr!(lang, "reply-setting-updated", key = key))
 }
 
-pub fn library_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
-    let lines: Vec<_> = store::list_library(conn, guild_id)?
+pub async fn library_text(
+    conn: &mut Connection,
+    guild_id: i64,
+    lang: Lang,
+) -> Result<String, OpError> {
+    let lines: Vec<_> = store::list_library(conn, guild_id)
+        .await?
         .into_iter()
         .map(|opt| format!("{} {}", opt.emoji, opt.name))
         .collect();
@@ -1987,7 +2068,7 @@ pub fn library_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<
 }
 
 /// Adds a type to the library, or gives an existing one a new emoji.
-pub fn add_library_option(
+pub async fn add_library_option(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
@@ -2001,7 +2082,7 @@ pub fn add_library_option(
     } else {
         emoji.trim()
     };
-    match store::library_type_named(conn, guild_id, name)? {
+    match store::library_type_named(conn, guild_id, name).await? {
         Some(existing) => {
             logic::update_type(
                 conn,
@@ -2012,7 +2093,8 @@ pub fn add_library_option(
                     emoji: emoji.to_string(),
                     attending: existing.attending,
                 },
-            )?;
+            )
+            .await?;
             Ok(tr!(
                 lang,
                 "reply-library-kept",
@@ -2030,7 +2112,8 @@ pub fn add_library_option(
                     emoji: emoji.to_string(),
                     attending,
                 },
-            )?;
+            )
+            .await?;
             Ok(tr!(
                 lang,
                 "reply-library-saved",
@@ -2042,21 +2125,27 @@ pub fn add_library_option(
 }
 
 /// Takes a type out of the library, unless something still uses it.
-pub fn remove_library_option(
+pub async fn remove_library_option(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     name: &str,
     lang: Lang,
 ) -> Result<String, OpError> {
-    let kind = store::library_type_named(conn, guild_id, name)?
+    let kind = store::library_type_named(conn, guild_id, name)
+        .await?
         .ok_or_else(|| OpError::from(crate::msg!("err-library-missing", name = name.trim())))?;
-    logic::delete_type(conn, kind.id, membership_id)?;
+    logic::delete_type(conn, kind.id, membership_id).await?;
     Ok(tr!(lang, "reply-library-removed", name = &kind.name))
 }
 
-pub fn preset_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<String, OpError> {
-    let lines: Vec<_> = store::list_presets(conn, guild_id)?
+pub async fn preset_text(
+    conn: &mut Connection,
+    guild_id: i64,
+    lang: Lang,
+) -> Result<String, OpError> {
+    let lines: Vec<_> = store::list_presets(conn, guild_id)
+        .await?
         .into_iter()
         .map(|preset| preset.name)
         .collect();
@@ -2069,7 +2158,7 @@ pub fn preset_text(conn: &mut Connection, guild_id: i64, lang: Lang) -> Result<S
 
 /// A preset from type names, comma separated. A name the library doesn't have
 /// yet is added to it.
-pub fn add_preset(
+pub async fn add_preset(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
@@ -2083,9 +2172,9 @@ pub fn add_preset(
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
-        types.push(OptionInput::of_type(logic::ensure_type(
-            conn, guild_id, part, "•", true,
-        )?));
+        types.push(OptionInput::of_type(
+            logic::ensure_type(conn, guild_id, part, "•", true).await?,
+        ));
     }
     logic::save_preset(
         conn,
@@ -2097,22 +2186,24 @@ pub fn add_preset(
             multiple_signups: false,
             options: types,
         },
-    )?;
+    )
+    .await?;
     Ok(tr!(lang, "reply-preset-saved", name = name.trim()))
 }
 
-pub fn remove_preset(
+pub async fn remove_preset(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     name: &str,
     lang: Lang,
 ) -> Result<String, OpError> {
-    if let Some(preset) = store::list_presets(conn, guild_id)?
+    if let Some(preset) = store::list_presets(conn, guild_id)
+        .await?
         .into_iter()
         .find(|preset| preset.name.eq_ignore_ascii_case(name))
     {
-        logic::delete_preset(conn, preset.id, membership_id)?;
+        logic::delete_preset(conn, preset.id, membership_id).await?;
     }
     Ok(tr!(lang, "reply-preset-removed", name = name))
 }
@@ -2125,13 +2216,17 @@ fn public_base() -> String {
         .to_string()
 }
 
-fn person_user_id(conn: &mut Connection, membership_id: i64) -> Result<i64, OpError> {
-    store::membership(conn, membership_id)?
+async fn person_user_id(conn: &mut Connection, membership_id: i64) -> Result<i64, OpError> {
+    store::membership(conn, membership_id)
+        .await?
         .map(|membership| membership.user_id)
         .ok_or_else(|| OpError::from(crate::msg!("err-google-needs-account")))
 }
 
-pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
+pub async fn google_sign_in_url(
+    conn: &mut Connection,
+    membership_id: i64,
+) -> Result<String, OpError> {
     if !crate::google::configured_from_env() {
         return Err(OpError::from(crate::msg!("err-google-unconfigured")));
     }
@@ -2139,27 +2234,27 @@ pub fn google_sign_in_url(conn: &mut Connection, membership_id: i64) -> Result<S
     if base.is_empty() {
         return Err(OpError::from(crate::msg!("err-google-no-url")));
     }
-    let user_id = person_user_id(conn, membership_id)?;
-    let state = crate::google::begin_link(conn, user_id)?;
+    let user_id = person_user_id(conn, membership_id).await?;
+    let state = crate::google::begin_link(conn, user_id).await?;
     let Some(url) = crate::google::connect_url(&base, &state) else {
         return Err(OpError::from(crate::msg!("err-google-no-url")));
     };
     if url.len() > 512 {
-        let _ = crate::google::finish_oauth(conn, &state);
+        let _ = crate::google::finish_oauth(conn, &state).await;
         return Err(OpError::from(crate::msg!("err-google-link-long")));
     }
     Ok(url)
 }
 
-pub fn google_auto_sync(
+pub async fn google_auto_sync(
     conn: &mut Connection,
     _guild_id: i64,
     membership_id: i64,
     enabled: bool,
     lang: Lang,
 ) -> Result<String, OpError> {
-    let user_id = person_user_id(conn, membership_id)?;
-    crate::google::set_auto_sync(conn, user_id, enabled)?;
+    let user_id = person_user_id(conn, membership_id).await?;
+    crate::google::set_auto_sync(conn, user_id, enabled).await?;
     Ok(if enabled {
         tr!(lang, "reply-google-auto-on")
     } else {
@@ -2167,42 +2262,46 @@ pub fn google_auto_sync(
     })
 }
 
-pub fn google_revoke(
+pub async fn google_revoke(
     conn: &mut Connection,
     _guild_id: i64,
     membership_id: i64,
     lang: Lang,
 ) -> Result<String, OpError> {
-    let user_id = person_user_id(conn, membership_id)?;
-    if !crate::google::queue_revoke(conn, user_id)? {
+    let user_id = person_user_id(conn, membership_id).await?;
+    if !crate::google::queue_revoke(conn, user_id).await? {
         return Ok(tr!(lang, "reply-google-already-off"));
     }
     Ok(tr!(lang, "reply-google-revoking"))
 }
 
-pub fn google_sync(
+pub async fn google_sync(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     event: &str,
     lang: Lang,
 ) -> Result<String, OpError> {
-    let sight = member_sight(conn, membership_id)?;
-    let event = find_event(conn, guild_id, &sight, event)?;
+    let sight = member_sight(conn, membership_id).await?;
+    let event = find_event(conn, guild_id, &sight, event).await?;
     if !matches!(
         event.status,
         EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
     ) {
         return Err(OpError::from(crate::msg!("err-sync-unposted")));
     }
-    let user_id = person_user_id(conn, membership_id)?;
-    crate::google::queue_event(conn, user_id, event.id)?;
+    let user_id = person_user_id(conn, membership_id).await?;
+    crate::google::queue_event(conn, user_id, event.id).await?;
     Ok(tr!(lang, "reply-google-sync", title = &event.title))
 }
 
-fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<EventInput, OpError> {
-    let options = store::options_for(conn, event)?;
-    let reminders = store::reminders_for(conn, event)?;
+async fn input_from(
+    conn: &mut Connection,
+    event: &Event,
+    actor_id: i64,
+) -> Result<EventInput, OpError> {
+    let options = store::options_for(conn, event).await?;
+    let reminders = store::reminders_for(conn, event).await?;
     Ok(EventInput {
         id: Some(event.id),
         guild_id: event.guild_id,
@@ -2220,8 +2319,8 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,
-        mention_role_ids: store::event_role_ids(conn, event, EventRoleKind::Mention)?,
-        restrict_role_ids: store::event_role_ids(conn, event, EventRoleKind::Restrict)?,
+        mention_role_ids: store::event_role_ids(conn, event, EventRoleKind::Mention).await?,
+        restrict_role_ids: store::event_role_ids(conn, event, EventRoleKind::Restrict).await?,
         options: options
             .into_iter()
             .map(|opt| OptionInput {
@@ -2246,8 +2345,10 @@ fn input_from(conn: &mut Connection, event: &Event, actor_id: i64) -> Result<Eve
     })
 }
 
-fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
-    let user = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
+async fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(), OpError> {
+    let user = store::membership(conn, membership_id)
+        .await?
+        .ok_or(OpError::NotFound)?;
     if user.server_manager {
         Ok(())
     } else {
@@ -2257,7 +2358,7 @@ fn require_server_manager(conn: &mut Connection, membership_id: i64) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use diesel::connection::SimpleConnection as _;
+    use diesel_async::SimpleAsyncConnection;
 
     use super::*;
 
@@ -2267,9 +2368,9 @@ mod tests {
         replies.remove(0)
     }
 
-    #[test]
-    fn a_response_picked_from_the_list_names_the_option_by_public_id() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_response_picked_from_the_list_names_the_option_by_public_id() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -2281,13 +2382,13 @@ mod tests {
             SELECT 2, id, 1, 'June', 'june', '#223344', true, false FROM users WHERE discord_id = 'june';
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
         let starts_at = Utc::now() + chrono::Duration::days(2);
-        let kinds: Vec<_> = ["Tank", "Healer"]
-            .into_iter()
-            .map(|name| logic::test_option(&mut conn, 1, name, "", true))
-            .collect();
+        let mut kinds = Vec::new();
+        for name in ["Tank", "Healer"] {
+            kinds.push(logic::test_option(&mut conn, 1, name, "", true).await);
+        }
         let id = logic::save_event(
             &mut conn,
             logic::EventInput {
@@ -2317,10 +2418,13 @@ mod tests {
                 apply_series: false,
             },
         )
+        .await
         .unwrap();
-        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
         let token = event.public_id.to_string();
-        let choices = response_options(&mut conn, 1, "100", &token, "heal").unwrap();
+        let choices = response_options(&mut conn, 1, "100", &token, "heal")
+            .await
+            .unwrap();
         assert_eq!(choices.len(), 1);
         let picked = &choices[0].value;
         assert_eq!(
@@ -2328,23 +2432,29 @@ mod tests {
             7,
             "not a row number"
         );
-        roster_action(&mut conn, 1, &token, 2, picked, "add", None, Lang::En).unwrap();
+        roster_action(&mut conn, 1, &token, 2, picked, "add", None, Lang::En)
+            .await
+            .unwrap();
         let healer = store::options_for(&mut conn, &event)
+            .await
             .unwrap()
             .into_iter()
             .find(|opt| opt.name == "Healer")
             .unwrap();
         assert!(store::signups_for(&mut conn, &event)
+            .await
             .unwrap()
             .iter()
             .any(|s| s.option_id == healer.id && s.membership_id == 2));
         // A typed name still works.
-        roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En).unwrap();
+        roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En)
+            .await
+            .unwrap();
     }
 
-    #[test]
-    fn a_polish_server_gets_the_questions_and_the_post_in_polish() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn a_polish_server_gets_the_questions_and_the_post_in_polish() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'Europe/Warsaw', '4242');
@@ -2354,17 +2464,20 @@ mod tests {
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
-        let switched =
-            apply_setting(&mut conn, 1, 1, Setting::Language("pl".into()), Lang::En).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
+        let switched = apply_setting(&mut conn, 1, 1, Setting::Language("pl".into()), Lang::En)
+            .await
+            .unwrap();
         assert_eq!(
             switched, "Zaktualizowano ustawienie language.",
             "the reply is in the new language"
         );
-        assert_eq!(i18n::lang_of(&mut conn, 1), Lang::Pl);
+        assert_eq!(i18n::lang_of(&mut conn, 1).await, Lang::Pl);
 
-        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::Pl).unwrap();
+        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::Pl)
+            .await
+            .unwrap();
         assert_eq!(
             first.title.as_deref(),
             Some("Gdzie opublikować to wydarzenie?")
@@ -2374,34 +2487,35 @@ mod tests {
             "{first}"
         );
         assert!(first.body.ends_with("Aby wyjść, wpisz „anuluj”"), "{first}");
-        let title = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        let title = only(answer_event_dm(&mut conn, "u1", "1", "").await);
         assert_eq!(title.title.as_deref(), Some("Podaj tytuł wydarzenia"));
-        only(answer_event_dm(&mut conn, "u1", "Sprzątanie plaży", ""));
-        let start = only(answer_event_dm(&mut conn, "u1", "brak", ""));
+        only(answer_event_dm(&mut conn, "u1", "Sprzątanie plaży", "").await);
+        let start = only(answer_event_dm(&mut conn, "u1", "brak", "").await);
         assert_eq!(
             start.title.as_deref(),
             Some("Kiedy wydarzenie ma się zacząć?")
         );
-        let again = only(answer_event_dm(&mut conn, "u1", "kiedyś", ""));
+        let again = only(answer_event_dm(&mut conn, "u1", "kiedyś", "").await);
         assert!(
             again.body.starts_with("Marian nie rozumie tej godziny."),
             "{again}"
         );
-        let end = only(answer_event_dm(&mut conn, "u1", "jutro o 16", ""));
+        let end = only(answer_event_dm(&mut conn, "u1", "jutro o 16", "").await);
         assert_eq!(end.title.as_deref(), Some("Kiedy wydarzenie się kończy?"));
-        let repeat = only(answer_event_dm(&mut conn, "u1", "2 godziny", ""));
+        let repeat = only(answer_event_dm(&mut conn, "u1", "2 godziny", "").await);
         assert_eq!(
             repeat.title.as_deref(),
             Some("Jak często wydarzenie ma się powtarzać?")
         );
         assert!(repeat.body.contains("**3** Co tydzień"), "{repeat}");
-        let finish = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        let finish = only(answer_event_dm(&mut conn, "u1", "1", "").await);
         assert_eq!(finish.title.as_deref(), Some("Zakończ albo dostosuj"));
         assert!(
             finish.body.contains("**11** Ustaw przypomnienia"),
             "{finish}"
         );
         let posted = answer_event_dm(&mut conn, "u1", "1", "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2411,8 +2525,8 @@ mod tests {
         assert_eq!(posted[0].created, Some(Lang::Pl));
         assert_eq!(posted[1].title.as_deref(), Some("Co chcesz zrobić?"));
 
-        let id = channel_posts_waiting(&mut conn, "u1").unwrap()[0];
-        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let id = channel_posts_waiting(&mut conn, "u1").await.unwrap()[0];
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(event.title, "Sprzątanie plaży");
         assert_eq!(event.duration_minutes, 120);
         let local = event.starts_at.with_timezone(&chrono_tz::Europe::Warsaw);
@@ -2422,6 +2536,7 @@ mod tests {
             "jutro o 16 is 16:00 in Warsaw"
         );
         let view = logic::discord_view(&mut conn, id, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert!(view.body.contains("**Czas**"), "{}", view.body);
@@ -2439,7 +2554,9 @@ mod tests {
             "[Kliknij tutaj, aby zobaczyć wydarzenie](https://discord.com/channels/4242/99/555)"
         );
 
-        let unknown = find_event(&mut conn, 1, &logic::Sight::default(), "nope").unwrap_err();
+        let unknown = find_event(&mut conn, 1, &logic::Sight::default(), "nope")
+            .await
+            .unwrap_err();
         assert_eq!(
             unknown.to_string(),
             "That event isn't in this server.",
@@ -2451,9 +2568,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn event_dm_asks_then_posts() {
-        let mut conn = store::open_memory().unwrap();
+    #[tokio::test]
+    async fn event_dm_asks_then_posts() {
+        let mut conn = store::open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
@@ -2464,9 +2581,11 @@ mod tests {
             SELECT 1, id, 1, 'Nell', 'nell', '#112233', true, true FROM users WHERE discord_id = 'nell';
             ",
         )
-        .unwrap();
-        store::insert_default_settings(&mut conn, 1).unwrap();
-        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::En).unwrap();
+        .await.unwrap();
+        store::insert_default_settings(&mut conn, 1).await.unwrap();
+        let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::En)
+            .await
+            .unwrap();
         assert_eq!(
             first.title.as_deref(),
             Some("Where would you like to post this event?")
@@ -2481,38 +2600,39 @@ mod tests {
             "{first}"
         );
         assert!(first.body.contains("To exit, type 'cancel'"), "{first}");
-        let still = only(answer_event_dm(&mut conn, "u1", "9", ""));
+        let still = only(answer_event_dm(&mut conn, "u1", "9", "").await);
         assert!(still.title.is_some(), "{still}");
         assert!(still.body.contains("In the current channel"), "{still}");
-        let other = only(answer_event_dm(&mut conn, "u1", "2", ""));
+        let other = only(answer_event_dm(&mut conn, "u1", "2", "").await);
         assert!(other.body.contains("**1** <#100>"), "{other}");
-        let title = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        let title = only(answer_event_dm(&mut conn, "u1", "1", "").await);
         assert_eq!(title.title.as_deref(), Some("Enter the event title"));
-        let description = only(answer_event_dm(&mut conn, "u1", "Shore cleanup", ""));
+        let description = only(answer_event_dm(&mut conn, "u1", "Shore cleanup", "").await);
         assert_eq!(
             description.title.as_deref(),
             Some("Enter the event description")
         );
-        let start = only(answer_event_dm(&mut conn, "u1", "none", ""));
+        let start = only(answer_event_dm(&mut conn, "u1", "none", "").await);
         assert_eq!(start.title.as_deref(), Some("When should the event start?"));
         assert!(!start.body.contains("Signup"), "{start}");
-        let again = only(answer_event_dm(&mut conn, "u1", "not a time", ""));
+        let again = only(answer_event_dm(&mut conn, "u1", "not a time", "").await);
         assert!(again.body.contains("couldn't read"), "{again}");
-        let end = only(answer_event_dm(&mut conn, "u1", "tomorrow at 4pm", ""));
+        let end = only(answer_event_dm(&mut conn, "u1", "tomorrow at 4pm", "").await);
         assert_eq!(end.title.as_deref(), Some("When does the event end?"));
-        let repeat = only(answer_event_dm(&mut conn, "u1", "2 hours", ""));
+        let repeat = only(answer_event_dm(&mut conn, "u1", "2 hours", "").await);
         assert_eq!(
             repeat.title.as_deref(),
             Some("How often should this event repeat?")
         );
-        let finish = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        let finish = only(answer_event_dm(&mut conn, "u1", "1", "").await);
         assert_eq!(finish.title.as_deref(), Some("Finish or customize"));
         assert!(finish.body.contains("Signup options"), "{finish}");
-        let signup = only(answer_event_dm(&mut conn, "u1", "2", ""));
+        let signup = only(answer_event_dm(&mut conn, "u1", "2", "").await);
         assert_eq!(signup.title.as_deref(), Some("Signup options"));
-        let back = only(answer_event_dm(&mut conn, "u1", "1", ""));
+        let back = only(answer_event_dm(&mut conn, "u1", "1", "").await);
         assert_eq!(back.title.as_deref(), Some("Finish or customize"));
         let posted = answer_event_dm(&mut conn, "u1", "1", "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(posted.len(), 2, "{posted:?}");
@@ -2524,15 +2644,19 @@ mod tests {
             "{}",
             posted[0]
         );
-        let posts = channel_posts_waiting(&mut conn, "u1").unwrap();
+        let posts = channel_posts_waiting(&mut conn, "u1").await.unwrap();
         assert_eq!(posts.len(), 1, "{posts:?}");
         diesel::update(schema::events::table.filter(schema::events::id.eq(posts[0])))
             .set(schema::events::discord_message_id.eq("555"))
             .execute(&mut conn)
+            .await
             .unwrap();
-        let url = posted_message_url(&mut conn, posts[0]).unwrap().unwrap();
+        let url = posted_message_url(&mut conn, posts[0])
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(url, "https://discord.com/channels/4242/100/555");
-        let event = store::event(&mut conn, posts[0]).unwrap().unwrap();
+        let event = store::event(&mut conn, posts[0]).await.unwrap().unwrap();
         assert!(
             posted[0].body.contains(&event.public_id.to_string()),
             "{}",
@@ -2541,6 +2665,7 @@ mod tests {
         assert_eq!(event.channel_id, 2, "the agreed channel");
         assert_eq!(event.status, EventStatus::Posted);
         let view = logic::discord_view(&mut conn, event.id, "https://marian.example.com")
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(view.channel_id, "100");
@@ -2596,13 +2721,10 @@ mod tests {
         );
         assert_eq!(sent[1].title.as_deref(), Some("What would you like to do?"));
 
-        let duplicated = only(answer_event_dm(
-            &mut conn,
-            "u1",
-            "4",
-            "https://marian.example.com",
-        ));
+        let duplicated =
+            only(answer_event_dm(&mut conn, "u1", "4", "https://marian.example.com").await);
         let copy = store::list_events(&mut conn, 1)
+            .await
             .unwrap()
             .into_iter()
             .find(|other| other.id != event.id)

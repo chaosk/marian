@@ -1,6 +1,8 @@
 //! Buttons on Marian's posts, and the guests form one of them opens.
 
 use diesel::prelude::*;
+
+use diesel_async::RunQueryDsl;
 use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -32,40 +34,47 @@ pub(super) async fn handle_button(
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
     // The button names rows by public id; the handlers below work on row keys.
-    let found = store::blocking(|| -> Result<_, Error> {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let event_key = |conn: &mut store::Connection,
-                         event: uuid::Uuid|
-         -> Result<Option<i64>, crate::error::OpError> {
-            Ok(store::event_by_public(conn, &event.to_string())?.map(|event| event.id))
-        };
-        let found = match action {
-            ButtonAction::Edit { event } => event_key(&mut conn, event)?.map(Found::Edit),
-            ButtonAction::Delete { event } => event_key(&mut conn, event)?.map(Found::Delete),
+    let found = {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        async fn event_key(
+            conn: &mut store::Connection,
+            event: uuid::Uuid,
+        ) -> Result<Option<i64>, crate::error::OpError> {
+            Ok(store::event_by_public(conn, &event.to_string())
+                .await?
+                .map(|event| event.id))
+        }
+        match action {
+            ButtonAction::Edit { event } => event_key(&mut conn, event).await?.map(Found::Edit),
+            ButtonAction::Delete { event } => event_key(&mut conn, event).await?.map(Found::Delete),
             ButtonAction::ConfirmDelete { event } => {
-                event_key(&mut conn, event)?.map(Found::ConfirmDelete)
+                event_key(&mut conn, event).await?.map(Found::ConfirmDelete)
             }
             // Opened as a form above, before the click was acknowledged.
             ButtonAction::Guests { .. } => None,
-            ButtonAction::Signup { event, option } => match event_key(&mut conn, event)? {
+            ButtonAction::Signup { event, option } => match event_key(&mut conn, event).await? {
                 Some(event_id) => {
                     crate::ids::public::option_id(&mut conn, event_id, &option.to_string())
+                        .await
                         .ok()
                         .map(|option_id| Found::Signup(event_id, option_id))
                 }
                 None => None,
             },
-            ButtonAction::Routine { run, day } => {
-                logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Routine(run_id, day))
-            }
-            ButtonAction::Decide { run, day } => {
-                logic::run_by_public(&mut conn, run)?.map(|run_id| Found::Decide(run_id, day))
-            }
-        };
-        Ok(found)
-    })?;
+            ButtonAction::Routine { run, day } => logic::run_by_public(&mut conn, run)
+                .await?
+                .map(|run_id| Found::Routine(run_id, day)),
+            ButtonAction::Decide { run, day } => logic::run_by_public(&mut conn, run)
+                .await?
+                .map(|run_id| Found::Decide(run_id, day)),
+        }
+    };
     let Some(found) = found else {
-        let lang = button_lang(data, component);
+        let lang = button_lang(data, component).await;
         return followup(ctx, component, &tr!(lang, "reply-gone")).await;
     };
     match found {
@@ -102,14 +111,18 @@ async fn decide_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (decided, lang) = store::blocking(|| -> Result<_, Error> {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        Ok((
-            logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()),
+    let (decided, lang) = {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        (
+            logic::decide_run(&mut conn, run_id, membership_id, day, chrono::Utc::now()).await,
             lang,
-        ))
-    })?;
+        )
+    };
     match decided {
         Ok(effect) => {
             for job in effect.jobs {
@@ -132,11 +145,18 @@ async fn routine_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (saved, lang) = store::blocking(|| -> Result<_, Error> {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        Ok((logic::cast_run(&mut conn, run_id, membership_id, day), lang))
-    })?;
+    let (saved, lang) = {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        (
+            logic::cast_run(&mut conn, run_id, membership_id, day).await,
+            lang,
+        )
+    };
     if let Err(err) = saved {
         return followup(ctx, component, &err.localized(lang)).await;
     }
@@ -157,18 +177,22 @@ async fn signup_from_button(
         followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await?;
         return Ok(());
     };
-    let (signed, lang) = store::blocking(|| -> Result<_, Error> {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        Ok((
-            logic::signup(&mut conn, event_id, option_id, membership_id),
+    let (signed, lang) = {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        (
+            logic::signup(&mut conn, event_id, option_id, membership_id).await,
             lang,
-        ))
-    })?;
+        )
+    };
     if let Err(err) = signed {
         return followup(ctx, component, &err.localized(lang)).await;
     }
-    tell_pages(&data.db, event_id, true);
+    tell_pages(&data.db, event_id, true).await;
     if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
         tracing::warn!("could not refresh the Discord post: {err}");
     }
@@ -193,19 +217,25 @@ async fn open_guests_form(
             .await?;
         return followup(ctx, component, &tr!(Lang::En, "reply-button-outside")).await;
     };
-    let found = store::blocking(|| -> Result<_, Error> {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        let option_id = store::event_by_public(&mut conn, &event.to_string())?.and_then(|event| {
-            crate::ids::public::option_id(&mut conn, event.id, &option.to_string()).ok()
-        });
-        let form = match option_id {
-            Some(option_id) => Some(logic::guests_form(&mut conn, option_id, membership_id)?),
+    let (form, lang) = {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        let option_id = match store::event_by_public(&mut conn, &event.to_string()).await? {
+            Some(event) => crate::ids::public::option_id(&mut conn, event.id, &option.to_string())
+                .await
+                .ok(),
             None => None,
         };
-        Ok((form, lang))
-    })?;
-    let (form, lang) = found;
+        let form = match option_id {
+            Some(option_id) => Some(logic::guests_form(&mut conn, option_id, membership_id).await?),
+            None => None,
+        };
+        (form, lang)
+    };
     let refusal = match &form {
         None => Some(tr!(lang, "reply-gone")),
         Some(form) if form.max_guests == 0 => {
@@ -272,13 +302,19 @@ pub(super) async fn guests_from_form(
         return form_followup(ctx, form, &tr!(Lang::En, "reply-button-outside")).await;
     };
     let (outcome, lang) = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        let found = store::event_by_public(&mut conn, &event.to_string())?.and_then(|event| {
-            crate::ids::public::option_id(&mut conn, event.id, &option.to_string())
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        let found = match store::event_by_public(&mut conn, &event.to_string()).await? {
+            Some(event) => crate::ids::public::option_id(&mut conn, event.id, &option.to_string())
+                .await
                 .ok()
-                .map(|option_id| (event.id, option_id))
-        });
+                .map(|option_id| (event.id, option_id)),
+            None => None,
+        };
         let outcome = match (found, typed.trim().parse::<i64>()) {
             (None, _) => Err(None),
             (Some(_), Err(_)) => Err(Some(crate::error::OpError::from(crate::msg!(
@@ -286,6 +322,7 @@ pub(super) async fn guests_from_form(
             )))),
             (Some((event_id, option_id)), Ok(guests)) => {
                 logic::signup_guests(&mut conn, event_id, option_id, membership_id, guests)
+                    .await
                     .map(|_| event_id)
                     .map_err(Some)
             }
@@ -297,7 +334,7 @@ pub(super) async fn guests_from_form(
         Err(None) => return form_followup(ctx, form, &tr!(lang, "reply-gone")).await,
         Err(Some(err)) => return form_followup(ctx, form, &err.localized(lang)).await,
     };
-    tell_pages(&data.db, event_id, true);
+    tell_pages(&data.db, event_id, true).await;
     if let Err(err) = push_sync(&data.db, &data.http, &data.public_url, event_id).await {
         tracing::warn!("could not refresh the Discord post: {err}");
     }
@@ -333,11 +370,15 @@ async fn edit_from_button(
         return Ok(());
     };
     let text = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        match store::event(&mut conn, event_id)? {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        match store::event(&mut conn, event_id).await? {
             Some(event) if event.created_by == Some(membership_id) => {
-                Some(event_link(&mut conn, &data.public_url, &event, lang)?)
+                Some(event_link(&mut conn, &data.public_url, &event, lang).await?)
             }
             Some(_) => None,
             None => Some(tr!(lang, "reply-event-missing")),
@@ -360,9 +401,13 @@ async fn ask_delete(
         return Ok(());
     };
     let (card, lang) = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        let card = match store::event(&mut conn, event_id)? {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        let card = match store::event(&mut conn, event_id).await? {
             None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event)
@@ -377,8 +422,9 @@ async fn ask_delete(
                 Err(tr!(lang, "err-event-closed"))
             }
             Some(event) => {
-                let server =
-                    store::discord_server_id(&mut conn, event.guild_id).unwrap_or_default();
+                let server = store::discord_server_id(&mut conn, event.guild_id)
+                    .await
+                    .unwrap_or_default();
                 let url = logic::web_event_url(
                     &data.public_url,
                     Some(server.as_str()).filter(|id| !id.is_empty()),
@@ -434,18 +480,24 @@ async fn delete_from_button(
         return Ok(());
     };
     let removed = {
-        let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click)?;
-        match store::event(&mut conn, event_id)? {
+        let mut conn = data
+            .db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        let (membership_id, lang) = bind_clicker(&mut conn, &data.jobs, &click).await?;
+        match store::event(&mut conn, event_id).await? {
             None => Err(tr!(lang, "reply-event-missing")),
             Some(event) if event.created_by != Some(membership_id) => Ok(None),
             Some(event) => {
                 let plan = logic::event_channel_purge(&mut conn, event.id)
+                    .await
                     .map_err(|err| err.localized(lang))?;
-                let channel_discord = store::channel(&mut conn, event.channel_id)?
+                let channel_discord = store::channel(&mut conn, event.channel_id)
+                    .await?
                     .and_then(|channel| channel.discord_id);
                 let message_id = event.discord_message_id.clone();
-                match logic::delete_event(&mut conn, event_id, membership_id) {
+                match logic::delete_event(&mut conn, event_id, membership_id).await {
                     Ok(notice) => {
                         crate::live::event(event.guild_id, event.public_id);
                         Ok(Some((
@@ -477,10 +529,11 @@ async fn delete_from_button(
             .await;
         if let Err(err) = deleted {
             tracing::warn!("could not remove the Discord post: {err}");
-        } else if let Ok(mut conn) = data.db.get() {
+        } else if let Ok(mut conn) = data.db.get().await {
             diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
                 .set(schema::events::discord_message_id.eq(None::<String>))
-                .execute(&mut *conn)?;
+                .execute(&mut *conn)
+                .await?;
         }
         if let Some(plan) = plan {
             if let Err(err) = purge_event_channel(&data.db, &http, plan).await {
@@ -589,46 +642,48 @@ fn click_of(
 }
 
 /// The member who pressed a button, and their server's language.
-fn bind_clicker(
+async fn bind_clicker(
     conn: &mut Connection,
     jobs: &UnboundedSender<DiscordJob>,
     click: &Click,
 ) -> Result<(i64, Lang), Error> {
-    let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name)?;
+    let guild = logic::ensure_discord_guild(conn, &click.guild_discord, &click.guild_name).await?;
     let (user, renamed) =
-        logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display)?;
+        logic::ensure_discord_user(conn, guild.id, &click.user_discord, &click.display).await?;
     redraw(jobs, renamed);
-    logic::follow_discord_avatar(conn, &user, click.avatar.as_deref())?;
+    logic::follow_discord_avatar(conn, &user, click.avatar.as_deref()).await?;
     if let Some(manage) = click.manage {
-        logic::set_server_manager(conn, user.id, manage)?;
+        logic::set_server_manager(conn, user.id, manage).await?;
     }
     if let Some(roles) = &click.roles {
-        sync_roles(conn, guild.id, user.id, roles)?;
+        sync_roles(conn, guild.id, user.id, roles).await?;
     }
-    Ok((user.id, i18n::lang_of(conn, guild.id)))
+    Ok((user.id, i18n::lang_of(conn, guild.id).await))
 }
 
 /// The language of the server a button is in; English outside one.
-fn button_lang(data: &Data, component: &serenity::ComponentInteraction) -> Lang {
+async fn button_lang(data: &Data, component: &serenity::ComponentInteraction) -> Lang {
     let Some(guild_id) = component.guild_id else {
         return Lang::En;
     };
-    let Ok(mut conn) = data.db.get() else {
+    let Ok(mut conn) = data.db.get().await else {
         return Lang::En;
     };
-    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()) {
-        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id),
+    match store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await {
+        Ok(Some(guild)) => i18n::lang_of(&mut conn, guild.id).await,
         _ => Lang::En,
     }
 }
 
-fn event_link(
+async fn event_link(
     conn: &mut Connection,
     public_url: &str,
     event: &store::Event,
     lang: Lang,
 ) -> Result<String, Error> {
-    let server = store::discord_server_id(conn, event.guild_id).unwrap_or_default();
+    let server = store::discord_server_id(conn, event.guild_id)
+        .await
+        .unwrap_or_default();
     let path = if server.is_empty() {
         format!("/events/{}", event.public_id)
     } else {

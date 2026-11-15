@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
-use diesel::connection::Connection as DbConnection;
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
+
+use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use chrono::{DateTime, Utc};
@@ -18,12 +18,16 @@ use crate::values::{
     ReminderPlace, RunStatus, SignupState,
 };
 
-pub use diesel::pg::PgConnection as Connection;
+pub use diesel_async::AsyncPgConnection as Connection;
 
-pub type Db = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<Connection>>;
+/// The pool of connections requests and the workers share.
+pub type Db = diesel_async::pooled_connection::deadpool::Pool<Connection>;
+
+/// Why the pool couldn't hand out a connection.
+pub type PoolError = diesel_async::pooled_connection::deadpool::PoolError;
 
 static TEST_SCHEMAS: AtomicU64 = AtomicU64::new(0);
-static TEST_CLEANUP: Once = Once::new();
+static TEST_CLEANUP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 /// Test schemas already migrated and emptied, ready for the next test.
 static TEST_POOL: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The shape of a freshly migrated schema, so one a test changed (a trigger
@@ -846,42 +850,27 @@ impl Preset {
     }
 }
 
-pub fn open(database_url: &str) -> Result<Connection, OpError> {
+pub async fn open(database_url: &str) -> Result<Connection, OpError> {
     let url = parse_database_url(database_url)?;
-    let mut conn = connect(&url)?;
-    crate::observe::install_query_trace(&mut conn, "postgresql");
-    migrate(&mut conn)?;
-    Ok(conn)
+    let conn = connect(&url).await?;
+    migrate(conn).await
 }
 
-/// Runs synchronous database work from async code without holding up the
-/// runtime: the worker thread hands its other tasks to another worker for the
-/// duration. Borrows freely, unlike `spawn_blocking`. On a single-threaded
-/// runtime (tests) it just runs `body`.
-pub fn blocking<T>(body: impl FnOnce() -> T) -> T {
-    use tokio::runtime::{Handle, RuntimeFlavor};
-    match Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(body)
-        }
-        _ => body(),
-    }
-}
-
-pub fn pool(database_url: &str) -> Result<Db, OpError> {
+pub async fn pool(database_url: &str) -> Result<Db, OpError> {
     let url = parse_database_url(database_url)?;
-    build_pool(&url, None, pool_size())
+    build_pool(&url, None, pool_size()).await
 }
 
-pub fn pool_for(conn: &mut Connection) -> Result<Db, OpError> {
+pub async fn pool_for(conn: &mut Connection) -> Result<Db, OpError> {
     let schema: String = diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(
         "current_schema()",
     ))
-    .get_result(conn)?;
-    build_pool(&database_url()?, Some(schema), 4)
+    .get_result(conn)
+    .await?;
+    build_pool(&database_url()?, Some(schema), 4).await
 }
 
-fn pool_size() -> u32 {
+fn pool_size() -> usize {
     std::env::var("MARIAN_DB_POOL")
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -889,42 +878,45 @@ fn pool_size() -> u32 {
         .unwrap_or(10)
 }
 
-fn build_pool(url: &str, schema: Option<String>, max_size: u32) -> Result<Db, OpError> {
-    let mut conn = connect(url)?;
+async fn build_pool(url: &str, schema: Option<String>, max_size: usize) -> Result<Db, OpError> {
+    use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+
+    let target = target(url)?;
+    let mut conn = connect_to(&target).await?;
     if let Some(schema) = &schema {
-        set_search_path(&mut conn, schema)?;
+        set_search_path(&mut conn, schema).await?;
     }
-    crate::observe::install_query_trace(&mut conn, "postgresql");
-    migrate(&mut conn)?;
-    drop(conn);
-    let manager = diesel::r2d2::ConnectionManager::<Connection>::new(url);
-    diesel::r2d2::Pool::builder()
+    drop(migrate(conn).await?);
+    let mut config = ManagerConfig::<Connection>::default();
+    config.custom_setup = Box::new(move |_| {
+        let (target, schema) = (target.clone(), schema.clone());
+        Box::pin(async move {
+            let mut conn = connect_to(&target)
+                .await
+                .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
+            if let Some(schema) = &schema {
+                set_search_path(&mut conn, schema)
+                    .await
+                    .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            }
+            Ok(conn)
+        })
+    });
+    // Callers wait at most this long for a free connection, then fail and
+    // try again later. Before a connection is handed out it answers a
+    // `SELECT 1`, and one left mid-transaction is closed instead.
+    let wait = Some(std::time::Duration::from_secs(5));
+    Db::builder(AsyncDieselConnectionManager::new_with_config(url, config))
         .max_size(max_size)
-        // Callers wait at most this long for a free connection, then fail and
-        // try again later, rather than the default 30 seconds.
-        .connection_timeout(std::time::Duration::from_secs(5))
-        .test_on_check_out(true)
-        .connection_customizer(Box::new(Prepare { schema }))
-        .build(manager)
+        .wait_timeout(wait)
+        .create_timeout(wait)
+        .recycle_timeout(wait)
+        .runtime(deadpool::Runtime::Tokio1)
+        .build()
         .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))
 }
 
-#[derive(Debug)]
-struct Prepare {
-    schema: Option<String>,
-}
-
-impl diesel::r2d2::CustomizeConnection<Connection, diesel::r2d2::Error> for Prepare {
-    fn on_acquire(&self, conn: &mut Connection) -> Result<(), diesel::r2d2::Error> {
-        if let Some(schema) = &self.schema {
-            set_search_path(conn, schema).map_err(diesel::r2d2::Error::QueryError)?;
-        }
-        crate::observe::install_query_trace(conn, "postgresql");
-        Ok(())
-    }
-}
-
-fn set_search_path(conn: &mut Connection, schema: &str) -> Result<(), diesel::result::Error> {
+async fn set_search_path(conn: &mut Connection, schema: &str) -> Result<(), diesel::result::Error> {
     if !schema
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
@@ -936,6 +928,7 @@ fn set_search_path(conn: &mut Connection, schema: &str) -> Result<(), diesel::re
     conn.batch_execute(&format!(
         "SET search_path TO {schema}; SET application_name TO '{schema}'"
     ))
+    .await
 }
 
 struct SchemaGuard {
@@ -945,40 +938,64 @@ struct SchemaGuard {
 
 impl Drop for SchemaGuard {
     fn drop(&mut self) {
-        if !recycle_schema(&self.admin_url, &self.schema) {
-            drop_schema(&self.admin_url, &self.schema);
-        }
+        // Dropped as the test's thread ends, after its runtime is gone: the
+        // schema is put away on a thread and runtime of its own.
+        let (admin_url, schema) = (self.admin_url.clone(), self.schema.clone());
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                if !recycle_schema(&admin_url, &schema).await {
+                    drop_schema(&admin_url, &schema).await;
+                }
+            });
+        })
+        .join();
     }
 }
 
 /// Migrating a fresh schema takes most of a database test's time, so a test's
 /// schema is emptied and kept for the next one, unless the test changed its
 /// shape or something still holds a connection to it.
-fn recycle_schema(admin_url: &str, schema: &str) -> bool {
+async fn recycle_schema(admin_url: &str, schema: &str) -> bool {
     let Some(shape) = TEST_SHAPE.get() else {
         return false;
     };
-    let Ok(mut admin) = Connection::establish(admin_url) else {
+    let Ok(mut admin) = connect(admin_url).await else {
         return false;
     };
-    let still_used: i64 =
-        match diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(&format!(
+    // The test's connections closed with its runtime; Postgres may take a
+    // moment to see them go.
+    let mut still_used = 1;
+    for _ in 0..200 {
+        still_used = match diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(&format!(
             "(SELECT count(*) FROM pg_stat_activity \
-              WHERE application_name = '{schema}' AND pid <> pg_backend_pid())"
+                  WHERE application_name = '{schema}' AND pid <> pg_backend_pid())"
         )))
-        .get_result(&mut admin)
+        .get_result::<i64>(&mut admin)
+        .await
         {
             Ok(count) => count,
             Err(_) => return false,
         };
-    if still_used > 0 || schema_shape(&mut admin, schema).as_deref() != Some(shape) {
+        if still_used == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    if still_used > 0 || schema_shape(&mut admin, schema).await.as_deref() != Some(shape) {
         return false;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let emptied = admin.batch_execute(&format!(
-        "DO $$ DECLARE tables text; BEGIN
+    let emptied = admin
+        .batch_execute(&format!(
+            "DO $$ DECLARE tables text; BEGIN
            SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') INTO tables
              FROM pg_tables
             WHERE schemaname = '{schema}' AND tablename <> '__diesel_schema_migrations';
@@ -987,7 +1004,8 @@ fn recycle_schema(admin_url: &str, schema: &str) -> bool {
            END IF;
          END $$;
          COMMENT ON SCHEMA {schema} IS 'pooled {now}'"
-    ));
+        ))
+        .await;
     if emptied.is_err() {
         return false;
     }
@@ -1000,7 +1018,7 @@ fn recycle_schema(admin_url: &str, schema: &str) -> bool {
 /// A fingerprint of everything in `schema` but its rows: tables and columns
 /// with their types and defaults, constraints, indexes, triggers (and whether
 /// they're on), functions, and sequences.
-fn schema_shape(conn: &mut Connection, schema: &str) -> Option<String> {
+async fn schema_shape(conn: &mut Connection, schema: &str) -> Option<String> {
     diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(&format!(
         "md5(replace(concat_ws('|',
            (SELECT string_agg(c.relname || '.' || a.attname || ':' || format_type(a.atttypid, a.atttypmod)
@@ -1028,6 +1046,7 @@ fn schema_shape(conn: &mut Connection, schema: &str) -> Option<String> {
               FROM pg_sequences s WHERE s.schemaname = '{schema}')), '{schema}.', ''))"
     )))
     .get_result(conn)
+    .await
     .ok()
 }
 
@@ -1035,9 +1054,9 @@ thread_local! {
     static TEST_GUARDS: RefCell<Vec<SchemaGuard>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn open_memory() -> Result<Connection, OpError> {
+pub async fn open_memory() -> Result<Connection, OpError> {
     let admin_url = database_url()?;
-    if let Some(conn) = reuse_schema(&admin_url) {
+    if let Some(conn) = reuse_schema(&admin_url).await {
         return Ok(conn);
     }
     let schema = format!(
@@ -1045,55 +1064,96 @@ pub fn open_memory() -> Result<Connection, OpError> {
         std::process::id(),
         TEST_SCHEMAS.fetch_add(1, Ordering::Relaxed)
     );
-    let mut admin = connect(&admin_url)?;
+    let mut admin = connect(&admin_url).await?;
     let pid = std::process::id();
-    TEST_CLEANUP.call_once(|| {
-        let _ = admin.batch_execute(&format!(
-            "DO $$ DECLARE name text; BEGIN
-               FOR name IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'marian_t{pid}_%'
-               LOOP EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', name); END LOOP;
-               -- Kept schemas outlive their test run; drop those idle a while.
-               FOR name IN SELECT nspname FROM pg_namespace
-                            WHERE nspname LIKE 'marian_t%'
-                              AND obj_description(oid, 'pg_namespace') ~ '^pooled [0-9]+$'
-                              AND split_part(obj_description(oid, 'pg_namespace'), ' ', 2)::bigint
-                                  < extract(epoch FROM now()) - 900
-               LOOP EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', name); END LOOP;
-             END $$"
-        ));
-    });
+    // Schemas an earlier run left behind: this process id's, which a run
+    // that ended before cleaning up left, and kept ones idle a while. Each is
+    // dropped on its own, since one transaction dropping them all can run out
+    // of lock slots and fail every test opening a schema meanwhile.
+    TEST_CLEANUP
+        .get_or_init(|| async {
+            let names = async |admin: &mut Connection, which: &str| -> Vec<String> {
+                diesel::select(diesel::dsl::sql::<
+                    diesel::sql_types::Array<diesel::sql_types::Text>,
+                >(&format!(
+                    "ARRAY(SELECT nspname::text FROM pg_namespace WHERE {which})"
+                )))
+                .get_result(admin)
+                .await
+                .unwrap_or_default()
+            };
+            // This process id's could clash with the schemas about to be made.
+            for name in names(&mut admin, &format!("nspname LIKE 'marian_t{pid}_%'")).await {
+                let _ = admin
+                    .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{name}\" CASCADE"))
+                    .await;
+            }
+            // Idle ones can't, so they go on a thread of their own while the
+            // tests run.
+            let idle = names(
+                &mut admin,
+                "nspname LIKE 'marian_t%'
+                 AND obj_description(oid, 'pg_namespace') ~ '^pooled [0-9]+$'
+                 AND split_part(obj_description(oid, 'pg_namespace'), ' ', 2)::bigint
+                     < extract(epoch FROM now()) - 900",
+            )
+            .await;
+            if !idle.is_empty() {
+                let admin_url = admin_url.clone();
+                std::thread::spawn(move || {
+                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    runtime.block_on(async {
+                        let Ok(mut admin) = connect(&admin_url).await else {
+                            return;
+                        };
+                        for name in idle {
+                            let _ = admin
+                                .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{name}\" CASCADE"))
+                                .await;
+                        }
+                    });
+                });
+            }
+        })
+        .await;
     admin
         .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .await
         .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))?;
     drop(admin);
-    let mut conn = match connect(&admin_url) {
+    let mut conn = match connect(&admin_url).await {
         Ok(conn) => conn,
         Err(err) => {
-            drop_schema(&admin_url, &schema);
+            drop_schema(&admin_url, &schema).await;
             return Err(err);
         }
     };
-    if let Err(err) = set_search_path(&mut conn, &schema) {
+    if let Err(err) = set_search_path(&mut conn, &schema).await {
         drop(conn);
-        drop_schema(&admin_url, &schema);
+        drop_schema(&admin_url, &schema).await;
         return Err(OpError::internal(format!(
             "Could not open the database: {err}"
         )));
     }
-    crate::observe::install_query_trace(&mut conn, "postgresql");
-    if let Err(err) = migrate(&mut conn) {
-        drop(conn);
-        drop_schema(&admin_url, &schema);
-        return Err(err);
-    }
+    let conn = match migrate(conn).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            drop_schema(&admin_url, &schema).await;
+            return Err(err);
+        }
+    };
     // Measured from outside the schema, the way recycling measures it, so
     // names read the same.
     if TEST_SHAPE.get().is_none() {
-        if let Some(shape) = Connection::establish(&admin_url)
-            .ok()
-            .and_then(|mut admin| schema_shape(&mut admin, &schema))
-        {
-            let _ = TEST_SHAPE.set(shape);
+        if let Ok(mut admin) = connect(&admin_url).await {
+            if let Some(shape) = schema_shape(&mut admin, &schema).await {
+                let _ = TEST_SHAPE.set(shape);
+            }
         }
     }
     let guard = SchemaGuard { schema, admin_url };
@@ -1102,15 +1162,14 @@ pub fn open_memory() -> Result<Connection, OpError> {
 }
 
 /// A schema an earlier test left migrated and empty, if there is one.
-fn reuse_schema(admin_url: &str) -> Option<Connection> {
+async fn reuse_schema(admin_url: &str) -> Option<Connection> {
     let schema = TEST_POOL.lock().ok()?.pop()?;
-    let mut conn = Connection::establish(admin_url).ok()?;
-    if set_search_path(&mut conn, &schema).is_err() {
+    let mut conn = connect(admin_url).await.ok()?;
+    if set_search_path(&mut conn, &schema).await.is_err() {
         drop(conn);
-        drop_schema(admin_url, &schema);
+        drop_schema(admin_url, &schema).await;
         return None;
     }
-    crate::observe::install_query_trace(&mut conn, "postgresql");
     let guard = SchemaGuard {
         schema,
         admin_url: admin_url.to_string(),
@@ -1119,19 +1178,35 @@ fn reuse_schema(admin_url: &str) -> Option<Connection> {
     Some(conn)
 }
 
-fn connect(url: &str) -> Result<Connection, OpError> {
-    Connection::establish(url)
-        .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))
+/// Opens a connection of its own, outside any pool, as `DATABASE_URL` asks:
+/// with TLS per its `sslmode`, and with its queries traced.
+pub async fn connect(url: &str) -> Result<Connection, OpError> {
+    connect_to(&target(url)?).await
 }
 
-fn drop_schema(admin_url: &str, schema: &str) {
+fn target(url: &str) -> Result<crate::pg_tls::Target, OpError> {
+    crate::pg_tls::Target::parse(url).map_err(OpError::message)
+}
+
+async fn connect_to(target: &crate::pg_tls::Target) -> Result<Connection, OpError> {
+    let mut conn = target
+        .connect()
+        .await
+        .map_err(|err| OpError::internal(format!("Could not open the database: {err}")))?;
+    crate::observe::install_query_trace(&mut conn, "postgresql");
+    Ok(conn)
+}
+
+async fn drop_schema(admin_url: &str, schema: &str) {
     if admin_url.is_empty() || schema.is_empty() {
         return;
     }
-    let Ok(mut admin) = Connection::establish(admin_url) else {
+    let Ok(mut admin) = connect(admin_url).await else {
         return;
     };
-    let _ = admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"));
+    let _ = admin
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .await;
 }
 
 fn parse_database_url(database_url: &str) -> Result<String, OpError> {
@@ -1230,18 +1305,50 @@ fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
 /// schema they run in, so test schemas don't wait on each other.
 const MIGRATION_LOCK: &str = "1835102825, hashtext(current_schema())";
 
-pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
+/// Runs diesel's migration harness, which only speaks to blocking connections,
+/// on a blocking thread over `conn`, and gives the connection back after.
+async fn with_harness<T: Send + 'static>(
+    conn: Connection,
+    work: impl FnOnce(&mut Harness) -> T + Send + 'static,
+) -> Result<(Connection, T), OpError> {
+    tokio::task::spawn_blocking(move || {
+        let mut harness = Harness::from(conn);
+        let done = work(&mut harness);
+        (harness.into_inner(), done)
+    })
+    .await
+    .map_err(|err| OpError::internal(format!("Could not update the database: {err}")))
+}
+
+type Harness = diesel_async::async_connection_wrapper::AsyncConnectionWrapper<Connection>;
+
+/// Brings the schema `conn` is in up to date, and gives the connection back.
+pub async fn migrate(conn: Connection) -> Result<Connection, OpError> {
     let failed = |err: &dyn std::fmt::Display| {
         OpError::internal(format!("Could not update the database: {err}"))
     };
-    conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})"))
-        .map_err(|err| failed(&err))?;
-    let ran = conn.run_pending_migrations(MIGRATIONS).map(drop);
-    // Closing the connection would let it go too, but pool connections stay open.
-    let unlocked = conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})"));
-    ran.map_err(|err| failed(&err))?;
-    unlocked.map_err(|err| failed(&err))?;
-    Ok(())
+    let (conn, done) = with_harness(conn, |conn| {
+        use diesel::connection::SimpleConnection;
+        SimpleConnection::batch_execute(
+            conn,
+            &format!("SELECT pg_advisory_lock({MIGRATION_LOCK})"),
+        )
+        .map_err(|err| err.to_string())?;
+        let ran = conn
+            .run_pending_migrations(MIGRATIONS)
+            .map(drop)
+            .map_err(|err| err.to_string());
+        // Closing the connection would let it go too, but pool connections stay open.
+        let unlocked = SimpleConnection::batch_execute(
+            conn,
+            &format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})"),
+        )
+        .map_err(|err| err.to_string());
+        ran.and(unlocked)
+    })
+    .await?;
+    done.map_err(|err| failed(&err))?;
+    Ok(conn)
 }
 
 /// Takes a server's tick lock for the rest of the transaction. Tasks for one
@@ -1250,26 +1357,52 @@ pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
 /// sees what the first did. The key, "tick" and the server's id, is the one
 /// the five-second tick took, so during an upgrade the old version's tick
 /// and the new version's tasks take turns too.
-pub fn lock_tick(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+pub async fn lock_tick(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     conn.batch_execute(&format!(
         "SELECT pg_advisory_xact_lock(1953065835, {})",
         guild_id.rem_euclid(1 << 31)
-    ))?;
+    ))
+    .await?;
     Ok(())
 }
 
-pub fn with_tx<T>(
-    conn: &mut Connection,
-    body: impl FnOnce(&mut Connection) -> Result<T, OpError>,
-) -> Result<T, OpError> {
-    conn.transaction(body)
+/// Runs `body` in a transaction: committed if it returns `Ok`, rolled back
+/// if it returns `Err` or is dropped part way (the connection is then closed
+/// rather than handed out again). Inside another transaction it is a
+/// savepoint.
+pub async fn with_tx<'c, T, F>(conn: &'c mut Connection, body: F) -> Result<T, OpError>
+where
+    F: for<'r> Work<'r, Result<T, OpError>> + Send + 'c,
+    T: Send + 'c,
+{
+    use diesel_async::AsyncConnection;
+    conn.transaction(body).await
 }
 
-pub fn meta(conn: &mut Connection, key: &str) -> Result<Option<String>, OpError> {
+/// Database work handed to a helper, such as `with_tx`: an async closure,
+/// `async |conn| { ... }`, whose future is `Send` so it can run in any task.
+/// (diesel-async has the same bound for its transactions, but doesn't export
+/// it.)
+pub trait Work<'r, T>:
+    AsyncFnOnce(&'r mut Connection) -> T + FnOnce(&'r mut Connection) -> <Self as Work<'r, T>>::Fut
+{
+    type Fut: std::future::Future<Output = T> + Send;
+}
+
+impl<'r, T, F, Fut> Work<'r, T> for F
+where
+    F: AsyncFnOnce(&'r mut Connection) -> T + FnOnce(&'r mut Connection) -> Fut,
+    Fut: std::future::Future<Output = T> + Send,
+{
+    type Fut = Fut;
+}
+
+pub async fn meta(conn: &mut Connection, key: &str) -> Result<Option<String>, OpError> {
     Ok(schema::meta::table
         .filter(schema::meta::key.eq(key))
         .select(schema::meta::value)
         .first(conn)
+        .await
         .optional()?)
 }
 
@@ -1280,26 +1413,33 @@ struct NewMeta<'a> {
     value: &'a str,
 }
 
-pub fn set_meta(conn: &mut Connection, key: &str, value: &str) -> Result<(), OpError> {
+pub async fn set_meta(conn: &mut Connection, key: &str, value: &str) -> Result<(), OpError> {
     diesel::insert_into(schema::meta::table)
         .values(&NewMeta { key, value })
         .on_conflict(schema::meta::key)
         .do_update()
         .set(schema::meta::value.eq(value))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn list_guilds(conn: &mut Connection) -> Result<Vec<Guild>, OpError> {
-    Ok(Guild::query().order(schema::guilds::id.asc()).load(conn)?)
+pub async fn list_guilds(conn: &mut Connection) -> Result<Vec<Guild>, OpError> {
+    Ok(Guild::query()
+        .order(schema::guilds::id.asc())
+        .load(conn)
+        .await?)
 }
 
-pub fn guild(conn: &mut Connection, id: i64) -> Result<Option<Guild>, OpError> {
-    Ok(Guild::by_id(id).first(conn).optional()?)
+pub async fn guild(conn: &mut Connection, id: i64) -> Result<Option<Guild>, OpError> {
+    Ok(Guild::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn guild_by_discord(conn: &mut Connection, discord_id: &str) -> Result<Option<Guild>, OpError> {
-    Ok(Guild::by_discord(discord_id).first(conn).optional()?)
+pub async fn guild_by_discord(
+    conn: &mut Connection,
+    discord_id: &str,
+) -> Result<Option<Guild>, OpError> {
+    Ok(Guild::by_discord(discord_id).first(conn).await.optional()?)
 }
 
 pub fn default_settings(guild_id: i64) -> Settings {
@@ -1339,18 +1479,20 @@ struct NewSettings {
 /// A new server's settings, and the attendance it starts with: Accepted,
 /// Declined, and Tentative in the library, and a Standard preset listing them
 /// as the default.
-pub fn has_settings(conn: &mut Connection, guild_id: i64) -> Result<bool, OpError> {
+pub async fn has_settings(conn: &mut Connection, guild_id: i64) -> Result<bool, OpError> {
     Ok(diesel::select(diesel::dsl::exists(
         schema::settings::table.filter(schema::settings::guild_id.eq(guild_id)),
     ))
-    .get_result(conn)?)
+    .get_result(conn)
+    .await?)
 }
 
-pub fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+pub async fn insert_default_settings(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     diesel::insert_into(schema::settings::table)
         .values(&NewSettings { guild_id })
-        .execute(conn)?;
-    seed_attendance(conn, guild_id)
+        .execute(conn)
+        .await?;
+    seed_attendance(conn, guild_id).await
 }
 
 /// The types every server starts with: name, emoji, and whether they count as attending.
@@ -1362,12 +1504,12 @@ pub const STARTING_TYPES: [(&str, &str, bool); 3] = [
 
 /// Puts the starting types in the library and, when the server has no default
 /// preset, makes a Standard one with them. What is already there stays.
-pub fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+pub async fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
     let mut types = Vec::new();
     for (name, emoji, attending) in STARTING_TYPES {
-        types.push(insert_type(conn, guild_id, name, emoji, attending)?);
+        types.push(insert_type(conn, guild_id, name, emoji, attending).await?);
     }
-    if settings(conn, guild_id)?.default_preset_id.is_some() {
+    if settings(conn, guild_id).await?.default_preset_id.is_some() {
         return Ok(());
     }
     let preset_id: i64 = diesel::insert_into(schema::presets::table)
@@ -1378,7 +1520,8 @@ pub fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpErr
             schema::presets::multiple_signups.eq(false),
         ))
         .returning(schema::presets::id)
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     let rows: Vec<_> = types
         .iter()
         .enumerate()
@@ -1392,19 +1535,20 @@ pub fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpErr
         .collect();
     diesel::insert_into(schema::preset_options::table)
         .values(&rows)
-        .execute(conn)?;
-    set_default_preset(conn, guild_id, Some(preset_id))
+        .execute(conn)
+        .await?;
+    set_default_preset(conn, guild_id, Some(preset_id)).await
 }
 
 /// The library type with this name (any case), made if missing.
-pub fn insert_type(
+pub async fn insert_type(
     conn: &mut Connection,
     guild_id: i64,
     name: &str,
     emoji: &str,
     attending: bool,
 ) -> Result<i64, OpError> {
-    if let Some(found) = library_type_named(conn, guild_id, name)? {
+    if let Some(found) = library_type_named(conn, guild_id, name).await? {
         return Ok(found.id);
     }
     Ok(diesel::insert_into(schema::option_library::table)
@@ -1415,28 +1559,34 @@ pub fn insert_type(
             schema::option_library::attending.eq(attending),
         ))
         .returning(schema::option_library::id)
-        .get_result(conn)?)
+        .get_result(conn)
+        .await?)
 }
 
-pub fn set_default_preset(
+pub async fn set_default_preset(
     conn: &mut Connection,
     guild_id: i64,
     preset_id: Option<i64>,
 ) -> Result<(), OpError> {
     diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(guild_id)))
         .set(schema::settings::default_preset_id.eq(preset_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn library_type(conn: &mut Connection, id: i64) -> Result<Option<LibraryOption>, OpError> {
+pub async fn library_type(
+    conn: &mut Connection,
+    id: i64,
+) -> Result<Option<LibraryOption>, OpError> {
     Ok(LibraryOption::query()
         .filter(schema::option_library::id.eq(id))
         .first(conn)
+        .await
         .optional()?)
 }
 
-pub fn library_type_named(
+pub async fn library_type_named(
     conn: &mut Connection,
     guild_id: i64,
     name: &str,
@@ -1445,10 +1595,11 @@ pub fn library_type_named(
         .filter(schema::option_library::guild_id.eq(guild_id))
         .filter(schema::lower(schema::option_library::name).eq(name.trim().to_lowercase()))
         .first(conn)
+        .await
         .optional()?)
 }
 
-pub fn library_type_by_public(
+pub async fn library_type_by_public(
     conn: &mut Connection,
     guild_id: i64,
     public_id: &str,
@@ -1460,6 +1611,7 @@ pub fn library_type_by_public(
         .filter(schema::option_library::guild_id.eq(guild_id))
         .filter(schema::option_library::public_id.eq(public_id))
         .first(conn)
+        .await
         .optional()?)
 }
 
@@ -1500,7 +1652,7 @@ impl TypeUsage {
 }
 
 /// Every library type of a server that is in use, and where.
-pub fn type_usage(
+pub async fn type_usage(
     conn: &mut Connection,
     guild_id: i64,
 ) -> Result<std::collections::HashMap<i64, TypeUsage>, OpError> {
@@ -1510,7 +1662,8 @@ pub fn type_usage(
         .filter(schema::events::guild_id.eq(guild_id))
         .group_by(schema::signup_options::type_id)
         .select((schema::signup_options::type_id, diesel::dsl::count_star()))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     for (type_id, count) in events {
         usage.entry(type_id).or_default().events = count;
     }
@@ -1519,7 +1672,8 @@ pub fn type_usage(
         .filter(schema::presets::guild_id.eq(guild_id))
         .group_by(schema::preset_options::type_id)
         .select((schema::preset_options::type_id, diesel::dsl::count_star()))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     for (type_id, count) in presets {
         usage.entry(type_id).or_default().presets = count;
     }
@@ -1528,17 +1682,19 @@ pub fn type_usage(
         .filter(schema::event_templates::guild_id.eq(guild_id))
         .group_by(schema::template_options::type_id)
         .select((schema::template_options::type_id, diesel::dsl::count_star()))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     for (type_id, count) in templates {
         usage.entry(type_id).or_default().templates = count;
     }
     Ok(usage)
 }
 
-pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpError> {
+pub async fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpError> {
     let row: SettingsRow = SettingsRow::query()
         .filter(schema::settings::guild_id.eq(guild_id))
         .first(conn)
+        .await
         .optional()?
         .ok_or_else(|| OpError::message("This server has no settings yet."))?;
     let mut settings = Settings::from(row);
@@ -1549,7 +1705,8 @@ pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpErro
             schema::permission_roles::kind,
             schema::permission_roles::role_id,
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     for (kind, role_id) in granted {
         settings.permission_mut(kind).push(role_id);
     }
@@ -1565,18 +1722,19 @@ struct NewPermissionRole {
 }
 
 /// Saves the settings row and replaces the roles each permission names.
-pub fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
-    with_tx(conn, |tx| update_settings_tx(tx, settings))
+pub async fn update_settings(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
+    with_tx(conn, async |tx| update_settings_tx(tx, settings).await).await
 }
 
-fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
+async fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), OpError> {
     let row = settings.row();
-    diesel::update(&row).set(&row).execute(conn)?;
+    diesel::update(&row).set(&row).execute(conn).await?;
     diesel::delete(
         schema::permission_roles::table
             .filter(schema::permission_roles::guild_id.eq(settings.guild_id)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     let mut rows = Vec::new();
     for &kind in Permission::ALL {
         let mut ids = settings.permission(kind).to_vec();
@@ -1591,31 +1749,34 @@ fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), 
     if !rows.is_empty() {
         diesel::insert_into(schema::permission_roles::table)
             .values(&rows)
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
     Ok(())
 }
 
-pub fn set_guild_timezone(
+pub async fn set_guild_timezone(
     conn: &mut Connection,
     guild_id: i64,
     timezone: &str,
 ) -> Result<(), OpError> {
     diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
         .set(schema::guilds::timezone.eq(timezone))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// The server's roles that still exist in Discord.
-pub fn list_roles(conn: &mut Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
+pub async fn list_roles(conn: &mut Connection, guild_id: i64) -> Result<Vec<Role>, OpError> {
     Ok(Role::in_guild(guild_id)
         .filter(schema::roles::gone_at.is_null())
         .order(schema::roles::id.asc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn role_by_discord(
+pub async fn role_by_discord(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
@@ -1623,70 +1784,81 @@ pub fn role_by_discord(
     Ok(Role::in_guild(guild_id)
         .filter(schema::roles::discord_id.eq(discord_id))
         .first(conn)
+        .await
         .optional()?)
 }
 
-pub fn role(conn: &mut Connection, id: i64) -> Result<Option<Role>, OpError> {
-    Ok(Role::by_id(id).first(conn).optional()?)
+pub async fn role(conn: &mut Connection, id: i64) -> Result<Option<Role>, OpError> {
+    Ok(Role::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn role_by_name(
+pub async fn role_by_name(
     conn: &mut Connection,
     guild_id: i64,
     name: &str,
 ) -> Result<Option<Role>, OpError> {
-    Ok(Role::named(guild_id, name).first(conn).optional()?)
+    Ok(Role::named(guild_id, name).first(conn).await.optional()?)
 }
 
 /// The server's channels that still exist, for picking where to post.
-pub fn list_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
+pub async fn list_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
     Ok(Channel::in_guild(guild_id)
         .filter(schema::channels::gone_at.is_null())
         .order((schema::channels::position.asc(), schema::channels::id.asc()))
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
 /// Every channel the server has had, including deleted ones events still point at.
-pub fn all_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
+pub async fn all_channels(conn: &mut Connection, guild_id: i64) -> Result<Vec<Channel>, OpError> {
     Ok(Channel::in_guild(guild_id)
         .order((schema::channels::position.asc(), schema::channels::id.asc()))
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn channel(conn: &mut Connection, id: i64) -> Result<Option<Channel>, OpError> {
-    Ok(Channel::by_id(id).first(conn).optional()?)
+pub async fn channel(conn: &mut Connection, id: i64) -> Result<Option<Channel>, OpError> {
+    Ok(Channel::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn channel_by_name(
+pub async fn channel_by_name(
     conn: &mut Connection,
     guild_id: i64,
     name: &str,
 ) -> Result<Option<Channel>, OpError> {
     let name = name.trim_start_matches('#');
-    Ok(Channel::named(guild_id, name).first(conn).optional()?)
+    Ok(Channel::named(guild_id, name)
+        .first(conn)
+        .await
+        .optional()?)
 }
 
-pub fn channel_by_discord(
+pub async fn channel_by_discord(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
 ) -> Result<Option<Channel>, OpError> {
     Ok(Channel::by_discord(guild_id, discord_id)
         .first(conn)
+        .await
         .optional()?)
 }
 
-pub fn list_memberships(conn: &mut Connection, guild_id: i64) -> Result<Vec<Membership>, OpError> {
+pub async fn list_memberships(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<Vec<Membership>, OpError> {
     Ok(Membership::in_guild(guild_id)
         .order(schema::memberships::name.asc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn membership(conn: &mut Connection, id: i64) -> Result<Option<Membership>, OpError> {
-    Ok(Membership::by_id(id).first(conn).optional()?)
+pub async fn membership(conn: &mut Connection, id: i64) -> Result<Option<Membership>, OpError> {
+    Ok(Membership::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn membership_by_handle(
+pub async fn membership_by_handle(
     conn: &mut Connection,
     guild_id: i64,
     handle: &str,
@@ -1694,6 +1866,7 @@ pub fn membership_by_handle(
     let handle = handle.trim_start_matches('@');
     Ok(Membership::by_handle(guild_id, handle)
         .first(conn)
+        .await
         .optional()?)
 }
 
@@ -1703,20 +1876,22 @@ struct NewUser<'a> {
     discord_id: &'a str,
 }
 
-pub fn ensure_user(conn: &mut Connection, discord_id: &str) -> Result<i64, OpError> {
+pub async fn ensure_user(conn: &mut Connection, discord_id: &str) -> Result<i64, OpError> {
     diesel::insert_into(schema::users::table)
         .values(&NewUser { discord_id })
         .on_conflict(schema::users::discord_id)
         .do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     schema::users::table
         .filter(schema::users::discord_id.eq(discord_id))
         .select(schema::users::id)
         .first(conn)
+        .await
         .map_err(Into::into)
 }
 
-pub fn discord_id_for_membership(
+pub async fn discord_id_for_membership(
     conn: &mut Connection,
     membership_id: i64,
 ) -> Result<String, OpError> {
@@ -1725,11 +1900,12 @@ pub fn discord_id_for_membership(
         .filter(schema::memberships::id.eq(membership_id))
         .select(schema::users::discord_id)
         .first(conn)
+        .await
         .optional()?
         .ok_or(OpError::NotFound)
 }
 
-pub fn membership_by_discord(
+pub async fn membership_by_discord(
     conn: &mut Connection,
     guild_id: i64,
     discord_id: &str,
@@ -1740,21 +1916,23 @@ pub fn membership_by_discord(
         .filter(schema::users::discord_id.eq(discord_id))
         .select(Membership::as_select())
         .first(conn)
+        .await
         .optional()?)
 }
 
-pub fn membership_role_ids(
+pub async fn membership_role_ids(
     conn: &mut Connection,
     membership: &Membership,
 ) -> Result<Vec<i64>, OpError> {
     let roles: Vec<Role> = MembershipRole::belonging_to(membership)
         .inner_join(schema::roles::table)
         .select(Role::as_select())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(roles.into_iter().map(|role| role.id).collect())
 }
 
-pub fn membership_has_role(
+pub async fn membership_has_role(
     conn: &mut Connection,
     membership_id: i64,
     role_id: i64,
@@ -1763,17 +1941,18 @@ pub fn membership_has_role(
         .filter(schema::membership_roles::membership_id.eq(membership_id))
         .filter(schema::membership_roles::role_id.eq(role_id))
         .count()
-        .get_result(conn)?;
+        .get_result(conn)
+        .await?;
     Ok(n > 0)
 }
 
-pub fn replace_discord_roles(
+pub async fn replace_discord_roles(
     conn: &mut Connection,
     guild_id: i64,
     membership_id: i64,
     discord_role_ids: &[String],
 ) -> Result<(), OpError> {
-    let known = list_roles(conn, guild_id)?;
+    let known = list_roles(conn, guild_id).await?;
     let role_ids: Vec<i64> = known
         .into_iter()
         .filter(|role| {
@@ -1786,14 +1965,16 @@ pub fn replace_discord_roles(
     // Requests and the gateway may replace the same member's roles at once:
     // the transaction keeps readers from seeing them roleless in between, and
     // the insert skips rows another replacement has just written.
-    conn.transaction(|conn| {
+    with_tx(conn, async |conn| {
         diesel::delete(
             schema::membership_roles::table
                 .filter(schema::membership_roles::membership_id.eq(membership_id)),
         )
-        .execute(conn)?;
-        insert_membership_roles(conn, membership_id, &role_ids)
+        .execute(conn)
+        .await?;
+        insert_membership_roles(conn, membership_id, &role_ids).await
     })
+    .await
 }
 
 #[derive(Insertable)]
@@ -1803,7 +1984,7 @@ struct NewMembershipRole {
     role_id: i64,
 }
 
-pub fn insert_membership_roles(
+pub async fn insert_membership_roles(
     conn: &mut Connection,
     membership_id: i64,
     role_ids: &[i64],
@@ -1824,37 +2005,42 @@ pub fn insert_membership_roles(
     diesel::insert_into(schema::membership_roles::table)
         .values(&rows)
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn event(conn: &mut Connection, id: i64) -> Result<Option<Event>, OpError> {
-    Ok(Event::by_id(id).first(conn).optional()?)
+pub async fn event(conn: &mut Connection, id: i64) -> Result<Option<Event>, OpError> {
+    Ok(Event::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn event_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Event>, OpError> {
+pub async fn event_by_public(
+    conn: &mut Connection,
+    public_id: &str,
+) -> Result<Option<Event>, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Ok(None);
     };
-    Ok(Event::by_public(public_id).first(conn).optional()?)
+    Ok(Event::by_public(public_id).first(conn).await.optional()?)
 }
 
-pub fn discord_server_id(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
-    let guild = guild(conn, guild_id)?.ok_or(OpError::NotFound)?;
+pub async fn discord_server_id(conn: &mut Connection, guild_id: i64) -> Result<String, OpError> {
+    let guild = guild(conn, guild_id).await?.ok_or(OpError::NotFound)?;
     guild
         .discord_id
         .filter(|id| !id.is_empty())
         .ok_or(OpError::NotFound)
 }
 
-pub fn list_events(conn: &mut Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
+pub async fn list_events(conn: &mut Connection, guild_id: i64) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_guild(guild_id)
         .order((schema::events::starts_at.asc(), schema::events::id.asc()))
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
 /// The server's events in `status`, soonest first.
-pub fn events_with_status(
+pub async fn events_with_status(
     conn: &mut Connection,
     guild_id: i64,
     status: EventStatus,
@@ -1862,37 +2048,49 @@ pub fn events_with_status(
     Ok(Event::in_guild(guild_id)
         .filter(schema::events::status.eq(status))
         .order((schema::events::starts_at.asc(), schema::events::id.asc()))
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn events_in_series(conn: &mut Connection, series_id: i64) -> Result<Vec<Event>, OpError> {
+pub async fn events_in_series(
+    conn: &mut Connection,
+    series_id: i64,
+) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_series(series_id)
         .order((
             schema::events::occurrence_index.asc(),
             schema::events::id.asc(),
         ))
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn list_series(conn: &mut Connection, guild_id: i64) -> Result<Vec<Series>, OpError> {
+pub async fn list_series(conn: &mut Connection, guild_id: i64) -> Result<Vec<Series>, OpError> {
     Ok(Series::in_guild(guild_id)
         .order(schema::series::id.desc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn series(conn: &mut Connection, id: i64) -> Result<Option<Series>, OpError> {
-    Ok(Series::by_id(id).first(conn).optional()?)
+pub async fn series(conn: &mut Connection, id: i64) -> Result<Option<Series>, OpError> {
+    Ok(Series::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn series_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Series>, OpError> {
+pub async fn series_by_public(
+    conn: &mut Connection,
+    public_id: &str,
+) -> Result<Option<Series>, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Ok(None);
     };
-    Ok(Series::by_public(public_id).first(conn).optional()?)
+    Ok(Series::by_public(public_id).first(conn).await.optional()?)
 }
 
-pub fn options_for(conn: &mut Connection, event: &Event) -> Result<Vec<SignupOption>, OpError> {
-    load_options(conn, OptionsOf::Events(&[event.id]))
+pub async fn options_for(
+    conn: &mut Connection,
+    event: &Event,
+) -> Result<Vec<SignupOption>, OpError> {
+    load_options(conn, OptionsOf::Events(&[event.id])).await
 }
 
 enum OptionsOf<'a> {
@@ -1901,7 +2099,10 @@ enum OptionsOf<'a> {
 }
 
 /// Options with their library type, in each event's order.
-fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOption>, OpError> {
+async fn load_options(
+    conn: &mut Connection,
+    of: OptionsOf<'_>,
+) -> Result<Vec<SignupOption>, OpError> {
     let mut query = schema::signup_options::table
         .inner_join(schema::option_library::table)
         .select((
@@ -1922,7 +2123,7 @@ fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOp
         OptionsOf::Events(ids) => query.filter(schema::signup_options::event_id.eq_any(ids)),
         OptionsOf::One(id) => query.filter(schema::signup_options::id.eq(id)),
     };
-    let rows: Vec<(SignupOptionRow, (String, String, bool, Uuid))> = query.load(conn)?;
+    let rows: Vec<(SignupOptionRow, (String, String, bool, Uuid))> = query.load(conn).await?;
     Ok(rows
         .into_iter()
         .map(
@@ -1944,7 +2145,7 @@ fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOp
         .collect())
 }
 
-pub fn options_by_event(
+pub async fn options_by_event(
     conn: &mut Connection,
     events: &[Event],
 ) -> Result<Vec<Vec<SignupOption>>, OpError> {
@@ -1952,7 +2153,7 @@ pub fn options_by_event(
         return Ok(Vec::new());
     }
     let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
-    let rows = load_options(conn, OptionsOf::Events(&ids))?;
+    let rows = load_options(conn, OptionsOf::Events(&ids)).await?;
     Ok(events
         .iter()
         .map(|event| {
@@ -1964,15 +2165,18 @@ pub fn options_by_event(
         .collect())
 }
 
-pub fn option(conn: &mut Connection, id: i64) -> Result<Option<SignupOption>, OpError> {
-    Ok(load_options(conn, OptionsOf::One(id))?.into_iter().next())
+pub async fn option(conn: &mut Connection, id: i64) -> Result<Option<SignupOption>, OpError> {
+    Ok(load_options(conn, OptionsOf::One(id))
+        .await?
+        .into_iter()
+        .next())
 }
 
-pub fn signups_for(conn: &mut Connection, event: &Event) -> Result<Vec<Signup>, OpError> {
-    Ok(Signup::for_event(event.id).load(conn)?)
+pub async fn signups_for(conn: &mut Connection, event: &Event) -> Result<Vec<Signup>, OpError> {
+    Ok(Signup::for_event(event.id).load(conn).await?)
 }
 
-pub fn signups_by_event(
+pub async fn signups_by_event(
     conn: &mut Connection,
     events: &[Event],
 ) -> Result<Vec<Vec<Signup>>, OpError> {
@@ -1980,15 +2184,15 @@ pub fn signups_by_event(
         return Ok(Vec::new());
     }
     let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
-    let rows = Signup::for_events(&ids).load(conn)?;
+    let rows = Signup::for_events(&ids).load(conn).await?;
     Ok(rows.grouped_by(events))
 }
 
-pub fn reminders_for(conn: &mut Connection, event: &Event) -> Result<Vec<Reminder>, OpError> {
-    Ok(Reminder::for_event(event.id).load(conn)?)
+pub async fn reminders_for(conn: &mut Connection, event: &Event) -> Result<Vec<Reminder>, OpError> {
+    Ok(Reminder::for_event(event.id).load(conn).await?)
 }
 
-pub fn reminders_by_event(
+pub async fn reminders_by_event(
     conn: &mut Connection,
     events: &[Event],
 ) -> Result<Vec<Vec<Reminder>>, OpError> {
@@ -1996,11 +2200,11 @@ pub fn reminders_by_event(
         return Ok(Vec::new());
     }
     let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
-    let rows = Reminder::for_events(&ids).load(conn)?;
+    let rows = Reminder::for_events(&ids).load(conn).await?;
     Ok(rows.grouped_by(events))
 }
 
-pub fn events_in_active_series(
+pub async fn events_in_active_series(
     conn: &mut Connection,
     guild_id: i64,
 ) -> Result<Vec<Event>, OpError> {
@@ -2014,10 +2218,11 @@ pub fn events_in_active_series(
             schema::events::id.asc(),
         ))
         .select(Event::as_select())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn event_role_ids(
+pub async fn event_role_ids(
     conn: &mut Connection,
     event: &Event,
     kind: EventRoleKind,
@@ -2026,13 +2231,14 @@ pub fn event_role_ids(
         .filter(schema::event_roles::kind.eq(kind))
         .inner_join(schema::roles::table)
         .select(Role::as_select())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(roles.into_iter().map(|role| role.id).collect())
 }
 
 /// A server's activity, or only one of its events'.
 /// The server's activity, or one event's, leaving out the `hidden` events'.
-pub fn count_activity(
+pub async fn count_activity(
     conn: &mut Connection,
     guild_id: i64,
     event_id: Option<i64>,
@@ -2049,10 +2255,10 @@ pub fn count_activity(
                 .or(schema::activity::event_id.ne_all(hidden.to_vec())),
         );
     }
-    Ok(query.count().get_result(conn)?)
+    Ok(query.count().get_result(conn).await?)
 }
 
-pub fn list_activity(
+pub async fn list_activity(
     conn: &mut Connection,
     guild_id: i64,
     event_id: Option<i64>,
@@ -2075,60 +2281,78 @@ pub fn list_activity(
         .order(schema::activity::id.desc())
         .limit(limit)
         .offset(offset)
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn list_presets(conn: &mut Connection, guild_id: i64) -> Result<Vec<Preset>, OpError> {
+pub async fn list_presets(conn: &mut Connection, guild_id: i64) -> Result<Vec<Preset>, OpError> {
     Ok(Preset::in_guild(guild_id)
         .order(schema::presets::name.asc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn preset(conn: &mut Connection, id: i64) -> Result<Option<Preset>, OpError> {
-    Ok(Preset::by_id(id).first(conn).optional()?)
+pub async fn preset(conn: &mut Connection, id: i64) -> Result<Option<Preset>, OpError> {
+    Ok(Preset::by_id(id).first(conn).await.optional()?)
 }
 
-pub fn preset_by_public(conn: &mut Connection, public_id: &str) -> Result<Option<Preset>, OpError> {
+pub async fn preset_by_public(
+    conn: &mut Connection,
+    public_id: &str,
+) -> Result<Option<Preset>, OpError> {
     let Some(public_id) = crate::ids::parse_event_id(public_id) else {
         return Ok(None);
     };
-    Ok(Preset::by_public(public_id).first(conn).optional()?)
+    Ok(Preset::by_public(public_id).first(conn).await.optional()?)
 }
 
-pub fn list_library(conn: &mut Connection, guild_id: i64) -> Result<Vec<LibraryOption>, OpError> {
+pub async fn list_library(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<Vec<LibraryOption>, OpError> {
     Ok(LibraryOption::query()
         .filter(schema::option_library::guild_id.eq(guild_id))
         .order(schema::option_library::name.asc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
-pub fn thread_member_ids(conn: &mut Connection, event: &Event) -> Result<Vec<i64>, OpError> {
+pub async fn thread_member_ids(conn: &mut Connection, event: &Event) -> Result<Vec<i64>, OpError> {
     let members: Vec<Membership> = ThreadMember::belonging_to(event)
         .inner_join(schema::memberships::table)
         .select(Membership::as_select())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(members.into_iter().map(|member| member.id).collect())
 }
 
-pub fn grant_membership_ids(conn: &mut Connection, event: &Event) -> Result<Vec<i64>, OpError> {
+pub async fn grant_membership_ids(
+    conn: &mut Connection,
+    event: &Event,
+) -> Result<Vec<i64>, OpError> {
     let members: Vec<Membership> = RoleGrant::belonging_to(event)
         .inner_join(schema::memberships::table)
         .select(Membership::as_select())
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(members.into_iter().map(|member| member.id).collect())
 }
 
-pub fn thread_discord_id(conn: &mut Connection, event_id: i64) -> Result<Option<String>, OpError> {
+pub async fn thread_discord_id(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<String>, OpError> {
     Ok(schema::threads::table
         .filter(schema::threads::event_id.eq(event_id))
         .select(schema::threads::discord_id)
         .first(conn)
+        .await
         .optional()?
         .flatten())
 }
 
 /// Remembers an event's Discord thread, whether or not Marian kept a row for it yet.
-pub fn set_thread_discord_id(
+pub async fn set_thread_discord_id(
     conn: &mut Connection,
     event_id: i64,
     name: &str,
@@ -2143,22 +2367,24 @@ pub fn set_thread_discord_id(
         .on_conflict(schema::threads::event_id)
         .do_update()
         .set(schema::threads::discord_id.eq(discord_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn set_role_discord_id(
+pub async fn set_role_discord_id(
     conn: &mut Connection,
     role_id: i64,
     discord_id: &str,
 ) -> Result<(), OpError> {
     diesel::update(schema::roles::table.filter(schema::roles::id.eq(role_id)))
         .set(schema::roles::discord_id.eq(discord_id))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn discord_ids_for_memberships(
+pub async fn discord_ids_for_memberships(
     conn: &mut Connection,
     membership_ids: &[i64],
 ) -> Result<Vec<String>, OpError> {
@@ -2166,13 +2392,14 @@ pub fn discord_ids_for_memberships(
         .inner_join(schema::users::table)
         .filter(schema::memberships::id.eq_any(membership_ids))
         .select(schema::users::discord_id)
-        .load(conn)?;
+        .load(conn)
+        .await?;
     ids.sort();
     ids.dedup();
     Ok(ids)
 }
 
-pub fn applied_membership_ids(
+pub async fn applied_membership_ids(
     conn: &mut Connection,
     event_id: i64,
     kind: AccessKind,
@@ -2182,7 +2409,8 @@ pub fn applied_membership_ids(
         .filter(schema::applied_access::kind.eq(kind))
         .order(schema::applied_access::discord_user_id.asc())
         .select(schema::applied_access::discord_user_id)
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
 #[derive(Insertable)]
@@ -2193,7 +2421,7 @@ struct NewApplied<'a> {
     kind: AccessKind,
 }
 
-pub fn mark_applied(
+pub async fn mark_applied(
     conn: &mut Connection,
     event_id: i64,
     kind: AccessKind,
@@ -2206,11 +2434,12 @@ pub fn mark_applied(
             kind,
         })
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn clear_applied(
+pub async fn clear_applied(
     conn: &mut Connection,
     event_id: i64,
     kind: AccessKind,
@@ -2222,11 +2451,12 @@ pub fn clear_applied(
             .filter(schema::applied_access::kind.eq(kind))
             .filter(schema::applied_access::discord_user_id.eq(discord_user_id)),
     )
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
-pub fn count_status(
+pub async fn count_status(
     conn: &mut Connection,
     guild_id: i64,
     status: EventStatus,
@@ -2235,11 +2465,12 @@ pub fn count_status(
         .filter(schema::events::guild_id.eq(guild_id))
         .filter(schema::events::status.eq(status))
         .count()
-        .get_result(conn)?)
+        .get_result(conn)
+        .await?)
 }
 
 /// Posted events that have not ended, plus scheduled posts.
-pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+pub async fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
     let now = Utc::now();
     let rows: Vec<(EventStatus, DateTime<Utc>, i64)> = schema::events::table
         .filter(schema::events::guild_id.eq(guild_id))
@@ -2249,7 +2480,8 @@ pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpErr
             schema::events::starts_at,
             schema::events::duration_minutes,
         ))
-        .load(conn)?;
+        .load(conn)
+        .await?;
     Ok(rows
         .into_iter()
         .filter(|(status, starts, minutes)| match status {
@@ -2260,13 +2492,14 @@ pub fn count_upcoming(conn: &mut Connection, guild_id: i64) -> Result<i64, OpErr
         .count() as i64)
 }
 
-pub fn count_active_series(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
+pub async fn count_active_series(conn: &mut Connection, guild_id: i64) -> Result<i64, OpError> {
     Ok(schema::series::table
         .filter(schema::series::guild_id.eq(guild_id))
         .filter(schema::series::active.eq(true))
         .filter(schema::series::cadence.ne(Cadence::Once))
         .count()
-        .get_result(conn)?)
+        .get_result(conn)
+        .await?)
 }
 
 pub struct WebSession {
@@ -2307,7 +2540,7 @@ struct NewWebSession<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn insert_web_session(
+pub async fn insert_web_session(
     conn: &mut Connection,
     token: &str,
     discord_user_id: &str,
@@ -2321,7 +2554,7 @@ pub fn insert_web_session(
     let discord_user_id = discord_user_id.to_string();
     let display_name = display_name.to_string();
     let guilds = guilds.to_vec();
-    conn.transaction(|conn| {
+    with_tx(conn, async |conn| {
         diesel::insert_into(schema::web_sessions::table)
             .values(&NewWebSession {
                 token: &token,
@@ -2334,10 +2567,12 @@ pub fn insert_web_session(
                 discord_refresh: grant.map(|grant| grant.refresh.as_str()),
                 discord_expires_at: grant.map(|grant| grant.expires_at),
             })
-            .execute(conn)?;
-        insert_session_guilds(conn, &token, &guilds)?;
+            .execute(conn)
+            .await?;
+        insert_session_guilds(conn, &token, &guilds).await?;
         Ok(())
     })
+    .await
 }
 
 #[derive(Insertable)]
@@ -2347,7 +2582,7 @@ struct NewSessionGuild<'a> {
     guild_id: i64,
 }
 
-fn insert_session_guilds(
+async fn insert_session_guilds(
     conn: &mut Connection,
     token: &str,
     guilds: &[i64],
@@ -2364,21 +2599,27 @@ fn insert_session_guilds(
     }
     diesel::insert_into(schema::web_session_guilds::table)
         .values(&rows)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
-pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSession>, OpError> {
+pub async fn web_session(
+    conn: &mut Connection,
+    token: &str,
+) -> Result<Option<WebSession>, OpError> {
     let Some(row) = SessionRow::query()
         .filter(schema::web_sessions::token.eq(token))
         .first(conn)
+        .await
         .optional()?
     else {
         return Ok(None);
     };
     let guilds = SessionGuild::belonging_to(&row)
         .select(SessionGuild::as_select())
-        .load(conn)?
+        .load(conn)
+        .await?
         .into_iter()
         .map(|link| link.guild_id)
         .collect();
@@ -2411,7 +2652,7 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
 /// requests asks Discord once.
 /// Claims the session's next server check: true for exactly one caller once
 /// the last check is older than `checked_before`, across requests and replicas.
-pub fn claim_session_guilds_check(
+pub async fn claim_session_guilds_check(
     conn: &mut Connection,
     token: &str,
     checked_before: DateTime<Utc>,
@@ -2422,12 +2663,13 @@ pub fn claim_session_guilds_check(
             .filter(schema::web_sessions::guilds_checked_at.lt(checked_before)),
     )
     .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(claimed == 1)
 }
 
 /// Replaces the session's grant; `None` forgets it once Discord stops honouring it.
-pub fn set_session_grant(
+pub async fn set_session_grant(
     conn: &mut Connection,
     token: &str,
     grant: Option<&DiscordGrant>,
@@ -2438,33 +2680,37 @@ pub fn set_session_grant(
             schema::web_sessions::discord_refresh.eq(grant.map(|grant| grant.refresh.as_str())),
             schema::web_sessions::discord_expires_at.eq(grant.map(|grant| grant.expires_at)),
         ))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// Swaps the session's servers for `guilds`, landing on `home` when the one it
 /// pointed at is no longer among them.
-pub fn replace_session_guilds(
+pub async fn replace_session_guilds(
     conn: &mut Connection,
     token: &str,
     guilds: &[i64],
     home: (i64, i64),
 ) -> Result<(), OpError> {
-    conn.transaction(|conn| {
+    with_tx(conn, async |conn| {
         diesel::delete(
             schema::web_session_guilds::table.filter(schema::web_session_guilds::token.eq(token)),
         )
-        .execute(conn)?;
-        insert_session_guilds(conn, token, guilds)?;
+        .execute(conn)
+        .await?;
+        insert_session_guilds(conn, token, guilds).await?;
         let current: i64 = schema::web_sessions::table
             .filter(schema::web_sessions::token.eq(token))
             .select(schema::web_sessions::guild_id)
-            .first(conn)?;
+            .first(conn)
+            .await?;
         let sessions = schema::web_sessions::table.filter(schema::web_sessions::token.eq(token));
         if guilds.contains(&current) {
             diesel::update(sessions)
                 .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         } else {
             diesel::update(sessions)
                 .set((
@@ -2472,15 +2718,17 @@ pub fn replace_session_guilds(
                     schema::web_sessions::membership_id.eq(home.1),
                     schema::web_sessions::guilds_checked_at.eq(Utc::now()),
                 ))
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
         Ok(())
     })
+    .await
 }
 
 /// Live sessions that can't open this server yet, as (token, Discord user id,
 /// display name); only `user`'s when given.
-pub fn sessions_without_guild(
+pub async fn sessions_without_guild(
     conn: &mut Connection,
     guild_id: i64,
     user: Option<&str>,
@@ -2504,32 +2752,36 @@ pub fn sessions_without_guild(
             schema::web_sessions::display_name,
         ))
         .order(schema::web_sessions::discord_user_id.asc())
-        .load(conn)?)
+        .load(conn)
+        .await?)
 }
 
 /// Takes a server out of the member's sessions once they leave it. A session
 /// that was on it moves to another of its servers, or ends with none left.
-pub fn drop_session_guild(
+pub async fn drop_session_guild(
     conn: &mut Connection,
     discord_user_id: &str,
     guild_id: i64,
 ) -> Result<(), OpError> {
-    conn.transaction(|conn| {
+    with_tx(conn, async |conn| {
         let tokens: Vec<String> = schema::web_sessions::table
             .filter(schema::web_sessions::discord_user_id.eq(discord_user_id))
             .select(schema::web_sessions::token)
-            .load(conn)?;
+            .load(conn)
+            .await?;
         diesel::delete(
             schema::web_session_guilds::table
                 .filter(schema::web_session_guilds::token.eq_any(&tokens))
                 .filter(schema::web_session_guilds::guild_id.eq(guild_id)),
         )
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
         let stranded: Vec<String> = schema::web_sessions::table
             .filter(schema::web_sessions::token.eq_any(&tokens))
             .filter(schema::web_sessions::guild_id.eq(guild_id))
             .select(schema::web_sessions::token)
-            .load(conn)?;
+            .load(conn)
+            .await?;
         for token in stranded {
             let next = schema::web_session_guilds::table
                 .inner_join(
@@ -2547,6 +2799,7 @@ pub fn drop_session_guild(
                     schema::memberships::id,
                 ))
                 .first::<(i64, i64)>(conn)
+                .await
                 .optional()?;
             let session =
                 schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token));
@@ -2557,28 +2810,35 @@ pub fn drop_session_guild(
                             schema::web_sessions::guild_id.eq(next_guild),
                             schema::web_sessions::membership_id.eq(membership_id),
                         ))
-                        .execute(conn)?;
+                        .execute(conn)
+                        .await?;
                 }
                 None => {
-                    diesel::delete(session).execute(conn)?;
+                    diesel::delete(session).execute(conn).await?;
                 }
             }
         }
         Ok(())
     })
+    .await
 }
 
-pub fn add_session_guild(conn: &mut Connection, token: &str, guild_id: i64) -> Result<(), OpError> {
+pub async fn add_session_guild(
+    conn: &mut Connection,
+    token: &str,
+    guild_id: i64,
+) -> Result<(), OpError> {
     diesel::insert_into(schema::web_session_guilds::table)
         .values(&NewSessionGuild { token, guild_id })
         .on_conflict_do_nothing()
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
 /// Deletes sign-ins older than `SESSION_DAYS`, with the Discord tokens they
 /// hold. Returns how many went.
-pub fn delete_expired_sessions(
+pub async fn delete_expired_sessions(
     conn: &mut Connection,
     now: DateTime<Utc>,
 ) -> Result<usize, OpError> {
@@ -2586,12 +2846,14 @@ pub fn delete_expired_sessions(
     Ok(diesel::delete(
         schema::web_sessions::table.filter(schema::web_sessions::created_at.le(cutoff)),
     )
-    .execute(conn)?)
+    .execute(conn)
+    .await?)
 }
 
-pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
+pub async fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
     diesel::delete(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -2603,11 +2865,12 @@ struct NewCalendarFeed<'a> {
     created_at: DateTime<Utc>,
 }
 
-pub fn ensure_calendar_token(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
+pub async fn ensure_calendar_token(conn: &mut Connection, user_id: i64) -> Result<String, OpError> {
     let existing: Option<String> = schema::calendar_feeds::table
         .filter(schema::calendar_feeds::user_id.eq(user_id))
         .select(schema::calendar_feeds::token)
         .first(conn)
+        .await
         .optional()?;
     if let Some(token) = existing {
         return Ok(token);
@@ -2619,22 +2882,25 @@ pub fn ensure_calendar_token(conn: &mut Connection, user_id: i64) -> Result<Stri
             user_id,
             created_at: Utc::now(),
         })
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(token)
 }
 
-pub fn calendar_user_id(conn: &mut Connection, token: &str) -> Result<Option<i64>, OpError> {
+pub async fn calendar_user_id(conn: &mut Connection, token: &str) -> Result<Option<i64>, OpError> {
     Ok(schema::calendar_feeds::table
         .filter(schema::calendar_feeds::token.eq(token))
         .select(schema::calendar_feeds::user_id)
         .first(conn)
+        .await
         .optional()?)
 }
 
 #[cfg(test)]
 mod tests {
-    use diesel::prelude::{Insertable, QueryableByName, RunQueryDsl};
+    use diesel::prelude::{Insertable, QueryableByName};
     use diesel::sql_query;
+    use diesel_async::RunQueryDsl;
 
     use super::*;
 
@@ -2644,34 +2910,6 @@ mod tests {
         id: i64,
         name: &'a str,
         timezone: &'a str,
-    }
-
-    #[test]
-    fn blocking_work_leaves_the_other_workers_free() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_time()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let heard = tokio::spawn(async move {
-                blocking(|| rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok())
-            });
-            // Queued behind the blocking task on the only worker: it would starve
-            // if `blocking` kept the worker to itself.
-            let other = tokio::spawn(async move { tx.send(()).unwrap() });
-            assert!(
-                heard.await.unwrap(),
-                "the other task ran while blocking work waited"
-            );
-            other.await.unwrap();
-        });
-        // A single-threaded runtime can't hand its tasks over; the work just runs.
-        let single = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        assert_eq!(single.block_on(async { blocking(|| 7) }), 7);
     }
 
     #[test]
@@ -2713,43 +2951,44 @@ mod tests {
         assert_eq!(parse_dotenv_line("PORT="), None);
     }
 
-    #[test]
-    fn migrations_wait_for_a_replica_already_running_them() {
-        let mut conn = open_memory().unwrap();
+    #[tokio::test]
+    async fn migrations_wait_for_a_replica_already_running_them() {
+        let mut conn = open_memory().await.unwrap();
         let schema: String = diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(
             "current_schema()",
         ))
         .get_result(&mut conn)
+        .await
         .unwrap();
         // Another replica, starting at the same moment, is migrating.
         conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})"))
+            .await
             .unwrap();
         let url = database_url().unwrap();
-        let (done, finished) = std::sync::mpsc::channel();
-        let starting = std::thread::spawn(move || {
-            let mut other = connect(&url).unwrap();
-            set_search_path(&mut other, &schema).unwrap();
-            let result = migrate(&mut other);
-            done.send(()).unwrap();
-            result
+        let mut starting = tokio::spawn(async move {
+            let mut other = connect(&url).await.unwrap();
+            set_search_path(&mut other, &schema).await.unwrap();
+            migrate(other).await.map(drop)
         });
         assert!(
-            finished
-                .recv_timeout(std::time::Duration::from_millis(500))
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut starting)
+                .await
                 .is_err(),
             "migrations wait for the lock"
         );
         conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})"))
+            .await
             .unwrap();
-        finished
-            .recv_timeout(std::time::Duration::from_secs(10))
+        tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+            .await
+            .unwrap()
+            .unwrap()
             .unwrap();
-        starting.join().unwrap().unwrap();
     }
 
-    #[test]
-    fn open_applies_the_migrations() {
-        let mut conn = open_memory().unwrap();
+    #[tokio::test]
+    async fn open_applies_the_migrations() {
+        let mut conn = open_memory().await.unwrap();
         diesel::insert_into(schema::guilds::table)
             .values(&SeedGuild {
                 id: 1,
@@ -2757,9 +2996,10 @@ mod tests {
                 timezone: "UTC",
             })
             .execute(&mut conn)
+            .await
             .unwrap();
-        migrate(&mut conn).unwrap();
-        let guilds = list_guilds(&mut conn).unwrap();
+        let mut conn = migrate(conn).await.unwrap();
+        let guilds = list_guilds(&mut conn).await.unwrap();
         assert_eq!(guilds.len(), 1);
         assert_eq!(guilds[0].name, "Guild");
         #[derive(QueryableByName)]
@@ -2769,6 +3009,7 @@ mod tests {
         }
         let versions = sql_query("SELECT version FROM __diesel_schema_migrations")
             .load::<VersionRow>(&mut conn)
+            .await
             .unwrap();
         let mut versions: Vec<_> = versions.into_iter().map(|row| row.version).collect();
         versions.sort();
@@ -2816,9 +3057,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_discord_role_list_replaces_the_stored_roles() {
-        let mut conn = open_memory().unwrap();
+    #[tokio::test]
+    async fn a_discord_role_list_replaces_the_stored_roles() {
+        let mut conn = open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
@@ -2832,21 +3073,30 @@ mod tests {
             INSERT INTO membership_roles (membership_id, role_id) VALUES (1, 1), (1, 3);
             ",
         )
+        .await
         .unwrap();
-        replace_discord_roles(&mut conn, 1, 1, &["222".into()]).unwrap();
-        let person = membership(&mut conn, 1).unwrap().unwrap();
-        let roles = membership_role_ids(&mut conn, &person).unwrap();
+        replace_discord_roles(&mut conn, 1, 1, &["222".into()])
+            .await
+            .unwrap();
+        let person = membership(&mut conn, 1).await.unwrap().unwrap();
+        let roles = membership_role_ids(&mut conn, &person).await.unwrap();
         assert_eq!(roles, vec![2]);
         // A replacement running alongside writes the same row first.
-        insert_membership_roles(&mut conn, 1, &[2]).unwrap();
-        assert_eq!(membership_role_ids(&mut conn, &person).unwrap(), vec![2]);
-        replace_discord_roles(&mut conn, 1, 1, &[]).unwrap();
-        let person = membership(&mut conn, 1).unwrap().unwrap();
-        assert!(membership_role_ids(&mut conn, &person).unwrap().is_empty());
+        insert_membership_roles(&mut conn, 1, &[2]).await.unwrap();
+        assert_eq!(
+            membership_role_ids(&mut conn, &person).await.unwrap(),
+            vec![2]
+        );
+        replace_discord_roles(&mut conn, 1, 1, &[]).await.unwrap();
+        let person = membership(&mut conn, 1).await.unwrap().unwrap();
+        assert!(membership_role_ids(&mut conn, &person)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
-    fn two_servers() -> Connection {
-        let mut conn = open_memory().unwrap();
+    async fn two_servers() -> Connection {
+        let mut conn = open_memory().await.unwrap();
         conn.batch_execute(
             "
             INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'One', 'UTC', '10'), (2, 'Two', 'UTC', '20');
@@ -2857,108 +3107,148 @@ mod tests {
             SELECT 2, id, 2, 'Nell', 'nell', '#112233', true, false FROM users WHERE discord_id = 'u1';
             ",
         )
-        .unwrap();
+        .await.unwrap();
         conn
     }
 
-    #[test]
-    fn a_session_keeps_its_discord_grant() {
-        let mut conn = two_servers();
+    #[tokio::test]
+    async fn a_session_keeps_its_discord_grant() {
+        let mut conn = two_servers().await;
         let grant = DiscordGrant {
             access: "access".into(),
             refresh: "refresh".into(),
             expires_at: Utc::now(),
         };
-        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], Some(&grant)).unwrap();
-        let stored = web_session(&mut conn, "t").unwrap().unwrap().grant.unwrap();
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], Some(&grant))
+            .await
+            .unwrap();
+        let stored = web_session(&mut conn, "t")
+            .await
+            .unwrap()
+            .unwrap()
+            .grant
+            .unwrap();
         assert_eq!(stored.access, "access");
         assert_eq!(stored.refresh, "refresh");
 
-        set_session_grant(&mut conn, "t", None).unwrap();
+        set_session_grant(&mut conn, "t", None).await.unwrap();
         assert!(web_session(&mut conn, "t")
+            .await
             .unwrap()
             .unwrap()
             .grant
             .is_none());
     }
 
-    #[test]
-    fn replacing_servers_moves_off_one_the_member_left() {
-        let mut conn = two_servers();
-        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None).unwrap();
+    #[tokio::test]
+    async fn replacing_servers_moves_off_one_the_member_left() {
+        let mut conn = two_servers().await;
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None)
+            .await
+            .unwrap();
 
-        replace_session_guilds(&mut conn, "t", &[1, 2], (1, 1)).unwrap();
-        let session = web_session(&mut conn, "t").unwrap().unwrap();
+        replace_session_guilds(&mut conn, "t", &[1, 2], (1, 1))
+            .await
+            .unwrap();
+        let session = web_session(&mut conn, "t").await.unwrap().unwrap();
         assert_eq!(session.guilds, vec![1, 2]);
         assert_eq!(session.guild_id, 1);
 
-        replace_session_guilds(&mut conn, "t", &[2], (2, 2)).unwrap();
-        let session = web_session(&mut conn, "t").unwrap().unwrap();
+        replace_session_guilds(&mut conn, "t", &[2], (2, 2))
+            .await
+            .unwrap();
+        let session = web_session(&mut conn, "t").await.unwrap().unwrap();
         assert_eq!(session.guilds, vec![2]);
         assert_eq!((session.guild_id, session.membership_id), (2, 2));
     }
 
-    #[test]
-    fn a_new_server_is_offered_to_sessions_without_it() {
-        let mut conn = two_servers();
-        insert_web_session(&mut conn, "a", "u1", "Nell", 1, 1, &[1], None).unwrap();
-        insert_web_session(&mut conn, "b", "u1", "Nell", 1, 1, &[1, 2], None).unwrap();
+    #[tokio::test]
+    async fn a_new_server_is_offered_to_sessions_without_it() {
+        let mut conn = two_servers().await;
+        insert_web_session(&mut conn, "a", "u1", "Nell", 1, 1, &[1], None)
+            .await
+            .unwrap();
+        insert_web_session(&mut conn, "b", "u1", "Nell", 1, 1, &[1, 2], None)
+            .await
+            .unwrap();
 
-        let waiting = sessions_without_guild(&mut conn, 2, None).unwrap();
+        let waiting = sessions_without_guild(&mut conn, 2, None).await.unwrap();
         assert_eq!(waiting, vec![("a".into(), "u1".into(), "Nell".into())]);
         assert!(sessions_without_guild(&mut conn, 2, Some("u2"))
+            .await
             .unwrap()
             .is_empty());
 
-        add_session_guild(&mut conn, "a", 2).unwrap();
-        add_session_guild(&mut conn, "a", 2).unwrap();
+        add_session_guild(&mut conn, "a", 2).await.unwrap();
+        add_session_guild(&mut conn, "a", 2).await.unwrap();
         assert_eq!(
-            web_session(&mut conn, "a").unwrap().unwrap().guilds,
+            web_session(&mut conn, "a").await.unwrap().unwrap().guilds,
             vec![1, 2]
         );
         assert!(sessions_without_guild(&mut conn, 2, None)
+            .await
             .unwrap()
             .is_empty());
     }
 
-    #[test]
-    fn one_request_claims_a_sessions_server_check() {
-        let mut conn = two_servers();
-        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None).unwrap();
+    #[tokio::test]
+    async fn one_request_claims_a_sessions_server_check() {
+        let mut conn = two_servers().await;
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None)
+            .await
+            .unwrap();
         let stale = Utc::now() - chrono::Duration::minutes(5);
         conn.batch_execute(
             "UPDATE web_sessions SET guilds_checked_at = now() - interval '6 minutes'",
         )
+        .await
         .unwrap();
         // A page's requests arrive together; only the first asks Discord.
-        let claims: Vec<bool> = (0..5)
-            .map(|_| claim_session_guilds_check(&mut conn, "t", stale).unwrap())
-            .collect();
+        let mut claims = Vec::new();
+        for _ in 0..5 {
+            claims.push(
+                claim_session_guilds_check(&mut conn, "t", stale)
+                    .await
+                    .unwrap(),
+            );
+        }
         assert_eq!(claims, [true, false, false, false, false]);
-        assert!(!claim_session_guilds_check(&mut conn, "missing", stale).unwrap());
+        assert!(!claim_session_guilds_check(&mut conn, "missing", stale)
+            .await
+            .unwrap());
         // Five minutes on, the next request claims it again.
         let later = Utc::now() + chrono::Duration::seconds(1);
-        assert!(claim_session_guilds_check(&mut conn, "t", later).unwrap());
+        assert!(claim_session_guilds_check(&mut conn, "t", later)
+            .await
+            .unwrap());
     }
 
-    #[test]
-    fn leaving_a_server_takes_it_out_of_the_members_sessions() {
-        let mut conn = two_servers();
-        insert_web_session(&mut conn, "both", "u1", "Nell", 1, 1, &[1, 2], None).unwrap();
-        insert_web_session(&mut conn, "only", "u1", "Nell", 1, 1, &[1], None).unwrap();
+    #[tokio::test]
+    async fn leaving_a_server_takes_it_out_of_the_members_sessions() {
+        let mut conn = two_servers().await;
+        insert_web_session(&mut conn, "both", "u1", "Nell", 1, 1, &[1, 2], None)
+            .await
+            .unwrap();
+        insert_web_session(&mut conn, "only", "u1", "Nell", 1, 1, &[1], None)
+            .await
+            .unwrap();
 
-        drop_session_guild(&mut conn, "u1", 1).unwrap();
-        let both = web_session(&mut conn, "both").unwrap().unwrap();
+        drop_session_guild(&mut conn, "u1", 1).await.unwrap();
+        let both = web_session(&mut conn, "both").await.unwrap().unwrap();
         assert_eq!(both.guilds, vec![2]);
         assert_eq!((both.guild_id, both.membership_id), (2, 2));
-        assert!(web_session(&mut conn, "only").unwrap().is_none());
+        assert!(web_session(&mut conn, "only").await.unwrap().is_none());
     }
 
-    #[test]
-    fn a_role_stored_twice_is_folded_into_one() {
-        let mut conn = two_servers();
+    #[tokio::test]
+    async fn a_role_stored_twice_is_folded_into_one() {
+        let conn = two_servers().await;
         // Back to before the migration that folds the duplicates.
-        while conn.revert_last_migration(MIGRATIONS).unwrap().to_string() != "20261026110000" {}
+        let (mut conn, ()) = with_harness(conn, |conn| {
+            while conn.revert_last_migration(MIGRATIONS).unwrap().to_string() != "20261026110000" {}
+        })
+        .await
+        .unwrap();
         conn.batch_execute(
             "
             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (81, 1, 'raids', 'text', 1);
@@ -2970,13 +3260,14 @@ mod tests {
             VALUES (95, 1, 81, 'Raid', 60, now(), '{92,93,91}', '{93}');
             ",
         )
-        .unwrap();
-        migrate(&mut conn).unwrap();
+        .await.unwrap();
+        let mut conn = migrate(conn).await.unwrap();
 
         let ids: Vec<i64> = schema::roles::table
             .order(schema::roles::id.asc())
             .select(schema::roles::id)
             .load(&mut conn)
+            .await
             .unwrap();
         assert_eq!(ids, vec![91, 93]);
         let held: Vec<(i64, i64)> = schema::membership_roles::table
@@ -2986,11 +3277,13 @@ mod tests {
                 schema::membership_roles::role_id,
             ))
             .load(&mut conn)
+            .await
             .unwrap();
         assert_eq!(held, vec![(1, 91), (2, 91)]);
         let granted: Vec<i64> = schema::permission_roles::table
             .select(schema::permission_roles::role_id)
             .load(&mut conn)
+            .await
             .unwrap();
         assert_eq!(granted, vec![91]);
         let (mention, restrict): (Vec<i64>, Vec<i64>) = schema::event_templates::table
@@ -2999,6 +3292,7 @@ mod tests {
                 schema::event_templates::restrict_role_ids,
             ))
             .first(&mut conn)
+            .await
             .unwrap();
         assert_eq!(mention, vec![91, 93]);
         assert_eq!(restrict, vec![93]);

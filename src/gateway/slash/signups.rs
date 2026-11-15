@@ -34,8 +34,9 @@ async fn signup_options_list(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        commands::library_text(&mut conn, actor.guild_id, actor.lang)
+        commands::library_text(&mut conn, actor.guild_id, actor.lang).await
     };
     deliver(ctx, &actor, "/signup_options list", outcome).await
 }
@@ -64,6 +65,7 @@ async fn signup_options_add(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::add_library_option(
             &mut conn,
@@ -74,6 +76,7 @@ async fn signup_options_add(
             attending.unwrap_or(true),
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, "/signup_options add", outcome).await
 }
@@ -98,6 +101,7 @@ async fn signup_options_remove(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::remove_library_option(
             &mut conn,
@@ -106,6 +110,7 @@ async fn signup_options_remove(
             &name,
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, "/signup_options remove", outcome).await
 }
@@ -137,8 +142,9 @@ async fn signup_presets_list(ctx: Context<'_>) -> Result<(), Error> {
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
-        commands::preset_text(&mut conn, actor.guild_id, actor.lang)
+        commands::preset_text(&mut conn, actor.guild_id, actor.lang).await
     };
     deliver(ctx, &actor, "/signup_presets list", outcome).await
 }
@@ -164,6 +170,7 @@ async fn signup_presets_add(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::add_preset(
             &mut conn,
@@ -173,6 +180,7 @@ async fn signup_presets_add(
             &options,
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, "/signup_presets add", outcome).await
 }
@@ -197,6 +205,7 @@ async fn signup_presets_remove(
             .data()
             .db
             .get()
+            .await
             .map_err(|_| "Could not reach the database.")?;
         commands::remove_preset(
             &mut conn,
@@ -205,6 +214,7 @@ async fn signup_presets_remove(
             &name,
             actor.lang,
         )
+        .await
     };
     deliver(ctx, &actor, "/signup_presets remove", outcome).await
 }
