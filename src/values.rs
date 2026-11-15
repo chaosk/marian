@@ -328,19 +328,21 @@ mod tests {
             for value in $all.iter().copied() {
                 let stored: String = diesel::select(value.into_sql::<Text>())
                     .get_result($conn)
+                    .await
                     .unwrap();
                 assert_eq!(stored, $word(value), "{value:?}");
                 let read = diesel::select($word(value).into_sql::<Text>())
                     .get_result($conn)
+                    .await
                     .unwrap();
                 assert_eq!(value, read);
             }
         };
     }
 
-    #[test]
-    fn diesel_writes_and_reads_each_enums_own_words() {
-        let mut conn = crate::store::open_memory().unwrap();
+    #[tokio::test]
+    async fn diesel_writes_and_reads_each_enums_own_words() {
+        let mut conn = crate::store::open_memory().await.unwrap();
         let conn = &mut conn;
         round_trip!(conn, EventStatus::ALL, EventStatus::as_str);
         round_trip!(conn, Cadence::ALL, Cadence::as_str);
