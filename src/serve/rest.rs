@@ -556,7 +556,7 @@ fn live_sse(guild_id: i64) -> Response {
     });
     let changes = tokio_stream::wrappers::BroadcastStream::new(crate::live::subscribe())
         .filter_map(move |news| match news {
-            Ok(news) if news.guild_id == guild_id => Some(Ok::<_, std::convert::Infallible>(
+            Ok(news) if news.concerns(guild_id) => Some(Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default().data(&*news.body),
             )),
             Ok(_) => None,

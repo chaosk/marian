@@ -1,6 +1,9 @@
 {{- if not (or .Values.discord.token .Values.discord.existingSecret) }}
 {{- fail "Set discord.token or discord.existingSecret. Marian does not start without a bot token." }}
 {{- end }}
+{{- if not (has .Values.updateStrategy (list "RollingUpdate" "Recreate")) }}
+{{- fail "Set updateStrategy to RollingUpdate or Recreate." }}
+{{- end }}
 {{- if and (not .Values.discord.existingSecret) (not .Values.database.url) }}
 {{- fail "Set database.url to a Postgres connection string, or store it in discord.existingSecret under database.secretKey." }}
 {{- end }}
@@ -11,11 +14,21 @@ metadata:
   labels:
     {{- include "marian.labels" . | nindent 4 }}
 spec:
-  # Always one. The bot and the reminder clock run in this process, and two
-  # would answer Discord twice. Recreate stops the old pod before the new one.
-  replicas: 1
+  # Every replica serves the web. One at a time, whichever holds a Postgres
+  # lock, runs the bot, the tick and Discord jobs; the others take over when
+  # it stops.
+  replicas: {{ .Values.replicaCount }}
   strategy:
+    {{- if eq .Values.updateStrategy "Recreate" }}
     type: Recreate
+    {{- else }}
+    # The new pod serves the web and waits for the lock while the old one
+    # finishes; then the old one lets the lock go and the new one takes it.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- end }}
   selector:
     matchLabels:
       {{- include "marian.selectorLabels" . | nindent 6 }}

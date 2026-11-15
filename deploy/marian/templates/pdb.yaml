@@ -1,0 +1,14 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+# With more than one replica, a node drain keeps one serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "marian.fullname" . }}
+  labels:
+    {{- include "marian.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "marian.selectorLabels" . | nindent 6 }}
+{{- end }}

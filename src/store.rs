@@ -1095,9 +1095,34 @@ fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
     Some((name.to_string(), value.to_string()))
 }
 
+/// The advisory lock replicas starting together take turns on, so only one
+/// runs migrations at a time and the rest find them done: "mari" and the
+/// schema they run in, so test schemas don't wait on each other.
+const MIGRATION_LOCK: &str = "1835102825, hashtext(current_schema())";
+
 pub fn migrate(conn: &mut Connection) -> Result<(), OpError> {
-    conn.run_pending_migrations(MIGRATIONS)
-        .map_err(|err| OpError::internal(format!("Could not update the database: {err}")))?;
+    let failed = |err: &dyn std::fmt::Display| {
+        OpError::internal(format!("Could not update the database: {err}"))
+    };
+    conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})"))
+        .map_err(|err| failed(&err))?;
+    let ran = conn.run_pending_migrations(MIGRATIONS).map(drop);
+    // Closing the connection would let it go too, but pool connections stay open.
+    let unlocked = conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})"));
+    ran.map_err(|err| failed(&err))?;
+    unlocked.map_err(|err| failed(&err))?;
+    Ok(())
+}
+
+/// Takes a server's tick lock for the rest of the transaction. Ticks for one
+/// server then take turns, so a replica that still thinks it leads for a
+/// moment after another took over can't post an event twice: the second
+/// tick sees what the first did. "tick" and the server's id.
+pub fn lock_tick(conn: &mut Connection, guild_id: i64) -> Result<(), OpError> {
+    conn.batch_execute(&format!(
+        "SELECT pg_advisory_xact_lock(1953065835, {})",
+        guild_id.rem_euclid(1 << 31)
+    ))?;
     Ok(())
 }
 
@@ -2484,6 +2509,33 @@ mod tests {
         );
         assert_eq!(parse_dotenv_line("# PORT=1"), None);
         assert_eq!(parse_dotenv_line("PORT="), None);
+    }
+
+    #[test]
+    fn migrations_wait_for_a_replica_already_running_them() {
+        let mut conn = open_memory().unwrap();
+        let schema: String =
+            diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>("current_schema()"))
+                .get_result(&mut conn)
+                .unwrap();
+        // Another replica, starting at the same moment, is migrating.
+        conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})")).unwrap();
+        let url = database_url().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let starting = std::thread::spawn(move || {
+            let mut other = connect(&url).unwrap();
+            set_search_path(&mut other, &schema).unwrap();
+            let result = migrate(&mut other);
+            done.send(()).unwrap();
+            result
+        });
+        assert!(
+            finished.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            "migrations wait for the lock"
+        );
+        conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})")).unwrap();
+        finished.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        starting.join().unwrap().unwrap();
     }
 
     #[test]

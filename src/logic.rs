@@ -711,7 +711,7 @@ mod tests {
         )));
         // Saved with the changes, so a restart before they run doesn't lose them.
         let mut saved = Vec::new();
-        while let Some((id, job)) = crate::jobs::next_due(&mut conn, Utc::now()).unwrap() {
+        while let Some((id, job)) = crate::jobs::claim(&mut conn, Utc::now(), crate::jobs::LEASE).unwrap() {
             crate::jobs::done(&mut conn, id).unwrap();
             saved.push(job);
         }

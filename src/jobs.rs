@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -130,6 +131,10 @@ pub fn backoff(tries: u8) -> Duration {
 
 static WAKE: LazyLock<Notify> = LazyLock::new(Notify::new);
 
+/// The Postgres channel `save` notifies, which `crate::live`'s listener on
+/// every replica turns into `wake`.
+pub const WAKE_CHANNEL: &str = "marian_jobs";
+
 /// Tells the job worker new jobs are in the table.
 pub fn wake() {
     WAKE.notify_one();
@@ -157,21 +162,52 @@ pub fn save(conn: &mut Connection, jobs: &[DiscordJob]) -> Result<(), OpError> {
             )
         })
         .collect();
-    diesel::insert_into(discord_jobs::table).values(&rows).execute(conn)?;
+    diesel::insert_into(discord_jobs::table)
+        .values(&rows)
+        .execute(conn)?;
+    // Wakes the worker, on whichever replica leads, once this commits.
+    conn.batch_execute(&format!("NOTIFY {WAKE_CHANNEL}"))?;
     Ok(())
 }
 
-/// The job due soonest, if any is due at `now`. A row this build can't read
-/// (from a newer one) is deleted rather than left blocking the queue.
-pub fn next_due(conn: &mut Connection, now: DateTime<Utc>) -> Result<Option<(i64, DiscordJob)>, OpError> {
+/// How long a worker has a job it took to itself. No other worker takes it
+/// until then, even if this one has gone. A run is cut off well before:
+/// `RUN_LIMIT`.
+pub const LEASE: Duration = Duration::from_secs(300);
+
+/// The longest a job may run before it counts as failed, so it never outlives
+/// its lease.
+pub const RUN_LIMIT: Duration = Duration::from_secs(120);
+
+/// Takes the job due soonest at `now`, if any, for `lease`: no other worker
+/// takes it until the lease is up, by the database's clock. Two workers
+/// taking at once get different jobs. A row this build can't read (from a
+/// newer one) is deleted rather than left blocking the queue.
+pub fn claim(
+    conn: &mut Connection,
+    now: DateTime<Utc>,
+    lease: Duration,
+) -> Result<Option<(i64, DiscordJob)>, OpError> {
+    #[derive(QueryableByName)]
+    struct Claimed {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        id: i64,
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        job: serde_json::Value,
+    }
     loop {
-        let row: Option<(i64, serde_json::Value)> = discord_jobs::table
-            .filter(discord_jobs::run_at.le(now))
-            .order((discord_jobs::run_at.asc(), discord_jobs::id.asc()))
-            .select((discord_jobs::id, discord_jobs::job))
-            .first(conn)
-            .optional()?;
-        let Some((id, value)) = row else {
+        let row: Option<Claimed> = diesel::sql_query(
+            "UPDATE discord_jobs SET locked_until = now() + make_interval(secs => $2) \
+             WHERE id = (SELECT id FROM discord_jobs \
+                         WHERE run_at <= $1 AND (locked_until IS NULL OR locked_until < now()) \
+                         ORDER BY run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+             RETURNING id, job",
+        )
+        .bind::<diesel::sql_types::Timestamptz, _>(now)
+        .bind::<diesel::sql_types::Double, _>(lease.as_secs_f64())
+        .get_result(conn)
+        .optional()?;
+        let Some(Claimed { id, job: value }) = row else {
             return Ok(None);
         };
         match serde_json::from_value(value) {
@@ -184,17 +220,25 @@ pub fn next_due(conn: &mut Connection, now: DateTime<Utc>) -> Result<Option<(i64
     }
 }
 
-/// When the next job not yet due is, if there is one.
+/// When the next job not yet due, or not yet free, is, if there is one.
 pub fn next_run_at(conn: &mut Connection) -> Result<Option<DateTime<Utc>>, OpError> {
     Ok(discord_jobs::table
-        .select(diesel::dsl::min(discord_jobs::run_at))
+        // A job another worker has is next due when its lease is up.
+        .select(diesel::dsl::sql::<
+            diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>,
+        >("min(GREATEST(run_at, locked_until))"))
         .first(conn)?)
 }
 
-/// Jobs due at `now`, and jobs waiting out a pause after failing.
+/// Jobs due at `now` that no worker has, and jobs waiting out a pause after failing.
 pub fn counts(conn: &mut Connection, now: DateTime<Utc>) -> Result<(i64, i64), OpError> {
     let due = discord_jobs::table
         .filter(discord_jobs::run_at.le(now))
+        .filter(
+            discord_jobs::locked_until
+                .is_null()
+                .or(discord_jobs::locked_until.lt(now)),
+        )
         .count()
         .get_result(conn)?;
     let later = discord_jobs::table
@@ -210,12 +254,19 @@ pub fn done(conn: &mut Connection, id: i64) -> Result<(), OpError> {
     Ok(())
 }
 
-/// The job failed: it's tried again as `job` (its tries counted) at `run_at`.
-pub fn retry(conn: &mut Connection, id: i64, job: &DiscordJob, run_at: DateTime<Utc>) -> Result<(), OpError> {
+/// The job failed: it's tried again as `job` (its tries counted) at `run_at`,
+/// by whichever worker takes it then.
+pub fn retry(
+    conn: &mut Connection,
+    id: i64,
+    job: &DiscordJob,
+    run_at: DateTime<Utc>,
+) -> Result<(), OpError> {
     diesel::update(discord_jobs::table.filter(discord_jobs::id.eq(id)))
         .set((
             discord_jobs::job.eq(serde_json::to_value(job).expect("a job serializes")),
             discord_jobs::run_at.eq(run_at),
+            discord_jobs::locked_until.eq(None::<DateTime<Utc>>),
         ))
         .execute(conn)?;
     Ok(())
@@ -263,20 +314,75 @@ mod tests {
     fn saved_jobs_come_back_in_order_and_wait_out_their_retries() {
         use chrono::SubsecRound;
         let mut conn = crate::store::open_memory().unwrap();
-        assert_eq!(next_due(&mut conn, Utc::now()).unwrap(), None);
+        assert_eq!(claim(&mut conn, Utc::now(), LEASE).unwrap(), None);
         save(&mut conn, &[DiscordJob::sync(1), DiscordJob::attend(1)]).unwrap();
         let now = Utc::now();
-        let (first, job) = next_due(&mut conn, now).unwrap().unwrap();
+        let (first, job) = claim(&mut conn, now, LEASE).unwrap().unwrap();
         assert_eq!(job, DiscordJob::sync(1));
         let later = now + chrono::Duration::seconds(30);
         retry(&mut conn, first, &job.clone().bump().unwrap(), later).unwrap();
-        let (second, job) = next_due(&mut conn, now).unwrap().unwrap();
+        let (second, job) = claim(&mut conn, now, LEASE).unwrap().unwrap();
         assert_eq!(job, DiscordJob::attend(1));
         done(&mut conn, second).unwrap();
-        assert_eq!(next_due(&mut conn, now).unwrap(), None);
+        assert_eq!(claim(&mut conn, now, LEASE).unwrap(), None);
         assert_eq!(counts(&mut conn, now).unwrap(), (0, 1));
-        assert_eq!(next_run_at(&mut conn).unwrap(), Some(later).map(|at| at.trunc_subsecs(6)));
-        let (id, job) = next_due(&mut conn, later).unwrap().unwrap();
+        assert_eq!(
+            next_run_at(&mut conn).unwrap(),
+            Some(later).map(|at| at.trunc_subsecs(6))
+        );
+        let (id, job) = claim(&mut conn, later, LEASE).unwrap().unwrap();
         assert_eq!((id, job.tries()), (first, 1));
+    }
+
+    #[test]
+    fn two_workers_taking_at_once_never_get_the_same_job() {
+        let mut conn = crate::store::open_memory().unwrap();
+        let jobs: Vec<_> = (1..=40).map(DiscordJob::sync).collect();
+        save(&mut conn, &jobs).unwrap();
+        let db = crate::store::pool_for(&mut conn).unwrap();
+        let now = Utc::now();
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let db = db.clone();
+                std::thread::spawn(move || {
+                    let mut conn = db.get().unwrap();
+                    let mut mine = Vec::new();
+                    // Nothing is done or retried, so each job can be taken once.
+                    while let Some((id, _)) = claim(&mut conn, now, LEASE).unwrap() {
+                        mine.push(id);
+                    }
+                    mine
+                })
+            })
+            .collect();
+        let taken: Vec<Vec<i64>> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        let mut all: Vec<i64> = taken.concat();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 40, "every job taken once: {taken:?}");
+        assert_eq!(taken[0].len() + taken[1].len(), 40);
+    }
+
+    #[test]
+    fn a_job_whose_lease_ran_out_is_taken_again() {
+        let mut conn = crate::store::open_memory().unwrap();
+        save(&mut conn, &[DiscordJob::sync(1)]).unwrap();
+        let now = Utc::now();
+        let (id, _) = claim(&mut conn, now, LEASE).unwrap().unwrap();
+        // Leased: nobody else gets it, and it doesn't count as waiting.
+        assert_eq!(claim(&mut conn, now, LEASE).unwrap(), None);
+        assert_eq!(counts(&mut conn, now).unwrap(), (0, 0));
+        // The worker that took it went away and its lease ran out.
+        diesel::update(discord_jobs::table.filter(discord_jobs::id.eq(id)))
+            .set(discord_jobs::locked_until.eq(Some(now - chrono::Duration::seconds(1))))
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(
+            claim(&mut conn, Utc::now(), LEASE).unwrap(),
+            Some((id, DiscordJob::sync(1)))
+        );
     }
 }

@@ -10,6 +10,7 @@ diesel::table! {
         id -> BigInt,
         job -> Jsonb,
         run_at -> Timestamptz,
+        locked_until -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
     }
 }
