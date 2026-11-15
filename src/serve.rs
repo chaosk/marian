@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
@@ -41,6 +42,136 @@ struct AppState {
     member_roles: Arc<Mutex<MemberRoles>>,
     /// The bot's member list, when it can vouch for members' roles.
     members: crate::gateway::MemberView,
+    /// When the tick last finished, for `/healthz`.
+    heartbeat: Heartbeat,
+}
+
+/// The last time the tick finished a round, in Unix seconds. It starts at
+/// launch, so a fresh process has the full grace period before it counts as
+/// stuck.
+#[derive(Clone)]
+struct Heartbeat(Arc<AtomicI64>);
+
+/// How long the tick may go without finishing before `/healthz` fails and
+/// Kubernetes restarts the process. The tick runs every 5 seconds.
+const TICK_STALE_AFTER_SECS: i64 = 120;
+
+impl Heartbeat {
+    fn new() -> Self {
+        Self(Arc::new(AtomicI64::new(Utc::now().timestamp())))
+    }
+
+    fn beat(&self) {
+        self.0.store(Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    fn stale(&self, now: i64) -> bool {
+        now - self.0.load(Ordering::Relaxed) > TICK_STALE_AFTER_SECS
+    }
+}
+
+/// Runs `body` with a pooled connection on a blocking thread, so database
+/// work doesn't hold up the async workers. `None`, after a warning, when no
+/// connection came or the work panicked; the caller skips this round.
+async fn with_db<T: Send + 'static>(
+    db: &store::Db,
+    what: &'static str,
+    body: impl FnOnce(&mut Connection) -> T + Send + 'static,
+) -> Option<T> {
+    let db = db.clone();
+    match tokio::task::spawn_blocking(move || db.get().map(|mut conn| body(&mut conn))).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(err)) => {
+            tracing::warn!("{what}: no database connection, skipping this round: {err}");
+            None
+        }
+        Err(err) => {
+            tracing::warn!("{what}: stopped unexpectedly, skipping this round: {err}");
+            None
+        }
+    }
+}
+
+/// Every 5 seconds: posts, reminders, archiving, series dates and routines.
+fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: Heartbeat) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // Instrumented, not entered: a guard held across the await below
+            // stayed entered on the thread, and other tasks' spans joined this
+            // trace until it ran past Tempo's size limit.
+            let span = tracing::info_span!(parent: None, "tick");
+            async {
+                let current = tracing::Span::current();
+                let report = with_db(&db, "tick", move |conn| {
+                    current.in_scope(|| logic::tick(conn, Utc::now()))
+                })
+                .await;
+                match report {
+                    Some(Ok(report)) => {
+                        heartbeat.beat();
+                        for note in report.notes {
+                            tracing::info!("{note}");
+                        }
+                        for job in report.jobs {
+                            enqueue(&discord, job);
+                        }
+                        for guild_id in report.guilds {
+                            crate::live::server(guild_id);
+                        }
+                    }
+                    Some(Err(err)) => tracing::warn!("tick failed: {err}"),
+                    None => {}
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+    });
+}
+
+/// Every 5 seconds, apart from the tick, so a slow Google API never holds up
+/// posts and reminders.
+fn spawn_google_sync(
+    db: store::Db,
+    http: reqwest::Client,
+    client_id: String,
+    client_secret: String,
+    public_base: String,
+) {
+    if !crate::google::configured(&client_id, &client_secret) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let span = tracing::info_span!(parent: None, "google_sync");
+            sync_google(&db, &http, &client_id, &client_secret, &public_base)
+                .instrument(span)
+                .await;
+        }
+    });
+}
+
+/// Hourly, from launch: deletes sign-ins past their 30 days, which hold
+/// Discord tokens nobody can use any more.
+fn spawn_session_sweep(db: store::Db) {
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(3600));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            match with_db(&db, "session sweep", |conn| {
+                store::delete_expired_sessions(conn, Utc::now())
+            })
+            .await
+            {
+                Some(Ok(0)) | None => {}
+                Some(Ok(gone)) => tracing::info!("Deleted {gone} expired sign-ins."),
+                Some(Err(err)) => tracing::warn!("session sweep failed: {err}"),
+            }
+        }
+    });
 }
 
 use crate::api::{cookie, Viewer as Session};
@@ -87,6 +218,7 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         bot_token: token.clone(),
         member_roles: member_roles_cache(),
         members: crate::gateway::MemberView::default(),
+        heartbeat: Heartbeat::new(),
     };
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
@@ -97,51 +229,15 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         };
         let app = router(state.clone(), pages(web));
         crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status, state.members.clone());
-        let db = state.db.clone();
-        let discord = state.discord.clone();
-        let http = state.http.clone();
-        let google_client_id = state.google_client_id.clone();
-        let google_client_secret = state.google_client_secret.clone();
-        let calendar_base = state.public_url.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                // Instrumented, not entered: a guard held across the await below
-                // stayed entered on the thread, and other tasks' spans joined this
-                // trace until it ran past Tempo's size limit.
-                let span = tracing::info_span!(parent: None, "tick");
-                async {
-                    let report = {
-                        let mut guard = db.get().expect("database");
-                        logic::tick(&mut guard, Utc::now())
-                    };
-                    match report {
-                        Ok(report) => {
-                            for note in report.notes {
-                                tracing::info!("{note}");
-                            }
-                            for job in report.jobs {
-                                enqueue(&discord, job);
-                            }
-                            for guild_id in report.guilds {
-                                crate::live::server(guild_id);
-                            }
-                        }
-                        Err(err) => tracing::warn!("tick failed: {err}"),
-                    }
-                    sync_google(
-                        &db,
-                        &http,
-                        &google_client_id,
-                        &google_client_secret,
-                        &calendar_base,
-                    )
-                    .await;
-                }
-                .instrument(span)
-                .await;
-            }
-        });
+        spawn_tick(state.db.clone(), state.discord.clone(), state.heartbeat.clone());
+        spawn_google_sync(
+            state.db.clone(),
+            state.http.clone(),
+            state.google_client_id.clone(),
+            state.google_client_secret.clone(),
+            state.public_url.clone(),
+        );
+        spawn_session_sweep(state.db.clone());
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -430,8 +526,14 @@ async fn revalidate_site(request: Request, next: Next) -> Response {
     response
 }
 
-async fn health() -> &'static str {
-    "ok"
+/// Liveness: fails once the tick hasn't finished in two minutes, so a stuck
+/// process gets restarted. The database's own health is `/readyz`.
+async fn health(State(state): State<AppState>) -> Response {
+    if state.heartbeat.stale(Utc::now().timestamp()) {
+        (StatusCode::SERVICE_UNAVAILABLE, "the tick has stalled").into_response()
+    } else {
+        (StatusCode::OK, "ok").into_response()
+    }
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
@@ -934,19 +1036,18 @@ async fn sync_google(
     client_secret: &str,
     public_base: &str,
 ) {
-    if !crate::google::configured(client_id, client_secret) {
-        return;
-    }
-    let jobs = {
-        let mut guard = db.get().expect("database");
-        crate::google::plan(&mut guard, public_base)
-    };
-    let jobs = match jobs {
-        Ok(jobs) => jobs,
-        Err(err) => {
+    let base = public_base.to_string();
+    let jobs = match with_db(db, "google calendar", move |conn| {
+        crate::google::plan(conn, &base)
+    })
+    .await
+    {
+        Some(Ok(jobs)) => jobs,
+        Some(Err(err)) => {
             tracing::warn!("google calendar: {err}");
             return;
         }
+        None => return,
     };
     for job in jobs {
         let outcome = crate::google::push(http, client_id, client_secret, job).await;
@@ -956,27 +1057,36 @@ async fn sync_google(
         {
             tracing::warn!("google calendar event {event_id}: {message}");
         }
-        let mut guard = db.get().expect("database");
-        if let Err(err) = crate::google::record(&mut guard, outcome) {
-            tracing::warn!("google calendar: {err}");
+        match with_db(db, "google calendar", move |conn| {
+            crate::google::record(conn, outcome)
+        })
+        .await
+        {
+            Some(Err(err)) => tracing::warn!("google calendar: {err}"),
+            Some(Ok(_)) => {}
+            // Without a database the rest of the round can't be recorded either.
+            None => return,
         }
     }
-    let revokes = {
-        let mut guard = db.get().expect("database");
-        match crate::google::ready_revokes(&mut guard) {
-            Ok(rows) => rows,
-            Err(err) => {
-                tracing::warn!("google calendar: {err}");
-                Vec::new()
-            }
+    let revokes = match with_db(db, "google calendar", crate::google::ready_revokes).await {
+        Some(Ok(rows)) => rows,
+        Some(Err(err)) => {
+            tracing::warn!("google calendar: {err}");
+            return;
         }
+        None => return,
     };
     for access in revokes {
         let user_id = access.user_id;
         if crate::google::forget_remote(http, client_id, client_secret, access).await {
-            let mut guard = db.get().expect("database");
-            if let Err(err) = crate::google::delete_account(&mut guard, user_id) {
-                tracing::warn!("google calendar: {err}");
+            match with_db(db, "google calendar", move |conn| {
+                crate::google::delete_account(conn, user_id)
+            })
+            .await
+            {
+                Some(Err(err)) => tracing::warn!("google calendar: {err}"),
+                Some(Ok(_)) => {}
+                None => return,
             }
         } else {
             tracing::warn!("google calendar disconnect for {user_id} will retry");
@@ -1702,6 +1812,19 @@ mod tests {
     }
 
     #[test]
+    fn health_fails_once_the_tick_stalls() {
+        let heartbeat = Heartbeat::new();
+        let now = Utc::now().timestamp();
+        assert!(!heartbeat.stale(now));
+        assert!(!heartbeat.stale(now + TICK_STALE_AFTER_SECS));
+        assert!(heartbeat.stale(now + TICK_STALE_AFTER_SECS + 5));
+        heartbeat.0.store(now - 600, Ordering::Relaxed);
+        assert!(heartbeat.stale(now));
+        heartbeat.beat();
+        assert!(!heartbeat.stale(now));
+    }
+
+    #[test]
     fn a_server_list_accepts_string_and_integer_permissions() {
         let current = r#"[{"id":"1","owner":false,"permissions":"40"}]"#;
         let legacy = r#"[{"id":"2","owner":false,"permissions":8,"permissions_new":"8"}]"#;
@@ -1881,6 +2004,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
+            heartbeat: Heartbeat::new(),
         };
         let pages = Router::new().route(
             "/page",
@@ -1961,6 +2085,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
+            heartbeat: Heartbeat::new(),
         };
         let app = router(state, Router::new().nest_service("/pkg", site_files(&dir)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2072,6 +2197,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
+            heartbeat: Heartbeat::new(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2275,6 +2401,7 @@ mod tests {
             bot_token: String::new(),
             member_roles: member_roles_cache(),
             members: crate::gateway::MemberView::default(),
+            heartbeat: Heartbeat::new(),
         };
         let app = router(state, Router::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

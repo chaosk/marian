@@ -712,6 +712,59 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_server_does_not_stop_the_tick_for_the_others() {
+        let mut conn = world();
+        // Sorted before server 1, and with no settings row, so its tick fails.
+        conn.batch_execute("INSERT INTO guilds (id, name, timezone) VALUES (0, 'Broken', 'UTC');")
+            .unwrap();
+        let mut scheduled = input("Q&A", Utc::now() + Duration::days(3), SaveAction::Schedule);
+        scheduled.post_at = Some(Utc::now() + Duration::hours(2));
+        let scheduled_id = save_event(&mut conn, scheduled).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
+            .set(schema::events::post_at.eq(Utc::now() - Duration::minutes(1)))
+            .execute(&mut conn)
+            .unwrap();
+        let report = tick(&mut conn, Utc::now()).unwrap();
+        assert_eq!(store::event(&mut conn, scheduled_id).unwrap().unwrap().status, "posted");
+        assert_eq!(report.guilds, vec![1]);
+    }
+
+    #[test]
+    fn the_tick_leaves_events_that_are_not_due_alone() {
+        let mut conn = world();
+        let mut later = input("Later", Utc::now() + Duration::days(3), SaveAction::Schedule);
+        later.post_at = Some(Utc::now() + Duration::hours(2));
+        let later_id = save_event(&mut conn, later).unwrap();
+        let mut failed = input("Failed", Utc::now() + Duration::days(3), SaveAction::Schedule);
+        failed.post_at = Some(Utc::now() + Duration::hours(2));
+        let failed_id = save_event(&mut conn, failed).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(failed_id)))
+            .set((
+                schema::events::post_at.eq(Utc::now() - Duration::minutes(1)),
+                schema::events::post_attempts.eq(3),
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        tick(&mut conn, Utc::now()).unwrap();
+        assert_eq!(store::event(&mut conn, later_id).unwrap().unwrap().status, "scheduled");
+        assert_eq!(store::event(&mut conn, failed_id).unwrap().unwrap().status, "scheduled");
+    }
+
+    #[test]
+    fn expired_sign_ins_are_swept() {
+        let mut conn = world();
+        conn.batch_execute(
+            "INSERT INTO web_sessions (token, membership_id, guild_id, discord_user_id, display_name, created_at)
+             VALUES ('old', 1, 1, 'u1', 'Nell', now() - interval '31 days'),
+                    ('new', 2, 1, 'u2', 'June', now() - interval '29 days');",
+        )
+        .unwrap();
+        assert_eq!(store::delete_expired_sessions(&mut conn, Utc::now()).unwrap(), 1);
+        assert!(store::web_session(&mut conn, "old").unwrap().is_none());
+        assert!(store::web_session(&mut conn, "new").unwrap().is_some());
+    }
+
+    #[test]
     fn a_reminder_links_the_event_and_says_how_to_opt_out() {
         let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
         let card = reminder_card(

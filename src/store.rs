@@ -877,6 +877,9 @@ fn build_pool(url: &str, schema: Option<String>, max_size: u32) -> Result<Db, Op
     let manager = diesel::r2d2::ConnectionManager::<Connection>::new(url);
     diesel::r2d2::Pool::builder()
         .max_size(max_size)
+        // Callers wait at most this long for a free connection, then fail and
+        // try again later, rather than the default 30 seconds.
+        .connection_timeout(std::time::Duration::from_secs(5))
         .test_on_check_out(true)
         .connection_customizer(Box::new(Prepare { schema }))
         .build(manager)
@@ -1642,6 +1645,33 @@ pub fn list_events(conn: &mut Connection, guild_id: i64) -> Result<Vec<Event>, O
         .load(conn)?)
 }
 
+/// The server's scheduled events whose post time has come and that haven't
+/// failed to post three times, soonest first.
+pub fn events_due_to_post(
+    conn: &mut Connection,
+    guild_id: i64,
+    now: DateTime<Utc>,
+) -> Result<Vec<Event>, OpError> {
+    Ok(Event::in_guild(guild_id)
+        .filter(schema::events::status.eq("scheduled"))
+        .filter(schema::events::post_attempts.lt(3))
+        .filter(schema::events::post_at.le(now))
+        .order((schema::events::starts_at.asc(), schema::events::id.asc()))
+        .load(conn)?)
+}
+
+/// The server's events in `status`, soonest first.
+pub fn events_with_status(
+    conn: &mut Connection,
+    guild_id: i64,
+    status: &str,
+) -> Result<Vec<Event>, OpError> {
+    Ok(Event::in_guild(guild_id)
+        .filter(schema::events::status.eq(status))
+        .order((schema::events::starts_at.asc(), schema::events::id.asc()))
+        .load(conn)?)
+}
+
 pub fn events_in_series(conn: &mut Connection, series_id: i64) -> Result<Vec<Event>, OpError> {
     Ok(Event::in_series(series_id)
         .order((
@@ -2311,6 +2341,16 @@ pub fn add_session_guild(conn: &mut Connection, token: &str, guild_id: i64) -> R
         .on_conflict_do_nothing()
         .execute(conn)?;
     Ok(())
+}
+
+/// Deletes sign-ins older than `SESSION_DAYS`, with the Discord tokens they
+/// hold. Returns how many went.
+pub fn delete_expired_sessions(conn: &mut Connection, now: DateTime<Utc>) -> Result<usize, OpError> {
+    let cutoff = now - chrono::Duration::days(SESSION_DAYS);
+    Ok(
+        diesel::delete(schema::web_sessions::table.filter(schema::web_sessions::created_at.le(cutoff)))
+            .execute(conn)?,
+    )
 }
 
 pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
