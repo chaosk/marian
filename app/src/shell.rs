@@ -147,7 +147,7 @@ fn server_gate(_: &str) -> Option<crate::api::Failure> {
 
 /// A full page for a server that can't be opened, with the way back to the
 /// front page. One that doesn't exist and one that isn't theirs read the same.
-fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView {
+fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView + use<> {
     crate::status(404);
     crate::title("Missing");
     // The logo would lead back to this server, so it goes to the front page too.

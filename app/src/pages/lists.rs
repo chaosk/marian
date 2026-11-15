@@ -621,12 +621,12 @@ fn activity_list(
     .into_any()
 }
 
-fn pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView {
+fn pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView + use<T> {
     let q = q.to_string();
     pager_with(page, move |n| list_link(&q, n))
 }
 
-fn pager_with<T>(page: &dto::Paged<T>, link: impl Fn(u32) -> String) -> impl IntoView {
+fn pager_with<T, F: Fn(u32) -> String>(page: &dto::Paged<T>, link: F) -> impl IntoView + use<T, F> {
     let prev = (page.page > 1).then(|| link(page.page - 1));
     let next = (page.page < page.pages).then(|| link(page.page + 1));
     view! {
@@ -655,6 +655,6 @@ pub(super) fn list_link(q: &str, page: u32) -> String {
     }
 }
 
-pub(super) fn table_pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView {
+pub(super) fn table_pager<T>(page: &dto::Paged<T>, q: &str) -> impl IntoView + use<T> {
     pager(page, q)
 }

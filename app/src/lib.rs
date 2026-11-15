@@ -247,7 +247,7 @@ pub(crate) fn paint(class: &'static str, color: String) -> impl IntoView {
     }
 }
 
-fn md(source: &str) -> impl IntoView {
+fn md(source: &str) -> impl IntoView + use<> {
     view! { <div class="md" inner_html=markdown::render(source)></div> }
 }
 

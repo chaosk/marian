@@ -274,7 +274,7 @@ fn after_poll(
 
 /// A closed poll waiting for its day to be confirmed, with the answers for
 /// whoever may give them.
-fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> impl IntoView {
+fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> impl IntoView + use<> {
     let server = cache::server_now();
     let url = crate::api::path::routine_decide(&server, &routine.id);
     let winner = approval

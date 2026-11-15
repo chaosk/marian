@@ -34,7 +34,7 @@ fn layout(
     event: &dto::Event,
     clock: format::Clock,
     slots: Slots,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     let image = event.image_url.clone();
     view! {
         <div class="event-top">
@@ -344,7 +344,7 @@ pub(crate) fn role_cells(
     key: (String, String),
     event: &dto::Event,
     roles: Vec<dto::Role>,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     view! {
         <div>
             <p class="kicker">"Mentions"</p>
@@ -404,7 +404,7 @@ fn embed_view(
     here: String,
     localize: &'static str,
     now: chrono::DateTime<chrono::Utc>,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     let event = event.clone();
     let description = event.description.clone();
     let location = event.location.clone();
