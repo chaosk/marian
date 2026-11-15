@@ -2409,11 +2409,21 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
 
 /// Notes that the session's servers were just looked at, so a burst of
 /// requests asks Discord once.
-pub fn touch_session_guilds(conn: &mut Connection, token: &str) -> Result<(), OpError> {
-    diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(token)))
-        .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
-        .execute(conn)?;
-    Ok(())
+/// Claims the session's next server check: true for exactly one caller once
+/// the last check is older than `checked_before`, across requests and replicas.
+pub fn claim_session_guilds_check(
+    conn: &mut Connection,
+    token: &str,
+    checked_before: DateTime<Utc>,
+) -> Result<bool, OpError> {
+    let claimed = diesel::update(
+        schema::web_sessions::table
+            .filter(schema::web_sessions::token.eq(token))
+            .filter(schema::web_sessions::guilds_checked_at.lt(checked_before)),
+    )
+    .set(schema::web_sessions::guilds_checked_at.eq(Utc::now()))
+    .execute(conn)?;
+    Ok(claimed == 1)
 }
 
 /// Replaces the session's grant; `None` forgets it once Discord stops honouring it.
@@ -2909,6 +2919,26 @@ mod tests {
         assert!(sessions_without_guild(&mut conn, 2, None)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn one_request_claims_a_sessions_server_check() {
+        let mut conn = two_servers();
+        insert_web_session(&mut conn, "t", "u1", "Nell", 1, 1, &[1], None).unwrap();
+        let stale = Utc::now() - chrono::Duration::minutes(5);
+        conn.batch_execute(
+            "UPDATE web_sessions SET guilds_checked_at = now() - interval '6 minutes'",
+        )
+        .unwrap();
+        // A page's requests arrive together; only the first asks Discord.
+        let claims: Vec<bool> = (0..5)
+            .map(|_| claim_session_guilds_check(&mut conn, "t", stale).unwrap())
+            .collect();
+        assert_eq!(claims, [true, false, false, false, false]);
+        assert!(!claim_session_guilds_check(&mut conn, "missing", stale).unwrap());
+        // Five minutes on, the next request claims it again.
+        let later = Utc::now() + chrono::Duration::seconds(1);
+        assert!(claim_session_guilds_check(&mut conn, "t", later).unwrap());
     }
 
     #[test]

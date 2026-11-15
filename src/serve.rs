@@ -790,8 +790,14 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         let mut db = state.db.get().expect("database");
         read_session(&mut db, &headers).is_some()
     };
-    if signed_in && recheck_session_guilds(&state, &headers).await {
-        refresh_member_roles(&state, &path, &headers).await;
+    if signed_in {
+        // Both ask Discord, so neither holds up the request: it goes on with
+        // what Marian already knows, at most a few minutes old.
+        start_session_guilds_recheck(&state, &headers);
+        let (state, path, headers) = (state.clone(), path.clone(), headers.clone());
+        tokio::spawn(
+            async move { refresh_member_roles(&state, &path, &headers).await }.in_current_span(),
+        );
         return next.run(request).await;
     }
     let target = match request.uri().query() {
@@ -1035,32 +1041,51 @@ fn admit_guilds(
 const SESSION_GUILDS_TTL: chrono::Duration = chrono::Duration::minutes(5);
 
 /// Re-reads the member's Discord servers every few minutes, so a server Marian
-/// joins after they sign in shows up, and one they leave drops out. Answers
-/// whether the session is still good.
-async fn recheck_session_guilds(state: &AppState, headers: &HeaderMap) -> bool {
+/// joins after they sign in shows up, and one they leave drops out. One request
+/// per session claims the check, and Discord is asked in the background: the
+/// requests a page fires together used to each ask, and wait out the 429s.
+fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
     let Some(token) = cookie(headers, "marian_session") else {
-        return false;
+        return;
     };
     let session = {
         let mut db = state.db.get().expect("database");
         match store::web_session(&mut db, &token) {
             Ok(Some(session)) => session,
-            _ => return true,
+            _ => return,
         }
     };
-    let Some(grant) = session.grant else {
-        return true;
+    let Some(grant) = session.grant.clone() else {
+        return;
     };
     if Utc::now() - session.guilds_checked_at < SESSION_GUILDS_TTL {
-        return true;
+        return;
     }
-    {
+    let claimed = {
         let mut db = state.db.get().expect("database");
-        if let Err(err) = store::touch_session_guilds(&mut db, &token) {
+        store::claim_session_guilds_check(&mut db, &token, Utc::now() - SESSION_GUILDS_TTL)
+    };
+    match claimed {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(err) => {
             tracing::warn!("could not note the server check: {err}");
-            return true;
+            return;
         }
     }
+    let state = state.clone();
+    tokio::spawn(
+        async move { recheck_session_guilds(&state, &token, session, grant).await }
+            .in_current_span(),
+    );
+}
+
+async fn recheck_session_guilds(
+    state: &AppState,
+    token: &str,
+    session: store::WebSession,
+    grant: store::DiscordGrant,
+) {
     let grant = if grant.expires_at - chrono::Duration::minutes(1) > Utc::now() {
         grant
     } else {
@@ -1068,16 +1093,16 @@ async fn recheck_session_guilds(state: &AppState, headers: &HeaderMap) -> bool {
         let mut db = state.db.get().expect("database");
         match fresh {
             Ok(fresh) => {
-                if let Err(err) = store::set_session_grant(&mut db, &token, Some(&fresh)) {
+                if let Err(err) = store::set_session_grant(&mut db, token, Some(&fresh)) {
                     tracing::warn!("could not keep the refreshed Discord grant: {err}");
                 }
                 fresh
             }
             Err(err) => {
                 if err.revoked() {
-                    let _ = store::set_session_grant(&mut db, &token, None);
+                    let _ = store::set_session_grant(&mut db, token, None);
                 }
-                return true;
+                return;
             }
         }
     };
@@ -1086,9 +1111,9 @@ async fn recheck_session_guilds(state: &AppState, headers: &HeaderMap) -> bool {
         Err(err) => {
             if err.revoked() {
                 let mut db = state.db.get().expect("database");
-                let _ = store::set_session_grant(&mut db, &token, None);
+                let _ = store::set_session_grant(&mut db, token, None);
             }
-            return true;
+            return;
         }
     };
     let mut db = state.db.get().expect("database");
@@ -1101,18 +1126,18 @@ async fn recheck_session_guilds(state: &AppState, headers: &HeaderMap) -> bool {
         Ok(admitted) => admitted,
         Err(err) => {
             tracing::warn!("could not recheck the member's servers: {err}");
-            return true;
+            return;
         }
     };
     let Some(&home) = admitted.first() else {
-        let _ = store::delete_web_session(&mut db, &token);
-        return false;
+        // In none of Marian's servers any more: the next request signs in again.
+        let _ = store::delete_web_session(&mut db, token);
+        return;
     };
     let guilds: Vec<i64> = admitted.iter().map(|(guild_id, _)| *guild_id).collect();
-    if let Err(err) = store::replace_session_guilds(&mut db, &token, &guilds, home) {
+    if let Err(err) = store::replace_session_guilds(&mut db, token, &guilds, home) {
         tracing::warn!("could not store the member's servers: {err}");
     }
-    true
 }
 
 async fn auth_start(
