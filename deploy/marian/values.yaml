@@ -46,13 +46,16 @@ google:
   clientSecretKey: ""
 
 database:
-  # Postgres connection string. Required unless discord.existingSecret already
+  # Postgres connection string. Add ?sslmode=verify-full (or require,
+  # verify-ca) for TLS; see the README for how each mode checks the server.
+  # Required unless discord.existingSecret already
   # holds it under secretKey. Ignored when discord.existingSecret is set: the
   # pod then reads the string from that secret under secretKey.
   url: ""
   secretKey: databaseUrl
-  # Pooled connections each pod keeps open. Each pod also holds two of its
-  # own: one for the leader lock, one for live updates between pods.
+  # The most pooled connections each pod opens, as needed. Each pod also
+  # holds two of its own: one for the leader lock, one for live updates
+  # between pods.
   pool: 10
 
 # Custom status under the bot's name. Empty leaves it unset.

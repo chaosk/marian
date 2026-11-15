@@ -36,8 +36,6 @@ allow = [
   "ISC",
   "MIT",
   "MIT-0",
-  # pq-src, the libpq that static-libpq builds into the release binary.
-  "PostgreSQL",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
