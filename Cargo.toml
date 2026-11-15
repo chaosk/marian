@@ -35,8 +35,8 @@ anyhow = "1"
 axum = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-diesel = { version = "2.3.14", default-features = false, features = ["postgres", "r2d2", "32-column-tables", "serde_json", "chrono", "uuid"] }
-diesel_migrations = { version = "2.3.2", default-features = false, features = ["postgres"] }
+diesel = { version = "2.4", default-features = false, features = ["postgres", "r2d2", "32-column-tables", "serde_json", "chrono", "uuid"] }
+diesel_migrations = { version = "2.4", default-features = false, features = ["postgres"] }
 marian-types = { workspace = true, features = ["diesel"] }
 opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }

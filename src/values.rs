@@ -4,49 +4,46 @@
 //! always held; a migration's CHECK constraint keeps any other out, and one
 //! read anyway fails the query.
 
-use marian_types::{text_enum, text_sql};
+use marian_types::text_enum;
 
 pub use marian_types::values::{Cadence, ChannelKind, EventStatus, RunStatus};
 
 text_enum! {
     /// Whether a signup holds a place or waits for one.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum SignupState("signup state") {
         Confirmed = "confirmed",
         /// On the option's waitlist, to move up as places open.
         Waitlisted = "waitlisted",
     }
 }
-text_sql!(SignupState);
 
 text_enum! {
     /// How often a server's digest is posted.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum Digest("digest") {
         Off = "off",
         Daily = "daily",
         Weekly = "weekly",
     }
 }
-text_sql!(Digest);
 
 text_enum! {
     /// Where a reminder was posted: the event's thread or its channel.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum ReminderPlace("reminder place") {
         Thread = "thread",
         Channel = "channel",
     }
 }
-text_sql!(ReminderPlace);
 
 text_enum! {
     /// One step of a routine.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum StepKind("routine step") {
         /// Members vote for the week's day.
         Poll = "poll",
@@ -56,12 +53,11 @@ text_enum! {
         Post = "post",
     }
 }
-text_sql!(StepKind);
 
 text_enum! {
     /// What an event does with one of its roles.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum EventRoleKind("event role kind") {
         /// Mentioned when the event is posted.
         Mention = "mention",
@@ -69,12 +65,11 @@ text_enum! {
         Restrict = "restrict",
     }
 }
-text_sql!(EventRoleKind);
 
 text_enum! {
     /// What Marian gave a member for an event, to take back later.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum AccessKind("applied access") {
         /// Added to the event's thread.
         Thread = "thread",
@@ -82,12 +77,11 @@ text_enum! {
         Role = "role",
     }
 }
-text_sql!(AccessKind);
 
 text_enum! {
     /// What a server's roles may be allowed to do.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum Permission("permission") {
         /// Create events.
         Event = "event",
@@ -101,23 +95,21 @@ text_enum! {
         Signup = "signup",
     }
 }
-text_sql!(Permission);
 
 text_enum! {
     /// Whom a channel permission overwrite is for.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum OverwriteKind("permission overwrite kind") {
         Member = "member",
         Role = "role",
     }
 }
-text_sql!(OverwriteKind);
 
 text_enum! {
     /// Which question the `/event` DM waits on an answer to.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum PromptStep("event DM step") {
         Channel = "channel",
         /// Another channel than the one `/event` was used in, from a list.
@@ -149,12 +141,11 @@ text_enum! {
         Respond = "respond",
     }
 }
-text_sql!(PromptStep);
 
 text_enum! {
     /// Something Marian does at a set time, one `tasks` row each.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum TaskKind("task kind") {
         /// Post a scheduled event; the subject is the event.
         Post = "post",
@@ -175,13 +166,12 @@ text_enum! {
         GoogleSync = "google_sync",
     }
 }
-text_sql!(TaskKind);
 
 text_enum! {
     /// What a trigger saw change, for the task worker to turn into task
     /// times. One `task_marks` row each.
-    #[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
-    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[derive(diesel::types::Enum)]
+    #[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
     pub enum MarkKind("task mark kind") {
         /// An event: its post, reminders, cutoff, archive and calendars.
         Event = "event",
@@ -201,7 +191,6 @@ text_enum! {
         People = "people",
     }
 }
-text_sql!(MarkKind);
 
 #[cfg(test)]
 mod tests {
@@ -323,10 +312,47 @@ mod tests {
             source = cause.source();
         }
         assert!(
-            causes
-                .iter()
-                .any(|cause| cause == "unknown digest \"hourly\""),
+            causes.iter().any(|cause| cause.contains("`hourly`")),
             "{causes:?}"
         );
+    }
+
+    /// Writes each value as Diesel does and reads the stored word back, then
+    /// reads the word back as the value: Diesel's words are the enum's own.
+    macro_rules! round_trip {
+        ($conn:expr, $all:expr, $word:path) => {
+            for value in $all.iter().copied() {
+                let stored: String = diesel::select(value.into_sql::<Text>())
+                    .get_result($conn)
+                    .unwrap();
+                assert_eq!(stored, $word(value), "{value:?}");
+                let read = diesel::select($word(value).into_sql::<Text>())
+                    .get_result($conn)
+                    .unwrap();
+                assert_eq!(value, read);
+            }
+        };
+    }
+
+    #[test]
+    fn diesel_writes_and_reads_each_enums_own_words() {
+        let mut conn = crate::store::open_memory().unwrap();
+        let conn = &mut conn;
+        round_trip!(conn, EventStatus::ALL, EventStatus::as_str);
+        round_trip!(conn, Cadence::ALL, Cadence::as_str);
+        round_trip!(conn, RunStatus::ALL, RunStatus::as_str);
+        round_trip!(conn, ChannelKind::ALL, ChannelKind::as_str);
+        round_trip!(conn, StepKind::ALL, StepKind::as_str);
+        round_trip!(conn, SignupState::ALL, SignupState::as_str);
+        round_trip!(conn, Digest::ALL, Digest::as_str);
+        round_trip!(conn, Lang::ALL, Lang::code);
+        round_trip!(conn, ReminderPlace::ALL, ReminderPlace::as_str);
+        round_trip!(conn, EventRoleKind::ALL, EventRoleKind::as_str);
+        round_trip!(conn, AccessKind::ALL, AccessKind::as_str);
+        round_trip!(conn, Permission::ALL, Permission::as_str);
+        round_trip!(conn, OverwriteKind::ALL, OverwriteKind::as_str);
+        round_trip!(conn, PromptStep::ALL, PromptStep::as_str);
+        round_trip!(conn, TaskKind::ALL, TaskKind::as_str);
+        round_trip!(conn, MarkKind::ALL, MarkKind::as_str);
     }
 }

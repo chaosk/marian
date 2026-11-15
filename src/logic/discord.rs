@@ -516,14 +516,12 @@ pub fn channel_reverse_plan(
 }
 
 pub fn detach_discord_posts(conn: &mut Connection, event_ids: &[i64]) -> Result<(), OpError> {
-    for event_id in event_ids {
-        diesel::update(schema::events::table.filter(schema::events::id.eq(event_id)))
-            .set(schema::events::discord_message_id.eq(None::<String>))
-            .execute(conn)?;
-        diesel::update(schema::threads::table.filter(schema::threads::event_id.eq(event_id)))
-            .set(schema::threads::discord_id.eq(None::<String>))
-            .execute(conn)?;
-    }
+    diesel::update(schema::events::table.filter(schema::events::id.eq_any(event_ids)))
+        .set(schema::events::discord_message_id.eq(None::<String>))
+        .execute(conn)?;
+    diesel::update(schema::threads::table.filter(schema::threads::event_id.eq_any(event_ids)))
+        .set(schema::threads::discord_id.eq(None::<String>))
+        .execute(conn)?;
     Ok(())
 }
 
