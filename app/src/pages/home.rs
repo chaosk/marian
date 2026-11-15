@@ -35,10 +35,13 @@ pub fn Schedule() -> impl IntoView {
     let pending = cache::listen(cache::pending_reminders_scope(), cache::server_key);
     let membership = cache::listen(cache::membership_scope(), cache::server_key);
     let now = format::now();
-    title("This week");
+    title("Schedule");
     view! {
         <div class="page-head">
-            <div><h1>"This week"</h1></div>
+            <div>
+                <h1>"Schedule"</h1>
+                <p class="lede">"This week, Monday to Sunday."</p>
+            </div>
             <A href=format!("{}/events/new", base()) attr:class="primary">"New event"</A>
         </div>
         {when(move || (server.get(), week.get()).ready(), move |(server, week)| week_cell(&server, week, now))}
@@ -84,7 +87,8 @@ fn week_key(server: Option<Result<dto::Server, crate::api::Failure>>) -> (String
             view: dto::EventView::Upcoming,
             from: Some(from),
             to: Some(to),
-            limit: Some(20),
+            // The most one page holds; past that, the week links to the Events list.
+            limit: Some(100),
             ..Default::default()
         },
     )
@@ -101,7 +105,7 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
         .cloned();
     let mut days: Vec<(String, bool, Vec<dto::EventSummary>)> = Vec::new();
     let today = clock.day(now);
-    for event in week.items.iter().take(5) {
+    for event in &week.items {
         let day = clock.day(event.starts_at);
         let label = format::format_day(day);
         if days.last().map(|(last, _, _)| last != &label).unwrap_or(true) {
@@ -152,7 +156,19 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
             </section>
         }
     });
-    view! { {hero} {days} }
+    // A week busier than one page holds links to the rest on the Events list.
+    let more = (week.total > week.items.len()).then(|| {
+        let (from, to) = format::week_of(&clock, now);
+        let filters = crate::pages::lists::Filters {
+            when: Some(dto::EventWhen::Upcoming),
+            from: Some(clock.day(from)),
+            to: Some(clock.day(to) - chrono::Duration::days(1)),
+            ..Default::default()
+        };
+        let href = format!("{base}/events{}", filters.link("", 1));
+        view! { <p class="week-more"><A href=href>{format!("See all {} this week →", week.total)}</A></p> }
+    });
+    view! { {hero} {days} {more} }
 }
 
 fn wrapped_cell(server: &dto::Server, wrapped: dto::Paged<dto::EventSummary>, _now: chrono::DateTime<chrono::Utc>) -> impl IntoView {
