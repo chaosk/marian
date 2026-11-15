@@ -971,7 +971,7 @@ async fn recycle_schema(admin_url: &str, schema: &str) -> bool {
     // The test's connections closed with its runtime; Postgres may take a
     // moment to see them go.
     let mut still_used = 1;
-    for _ in 0..40 {
+    for _ in 0..200 {
         still_used = match diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(&format!(
             "(SELECT count(*) FROM pg_stat_activity \
                   WHERE application_name = '{schema}' AND pid <> pg_backend_pid())"
@@ -985,7 +985,7 @@ async fn recycle_schema(admin_url: &str, schema: &str) -> bool {
         if still_used == 0 {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     if still_used > 0 || schema_shape(&mut admin, schema).await.as_deref() != Some(shape) {
         return false;
@@ -1072,23 +1072,52 @@ pub async fn open_memory() -> Result<Connection, OpError> {
     // of lock slots and fail every test opening a schema meanwhile.
     TEST_CLEANUP
         .get_or_init(|| async {
-            let stale: Vec<String> = diesel::select(diesel::dsl::sql::<
-                diesel::sql_types::Array<diesel::sql_types::Text>,
-            >(&format!(
-                "ARRAY(SELECT nspname::text FROM pg_namespace
-                        WHERE nspname LIKE 'marian_t{pid}_%'
-                           OR (nspname LIKE 'marian_t%'
-                               AND obj_description(oid, 'pg_namespace') ~ '^pooled [0-9]+$'
-                               AND split_part(obj_description(oid, 'pg_namespace'), ' ', 2)::bigint
-                                   < extract(epoch FROM now()) - 900))"
-            )))
-            .get_result(&mut admin)
-            .await
-            .unwrap_or_default();
-            for name in stale {
+            let names = async |admin: &mut Connection, which: &str| -> Vec<String> {
+                diesel::select(diesel::dsl::sql::<
+                    diesel::sql_types::Array<diesel::sql_types::Text>,
+                >(&format!(
+                    "ARRAY(SELECT nspname::text FROM pg_namespace WHERE {which})"
+                )))
+                .get_result(admin)
+                .await
+                .unwrap_or_default()
+            };
+            // This process id's could clash with the schemas about to be made.
+            for name in names(&mut admin, &format!("nspname LIKE 'marian_t{pid}_%'")).await {
                 let _ = admin
                     .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{name}\" CASCADE"))
                     .await;
+            }
+            // Idle ones can't, so they go on a thread of their own while the
+            // tests run.
+            let idle = names(
+                &mut admin,
+                "nspname LIKE 'marian_t%'
+                 AND obj_description(oid, 'pg_namespace') ~ '^pooled [0-9]+$'
+                 AND split_part(obj_description(oid, 'pg_namespace'), ' ', 2)::bigint
+                     < extract(epoch FROM now()) - 900",
+            )
+            .await;
+            if !idle.is_empty() {
+                let admin_url = admin_url.clone();
+                std::thread::spawn(move || {
+                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    runtime.block_on(async {
+                        let Ok(mut admin) = connect(&admin_url).await else {
+                            return;
+                        };
+                        for name in idle {
+                            let _ = admin
+                                .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{name}\" CASCADE"))
+                                .await;
+                        }
+                    });
+                });
             }
         })
         .await;
