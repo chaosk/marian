@@ -1,10 +1,13 @@
-//! Logs always go to stderr. Traces leave the process only when
+//! Logs go to stdout: plain text in a terminal, and JSON lines anywhere else
+//! (`MARIAN_LOG_FORMAT=text|json` overrides), so a collector like Loki reads
+//! each line's level and fields instead of guessing at coloured text. Traces leave the process only when
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and metrics only when
 //! `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is: a trace store like Tempo takes no
 //! metrics, so they don't follow the traces on their own.
 
 use std::cell::RefCell;
 use std::env;
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
@@ -58,7 +61,14 @@ impl Drop for Telemetry {
 pub fn init() -> Telemetry {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| "marian=info,tower_http=info".into());
-    let logs = tracing_subscriber::fmt::layer().with_filter(filter);
+    let logs = match log_format(
+        env::var("MARIAN_LOG_FORMAT").ok().as_deref(),
+        std::io::stdout().is_terminal(),
+    ) {
+        LogFormat::Json => json_logs(std::io::stdout).boxed(),
+        LogFormat::Text { colour } => tracing_subscriber::fmt::layer().with_ansi(colour).boxed(),
+    }
+    .with_filter(filter);
 
     let endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .ok()
@@ -93,6 +103,41 @@ pub fn init() -> Telemetry {
         .with(traces)
         .init();
     Telemetry { provider, meters }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LogFormat {
+    Json,
+    Text { colour: bool },
+}
+
+/// One JSON object per line: `level`, `target` and the message at the top,
+/// and the fields of the span the event happened in under `span`.
+fn json_logs<S, W>(writer: W) -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .json()
+        .flatten_event(true)
+        .with_current_span(true)
+        .with_span_list(false)
+        .with_writer(writer)
+}
+
+/// A terminal gets coloured text; a pipe or a container's log gets JSON unless
+/// asked for text, which then comes without colour codes.
+fn log_format(setting: Option<&str>, terminal: bool) -> LogFormat {
+    match setting
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("json") => LogFormat::Json,
+        Some("text") => LogFormat::Text { colour: terminal },
+        _ if terminal => LogFormat::Text { colour: true },
+        _ => LogFormat::Json,
+    }
 }
 
 fn exporter(endpoint: &str) -> Option<SdkTracerProvider> {
@@ -392,7 +437,59 @@ fn push_limited(out: &mut String, c: char) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_from, statement_shape, trace_filter, traceparent, traces_endpoint, EXPORT};
+    use super::{
+        json_logs, log_format, parent_from, statement_shape, trace_filter, traceparent,
+        traces_endpoint, LogFormat, EXPORT,
+    };
+
+    #[test]
+    fn logs_are_json_unless_a_terminal_reads_them() {
+        assert_eq!(log_format(None, false), LogFormat::Json);
+        assert_eq!(log_format(None, true), LogFormat::Text { colour: true });
+        assert_eq!(log_format(Some(" JSON "), true), LogFormat::Json);
+        assert_eq!(
+            log_format(Some("text"), false),
+            LogFormat::Text { colour: false }
+        );
+        assert_eq!(log_format(Some("loud"), false), LogFormat::Json);
+    }
+
+    #[test]
+    fn a_json_line_carries_its_level_and_span_fields() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::registry().with(json_logs(move || writer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("http", otel.name = "GET /api/servers");
+            let _entered = span.enter();
+            tracing::warn!("discord guilds returned 429 Too Many Requests");
+        });
+
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(!text.contains('\u{1b}'), "no colour codes: {text}");
+        let line: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(line["level"], "WARN");
+        assert_eq!(
+            line["message"],
+            "discord guilds returned 429 Too Many Requests"
+        );
+        assert_eq!(line["span"]["otel.name"], "GET /api/servers");
+    }
 
     #[test]
     fn statement_shape_hides_values() {
@@ -432,7 +529,10 @@ mod tests {
             let context = span.context();
             let current = context.span();
             let ids = current.span_context();
-            assert_eq!(written, format!("00-{}-{}-01", ids.trace_id(), ids.span_id()));
+            assert_eq!(
+                written,
+                format!("00-{}-{}-01", ids.trace_id(), ids.span_id())
+            );
             let parent = parent_from(&written).unwrap();
             assert_eq!(parent.span().span_context().span_id(), ids.span_id());
         });
@@ -442,7 +542,8 @@ mod tests {
     fn a_traceparent_names_its_parent() {
         use opentelemetry::trace::TraceContextExt;
 
-        let parent = parent_from("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").unwrap();
+        let parent =
+            parent_from("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").unwrap();
         let span = parent.span();
         assert_eq!(
             span.span_context().trace_id().to_string(),
@@ -490,7 +591,10 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             assert!(super::query_parent().is_none());
             tracing::info_span!("tick").in_scope(|| {
-                assert!(super::query_parent().is_some(), "a query in a span joins it");
+                assert!(
+                    super::query_parent().is_some(),
+                    "a query in a span joins it"
+                );
             });
             assert!(super::query_parent().is_none());
         });
@@ -514,12 +618,15 @@ mod tests {
         );
         tracing::subscriber::with_default(subscriber, || {
             // Serenity's shard runner, entered for as long as the gateway is up.
-            let runner = tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "run");
+            let runner =
+                tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "run");
             let _runner = runner.enter();
-            tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "recv_event").in_scope(|| {});
+            tracing::info_span!(target: "serenity::gateway::bridge::shard_runner", "recv_event")
+                .in_scope(|| {});
             let event = tracing::info_span!(parent: None, "discord_event");
             event.in_scope(|| {
-                tracing::info_span!(target: "serenity::http::ratelimiting", "perform").in_scope(|| {});
+                tracing::info_span!(target: "serenity::http::ratelimiting", "perform")
+                    .in_scope(|| {});
             });
         });
         let spans = exporter.get_finished_spans().expect("spans");
