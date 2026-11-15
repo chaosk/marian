@@ -64,11 +64,7 @@ fn catalog() -> &'static Catalog {
             file(&icon, icon_body, "image/svg+xml", true),
             file("/favicon.svg", icon_body, "image/svg+xml", false),
         ];
-        Catalog {
-            files,
-            mark,
-            icon,
-        }
+        Catalog { files, mark, icon }
     })
 }
 
@@ -105,11 +101,17 @@ pub fn frontend_build() -> &'static str {
         if var("LEPTOS_HASH_FILES", "false") == "true" {
             let list = std::env::current_exe()
                 .ok()
-                .and_then(|exe| exe.parent().map(|dir| dir.join(var("LEPTOS_HASH_FILE_NAME", "hash.txt"))))
+                .and_then(|exe| {
+                    exe.parent()
+                        .map(|dir| dir.join(var("LEPTOS_HASH_FILE_NAME", "hash.txt")))
+                })
                 .and_then(|path| std::fs::read_to_string(path).ok());
-            return list.map(|list| build_from_hash_list(&list)).unwrap_or_default();
+            return list
+                .map(|list| build_from_hash_list(&list))
+                .unwrap_or_default();
         }
-        let dir = std::path::Path::new(&var("LEPTOS_SITE_ROOT", "target/site")).join(var("LEPTOS_SITE_PKG_DIR", "pkg"));
+        let dir = std::path::Path::new(&var("LEPTOS_SITE_ROOT", "target/site"))
+            .join(var("LEPTOS_SITE_PKG_DIR", "pkg"));
         let name = var("LEPTOS_OUTPUT_NAME", "marian");
         frontend_build_in(&dir, &name)
     })
@@ -124,12 +126,20 @@ fn build_from_hash_list(list: &str) -> String {
         .filter(|(kind, hash)| matches!(kind.as_str(), "js" | "wasm" | "css") && !hash.is_empty())
         .collect();
     parts.sort();
-    parts.into_iter().map(|(kind, hash)| format!("{kind}:{hash}")).collect::<Vec<_>>().join(",")
+    parts
+        .into_iter()
+        .map(|(kind, hash)| format!("{kind}:{hash}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn frontend_build_in(dir: &std::path::Path, name: &str) -> String {
     let mut bytes = Vec::new();
-    for file in [format!("{name}.wasm"), format!("{name}.js"), format!("{name}.css")] {
+    for file in [
+        format!("{name}.wasm"),
+        format!("{name}.js"),
+        format!("{name}.css"),
+    ] {
         match std::fs::read(dir.join(&file)) {
             Ok(body) => bytes.extend(body),
             Err(_) if file.ends_with(".css") => {}
@@ -187,9 +197,17 @@ mod tests {
     fn a_hash_list_names_the_build() {
         let list = "js: p8RBG6uYGacG1M0EJS3XOg\nwasm: iucsWZX9RG8HB2_vQoyuAw\ncss: kcWcuR9ygyaOXPYiW0cpOw\n";
         let build = build_from_hash_list(list);
-        assert_eq!(build, "css:kcWcuR9ygyaOXPYiW0cpOw,js:p8RBG6uYGacG1M0EJS3XOg,wasm:iucsWZX9RG8HB2_vQoyuAw");
-        let reordered = "css: kcWcuR9ygyaOXPYiW0cpOw\njs: p8RBG6uYGacG1M0EJS3XOg\nwasm: iucsWZX9RG8HB2_vQoyuAw";
-        assert_eq!(build_from_hash_list(reordered), build, "order in the file doesn't matter");
+        assert_eq!(
+            build,
+            "css:kcWcuR9ygyaOXPYiW0cpOw,js:p8RBG6uYGacG1M0EJS3XOg,wasm:iucsWZX9RG8HB2_vQoyuAw"
+        );
+        let reordered =
+            "css: kcWcuR9ygyaOXPYiW0cpOw\njs: p8RBG6uYGacG1M0EJS3XOg\nwasm: iucsWZX9RG8HB2_vQoyuAw";
+        assert_eq!(
+            build_from_hash_list(reordered),
+            build,
+            "order in the file doesn't matter"
+        );
         assert_eq!(build_from_hash_list(""), "");
     }
 
@@ -203,11 +221,23 @@ mod tests {
         std::fs::write(dir.join("marian.css"), b"css").unwrap();
         let first = frontend_build_in(&dir, "marian");
         assert_eq!(first.len(), 16);
-        assert_eq!(frontend_build_in(&dir, "marian"), first, "the same files are the same build on every pod");
+        assert_eq!(
+            frontend_build_in(&dir, "marian"),
+            first,
+            "the same files are the same build on every pod"
+        );
         std::fs::write(dir.join("marian.css"), b"css, changed").unwrap();
-        assert_ne!(frontend_build_in(&dir, "marian"), first, "a new stylesheet is a new build");
+        assert_ne!(
+            frontend_build_in(&dir, "marian"),
+            first,
+            "a new stylesheet is a new build"
+        );
         std::fs::remove_file(dir.join("marian.wasm")).unwrap();
-        assert_eq!(frontend_build_in(&dir, "marian"), "", "without the wasm there is nothing to compare");
+        assert_eq!(
+            frontend_build_in(&dir, "marian"),
+            "",
+            "without the wasm there is nothing to compare"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -1,18 +1,15 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::format::{self, clock_of, spot_count, status_label};
 use crate::cache::{self, show, when, Ready};
+use crate::format::{self, clock_of, spot_count, status_label};
 use crate::{base, md, title, A};
 use marian_types::EventStatus;
 
 #[component]
 pub fn Schedule() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
-    let week = cache::listen(cache::events_scope(), {
-        let server = server;
-        move || week_key(server.get())
-    });
+    let week = cache::listen(cache::events_scope(), move || week_key(server.get()));
     let wrapped = cache::listen(cache::events_scope(), || {
         cache::events_key(
             cache::server_key(),
@@ -102,7 +99,11 @@ fn week_key(server: Option<Result<dto::Server, crate::api::Failure>>) -> (String
     )
 }
 
-fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chrono::DateTime<chrono::Utc>) -> impl IntoView {
+fn week_cell(
+    server: &dto::Server,
+    week: dto::Paged<dto::EventSummary>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> impl IntoView {
     let clock = clock_of(server);
     let base = base();
     let hero = week
@@ -116,7 +117,11 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
     for event in &week.items {
         let day = clock.day(event.starts_at);
         let label = format::format_day(day);
-        if days.last().map(|(last, _, _)| last != &label).unwrap_or(true) {
+        if days
+            .last()
+            .map(|(last, _, _)| last != &label)
+            .unwrap_or(true)
+        {
             days.push((label, day == today, Vec::new()));
         }
         days.last_mut().unwrap().2.push(event.clone());
@@ -179,7 +184,11 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
     view! { {hero} {days} {more} }
 }
 
-fn wrapped_cell(server: &dto::Server, wrapped: dto::Paged<dto::EventSummary>, _now: chrono::DateTime<chrono::Utc>) -> impl IntoView {
+fn wrapped_cell(
+    server: &dto::Server,
+    wrapped: dto::Paged<dto::EventSummary>,
+    _now: chrono::DateTime<chrono::Utc>,
+) -> impl IntoView {
     let clock = clock_of(server);
     let base = base();
     (!wrapped.items.is_empty()).then(|| {
@@ -219,7 +228,10 @@ fn pending_cell(reminders: Vec<dto::PendingReminder>) -> impl IntoView {
     }
 }
 
-fn activity_cell(activity: Vec<dto::Activity>, now: chrono::DateTime<chrono::Utc>) -> impl IntoView {
+fn activity_cell(
+    activity: Vec<dto::Activity>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> impl IntoView {
     if activity.is_empty() {
         view! { <p class="muted">"The log is quiet."</p> }.into_any()
     } else {
@@ -273,7 +285,12 @@ fn card(
     }
 }
 
-fn links(base: &str, items: &[dto::EventSummary], clock: &format::Clock, post: bool) -> impl IntoView {
+fn links(
+    base: &str,
+    items: &[dto::EventSummary],
+    clock: &format::Clock,
+    post: bool,
+) -> impl IntoView {
     if items.is_empty() {
         return view! { <p class="muted">"Nothing is queued."</p> }.into_any();
     }

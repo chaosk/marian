@@ -44,14 +44,16 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
 /// A `/settings` subcommand that takes one value and saves it as
 /// `commands::Setting::$variant`: the command `rename`d `$name` with the
 /// description `$about`, and one option `$param` described as `$param_about`.
+// rustfmt re-indents the attribute inside on every run, so it never settles.
+#[rustfmt::skip]
 macro_rules! setting_command {
     ($fn:ident, $name:tt, $about:tt, $param:ident: $ty:ident = $param_about:tt, $variant:ident) => {
         #[poise::command(
-                    slash_command,
-                    guild_only,
-                    rename = $name,
-                    description_localized("en-US", $about)
-                )]
+            slash_command,
+            guild_only,
+            rename = $name,
+            description_localized("en-US", $about)
+        )]
         async fn $fn(
             ctx: Context<'_>,
             #[description = $param_about] $param: $ty,

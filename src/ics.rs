@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use diesel::prelude::*;
 
 use crate::error::OpError;
-use crate::schema::{events, signup_options, signups, memberships};
+use crate::schema::{events, memberships, signup_options, signups};
 use crate::store::{self, Connection, Event};
 use crate::values::{EventStatus, SignupState};
 
@@ -40,7 +40,11 @@ pub(crate) fn events_for_person(
             )),
         )
         .filter(memberships::user_id.eq(user_id))
-        .filter(events::status.eq_any([EventStatus::Posted, EventStatus::Scheduled, EventStatus::Archived]))
+        .filter(events::status.eq_any([
+            EventStatus::Posted,
+            EventStatus::Scheduled,
+            EventStatus::Archived,
+        ]))
         .filter(
             events::created_by
                 .eq(memberships::id.nullable())
@@ -61,7 +65,11 @@ pub(crate) fn events_for_person(
     }
     Ok(events
         .into_iter()
-        .filter(|event| sights.get(&event.guild_id).is_some_and(|sight| sight.sees_event(event)))
+        .filter(|event| {
+            sights
+                .get(&event.guild_id)
+                .is_some_and(|sight| sight.sees_event(event))
+        })
         .collect())
 }
 
@@ -125,12 +133,38 @@ fn google_time(dt: DateTime<Utc>) -> String {
 }
 
 fn fold_escape(value: &str) -> String {
-    let escaped = value
+    value
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace(',', "\\,")
-        .replace(';', "\\;");
-    escaped
+        .replace(';', "\\;")
+}
+
+fn plus_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+pub fn pct(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -177,7 +211,10 @@ mod tests {
         assert!(!feed.contains("June hosts declined"), "{feed}");
         let token = store::ensure_calendar_token(&mut conn, person).unwrap();
         assert_eq!(token.len(), 64);
-        assert_eq!(store::ensure_calendar_token(&mut conn, person).unwrap(), token);
+        assert_eq!(
+            store::ensure_calendar_token(&mut conn, person).unwrap(),
+            token
+        );
         assert_eq!(
             store::calendar_user_id(&mut conn, &token).unwrap(),
             Some(person)
@@ -206,31 +243,4 @@ mod tests {
             "http://www.google.com/calendar/event?action=TEMPLATE&text=BotC+%23135&details=&location=&dates=20261014T153000Z/20261014T171500Z"
         );
     }
-}
-
-fn plus_encode(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-pub fn pct(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }

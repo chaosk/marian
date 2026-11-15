@@ -182,7 +182,9 @@ fn quote_line(line: &str) -> Option<&str> {
     if line.starts_with(">>>") {
         return None;
     }
-    let rest = line.strip_prefix("&gt;").or_else(|| line.strip_prefix('>'))?;
+    let rest = line
+        .strip_prefix("&gt;")
+        .or_else(|| line.strip_prefix('>'))?;
     Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
@@ -216,7 +218,13 @@ fn flush_list(html: &mut String, tag: &str, items: &mut Vec<&str>) {
 
 fn escape_keep_nl(src: &str) -> String {
     src.chars()
-        .map(|c| if c == '\n' { c.to_string() } else { escape_char(c) })
+        .map(|c| {
+            if c == '\n' {
+                c.to_string()
+            } else {
+                escape_char(c)
+            }
+        })
         .collect()
 }
 
@@ -274,19 +282,22 @@ pub fn reveal_spoilers() {
         }
     })
     .into_js_value();
-    let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
-        let on_spoiler = ev
-            .target()
-            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-            .is_some_and(|element| element.matches(".md .spoiler").unwrap_or(false));
-        if on_spoiler && matches!(ev.key().as_str(), "Enter" | " ") {
-            toggle(&ev);
-        }
-    })
-    .into_js_value();
+    let on_key =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            let on_spoiler = ev
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|element| element.matches(".md .spoiler").unwrap_or(false));
+            if on_spoiler && matches!(ev.key().as_str(), "Enter" | " ") {
+                toggle(&ev);
+            }
+        })
+        .into_js_value();
     let document = leptos::prelude::document();
-    let _ = document.add_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
-    let _ = document.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
+    let _ =
+        document.add_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
+    let _ =
+        document.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
 }
 
 #[cfg(not(feature = "hydrate"))]

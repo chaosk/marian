@@ -45,6 +45,38 @@ jobs:
       # The server depends on the app with `ssr`, so this runs the app's tests too.
       - run: cargo test --locked --workspace --exclude marian-frontend
 
+  # Dependabot merges minor and patch bumps on green checks, so formatting,
+  # lints and the dependency audit run beside the tests.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - name: libpq
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The workspace build sees the app without ssr; the server compiles it with ssr.
+      - run: cargo clippy --locked -p marian-app --features ssr -- -D warnings
+
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        with:
+          tool: cargo-deny@0.20.2
+      # Advisories, licenses, banned and duplicate crates, and sources, per deny.toml.
+      - run: cargo deny --locked check
+
   binary:
     name: Release binary
     needs: [test]
@@ -78,6 +110,7 @@ jobs:
       # source took minutes and ran the runner out of disk.
       - name: cargo-leptos
         env:
+          # Keep in step with the Dockerfile's cargo install --version.
           VERSION: 0.3.11
           SHA256: 1c9cf0e1e3ffae6c8b58d29281d949dab560cea613b80d361f323f93071df7c8
         run: |
@@ -163,13 +196,13 @@ jobs:
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.image
@@ -181,7 +214,7 @@ jobs:
           outputs: type=image,push=true,oci-mediatypes=false
           build-args: MARIAN_VERSION=${{ steps.image.outputs.version }}
           tags: ${{ steps.image.outputs.tags }}
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         if: startsWith(github.ref, 'refs/tags/')
       - name: Publish chart
         if: startsWith(github.ref, 'refs/tags/')

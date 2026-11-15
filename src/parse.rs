@@ -103,7 +103,10 @@ pub fn normalize(input: &str) -> String {
             out.push(mapped.to_string());
             continue;
         }
-        if matches!(plain.as_str(), "o" | "godz" | "godz." | "godzinie" | "w" | "we" | "na") {
+        if matches!(
+            plain.as_str(),
+            "o" | "godz" | "godz." | "godzinie" | "w" | "we" | "na"
+        ) {
             continue;
         }
         if let Some(day) = polish_weekday(&plain) {
@@ -139,7 +142,10 @@ pub fn normalize(input: &str) -> String {
         if last == Some("at") {
             // "o 19.30" is a clock time.
             if let Some((hour, minute)) = plain.split_once('.') {
-                if hour.chars().all(|ch| ch.is_ascii_digit()) && minute.len() == 2 && minute.chars().all(|ch| ch.is_ascii_digit()) {
+                if hour.chars().all(|ch| ch.is_ascii_digit())
+                    && minute.len() == 2
+                    && minute.chars().all(|ch| ch.is_ascii_digit())
+                {
                     out.push(format!("{hour}:{minute}"));
                     continue;
                 }
@@ -223,7 +229,10 @@ fn polish_month(word: &str) -> Option<&'static str> {
     // Every form of a Polish month starts with its stem: "października", "maja".
     MONTHS
         .iter()
-        .find(|(stem, _)| word.starts_with(stem) && (word.len() > 3 || word == "maj" || word == "mar" || word == "lut"))
+        .find(|(stem, _)| {
+            word.starts_with(stem)
+                && (word.len() > 3 || word == "maj" || word == "mar" || word == "lut")
+        })
         .map(|(_, month)| *month)
 }
 
@@ -233,7 +242,11 @@ fn dotted_date(word: &str, last: Option<&str>) -> Option<Vec<String>> {
         return None;
     }
     let parts: Vec<&str> = word.trim_end_matches('.').split('.').collect();
-    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit())) {
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
+    {
         return None;
     }
     let day: u32 = parts[0].parse().ok()?;
@@ -241,7 +254,9 @@ fn dotted_date(word: &str, last: Option<&str>) -> Option<Vec<String>> {
     if !(1..=31).contains(&day) || !(1..=12).contains(&month) {
         return None;
     }
-    const NAMES: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    const NAMES: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
     Some(vec![NAMES[month as usize - 1].to_string(), day.to_string()])
 }
 
@@ -336,7 +351,7 @@ fn next_weekday(from: NaiveDate, target: Weekday, strict_next: bool) -> NaiveDat
     from
 }
 
-fn month_day<'a>(text: &'a str, today: NaiveDate) -> Option<(NaiveDate, &'a str)> {
+fn month_day(text: &str, today: NaiveDate) -> Option<(NaiveDate, &str)> {
     const MONTHS: &[(&str, u32)] = &[
         ("january", 1),
         ("february", 2),
@@ -479,24 +494,59 @@ mod tests {
         let tz = la();
         let at = |text: &str| parse_when(text, now(), tz).map(|when| when.with_timezone(&tz));
         let tomorrow = at("jutro o 19").unwrap();
-        assert_eq!((tomorrow.date_naive().to_string(), tomorrow.hour()), ("2026-10-15".into(), 19));
+        assert_eq!(
+            (tomorrow.date_naive().to_string(), tomorrow.hour()),
+            ("2026-10-15".into(), 19)
+        );
         let friday = at("w piątek o 18:30").unwrap();
-        assert_eq!((friday.weekday(), friday.hour(), friday.minute()), (Weekday::Fri, 18, 30));
+        assert_eq!(
+            (friday.weekday(), friday.hour(), friday.minute()),
+            (Weekday::Fri, 18, 30)
+        );
         assert_eq!(at("we wtorek").unwrap().weekday(), Weekday::Tue);
         assert_eq!(at("sroda o godz. 20").unwrap().hour(), 20);
-        assert_eq!(parse_when("za 2 godziny", now(), tz), Some(now() + Duration::hours(2)));
-        assert_eq!(parse_when("za godzinę", now(), tz), Some(now() + Duration::hours(1)));
-        assert_eq!(parse_when("za 30 minut", now(), tz), Some(now() + Duration::minutes(30)));
+        assert_eq!(
+            parse_when("za 2 godziny", now(), tz),
+            Some(now() + Duration::hours(2))
+        );
+        assert_eq!(
+            parse_when("za godzinę", now(), tz),
+            Some(now() + Duration::hours(1))
+        );
+        assert_eq!(
+            parse_when("za 30 minut", now(), tz),
+            Some(now() + Duration::minutes(30))
+        );
         let dated = at("20 października o 20:00").unwrap();
-        assert_eq!((dated.date_naive().to_string(), dated.hour()), ("2026-10-20".into(), 20));
+        assert_eq!(
+            (dated.date_naive().to_string(), dated.hour()),
+            ("2026-10-20".into(), 20)
+        );
         let dotted = at("20.10 o 19.30").unwrap();
-        assert_eq!((dotted.date_naive().to_string(), dotted.hour(), dotted.minute()), ("2026-10-20".into(), 19, 30));
+        assert_eq!(
+            (
+                dotted.date_naive().to_string(),
+                dotted.hour(),
+                dotted.minute()
+            ),
+            ("2026-10-20".into(), 19, 30)
+        );
         let later = at("pojutrze o 9").unwrap();
-        assert_eq!((later.date_naive().to_string(), later.hour()), ("2026-10-16".into(), 9));
+        assert_eq!(
+            (later.date_naive().to_string(), later.hour()),
+            ("2026-10-16".into(), 9)
+        );
         assert_eq!(at("dziś wieczorem").unwrap().hour(), 20);
         let next = at("następny piątek o 18").unwrap();
         assert_eq!(next.weekday(), Weekday::Fri);
-        assert_eq!(at("1 maja o 12").unwrap().date_naive().to_string(), "2027-05-01");
-        assert_eq!(normalize("Friday at 9pm"), "friday at 9pm", "English stays as it is");
+        assert_eq!(
+            at("1 maja o 12").unwrap().date_naive().to_string(),
+            "2027-05-01"
+        );
+        assert_eq!(
+            normalize("Friday at 9pm"),
+            "friday at 9pm",
+            "English stays as it is"
+        );
     }
 }

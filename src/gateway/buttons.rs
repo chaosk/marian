@@ -368,7 +368,10 @@ async fn ask_delete(
             Some(event)
                 if !matches!(
                     event.status,
-                    EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed | EventStatus::Posted
+                    EventStatus::Draft
+                        | EventStatus::Scheduled
+                        | EventStatus::Failed
+                        | EventStatus::Posted
                 ) =>
             {
                 Err(tr!(lang, "err-event-closed"))
@@ -379,7 +382,7 @@ async fn ask_delete(
                 let url = logic::web_event_url(
                     &data.public_url,
                     Some(server.as_str()).filter(|id| !id.is_empty()),
-                    &event.public_id,
+                    event.public_id,
                 );
                 Ok(Some((
                     logic::delete_confirm_body(

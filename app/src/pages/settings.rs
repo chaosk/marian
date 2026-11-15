@@ -1,21 +1,41 @@
 use leptos::prelude::*;
 
-use crate::widgets::{JsonForm, RolePicker, SaveState, ZonePicker};
 use crate::cache::{self, ask, Ready};
 use crate::head;
+use crate::widgets::{JsonForm, RolePicker, SaveState, ZonePicker};
 
 /// A switch: its field name, title, and what it does.
 type Toggle = (&'static str, &'static str, &'static str);
 
 const TIME_TOGGLES: &[Toggle] = &[
-    ("hour_24", "24-hour time", "This site and the digest use a 24-hour clock."),
-    ("localize_time", "Members see their own zone", "Discord shows the start time in each member's own zone."),
+    (
+        "hour_24",
+        "24-hour time",
+        "This site and the digest use a 24-hour clock.",
+    ),
+    (
+        "localize_time",
+        "Members see their own zone",
+        "Discord shows the start time in each member's own zone.",
+    ),
 ];
 
 const POST_TOGGLES: &[Toggle] = &[
-    ("show_attendees", "Show names on the post", "The Discord post lists who accepted each option."),
-    ("purge_channels", "Purge event channels", "Posting or deleting an event clears other unpinned messages from its channel."),
-    ("calendar_auto_sync", "Add new posts to calendar feeds", "Each new post appears on members' personal calendar feeds."),
+    (
+        "show_attendees",
+        "Show names on the post",
+        "The Discord post lists who accepted each option.",
+    ),
+    (
+        "purge_channels",
+        "Purge event channels",
+        "Posting or deleting an event clears other unpinned messages from its channel.",
+    ),
+    (
+        "calendar_auto_sync",
+        "Add new posts to calendar feeds",
+        "Each new post appears on members' personal calendar feeds.",
+    ),
 ];
 
 const THREAD_TOGGLES: &[Toggle] = &[
@@ -26,11 +46,36 @@ const THREAD_TOGGLES: &[Toggle] = &[
 
 /// A permission: its field, title, note, and what choosing no role means.
 const ROLE_PICKS: &[(&str, &str, &str, &str)] = &[
-    ("role_event", "Create events", "Choose roles to limit who can.", "Everyone"),
-    ("role_edit", "Edit any event", "An event's creator can always edit it.", "Nobody extra"),
-    ("role_delete", "Delete any event", "An event's creator can always delete it.", "Nobody extra"),
-    ("role_channel", "Create channels", "Choose roles to limit who can.", "Same as creating events"),
-    ("role_signup", "Change signup options and presets", "Choose roles to limit who can.", "Same as creating events"),
+    (
+        "role_event",
+        "Create events",
+        "Choose roles to limit who can.",
+        "Everyone",
+    ),
+    (
+        "role_edit",
+        "Edit any event",
+        "An event's creator can always edit it.",
+        "Nobody extra",
+    ),
+    (
+        "role_delete",
+        "Delete any event",
+        "An event's creator can always delete it.",
+        "Nobody extra",
+    ),
+    (
+        "role_channel",
+        "Create channels",
+        "Choose roles to limit who can.",
+        "Same as creating events",
+    ),
+    (
+        "role_signup",
+        "Change signup options and presets",
+        "Choose roles to limit who can.",
+        "Same as creating events",
+    ),
 ];
 
 #[component]
@@ -77,7 +122,9 @@ fn settings_form(
     let on_status = Callback::new(move |(field, state): (String, SaveState)| {
         match &state {
             SaveState::Failed(_) => {
-                let saved = untrack(|| queries.get_cached_query(cache::settings_scope(), server.get_value()));
+                let saved = untrack(|| {
+                    queries.get_cached_query(cache::settings_scope(), server.get_value())
+                });
                 if let Some(Ok(saved)) = saved {
                     shown.set_value(saved);
                 }
@@ -120,9 +167,9 @@ fn setting_title(title: &'static str, name: &'static str, status: Status) -> imp
     };
     let failed = move || {
         status.with(|now| match now {
-            Some((field, SaveState::Failed(message))) if field == name => {
-                Some(view! { <span class="error setting-error" role="alert">{message.clone()}</span> })
-            }
+            Some((field, SaveState::Failed(message))) if field == name => Some(
+                view! { <span class="error setting-error" role="alert">{message.clone()}</span> },
+            ),
             _ => None,
         })
     };
@@ -181,7 +228,11 @@ fn settings_rows(
         }
     };
     let switches = |list: &[Toggle]| list.iter().map(switch).collect_view();
-    let number = |name: &'static str, title: &'static str, note: &'static str, value: i64, unit: &'static str| {
+    let number = |name: &'static str,
+                  title: &'static str,
+                  note: &'static str,
+                  value: i64,
+                  unit: &'static str| {
         view! {
             <label class="setting-row" data-setting=name>
                 <span class="setting-text">{setting_title(title, name, status)}<span class="muted">{note}</span></span>
@@ -215,12 +266,32 @@ fn settings_rows(
     let time_switches = switches(TIME_TOGGLES);
     let post_switches = switches(POST_TOGGLES);
     let thread_switches = switches(THREAD_TOGGLES);
-    let archive_switch = switch(&("auto_archive", "Archive automatically", "Marian archives a posted event once it has ended and the time below has passed."));
+    let archive_switch = switch(&(
+        "auto_archive",
+        "Archive automatically",
+        "Marian archives a posted event once it has ended and the time below has passed.",
+    ));
     let waitlist_switch = switch(&("waitlist", "Waitlist", "When an option is full, people can still sign up and wait. As spots open, the first in line takes them."));
-    let role_switch = switch(&("temp_roles", "Temporary attendee role", "Marian creates a role for each event and gives it to people on an attending option."));
-    let lead = number("post_lead_hours", "Post series dates early", "How long before a recurring date Marian posts it.", settings.post_lead_hours, "hours before");
+    let role_switch = switch(&(
+        "temp_roles",
+        "Temporary attendee role",
+        "Marian creates a role for each event and gives it to people on an attending option.",
+    ));
+    let lead = number(
+        "post_lead_hours",
+        "Post series dates early",
+        "How long before a recurring date Marian posts it.",
+        settings.post_lead_hours,
+        "hours before",
+    );
     let reminder = default_reminder(settings.default_reminder_minutes, server_manager, status);
-    let archive_after = number("auto_archive_hours", "Archive after", "Counted from the end of the event.", settings.auto_archive_hours, "hours");
+    let archive_after = number(
+        "auto_archive_hours",
+        "Archive after",
+        "Counted from the end of the event.",
+        settings.auto_archive_hours,
+        "hours",
+    );
     let digest = settings.digest.clone();
     let digests = [("off", "Off"), ("daily", "Daily"), ("weekly", "Weekly")]
         .into_iter()
@@ -288,7 +359,11 @@ fn default_reminder(minutes: i64, enabled: bool, status: Status) -> impl IntoVie
     let field = NodeRef::<leptos::html::Input>::new();
     let store = move || {
         if let Some(input) = field.get_untracked() {
-            let value = if on.get_untracked() { amount.get_untracked() } else { 0 };
+            let value = if on.get_untracked() {
+                amount.get_untracked()
+            } else {
+                0
+            };
             input.set_value(&value.to_string());
         }
     };

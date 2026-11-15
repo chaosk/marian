@@ -19,7 +19,15 @@ use crate::store::Connection;
 
 /// A language Marian writes in. Stored by its code.
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    diesel::expression::AsExpression,
+    diesel::deserialize::FromSqlRow,
 )]
 #[diesel(sql_type = diesel::sql_types::Text)]
 pub enum Lang {
@@ -57,7 +65,10 @@ impl Lang {
 }
 
 impl diesel::serialize::ToSql<diesel::sql_types::Text, diesel::pg::Pg> for Lang {
-    fn to_sql<'b>(&'b self, out: &mut diesel::serialize::Output<'b, '_, diesel::pg::Pg>) -> diesel::serialize::Result {
+    fn to_sql<'b>(
+        &'b self,
+        out: &mut diesel::serialize::Output<'b, '_, diesel::pg::Pg>,
+    ) -> diesel::serialize::Result {
         std::io::Write::write_all(out, self.code().as_bytes())?;
         Ok(diesel::serialize::IsNull::No)
     }
@@ -164,7 +175,10 @@ fn joined(lang: Lang, key: &str, items: &[String]) -> String {
         [rest @ .., last] => text(
             lang,
             key,
-            &[("rest", Arg::from(rest.join(", "))), ("last", Arg::from(last))],
+            &[
+                ("rest", Arg::from(rest.join(", "))),
+                ("last", Arg::from(last)),
+            ],
         ),
     }
 }
@@ -222,7 +236,11 @@ pub fn text(lang: Lang, key: &str, args: &[(&str, Arg)]) -> String {
             Arg::Number(number) => values.set(*name, FluentValue::from(*number)),
             Arg::Each(texts) => {
                 let at = Lang::ALL.iter().position(|each| *each == lang).unwrap_or(0);
-                let text = texts.get(at).or(texts.first()).map(String::as_str).unwrap_or("");
+                let text = texts
+                    .get(at)
+                    .or(texts.first())
+                    .map(String::as_str)
+                    .unwrap_or("");
                 values.set(*name, FluentValue::from(text))
             }
         }
@@ -311,7 +329,13 @@ pub fn format_day(lang: Lang, date: NaiveDate) -> String {
         lang,
         "date-day",
         &[
-            ("weekday", Arg::from(weekday_short(lang, date.weekday().num_days_from_monday() as u8))),
+            (
+                "weekday",
+                Arg::from(weekday_short(
+                    lang,
+                    date.weekday().num_days_from_monday() as u8,
+                )),
+            ),
             ("month", Arg::from(month_short(lang, date))),
             ("day", Arg::from(date.day())),
         ],
@@ -324,7 +348,13 @@ pub fn format_long_day(lang: Lang, date: NaiveDate) -> String {
         lang,
         "date-long-day",
         &[
-            ("weekday", Arg::from(weekday_name(lang, date.weekday().num_days_from_monday() as u8))),
+            (
+                "weekday",
+                Arg::from(weekday_name(
+                    lang,
+                    date.weekday().num_days_from_monday() as u8,
+                )),
+            ),
             ("month", Arg::from(month_short(lang, date))),
             ("day", Arg::from(date.day())),
         ],
@@ -346,7 +376,10 @@ pub fn format_month_day(lang: Lang, date: NaiveDate) -> String {
     text(
         lang,
         "date-month-day",
-        &[("month", Arg::from(month_short(lang, date))), ("day", Arg::from(date.day()))],
+        &[
+            ("month", Arg::from(month_short(lang, date))),
+            ("day", Arg::from(date.day())),
+        ],
     )
 }
 
@@ -420,8 +453,12 @@ mod tests {
                     }
                 }
                 let body = &rest[..end];
-                let Some(start) = body.find('"') else { continue };
-                let Some(len) = body[start + 1..].find('"') else { continue };
+                let Some(start) = body.find('"') else {
+                    continue;
+                };
+                let Some(len) = body[start + 1..].find('"') else {
+                    continue;
+                };
                 let key = body[start + 1..start + 1 + len].to_string();
                 if key.contains('{') || key.contains(' ') {
                     continue;
@@ -436,7 +473,9 @@ mod tests {
                         '=' if level == 0 => {
                             let next = chars.get(index + 1).copied();
                             let prev = index.checked_sub(1).map(|at| chars[at]);
-                            if matches!(next, Some('=') | Some('>')) || matches!(prev, Some('=') | Some('!') | Some('<') | Some('>')) {
+                            if matches!(next, Some('=') | Some('>'))
+                                || matches!(prev, Some('=') | Some('!') | Some('<') | Some('>'))
+                            {
                                 continue;
                             }
                             let name: String = chars[..index]
@@ -465,7 +504,9 @@ mod tests {
         let mut ids = BTreeSet::new();
         for source in sources {
             for line in source.lines() {
-                let Some((id, _)) = line.split_once('=') else { continue };
+                let Some((id, _)) = line.split_once('=') else {
+                    continue;
+                };
                 let id = id.trim();
                 if !line.starts_with(char::is_alphabetic) || id.contains(' ') {
                     continue;
@@ -479,7 +520,11 @@ mod tests {
     #[test]
     fn every_message_the_code_uses_is_in_english_and_polish() {
         let used = used_messages();
-        assert!(used.len() > 100, "found {} messages; is the scan reading the code?", used.len());
+        assert!(
+            used.len() > 100,
+            "found {} messages; is the scan reading the code?",
+            used.len()
+        );
         for (key, names) in &used {
             for lang in Lang::ALL {
                 assert!(has(lang, key), "{key} is missing in {}", lang.code());
@@ -508,7 +553,10 @@ mod tests {
         let missing: Vec<_> = en.difference(&pl).collect();
         let extra: Vec<_> = pl.difference(&en).collect();
         assert!(missing.is_empty(), "Polish is missing {missing:?}");
-        assert!(extra.is_empty(), "Polish has messages English doesn't: {extra:?}");
+        assert!(
+            extra.is_empty(),
+            "Polish has messages English doesn't: {extra:?}"
+        );
     }
 
     #[test]
@@ -516,24 +564,53 @@ mod tests {
         assert_eq!(tr!(Lang::Pl, "post-waiting", count = 1), "1 osoba czeka");
         assert_eq!(tr!(Lang::Pl, "post-waiting", count = 3), "3 osoby czekają");
         assert_eq!(tr!(Lang::Pl, "post-waiting", count = 5), "5 osób czeka");
-        assert_eq!(tr!(Lang::Pl, "post-waiting", count = 22), "22 osoby czekają");
+        assert_eq!(
+            tr!(Lang::Pl, "post-waiting", count = 22),
+            "22 osoby czekają"
+        );
         assert_eq!(tr!(Lang::En, "post-waiting", count = 1), "1 waiting");
     }
 
     #[test]
     fn guests_read_naturally_in_both_languages() {
-        let signed = |lang, guests: i64| tr!(lang, "notice-signed-up-guests", name = "Ola", option = "Tak", guests = guests);
-        assert_eq!(signed(Lang::Pl, 1), "Zapisano Ola na opcję Tak z 1 gościem.");
+        let signed = |lang, guests: i64| {
+            tr!(
+                lang,
+                "notice-signed-up-guests",
+                name = "Ola",
+                option = "Tak",
+                guests = guests
+            )
+        };
+        assert_eq!(
+            signed(Lang::Pl, 1),
+            "Zapisano Ola na opcję Tak z 1 gościem."
+        );
         assert_eq!(signed(Lang::Pl, 3), "Zapisano Ola na opcję Tak z 3 gośćmi.");
-        assert_eq!(signed(Lang::En, 1), "Ola signed up as Tak, bringing one guest.");
+        assert_eq!(
+            signed(Lang::En, 1),
+            "Ola signed up as Tak, bringing one guest."
+        );
         let left = |left: i64| tr!(Lang::Pl, "err-party-too-big", option = "Tak", left = left);
         assert_eq!(left(1), "W opcji Tak zostało tylko jedno miejsce.");
         assert_eq!(left(3), "W opcji Tak zostały tylko 3 miejsca.");
         assert_eq!(left(5), "W opcji Tak zostało tylko 5 miejsc.");
         let most = |most: i64| tr!(Lang::Pl, "err-guests-most", option = "Tak", most = most);
-        assert_eq!(most(1), "W opcji Tak można przyprowadzić najwyżej 1 gościa.");
+        assert_eq!(
+            most(1),
+            "W opcji Tak można przyprowadzić najwyżej 1 gościa."
+        );
         assert_eq!(most(4), "W opcji Tak można przyprowadzić najwyżej 4 gości.");
-        assert_eq!(tr!(Lang::En, "notice-guests", name = "Ola", option = "Yes", guests = 0), "Ola now brings no guests to Yes.");
+        assert_eq!(
+            tr!(
+                Lang::En,
+                "notice-guests",
+                name = "Ola",
+                option = "Yes",
+                guests = 0
+            ),
+            "Ola now brings no guests to Yes."
+        );
     }
 
     #[test]
@@ -544,7 +621,10 @@ mod tests {
         assert_eq!(format_long_day(Lang::En, date), "Tuesday, Oct 13");
         assert_eq!(format_long_day(Lang::Pl, date), "wtorek, 13 paź");
         let at = Utc.with_ymd_and_hms(2026, 10, 13, 18, 0, 0).unwrap();
-        assert_eq!(format_when(Lang::Pl, at, Tz::UTC, true), "wt., 13 paź · 18:00");
+        assert_eq!(
+            format_when(Lang::Pl, at, Tz::UTC, true),
+            "wt., 13 paź · 18:00"
+        );
         assert_eq!(capitalized("środa"), "Środa");
     }
 

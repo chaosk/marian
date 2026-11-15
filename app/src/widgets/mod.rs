@@ -11,11 +11,13 @@ mod routine;
 mod signups;
 
 pub use inline::{
-    EventAttendeeRole, LeaveGuard, LocalDraft, EventColor, EventCutoff, EventDescription, EventLocation, EventMentions, EventReminders, EventRepeat, PostButtons, EventChannel, ThreadToggle, ApplyToSeries,
-    EventRestrictions, EventTitle, EventWhen, MultipleToggle,
+    ApplyToSeries, EventAttendeeRole, EventChannel, EventColor, EventCutoff, EventDescription,
+    EventLocation, EventMentions, EventReminders, EventRepeat, EventRestrictions, EventTitle,
+    EventWhen, LeaveGuard, LocalDraft, MultipleToggle, PostButtons, ThreadToggle,
 };
 pub use routine::{
-    routine_problems, template_event, PollMoment, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, PollTally, UsualDays, tally, TallyRow,
+    routine_problems, tally, template_event, PollMoment, PollTally, RoutineChannel,
+    RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, TallyRow, UsualDays,
 };
 pub use signups::{numbered, unsaved_signups, SignupPanel};
 
@@ -77,26 +79,30 @@ impl LiveStream {
         };
         let (here, client) = (self.server.clone(), self.client);
         // A message this page can't read, from a newer or older server, refetches everything.
-        let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            let change = event
-                .data()
-                .as_string()
-                .and_then(|text| serde_json::from_str::<dto::Change>(&text).ok())
-                .unwrap_or(dto::Change::Server);
-            crate::cache::apply_change(client, &here, &change);
-        });
+        let on_change = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+            move |event: web_sys::MessageEvent| {
+                let change = event
+                    .data()
+                    .as_string()
+                    .and_then(|text| serde_json::from_str::<dto::Change>(&text).ok())
+                    .unwrap_or(dto::Change::Server);
+                crate::cache::apply_change(client, &here, &change);
+            },
+        );
         source.set_onmessage(Some(on_change.as_ref().unchecked_ref()));
         on_change.forget();
         let new_build = self.new_build;
-        let on_build = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            let served = event.data().as_string().unwrap_or_default();
-            let mine = api::site().build;
-            if !served.is_empty() && !mine.is_empty() && served != mine {
-                if let Some(flag) = new_build {
-                    flag.try_set(true);
+        let on_build = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+            move |event: web_sys::MessageEvent| {
+                let served = event.data().as_string().unwrap_or_default();
+                let mine = api::site().build;
+                if !served.is_empty() && !mine.is_empty() && served != mine {
+                    if let Some(flag) = new_build {
+                        flag.try_set(true);
+                    }
                 }
-            }
-        });
+            },
+        );
         let _ = source.add_event_listener_with_callback("build", on_build.as_ref().unchecked_ref());
         on_build.forget();
         // Changes made while the stream was down were never announced.
@@ -130,7 +136,10 @@ impl LiveStream {
                         again.open();
                     }
                 });
-                let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(reopen.unchecked_ref(), wait);
+                let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(
+                    reopen.unchecked_ref(),
+                    wait,
+                );
             }
         });
         source.set_onerror(Some(on_error.as_ref().unchecked_ref()));
@@ -182,7 +191,10 @@ pub fn Finder(q: String) -> impl IntoView {
 /// Where a change sent the person, when it moved them.
 fn reply_done(reply: &Value) -> dto::Done {
     dto::Done {
-        location: reply.get("location").and_then(Value::as_str).map(str::to_string),
+        location: reply
+            .get("location")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -334,7 +346,11 @@ impl FocusBack {
                 }
             }
         });
-        Self { trigger, wanted, name }
+        Self {
+            trigger,
+            wanted,
+            name,
+        }
     }
 
     /// The control gets focus once it's drawn again.
@@ -348,7 +364,9 @@ impl FocusBack {
 
 /// Whether focus should come back to the control named `name`.
 fn returning(name: &'static str) -> bool {
-    RETURNING.with(|slot| slot.get()).is_some_and(|(waiting, until)| waiting == name && now_ms() < until)
+    RETURNING
+        .with(|slot| slot.get())
+        .is_some_and(|(waiting, until)| waiting == name && now_ms() < until)
 }
 
 #[cfg(feature = "hydrate")]
@@ -364,7 +382,9 @@ fn now_ms() -> f64 {
 /// Focus is on nothing in particular: the editor that had it is gone.
 #[cfg(feature = "hydrate")]
 fn focus_lost() -> bool {
-    document().active_element().is_none_or(|element| element.tag_name() == "BODY")
+    document()
+        .active_element()
+        .is_none_or(|element| element.tag_name() == "BODY")
 }
 
 #[cfg(not(feature = "hydrate"))]
@@ -518,7 +538,10 @@ pub fn JsonForm(
 #[cfg(feature = "hydrate")]
 fn changed_field(ev: &web_sys::Event) -> String {
     use wasm_bindgen::JsCast;
-    let Some(element) = ev.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) else {
+    let Some(element) = ev
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    else {
         return String::new();
     };
     element
@@ -541,7 +564,9 @@ fn read_form(form: &web_sys::HtmlFormElement) -> Value {
     let mut out = serde_json::Map::new();
     let elements = form.elements();
     for i in 0..elements.length() {
-        let Some(element) = elements.item(i) else { continue };
+        let Some(element) = elements.item(i) else {
+            continue;
+        };
         let name = element.get_attribute("name").unwrap_or_default();
         if name.is_empty() {
             continue;
@@ -667,11 +692,22 @@ fn membership_said(change: &dto::MembershipPatch) -> String {
 /// none or it won't load (an old URL after they change it, until the next
 /// refetch). Decorative: their name always sits beside it.
 #[component]
-pub fn Avatar(name: String, color: String, avatar: Option<String>, #[prop(optional)] small: bool) -> impl IntoView {
+pub fn Avatar(
+    name: String,
+    color: String,
+    avatar: Option<String>,
+    #[prop(optional)] small: bool,
+) -> impl IntoView {
     let class = if small { "avatar small" } else { "avatar" };
     let broken = RwSignal::new(false);
-    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
-    move || match avatar.clone().filter(|_| !broken.get()) {
+    let initial = name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    move || {
+        match avatar.clone().filter(|_| !broken.get()) {
         Some(url) => view! {
             <img class=class src=url alt="" aria-hidden="true" loading="lazy" decoding="async"
                 referrerpolicy="no-referrer" on:error=move |_| broken.set(true)/>
@@ -681,6 +717,7 @@ pub fn Avatar(name: String, color: String, avatar: Option<String>, #[prop(option
             <span class=class aria-hidden="true">{crate::paint("paint", color.clone())}{initial.clone()}</span>
         }
         .into_any(),
+    }
     }
 }
 
@@ -832,7 +869,11 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
     let google = if google.connected {
         // One row like Reminders: the switch keeps the calendar updated. The
         // account and a way out sit underneath on one small line.
-        let account = if google.email.is_empty() { "Connected".to_string() } else { google.email.clone() };
+        let account = if google.email.is_empty() {
+            "Connected".to_string()
+        } else {
+            google.email.clone()
+        };
         view! {
             <button type="button" class="reminder-toggle" title="Keep your Google Calendar updated"
                 aria-pressed=move || if auto_sync.get() { "true" } else { "false" }
@@ -921,7 +962,10 @@ pub fn RolePicker(
     let chosen = RwSignal::new(chosen);
     let field = NodeRef::<leptos::html::Input>::new();
     let on_change = Callback::new(move |now: Vec<String>| {
-        announce(field, &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()));
+        announce(
+            field,
+            &serde_json::to_string(&now).unwrap_or_else(|_| "[]".into()),
+        );
     });
     view! {
         <RoleCombo label roles chosen enabled empty on_change>
@@ -1120,7 +1164,13 @@ pub fn Choice(
     let face = move || {
         let now = chosen.get();
         now.as_ref()
-            .and_then(|value| options.with(|list| list.iter().find(|(id, _)| id == value).map(|(_, name)| name.clone())))
+            .and_then(|value| {
+                options.with(|list| {
+                    list.iter()
+                        .find(|(id, _)| id == value)
+                        .map(|(_, name)| name.clone())
+                })
+            })
             .or_else(|| none.get_value().filter(|_| now.is_none()))
             .unwrap_or_else(|| placeholder.get_value())
     };
@@ -1229,7 +1279,10 @@ pub fn Choice(
 pub fn ZonePicker(mut groups: Vec<dto::ZoneGroup>, chosen: String, enabled: bool) -> impl IntoView {
     // A zone the list leaves out, like a fixed GMT offset a server already
     // uses, still shows, in a group of its own at the top.
-    let listed = groups.iter().flat_map(|group| group.zones.iter()).any(|zone| zone.id == chosen);
+    let listed = groups
+        .iter()
+        .flat_map(|group| group.zones.iter())
+        .any(|zone| zone.id == chosen);
     if !listed && !chosen.is_empty() {
         groups.insert(
             0,
@@ -1271,7 +1324,13 @@ pub fn ZonePicker(mut groups: Vec<dto::ZoneGroup>, chosen: String, enabled: bool
                         .map(|zone| format!("{} · {}", zone.label, group.offset))
                 })
             })
-            .unwrap_or_else(|| if id.is_empty() { "Pick a time zone".into() } else { id })
+            .unwrap_or_else(|| {
+                if id.is_empty() {
+                    "Pick a time zone".into()
+                } else {
+                    id
+                }
+            })
     };
     let close = move || {
         open.set(false);
@@ -1470,17 +1529,27 @@ pub(crate) fn close_on_outside_press(
         let Some(root) = root.try_get_untracked().flatten() else {
             return;
         };
-        let target = ev.target().and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+        let target = ev
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Node>().ok());
         if !root.contains(target.as_ref()) {
             close();
         }
     })
     .into_js_value();
-    let _ = document().add_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+    let _ = document().add_event_listener_with_callback_and_bool(
+        "pointerdown",
+        on_press.unchecked_ref(),
+        true,
+    );
     let handle = send_wrapper::SendWrapper::new(on_press);
     on_cleanup(move || {
         let on_press = handle.take();
-        let _ = document().remove_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+        let _ = document().remove_event_listener_with_callback_and_bool(
+            "pointerdown",
+            on_press.unchecked_ref(),
+            true,
+        );
     });
 }
 
@@ -1512,13 +1581,17 @@ pub(crate) fn watch_presses() {
 
     // Whether the press under way was held, so its click is held too.
     let held = Rc::new(Cell::new(false));
-    let target_of = |ev: &web_sys::Event| ev.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let target_of = |ev: &web_sys::Event| {
+        ev.target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    };
     let outside_editor = |target: &web_sys::Element| -> Option<web_sys::Element> {
         let editor = document().query_selector("[data-editor]").ok().flatten()?;
         let inside = |area: &web_sys::Element| area.contains(Some(target));
         let anchor = editor.closest(".inline-anchor").ok().flatten();
         let dialog = target.closest(".modal-backdrop").ok().flatten();
-        (!inside(&editor) && !anchor.as_ref().is_some_and(inside) && dialog.is_none()).then_some(editor)
+        (!inside(&editor) && !anchor.as_ref().is_some_and(inside) && dialog.is_none())
+            .then_some(editor)
     };
     let hold = |ev: &web_sys::Event, editor: &web_sys::Element| {
         ev.prevent_default();
@@ -1532,7 +1605,9 @@ pub(crate) fn watch_presses() {
             held.set(false);
             let Some(target) = target_of(&ev) else { return };
             if let Ok(open) = document().query_selector_all("details.switcher[open]") {
-                for menu in (0..open.length()).filter_map(|n| open.item(n)?.dyn_into::<web_sys::Element>().ok()) {
+                for menu in (0..open.length())
+                    .filter_map(|n| open.item(n)?.dyn_into::<web_sys::Element>().ok())
+                {
                     if !menu.contains(Some(&target)) {
                         let _ = menu.remove_attribute("open");
                     }
@@ -1565,30 +1640,41 @@ pub(crate) fn watch_presses() {
         .into_js_value()
     };
     // Enter or Space on a button elsewhere would open a second editor.
-    let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
-        if !matches!(ev.key().as_str(), "Enter" | " ") {
-            return;
-        }
-        let Some(target) = target_of(&ev) else { return };
-        if target.closest("button, a, summary, [role=button]").ok().flatten().is_none() {
-            return;
-        }
-        if let Some(editor) = outside_editor(&target) {
-            if unchanged(&editor) {
-                let_go(&editor);
-            } else {
-                hold(&ev, &editor);
+    let on_key =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            if !matches!(ev.key().as_str(), "Enter" | " ") {
+                return;
             }
-        }
-    })
-    .into_js_value();
+            let Some(target) = target_of(&ev) else { return };
+            if target
+                .closest("button, a, summary, [role=button]")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return;
+            }
+            if let Some(editor) = outside_editor(&target) {
+                if unchanged(&editor) {
+                    let_go(&editor);
+                } else {
+                    hold(&ev, &editor);
+                }
+            }
+        })
+        .into_js_value();
     // Popovers and editors as they appear: where a popover fits, and what an
     // editor held when it opened.
     let on_added = Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(
         move |records: js_sys::Array, _: web_sys::MutationObserver| {
-            for record in records.iter().filter_map(|record| record.dyn_into::<web_sys::MutationRecord>().ok()) {
+            for record in records
+                .iter()
+                .filter_map(|record| record.dyn_into::<web_sys::MutationRecord>().ok())
+            {
                 let added = record.added_nodes();
-                for node in (0..added.length()).filter_map(|n| added.item(n)?.dyn_into::<web_sys::Element>().ok()) {
+                for node in (0..added.length())
+                    .filter_map(|n| added.item(n)?.dyn_into::<web_sys::Element>().ok())
+                {
                     for popover in matching(&node, ".popover") {
                         place(&popover);
                     }
@@ -1610,11 +1696,17 @@ pub(crate) fn watch_presses() {
         let _ = observer.observe_with_options(&body, &options);
     }
     let window = window();
-    let _ = window.add_event_listener_with_callback_and_bool("pointerdown", on_press.unchecked_ref(), true);
+    let _ = window.add_event_listener_with_callback_and_bool(
+        "pointerdown",
+        on_press.unchecked_ref(),
+        true,
+    );
     for kind in ["mousedown", "click"] {
-        let _ = window.add_event_listener_with_callback_and_bool(kind, on_follow.unchecked_ref(), true);
+        let _ =
+            window.add_event_listener_with_callback_and_bool(kind, on_follow.unchecked_ref(), true);
     }
-    let _ = window.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
+    let _ =
+        window.add_event_listener_with_callback_and_bool("keydown", on_key.unchecked_ref(), true);
 }
 
 #[cfg(not(feature = "hydrate"))]
@@ -1624,9 +1716,17 @@ pub(crate) fn watch_presses() {}
 #[cfg(feature = "hydrate")]
 fn matching(node: &web_sys::Element, selector: &str) -> Vec<web_sys::Element> {
     use wasm_bindgen::JsCast;
-    let mut found: Vec<web_sys::Element> = node.matches(selector).unwrap_or(false).then(|| node.clone()).into_iter().collect();
+    let mut found: Vec<web_sys::Element> = node
+        .matches(selector)
+        .unwrap_or(false)
+        .then(|| node.clone())
+        .into_iter()
+        .collect();
     if let Ok(inside) = node.query_selector_all(selector) {
-        found.extend((0..inside.length()).filter_map(|n| inside.item(n)?.dyn_into::<web_sys::Element>().ok()));
+        found.extend(
+            (0..inside.length())
+                .filter_map(|n| inside.item(n)?.dyn_into::<web_sys::Element>().ok()),
+        );
     }
     found
 }
@@ -1635,12 +1735,18 @@ fn matching(node: &web_sys::Element, selector: &str) -> Vec<web_sys::Element> {
 /// and there is room above the thing it opened from.
 #[cfg(feature = "hydrate")]
 fn place(popover: &web_sys::Element) {
-    let room_below = window().inner_height().ok().and_then(|height| height.as_f64()).unwrap_or(f64::MAX);
+    let room_below = window()
+        .inner_height()
+        .ok()
+        .and_then(|height| height.as_f64())
+        .unwrap_or(f64::MAX);
     let own = popover.get_bounding_client_rect();
     if own.bottom() <= room_below - 8.0 {
         return;
     }
-    let Some(anchor) = popover.parent_element() else { return };
+    let Some(anchor) = popover.parent_element() else {
+        return;
+    };
     if anchor.get_bounding_client_rect().top() - 6.0 >= own.height() + 8.0 {
         let _ = popover.set_attribute("data-above", "");
     }
@@ -1659,7 +1765,8 @@ fn editor_state(editor: &web_sys::Element) -> String {
         .filter_map(|node| {
             if let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() {
                 let kind = input.type_();
-                return (kind != "search").then(|| format!("{kind}:{}:{}", input.value(), input.checked()));
+                return (kind != "search")
+                    .then(|| format!("{kind}:{}:{}", input.value(), input.checked()));
             }
             if let Some(select) = node.dyn_ref::<web_sys::HtmlSelectElement>() {
                 return Some(format!("select:{}", select.value()));
@@ -1668,7 +1775,10 @@ fn editor_state(editor: &web_sys::Element) -> String {
                 return Some(format!("text:{}", text.value()));
             }
             let element = node.dyn_ref::<web_sys::Element>()?;
-            Some(format!("switch:{}", element.get_attribute("aria-checked").unwrap_or_default()))
+            Some(format!(
+                "switch:{}",
+                element.get_attribute("aria-checked").unwrap_or_default()
+            ))
         })
         .collect::<Vec<_>>()
         .join("\u{1f}")
@@ -1677,7 +1787,9 @@ fn editor_state(editor: &web_sys::Element) -> String {
 /// Whether an editor still holds what it opened with.
 #[cfg(feature = "hydrate")]
 fn unchanged(editor: &web_sys::Element) -> bool {
-    editor.get_attribute("data-start").is_some_and(|start| start == editor_state(editor))
+    editor
+        .get_attribute("data-start")
+        .is_some_and(|start| start == editor_state(editor))
 }
 
 /// Closes an editor the way Escape does, which every editor answers by cancelling.
@@ -1708,19 +1820,24 @@ fn nudge(editor: &web_sys::Element) {
     let done = Closure::once_into_js(move || {
         let _ = editor.remove_attribute("data-asking");
     });
-    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(done.unchecked_ref(), 600);
+    let _ =
+        window().set_timeout_with_callback_and_timeout_and_arguments_0(done.unchecked_ref(), 600);
 }
-
 
 /// The new event page, for someone who can create events. Everyone else reads
 /// why, and the page's own reads never start. Decided once, like
 /// `ManagersOnly`.
 #[component]
 pub fn CreatorsOnly(children: ChildrenFn) -> impl IntoView {
-    let membership = crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
+    let membership =
+        crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
     let children = StoredValue::new(children);
     crate::cache::when_once(
-        move || membership.get().map(|read| read.map(|m| m.can_create_event)),
+        move || {
+            membership
+                .get()
+                .map(|read| read.map(|m| m.can_create_event))
+        },
         move |create| {
             if create {
                 children.with_value(|children| children()).into_any()
@@ -1744,7 +1861,8 @@ pub fn CreatorsOnly(children: ChildrenFn) -> impl IntoView {
 /// the page under them.
 #[component]
 pub fn ManagersOnly(heading: &'static str, children: ChildrenFn) -> impl IntoView {
-    let membership = crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
+    let membership =
+        crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
     let children = StoredValue::new(children);
     crate::cache::when_once(
         move || membership.get().map(|read| read.map(|m| m.server_manager)),

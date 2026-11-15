@@ -78,7 +78,12 @@ fn report(info: &PanicHookInfo, detail: String) {
         .unwrap_or_default();
     let traceparent = window
         .document()
-        .and_then(|document| document.query_selector("meta[name=traceparent]").ok().flatten())
+        .and_then(|document| {
+            document
+                .query_selector("meta[name=traceparent]")
+                .ok()
+                .flatten()
+        })
         .and_then(|meta| meta.get_attribute("content"))
         .unwrap_or_default();
     let body = serde_json::json!({
@@ -93,7 +98,9 @@ fn report(info: &PanicHookInfo, detail: String) {
     let options = web_sys::BlobPropertyBag::new();
     options.set_type("application/json");
     let parts = js_sys::Array::of1(&JsValue::from_str(&body));
-    if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(parts.unchecked_ref(), &options) {
+    if let Ok(blob) =
+        web_sys::Blob::new_with_str_sequence_and_options(parts.unchecked_ref(), &options)
+    {
         let _ = window
             .navigator()
             .send_beacon_with_opt_blob(&marian_app::api::path::client_errors(), Some(&blob));

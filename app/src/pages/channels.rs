@@ -1,18 +1,20 @@
 use leptos::prelude::*;
 
-use crate::format::clock_of;
-use crate::widgets::JsonForm;
 use crate::cache::{self, when, Ready};
+use crate::format::clock_of;
 use crate::title;
+use crate::widgets::JsonForm;
 use marian_types::ChannelKind;
 
 #[component]
 pub fn Channels() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
     let channels = cache::listen(cache::channels_scope(), cache::server_key);
-    when(move || (server.get(), channels.get()).ready(), move |(server, channels)| {
-        let clock = clock_of(&server);
-        let table = (!channels.is_empty()).then(|| {
+    when(
+        move || (server.get(), channels.get()).ready(),
+        move |(server, channels)| {
+            let clock = clock_of(&server);
+            let table = (!channels.is_empty()).then(|| {
             let rows = channels
                 .into_iter()
                 .map(|channel| {
@@ -45,19 +47,20 @@ pub fn Channels() -> impl IntoView {
                 </div>
             }
         });
-        title("Channels");
-        view! {
-            <div class="page-head">
-                <div>
-                    <h1>"Channels"</h1>
-                    <p class="lede">"An event channel is a Discord channel Marian creates for events. With purge on, posting or deleting an event removes other messages, and pinned messages stay. Other Discord channels from this server are listed as text channels."</p>
+            title("Channels");
+            view! {
+                <div class="page-head">
+                    <div>
+                        <h1>"Channels"</h1>
+                        <p class="lede">"An event channel is a Discord channel Marian creates for events. With purge on, posting or deleting an event removes other messages, and pinned messages stay. Other Discord channels from this server are listed as text channels."</p>
+                    </div>
                 </div>
-            </div>
-            {table}
-            <JsonForm method="POST" url=crate::api::path::channels(&cache::server_now()) class="panel channel-create" done="Created the channel.">
-                <label class="field">"Name "<input name="name" placeholder="race-night" required/></label>
-                <button class="primary" type="submit">"Create event channel"</button>
-            </JsonForm>
-        }
-    })
+                {table}
+                <JsonForm method="POST" url=crate::api::path::channels(&cache::server_now()) class="panel channel-create" done="Created the channel.">
+                    <label class="field">"Name "<input name="name" placeholder="race-night" required/></label>
+                    <button class="primary" type="submit">"Create event channel"</button>
+                </JsonForm>
+            }
+        },
+    )
 }

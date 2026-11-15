@@ -1,0 +1,64 @@
+# cargo deny check: run in CI by the Deny job.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory in the RustSec database fails the check, including
+# unmaintained and unsound crates. Ignore one only with a reason.
+#
+# serenity 0.12.5, the newest release, connects to the Discord gateway through
+# tokio-tungstenite 0.21, which pins rustls 0.22 and rustls-webpki 0.102. No
+# patch release of either exists. That client only ever talks to Discord's
+# gateway, with the default webpki roots and no CRLs or session store of ours.
+# Drop these when serenity moves to rustls 0.23.
+ignore = [
+  # derivative is unmaintained; poise 0.6 derives with it at compile time.
+  { id = "RUSTSEC-2024-0388", reason = "proc macro used by poise 0.6; no runtime code" },
+  { id = "RUSTSEC-2026-0346", reason = "rustls 0.22 via serenity: Debug of session values; we never format a ClientSessionStore" },
+  { id = "RUSTSEC-2026-0349", reason = "rustls 0.22 via serenity: no fix in 0.22; gateway connection to Discord only" },
+  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102 via serenity: CRL matching; no CRLs are configured" },
+  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102 via serenity: URI name constraints need a misissued certificate" },
+  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102 via serenity: wildcard name constraints need a misissued certificate" },
+  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102 via serenity: panic parsing CRLs; no CRLs are parsed" },
+  { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102 via serenity: no fix in 0.102; 0.103 is updated; gateway connection to Discord only" },
+]
+
+[licenses]
+# The licenses the dependency tree uses today. A crate under anything else
+# fails the check until someone reads the license and adds it here.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  # pq-src, the libpq that static-libpq builds into the release binary.
+  "PostgreSQL",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Marian's own crates are publish = false.
+ignore = true
+
+[bans]
+# serenity and poise pull in older copies of rustls, tungstenite, reqwest and
+# others. Duplicates are reported but don't fail the check.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

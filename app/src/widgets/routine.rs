@@ -253,7 +253,11 @@ pub fn RoutineChannel(edit: RoutineEdit, channels: Vec<dto::Channel>) -> impl In
     let face = move || {
         let id = edit.draft.with(|draft| draft.channel_id.clone());
         channels
-            .with_value(|list| list.iter().find(|channel| channel.id == id).map(|channel| format!("#{}", channel.name)))
+            .with_value(|list| {
+                list.iter()
+                    .find(|channel| channel.id == id)
+                    .map(|channel| format!("#{}", channel.name))
+            })
             .unwrap_or_else(|| "Pick a channel".into())
     };
     let body = move || {
@@ -286,7 +290,15 @@ pub fn RoutineTime(edit: RoutineEdit) -> impl IntoView {
     let open = RwSignal::new(false);
     let start = RwSignal::new(String::new());
     let minutes = RwSignal::new(120_i64);
-    let face = move || edit.draft.with(|draft| format!("{} · {}", draft.start_time, human_duration(draft.duration_minutes)));
+    let face = move || {
+        edit.draft.with(|draft| {
+            format!(
+                "{} · {}",
+                draft.start_time,
+                human_duration(draft.duration_minutes)
+            )
+        })
+    };
     let body = move || {
         let now = minutes.get_untracked();
         let mut list = DURATIONS.to_vec();
@@ -323,7 +335,14 @@ pub fn RoutineTime(edit: RoutineEdit) -> impl IntoView {
             draft.duration_minutes = mins;
         });
     };
-    fact("Change when the event starts", face, body, open, begin, save)
+    fact(
+        "Change when the event starts",
+        face,
+        body,
+        open,
+        begin,
+        save,
+    )
 }
 
 /// When the poll opens, or when it locks: a weekday and a time.
@@ -384,7 +403,11 @@ pub fn PollMoment(edit: RoutineEdit, locks: bool) -> impl IntoView {
             }
         });
     };
-    let title = if locks { "Change when the poll locks" } else { "Change when the poll opens" };
+    let title = if locks {
+        "Change when the poll locks"
+    } else {
+        "Change when the poll opens"
+    };
     fact(title, face, body, open, begin, save)
 }
 
@@ -416,7 +439,11 @@ pub fn UsualDays(edit: RoutineEdit) -> impl IntoView {
 /// What happens each week after the poll closes: an optional approval, which
 /// asks some roles in a channel to confirm the day, and then the event's post.
 #[component]
-pub fn RoutineSteps(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<dto::Role>) -> impl IntoView {
+pub fn RoutineSteps(
+    edit: RoutineEdit,
+    channels: Vec<dto::Channel>,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     let channels = StoredValue::new(channels);
     let roles = StoredValue::new(roles);
     let approval = move || {
@@ -437,14 +464,19 @@ pub fn RoutineSteps(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<d
         })
     };
     let add = move |_| {
-        let first = channels.with_value(|list| list.first().map(|channel| channel.id.clone()).unwrap_or_default());
+        let first = channels.with_value(|list| {
+            list.first()
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default()
+        });
         set_approval(Some(dto::RoutineStep {
             kind: "approval".into(),
             channel_id: Some(first).filter(|id| !id.is_empty()),
             role_ids: Vec::new(),
         }));
     };
-    let middle = move || match approval() {
+    let middle = move || {
+        match approval() {
         None => view! {
             <li class="routine-step">
                 <button type="button" class="link-button" on:click=add>"Add an approval step"</button>
@@ -485,6 +517,7 @@ pub fn RoutineSteps(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<d
             }
             .into_any()
         }
+    }
     };
     view! {
         <ol class="routine-steps">
@@ -554,7 +587,13 @@ pub fn tally(rows: Vec<TallyRow>) -> impl IntoView {
 /// this again, and the days stay open for the next change.
 #[component]
 pub fn PollTally(run: dto::RunView, routine: String, editing: RwSignal<bool>) -> impl IntoView {
-    let days = RwSignal::new(run.days.iter().filter(|day| day.on).map(|day| day.n).collect::<Vec<u8>>());
+    let days = RwSignal::new(
+        run.days
+            .iter()
+            .filter(|day| day.on)
+            .map(|day| day.n)
+            .collect::<Vec<u8>>(),
+    );
     let order = StoredValue::new(run.days.clone());
     let problem = RwSignal::new(String::new());
     let server = cache::server_now();
@@ -673,7 +712,11 @@ pub fn routine_event(local: LocalDraft) -> dto::RoutineEvent {
 
 /// A stand-in event for the event editors to work on: a routine's details on
 /// a date a week out. Only the details matter; the date is never shown.
-pub fn template_event(draft: &dto::RoutineDraft, event: &dto::RoutineEvent, channel: String) -> dto::Event {
+pub fn template_event(
+    draft: &dto::RoutineDraft,
+    event: &dto::RoutineEvent,
+    channel: String,
+) -> dto::Event {
     let starts_at = crate::format::now() + chrono::Duration::days(7);
     dto::Event {
         id: "routine".into(),
@@ -683,7 +726,9 @@ pub fn template_event(draft: &dto::RoutineDraft, event: &dto::RoutineEvent, chan
         status: EventStatus::Draft,
         starts_at,
         duration_minutes: draft.duration_minutes,
-        cutoff_at: event.cutoff_minutes.map(|mins| starts_at - chrono::Duration::minutes(mins)),
+        cutoff_at: event
+            .cutoff_minutes
+            .map(|mins| starts_at - chrono::Duration::minutes(mins)),
         post_at: None,
         color: event.color.clone(),
         image_url: None,

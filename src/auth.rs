@@ -15,7 +15,11 @@ pub fn random_token() -> Result<String, OpError> {
 
 /// The name a person goes by in a server, as Discord shows it: their server
 /// nickname, else their global display name, else their username.
-pub fn discord_display_name(nick: Option<&str>, global_name: Option<&str>, username: &str) -> String {
+pub fn discord_display_name(
+    nick: Option<&str>,
+    global_name: Option<&str>,
+    username: &str,
+) -> String {
     let picked = [nick, global_name]
         .into_iter()
         .flatten()
@@ -33,13 +37,20 @@ pub fn discord_display_name(nick: Option<&str>, global_name: Option<&str>, usern
 /// The picture a person shows in a server, as Discord shows it: their server
 /// avatar, else their account's. `None` for someone with neither, who gets
 /// their initial instead of Discord's stock picture.
-pub fn discord_avatar_url(guild: &str, user: &str, member_hash: Option<&str>, user_hash: Option<&str>) -> Option<String> {
+pub fn discord_avatar_url(
+    guild: &str,
+    user: &str,
+    member_hash: Option<&str>,
+    user_hash: Option<&str>,
+) -> Option<String> {
     const CDN: &str = "https://cdn.discordapp.com";
     fn clean(hash: Option<&str>) -> Option<&str> {
         hash.map(str::trim).filter(|hash| !hash.is_empty())
     }
     match (clean(member_hash), clean(user_hash)) {
-        (Some(hash), _) => Some(format!("{CDN}/guilds/{guild}/users/{user}/avatars/{hash}.webp?size=64")),
+        (Some(hash), _) => Some(format!(
+            "{CDN}/guilds/{guild}/users/{user}/avatars/{hash}.webp?size=64"
+        )),
         (None, Some(hash)) => Some(format!("{CDN}/avatars/{user}/{hash}.webp?size=64")),
         (None, None) => None,
     }
@@ -267,8 +278,14 @@ mod tests {
         let guilds = vec![(1, "10".into()), (2, "20".into()), (3, "30".into())];
         let member = vec!["30".into(), "10".into(), "99".into()];
         assert_eq!(guilds_in_common(&guilds, &member), vec![1, 3]);
-        assert_eq!(discord_display_name(Some("Nellie"), Some("Nell"), "nell"), "Nellie");
-        assert_eq!(discord_display_name(Some(" "), Some("Nell"), "nell"), "Nell");
+        assert_eq!(
+            discord_display_name(Some("Nellie"), Some("Nell"), "nell"),
+            "Nellie"
+        );
+        assert_eq!(
+            discord_display_name(Some(" "), Some("Nell"), "nell"),
+            "Nell"
+        );
         assert_eq!(discord_display_name(None, Some("Nell"), "nell"), "Nell");
         assert_eq!(discord_display_name(None, None, "nell"), "nell");
         assert!(manages_guild(true, "0"));

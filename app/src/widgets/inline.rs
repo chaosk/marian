@@ -16,7 +16,11 @@ const MAX_REMINDERS: usize = 5;
 
 /// Whether this person can change the event from its page.
 fn editable(event: &dto::Event) -> bool {
-    event.can.edit && !matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled)
+    event.can.edit
+        && !matches!(
+            event.status,
+            EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+        )
 }
 
 pub(super) fn pencil() -> impl IntoView {
@@ -79,11 +83,18 @@ impl LocalDraft {
     /// Keeps a change in the browser, as the server would have saved it.
     fn keep(self, patch: &dto::EventPatch) {
         let channel = patch.channel_id.as_ref().and_then(|id| {
-            self.channels
-                .with_value(|channels| channels.iter().find(|channel| &channel.id == id).map(|channel| channel.name.clone()))
+            self.channels.with_value(|channels| {
+                channels
+                    .iter()
+                    .find(|channel| &channel.id == id)
+                    .map(|channel| channel.name.clone())
+            })
         });
         let clock = self.clock;
-        let repeat = patch.repeat.clone().filter(|repeat| repeat.cadence != "none");
+        let repeat = patch
+            .repeat
+            .clone()
+            .filter(|repeat| repeat.cadence != "none");
         self.event.update(|event| {
             preview(event, patch, Some(clock));
             if let (Some(id), Some(name)) = (patch.channel_id.clone(), channel) {
@@ -98,9 +109,15 @@ impl LocalDraft {
                         cadence: repeat.cadence.parse().ok()?,
                         active: true,
                         max_occurrences: repeat.count,
-                        end_on: repeat.until.and_then(|day| {
-                            clock.tz.from_local_datetime(&day.and_hms_opt(23, 59, 0)?).earliest()
-                        }).map(|end| end.with_timezone(&Utc)),
+                        end_on: repeat
+                            .until
+                            .and_then(|day| {
+                                clock
+                                    .tz
+                                    .from_local_datetime(&day.and_hms_opt(23, 59, 0)?)
+                                    .earliest()
+                            })
+                            .map(|end| end.with_timezone(&Utc)),
                         next: None,
                         dates: 0,
                     })
@@ -218,7 +235,12 @@ impl Sender {
         self.request.pending()
     }
 
-    fn dispatch(self, request: Request, done: impl FnOnce() + Send + Sync + 'static, undo: impl FnOnce() + Send + Sync + 'static) {
+    fn dispatch(
+        self,
+        request: Request,
+        done: impl FnOnce() + Send + Sync + 'static,
+        undo: impl FnOnce() + Send + Sync + 'static,
+    ) {
         self.problem.set(String::new());
         self.hooks.set_value(Some(Hooks {
             done: Box::new(done),
@@ -232,7 +254,12 @@ impl Sender {
     /// the page must already hold the new value. The answer replaces it after,
     /// and the page itself is the confirmation. `undo` runs when the server says
     /// no, and the page reloads what is really saved.
-    fn send(self, patch: dto::EventPatch, done: impl FnOnce() + Send + Sync + 'static, undo: impl FnOnce() + Send + Sync + 'static) {
+    fn send(
+        self,
+        patch: dto::EventPatch,
+        done: impl FnOnce() + Send + Sync + 'static,
+        undo: impl FnOnce() + Send + Sync + 'static,
+    ) {
         if let Some(local) = self.local {
             let _ = undo;
             self.problem.set(String::new());
@@ -306,7 +333,8 @@ impl Sender {
     fn error(self) -> impl IntoView {
         move || {
             let text = self.problem.get();
-            (!text.is_empty()).then(|| view! { <p class="error inline-error" role="alert">{text}</p> })
+            (!text.is_empty())
+                .then(|| view! { <p class="error inline-error" role="alert">{text}</p> })
         }
     }
 
@@ -367,11 +395,15 @@ fn preview(event: &mut dto::Event, patch: &dto::EventPatch, clock: Option<Clock>
     }
     match patch.cutoff {
         Some(dto::Cutoff::Never) => event.cutoff_at = None,
-        Some(dto::Cutoff::Before { minutes }) => event.cutoff_at = Some(event.starts_at - Duration::minutes(minutes)),
+        Some(dto::Cutoff::Before { minutes }) => {
+            event.cutoff_at = Some(event.starts_at - Duration::minutes(minutes))
+        }
         None => {}
     }
     if patch.cutoff.is_some() || start.is_some() {
-        event.signups_closed = event.cutoff_at.is_some_and(|cutoff| format::now() >= cutoff);
+        event.signups_closed = event
+            .cutoff_at
+            .is_some_and(|cutoff| format::now() >= cutoff);
     }
 }
 
@@ -472,7 +504,10 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     if let Some(draft) = use_context::<LocalDraft>() {
         return new_event_buttons(key, draft, clock).into_any();
     }
-    let waiting = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed);
+    let waiting = matches!(
+        event.status,
+        EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+    );
     if !event.can.edit || !waiting {
         return ().into_any();
     }
@@ -481,7 +516,11 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     let now = format::now();
     let first = event.post_at.filter(|at| *at > now).unwrap_or_else(|| {
         let day_before = event.starts_at - Duration::days(1);
-        if day_before > now { day_before } else { now + Duration::hours(1) }
+        if day_before > now {
+            day_before
+        } else {
+            now + Duration::hours(1)
+        }
     });
     let initial = StoredValue::new(clock.input(first));
     let when = RwSignal::new(initial.get_value());
@@ -504,7 +543,12 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
             return sender.fail("Pick a date and time to post.");
         };
         let body = dto::PostAt { post_local: local };
-        sender.go(api::path::event_schedule, serde_json::to_value(body).ok(), "Scheduled.", move || open.set(false));
+        sender.go(
+            api::path::event_schedule,
+            serde_json::to_value(body).ok(),
+            "Scheduled.",
+            move || open.set(false),
+        );
     };
     view! {
         <div class="inline-anchor post-buttons">
@@ -540,7 +584,12 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     .into_any()
 }
 
-const CADENCES: [Cadence; 4] = [Cadence::Daily, Cadence::Weekly, Cadence::Biweekly, Cadence::Monthly];
+const CADENCES: [Cadence; 4] = [
+    Cadence::Daily,
+    Cadence::Weekly,
+    Cadence::Biweekly,
+    Cadence::Monthly,
+];
 
 /// How a series reads in a line: its repeat and how long it runs.
 fn repeat_line(series: &dto::Series, clock: &Clock) -> String {
@@ -558,7 +607,10 @@ fn repeat_line(series: &dto::Series, clock: &Clock) -> String {
 /// Whether the event repeats, and a form to start, change, or stop the repeat.
 #[component]
 pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> impl IntoView {
-    let series = event.series.clone().filter(|series| series.cadence != Cadence::Once);
+    let series = event
+        .series
+        .clone()
+        .filter(|series| series.cadence != Cadence::Once);
     let face = series
         .as_ref()
         .map(|series| repeat_line(series, &clock))
@@ -581,7 +633,10 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
     let sender = Sender::new(key);
     let open = RwSignal::new(false);
     let start = (
-        series.as_ref().map(|series| series.cadence.to_string()).unwrap_or_else(|| "none".into()),
+        series
+            .as_ref()
+            .map(|series| series.cadence.to_string())
+            .unwrap_or_else(|| "none".into()),
         series
             .as_ref()
             .and_then(|series| series.max_occurrences)
@@ -597,7 +652,12 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
     let count = RwSignal::new(start.1.clone());
     let until = RwSignal::new(start.2.clone());
     let start = StoredValue::new(start);
-    let series_id = StoredValue::new(series.as_ref().filter(|_| in_series).map(|series| series.id.clone()));
+    let series_id = StoredValue::new(
+        series
+            .as_ref()
+            .filter(|_| in_series)
+            .map(|series| series.id.clone()),
+    );
     let cancel = move || {
         let (first, stop, end) = start.get_value();
         cadence.set(first);
@@ -666,7 +726,9 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
     };
     let cadences = move || {
         let now = cadence.get_untracked();
-        let none = (!in_series).then(|| view! { <option value="none" selected=now == "none">"Doesn't repeat"</option> });
+        let none = (!in_series).then(
+            || view! { <option value="none" selected=now == "none">"Doesn't repeat"</option> },
+        );
         let rest = CADENCES
             .iter()
             .map(|value| view! { <option value=value.as_str() selected=now == value.as_str()>{cadence_label(value.as_str())}</option> })
@@ -737,7 +799,11 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
 }
 
 /// Everything the browser holds for a new event, as the create endpoint takes it.
-fn new_event_draft(draft: LocalDraft, action: dto::SaveAction, post_local: Option<chrono::NaiveDateTime>) -> dto::EventDraft {
+fn new_event_draft(
+    draft: LocalDraft,
+    action: dto::SaveAction,
+    post_local: Option<chrono::NaiveDateTime>,
+) -> dto::EventDraft {
     let event = draft.event.get_untracked();
     let local = |at: chrono::DateTime<Utc>| at.with_timezone(&draft.clock.tz).naive_local();
     dto::EventDraft {
@@ -772,7 +838,10 @@ fn new_event_draft(draft: LocalDraft, action: dto::SaveAction, post_local: Optio
 
 /// What stops a new event from being saved, as the server would say it. Empty
 /// means it can go. `post_at` is the chosen post time when scheduling.
-fn unsaved_problems(draft: LocalDraft, post_at: Option<chrono::DateTime<Utc>>) -> Vec<&'static str> {
+fn unsaved_problems(
+    draft: LocalDraft,
+    post_at: Option<chrono::DateTime<Utc>>,
+) -> Vec<&'static str> {
     let event = draft.event.get_untracked();
     let mut problems = Vec::new();
     let title = event.title.trim();
@@ -790,7 +859,10 @@ fn unsaved_problems(draft: LocalDraft, post_at: Option<chrono::DateTime<Utc>>) -
     if !(15..=1440).contains(&event.duration_minutes) {
         problems.push("An event lasts between 15 minutes and 24 hours.");
     }
-    if event.cutoff_at.is_some_and(|cutoff| cutoff > event.starts_at) {
+    if event
+        .cutoff_at
+        .is_some_and(|cutoff| cutoff > event.starts_at)
+    {
         problems.push("Signups have to close before the event starts.");
     }
     if let Some(at) = post_at {
@@ -851,62 +923,83 @@ fn watch_leaving(dirty: RwSignal<bool>, pending: RwSignal<Option<String>>) {
     use send_wrapper::SendWrapper;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
-    let on_click = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-        if !dirty.get_untracked()
-            || ev.default_prevented()
-            || ev.button() != 0
-            || ev.meta_key()
-            || ev.ctrl_key()
-            || ev.shift_key()
-            || ev.alt_key()
-        {
-            return;
-        }
-        let Some(element) = ev.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) else {
-            return;
-        };
-        let Ok(Some(link)) = element.closest("a[href]") else {
-            return;
-        };
-        if link.get_attribute("target").is_some_and(|target| target == "_blank")
-            || link.has_attribute("download")
-            || link.get_attribute("rel").is_some_and(|rel| rel.contains("external"))
-        {
-            return;
-        }
-        let Ok(link) = link.dyn_into::<web_sys::HtmlAnchorElement>() else {
-            return;
-        };
-        let here = leptos::prelude::window().location();
-        if link.origin() != here.origin().unwrap_or_default() {
-            return;
-        }
-        let to = format!("{}{}", link.pathname(), link.search());
-        if to == format!("{}{}", here.pathname().unwrap_or_default(), here.search().unwrap_or_default()) {
-            return;
-        }
-        ev.prevent_default();
-        ev.stop_immediate_propagation();
-        pending.set(Some(to));
-    })
-    .into_js_value();
-    let on_unload = Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(move |ev: web_sys::BeforeUnloadEvent| {
-        if dirty.get_untracked() {
+    let on_click =
+        Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+            if !dirty.get_untracked()
+                || ev.default_prevented()
+                || ev.button() != 0
+                || ev.meta_key()
+                || ev.ctrl_key()
+                || ev.shift_key()
+                || ev.alt_key()
+            {
+                return;
+            }
+            let Some(element) = ev
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            else {
+                return;
+            };
+            let Ok(Some(link)) = element.closest("a[href]") else {
+                return;
+            };
+            if link
+                .get_attribute("target")
+                .is_some_and(|target| target == "_blank")
+                || link.has_attribute("download")
+                || link
+                    .get_attribute("rel")
+                    .is_some_and(|rel| rel.contains("external"))
+            {
+                return;
+            }
+            let Ok(link) = link.dyn_into::<web_sys::HtmlAnchorElement>() else {
+                return;
+            };
+            let here = leptos::prelude::window().location();
+            if link.origin() != here.origin().unwrap_or_default() {
+                return;
+            }
+            let to = format!("{}{}", link.pathname(), link.search());
+            if to
+                == format!(
+                    "{}{}",
+                    here.pathname().unwrap_or_default(),
+                    here.search().unwrap_or_default()
+                )
+            {
+                return;
+            }
             ev.prevent_default();
-            ev.set_return_value("");
-        }
-    })
+            ev.stop_immediate_propagation();
+            pending.set(Some(to));
+        })
+        .into_js_value();
+    let on_unload = Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(
+        move |ev: web_sys::BeforeUnloadEvent| {
+            if dirty.get_untracked() {
+                ev.prevent_default();
+                ev.set_return_value("");
+            }
+        },
+    )
     .into_js_value();
     let document = leptos::prelude::document();
     let window = leptos::prelude::window();
-    let _ = document.add_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
+    let _ =
+        document.add_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
     let _ = window.add_event_listener_with_callback("beforeunload", on_unload.unchecked_ref());
     let handles = SendWrapper::new((on_click, on_unload));
     on_cleanup(move || {
         let (on_click, on_unload) = handles.take();
-        let _ = leptos::prelude::document()
-            .remove_event_listener_with_callback_and_bool("click", on_click.unchecked_ref(), true);
-        let _ = leptos::prelude::window().remove_event_listener_with_callback("beforeunload", on_unload.unchecked_ref());
+        let _ = leptos::prelude::document().remove_event_listener_with_callback_and_bool(
+            "click",
+            on_click.unchecked_ref(),
+            true,
+        );
+        let _ = leptos::prelude::window()
+            .remove_event_listener_with_callback("beforeunload", on_unload.unchecked_ref());
     });
 }
 
@@ -923,7 +1016,11 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
     let starts = draft.event.with_untracked(|event| event.starts_at);
     let first = {
         let day_before = starts - Duration::days(1);
-        if day_before > now { day_before } else { now + Duration::hours(1) }
+        if day_before > now {
+            day_before
+        } else {
+            now + Duration::hours(1)
+        }
     };
     let initial = StoredValue::new(clock.input(first));
     let when = RwSignal::new(initial.get_value());
@@ -954,7 +1051,9 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
             }
         }
     });
-    let create = move |action: dto::SaveAction, post_local: Option<chrono::NaiveDateTime>, said: &'static str| {
+    let create = move |action: dto::SaveAction,
+                       post_local: Option<chrono::NaiveDateTime>,
+                       said: &'static str| {
         let post_at = post_local
             .and_then(|local| clock.tz.from_local_datetime(&local).earliest())
             .map(|at| at.with_timezone(&Utc));
@@ -971,22 +1070,16 @@ fn new_event_buttons(key: (String, String), draft: LocalDraft, clock: Clock) -> 
         sender.problem.set(String::new());
         open.set(false);
     };
-    let schedule = {
-        let create = create.clone();
-        move || {
-            let Some(local) = parse_local(&when.get_untracked()) else {
-                return sender.fail("Pick a date and time to post.");
-            };
-            create(dto::SaveAction::Schedule, Some(local), "Scheduled.");
-            if problems.with_untracked(|list| list.is_empty()) {
-                open.set(false);
-            }
+    let schedule = move || {
+        let Some(local) = parse_local(&when.get_untracked()) else {
+            return sender.fail("Pick a date and time to post.");
+        };
+        create(dto::SaveAction::Schedule, Some(local), "Scheduled.");
+        if problems.with_untracked(|list| list.is_empty()) {
+            open.set(false);
         }
     };
-    let save_draft = {
-        let create = create.clone();
-        move |_| create(dto::SaveAction::Draft, None, "Saved as a draft.")
-    };
+    let save_draft = move |_| create(dto::SaveAction::Draft, None, "Saved as a draft.");
     let post_now = move |_| create(dto::SaveAction::Publish, None, "Posted to Discord.");
     let schedule = StoredValue::new(schedule);
     view! {
@@ -1144,8 +1237,14 @@ pub fn EventWhen(key: (String, String), event: dto::Event, clock: Clock) -> impl
     let ends_at = move || {
         let begin = parse_local(&start.get())?;
         let mins = length().ok()?;
-        let finish = clock.tz.from_local_datetime(&(begin + Duration::minutes(mins))).earliest()?;
-        Some(format!("ends at {}", clock.clock(finish.with_timezone(&Utc))))
+        let finish = clock
+            .tz
+            .from_local_datetime(&(begin + Duration::minutes(mins)))
+            .earliest()?;
+        Some(format!(
+            "ends at {}",
+            clock.clock(finish.with_timezone(&Utc))
+        ))
     };
     let cancel = move || {
         let (first, mins, last) = initial.get_value();
@@ -1347,8 +1446,10 @@ pub fn EventColor(key: (String, String), event: dto::Event) -> impl IntoView {
     let color = event.color.clone();
     let face = {
         let color = color.clone();
-        move || view! {
-            <span class="color-face"><i class="dot">{crate::paint("paint", color.clone())}</i>{color_name(&color)}</span>
+        move || {
+            view! {
+                <span class="color-face"><i class="dot">{crate::paint("paint", color.clone())}</i>{color_name(&color)}</span>
+            }
         }
     };
     if !editable(&event) {
@@ -1458,9 +1559,13 @@ fn patch_switch(
         }
         let next = !on.get_untracked();
         on.set(next);
-        sender.send(patch(next), || (), move || {
-            on.try_set(!next);
-        });
+        sender.send(
+            patch(next),
+            || (),
+            move || {
+                on.try_set(!next);
+            },
+        );
     };
     view! {
         <div class="toggle-row">
@@ -1480,25 +1585,40 @@ fn patch_switch(
 
 #[component]
 pub fn MultipleToggle(key: (String, String), event: dto::Event) -> impl IntoView {
-    patch_switch(key, &event, event.multiple_signups, "Multiple responses", |on| dto::EventPatch {
-        multiple_signups: Some(on),
-        ..Default::default()
-    })
+    patch_switch(
+        key,
+        &event,
+        event.multiple_signups,
+        "Multiple responses",
+        |on| dto::EventPatch {
+            multiple_signups: Some(on),
+            ..Default::default()
+        },
+    )
 }
 
 #[component]
 pub fn ThreadToggle(key: (String, String), event: dto::Event) -> impl IntoView {
-    patch_switch(key, &event, event.thread_enabled, "Event thread", |on| dto::EventPatch {
-        thread_enabled: Some(on),
-        ..Default::default()
+    patch_switch(key, &event, event.thread_enabled, "Event thread", |on| {
+        dto::EventPatch {
+            thread_enabled: Some(on),
+            ..Default::default()
+        }
     })
 }
 
 /// The channel: a link to the post once it is out, and a choice before then.
 #[component]
-pub fn EventChannel(key: (String, String), event: dto::Event, channels: Vec<dto::Channel>) -> impl IntoView {
+pub fn EventChannel(
+    key: (String, String),
+    event: dto::Event,
+    channels: Vec<dto::Channel>,
+) -> impl IntoView {
     let name = format!("#{}", event.channel);
-    let unposted = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) && event.discord_url.is_none();
+    let unposted = matches!(
+        event.status,
+        EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+    ) && event.discord_url.is_none();
     if !editable(&event) || !unposted {
         return match event.discord_url.clone() {
             Some(url) => view! { <p><a href=url title="Open in Discord">{name}</a></p> }.into_any(),
@@ -1743,7 +1863,11 @@ fn reminder_rows(list: &[dto::Reminder]) -> Vec<ReminderRow> {
 }
 
 #[component]
-pub fn EventReminders(key: (String, String), event: dto::Event, reminders: Vec<dto::Reminder>) -> impl IntoView {
+pub fn EventReminders(
+    key: (String, String),
+    event: dto::Event,
+    reminders: Vec<dto::Reminder>,
+) -> impl IntoView {
     let template = for_template();
     let face = {
         let reminders = reminders.clone();
@@ -1884,7 +2008,11 @@ fn name_lines(names: Vec<String>, empty: &'static str) -> impl IntoView {
 /// Roles to mention, and @everyone, found by name the way members are. With
 /// nothing typed it lists only what is picked; typing finds the rest, so a
 /// server with hundreds of roles stays one short list.
-fn mention_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<String>>, everyone: RwSignal<bool>) -> impl IntoView {
+fn mention_search(
+    roles: StoredValue<Vec<dto::Role>>,
+    picked: RwSignal<Vec<String>>,
+    everyone: RwSignal<bool>,
+) -> impl IntoView {
     let needle = RwSignal::new(String::new());
     let everyone_on = move || everyone.get();
     let pick_everyone = move || everyone.update(|on| *on = !*on);
@@ -1901,11 +2029,21 @@ fn mention_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<Strin
     };
     // What the list shows: picked things with nothing typed, matches otherwise.
     let shown = move |text: &str, chosen: &[String], on: bool| -> (bool, Vec<dto::Role>) {
-        let everyone = if text.is_empty() { on } else { "@everyone".contains(text) };
+        let everyone = if text.is_empty() {
+            on
+        } else {
+            "@everyone".contains(text)
+        };
         let found = roles.with_value(|roles| {
             roles
                 .iter()
-                .filter(|role| if text.is_empty() { chosen.contains(&role.id) } else { role.name.to_lowercase().contains(text) })
+                .filter(|role| {
+                    if text.is_empty() {
+                        chosen.contains(&role.id)
+                    } else {
+                        role.name.to_lowercase().contains(text)
+                    }
+                })
                 .take(50)
                 .cloned()
                 .collect()
@@ -1980,7 +2118,11 @@ fn mention_search(roles: StoredValue<Vec<dto::Role>>, picked: RwSignal<Vec<Strin
 }
 
 #[component]
-pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::Role>) -> impl IntoView {
+pub fn EventMentions(
+    key: (String, String),
+    event: dto::Event,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     let mut shown = role_names(&roles, &event.mention_role_ids);
     if event.mention_everyone {
         shown.insert(0, "@everyone".into());
@@ -2043,16 +2185,26 @@ pub fn EventMentions(key: (String, String), event: dto::Event, roles: Vec<dto::R
 }
 
 #[component]
-pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dto::Role>) -> impl IntoView {
+pub fn EventRestrictions(
+    key: (String, String),
+    event: dto::Event,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     let shown = role_names(&roles, &event.restrict_role_ids);
     if !editable(&event) {
         return view! { <p class="face">{name_lines(shown, "No restrictions")}</p> }.into_any();
     }
     // A routine's poll asks the same roles of whoever votes.
     let (note, label) = if key.1 == "routine" {
-        ("Only people with one of these roles can vote on the poll or sign up.", "Roles that can vote and sign up")
+        (
+            "Only people with one of these roles can vote on the poll or sign up.",
+            "Roles that can vote and sign up",
+        )
     } else {
-        ("Only people with one of these roles can sign up.", "Roles that can sign up")
+        (
+            "Only people with one of these roles can sign up.",
+            "Roles that can sign up",
+        )
     };
     let sender = Sender::new(key);
     let open = RwSignal::new(false);
@@ -2100,7 +2252,11 @@ pub fn EventRestrictions(key: (String, String), event: dto::Event, roles: Vec<dt
 }
 
 #[component]
-pub fn EventAttendeeRole(key: (String, String), event: dto::Event, roles: Vec<dto::Role>) -> impl IntoView {
+pub fn EventAttendeeRole(
+    key: (String, String),
+    event: dto::Event,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     let name = event
         .attendee_role_id
         .as_ref()
@@ -2110,13 +2266,15 @@ pub fn EventAttendeeRole(key: (String, String), event: dto::Event, roles: Vec<dt
     let current = StoredValue::new(event.attendee_role_id.clone());
     let face = {
         let name = name.clone();
-        move || match name.clone() {
+        move || {
+            match name.clone() {
             Some(name) => view! {
                 <span class="face-line">{name.clone()}</span>
                 <span class="face-line muted">"Confirmed people on an attending option get "{name}"."</span>
             }
             .into_any(),
             None => view! { <span class="muted">"No attendee role"</span> }.into_any(),
+        }
         }
     };
     if !editable(&event) {

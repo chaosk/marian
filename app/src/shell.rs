@@ -2,8 +2,8 @@ use leptos::prelude::*;
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_params_map};
 
-use crate::widgets::{AccountMenu, Flash, Live};
 use crate::cache::{self, when, Ready};
+use crate::widgets::{AccountMenu, Flash, Live};
 use crate::{api, A};
 
 /// The sidebar: a path under the server, its label, and whether it sits under
@@ -25,7 +25,14 @@ const NAV: &[(&str, &str, bool)] = &[
 
 /// Pages only someone who can manage the server sees; everyone else gets the
 /// events they have access to.
-const MANAGERS_ONLY: &[&str] = &["/recurring", "/routines", "/presets", "/channels", "/activity", "/settings"];
+const MANAGERS_ONLY: &[&str] = &[
+    "/recurring",
+    "/routines",
+    "/presets",
+    "/channels",
+    "/activity",
+    "/settings",
+];
 
 /// The logo and name, linking to the server in the address. Away from a
 /// server, it links to the one this browser opened last, once the page has
@@ -43,7 +50,11 @@ pub fn Brand(#[prop(optional)] front: bool) -> impl IntoView {
             return "/".to_string();
         }
         pathname
-            .with(|path| path.strip_prefix("/servers/").and_then(|rest| rest.split('/').next()).map(str::to_string))
+            .with(|path| {
+                path.strip_prefix("/servers/")
+                    .and_then(|rest| rest.split('/').next())
+                    .map(str::to_string)
+            })
             .filter(|id| !id.is_empty())
             .or_else(|| remembered.get())
             .map(|id| format!("/servers/{id}"))
@@ -70,7 +81,8 @@ pub fn ServerShell() -> impl IntoView {
     let me = cache::listen(cache::me_scope(), || ());
     let server = cache::listen(cache::server_scope(), cache::server_key);
     let membership = cache::listen(cache::membership_scope(), cache::server_key);
-    let server_id = Memo::new(move |_| params.with(|params| params.get("server").unwrap_or_default()));
+    let server_id =
+        Memo::new(move |_| params.with(|params| params.get("server").unwrap_or_default()));
     let server_title = use_context::<crate::ServerTitle>().map(|title| title.0);
     on_cleanup(move || {
         if let Some(title) = server_title {
@@ -124,7 +136,10 @@ fn server_gate(id: &str) -> Option<crate::api::Failure> {
         .get_attribute("data-status")?
         .parse()
         .ok()?;
-    Some(crate::api::Failure { status, message: String::new() })
+    Some(crate::api::Failure {
+        status,
+        message: String::new(),
+    })
 }
 
 #[cfg(not(any(feature = "ssr", feature = "hydrate")))]
@@ -227,7 +242,13 @@ fn Switcher(me: marian_types::Me, server: marian_types::Server) -> impl IntoView
         .servers
         .into_iter()
         .map(|other| {
-            let initial = other.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+            let initial = other
+                .name
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
             let href = format!("/servers/{}", other.id);
             if other.id == server.id {
                 // Picking the server already open only closes the menu.
@@ -281,7 +302,11 @@ fn close_menu(ev: &leptos::ev::MouseEvent) {
         .current_target()
         .and_then(|target| target.dyn_into::<leptos::web_sys::Element>().ok())
         .and_then(|element| element.closest("details").ok().flatten())
-        .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlDetailsElement>().ok());
+        .and_then(|element| {
+            element
+                .dyn_into::<leptos::web_sys::HtmlDetailsElement>()
+                .ok()
+        });
     if let Some(menu) = menu {
         menu.set_open(false);
     }

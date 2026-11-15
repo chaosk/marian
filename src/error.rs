@@ -78,7 +78,10 @@ mod tests {
     fn constraint_error() -> OpError {
         OpError::Db(DieselError::DatabaseError(
             DatabaseErrorKind::UniqueViolation,
-            Box::new(r#"duplicate key value violates unique constraint "events_public_id_key""#.to_string()),
+            Box::new(
+                r#"duplicate key value violates unique constraint "events_public_id_key""#
+                    .to_string(),
+            ),
         ))
     }
 
@@ -91,7 +94,10 @@ mod tests {
             assert!(!text.contains("duplicate key"), "{text}");
             assert!(!text.is_empty());
         }
-        assert_eq!(err.localized(Lang::En), "Something went wrong. Please try again.");
+        assert_eq!(
+            err.localized(Lang::En),
+            "Something went wrong. Please try again."
+        );
         // The log still gets it.
         assert!(err.to_string().contains("events_public_id_key"));
         assert!(err.is_internal());
@@ -106,10 +112,12 @@ mod tests {
             Box::new(r#"violates foreign key constraint "signups_event_id_fkey""#.to_string()),
         ));
         assert!(!user_text(raw.as_ref(), Lang::En).contains("signups_event_id_fkey"));
-        let internal = OpError::internal("Could not open the database: password authentication failed");
+        let internal =
+            OpError::internal("Could not open the database: password authentication failed");
         assert!(!internal.localized(Lang::En).contains("password"));
         // What a person asked wrongly still reads as it is.
-        let plain: Box<dyn std::error::Error + Send + Sync> = OpError::message("Pick a time.").into();
+        let plain: Box<dyn std::error::Error + Send + Sync> =
+            OpError::message("Pick a time.").into();
         assert_eq!(user_text(plain.as_ref(), Lang::En), "Pick a time.");
     }
 }

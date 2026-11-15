@@ -5,10 +5,15 @@ RUN apt-get update \
 # ring and OpenSSL pass -m64, which Debian's musl-gcc rejects. The compiler
 # already matches the host, so the wrapper drops the flag.
 COPY ci/musl-cc /usr/local/bin/musl-cc
-RUN chmod +x /usr/local/bin/musl-cc \
-    && rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl \
-    && cargo install cargo-leptos --locked --debug
 WORKDIR /src
+# rust-toolchain.toml picks the compiler cargo uses here, which can differ from
+# the image's when only one of them is bumped. The musl target goes on that one,
+# with the wasm target the file lists. cargo-leptos is the release ci.yml uses.
+COPY rust-toolchain.toml .
+RUN chmod +x /usr/local/bin/musl-cc \
+    && rustup toolchain install \
+    && rustup target add x86_64-unknown-linux-musl \
+    && cargo install cargo-leptos --locked --version 0.3.11 --debug
 ENV CC_x86_64_unknown_linux_musl=/usr/local/bin/musl-cc
 COPY . .
 # A branch build passes the commit hash. A tag build passes the version number.

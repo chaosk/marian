@@ -8,8 +8,8 @@ use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State}
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::Json;
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use chrono::Utc;
 use diesel::prelude::*;
@@ -220,7 +220,10 @@ async fn lead(state: AppState, token: String, status: String, term: Term) {
         tracing::warn!("The tick didn't finish in time.");
     }
     gateway.stop().await;
-    for (what, task) in [("Google Calendar sync", sync), ("The sign-in sweep", Some(sweep))] {
+    for (what, task) in [
+        ("Google Calendar sync", sync),
+        ("The sign-in sweep", Some(sweep)),
+    ] {
         let Some(mut task) = task else { continue };
         if tokio::time::timeout(finish, &mut task).await.is_err() {
             tracing::warn!("{what} didn't finish in time.");
@@ -320,7 +323,10 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         }
         // The leader finishes its tick and due Discord jobs, disconnects,
         // then lets the lock go for the next replica.
-        if tokio::time::timeout(std::time::Duration::from_secs(45), leading).await.is_err() {
+        if tokio::time::timeout(std::time::Duration::from_secs(45), leading)
+            .await
+            .is_err()
+        {
             tracing::warn!("The leader's work didn't stop in time.");
         }
         saver.stop().await;
@@ -392,7 +398,8 @@ fn public_origin(public_url: &str) -> Option<String> {
 /// What isn't a page (JSON, calendar feeds, redirects, files) may load and
 /// run nothing, nor be framed. Pages send their own policy from the app shell,
 /// with the nonce their scripts carry.
-const NON_PAGE_POLICY: &str = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const NON_PAGE_POLICY: &str =
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 async fn lock_down_non_pages(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
@@ -401,10 +408,15 @@ async fn lock_down_non_pages(request: Request, next: Next) -> Response {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|kind| kind.starts_with("text/html"));
-    if !page && !response.headers().contains_key(header::CONTENT_SECURITY_POLICY) {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(NON_PAGE_POLICY));
+    if !page
+        && !response
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY)
+    {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(NON_PAGE_POLICY),
+        );
     }
     response
 }
@@ -546,7 +558,10 @@ async fn mark_page_trace(mut request: Request, next: Next) -> Response {
 fn hashed_name(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or("");
     name.split('.').any(|part| {
-        part.len() == 22 && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        part.len() == 22
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     })
 }
 
@@ -598,7 +613,9 @@ async fn revalidate_site(request: Request, next: Next) -> Response {
     if unchanged {
         let mut fresh = StatusCode::NOT_MODIFIED.into_response();
         if let Some(modified) = response.headers().get(header::LAST_MODIFIED) {
-            fresh.headers_mut().insert(header::LAST_MODIFIED, modified.clone());
+            fresh
+                .headers_mut()
+                .insert(header::LAST_MODIFIED, modified.clone());
         }
         response = fresh;
     }
@@ -613,12 +630,20 @@ async fn revalidate_site(request: Request, next: Next) -> Response {
 /// A follower runs no tick. The body says which this replica is. The
 /// database's own health is `/readyz`.
 async fn health(State(state): State<AppState>) -> Response {
-    liveness(state.leader.leading(), &state.heartbeat, Utc::now().timestamp()).into_response()
+    liveness(
+        state.leader.leading(),
+        &state.heartbeat,
+        Utc::now().timestamp(),
+    )
+    .into_response()
 }
 
 fn liveness(leading: bool, heartbeat: &Heartbeat, now: i64) -> (StatusCode, &'static str) {
     match (leading, heartbeat.stale(now)) {
-        (true, true) => (StatusCode::SERVICE_UNAVAILABLE, "leader: the tick has stalled"),
+        (true, true) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "leader: the tick has stalled",
+        ),
         (true, false) => (StatusCode::OK, "ok: leader"),
         (false, _) => (StatusCode::OK, "ok: follower"),
     }
@@ -760,22 +785,28 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
     let Some(target) = load_role_target(state, path, headers) else {
         return;
     };
-    if !state
-        .member_roles
-        .lock()
-        .expect("member roles")
-        .claim(&target.guild_discord, &target.user_discord, std::time::Instant::now())
-    {
+    if !state.member_roles.lock().expect("member roles").claim(
+        &target.guild_discord,
+        &target.user_discord,
+        std::time::Instant::now(),
+    ) {
         return;
     }
     // The bot's member list already has them while the gateway follows members.
-    if let Some(roles) = state.members.roles(&target.guild_discord, &target.user_discord) {
+    if let Some(roles) = state
+        .members
+        .roles(&target.guild_discord, &target.user_discord)
+    {
         store_member_roles(state, &target, &roles);
         return;
     }
-    let Some((status, body)) =
-        discord_member(&state.http, &state.bot_token, &target.guild_discord, &target.user_discord)
-            .await
+    let Some((status, body)) = discord_member(
+        &state.http,
+        &state.bot_token,
+        &target.guild_discord,
+        &target.user_discord,
+    )
+    .await
     else {
         tracing::warn!("could not read Discord roles for this member");
         return;
@@ -795,7 +826,8 @@ fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option
 
 fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
     let mut db = state.db.get().expect("database");
-    if let Err(err) = store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles)
+    if let Err(err) =
+        store::replace_discord_roles(&mut db, target.guild_id, target.membership_id, roles)
     {
         tracing::warn!("could not store Discord roles: {err}");
     }
@@ -804,7 +836,11 @@ fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
 fn server_in_path(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/servers/")?;
     let id = rest.split('/').next()?;
-    if snowflake(id) { Some(id) } else { None }
+    if snowflake(id) {
+        Some(id)
+    } else {
+        None
+    }
 }
 
 fn snowflake(id: &str) -> bool {
@@ -844,9 +880,13 @@ fn fresh_roles(status: StatusCode, body: &str) -> FreshRoles {
         roles: Vec<String>,
     }
     match serde_json::from_str::<Member>(body) {
-        Ok(member) => {
-            FreshRoles::Known(member.roles.into_iter().filter(|id| snowflake(id)).collect())
-        }
+        Ok(member) => FreshRoles::Known(
+            member
+                .roles
+                .into_iter()
+                .filter(|id| snowflake(id))
+                .collect(),
+        ),
         Err(_) => FreshRoles::Unavailable,
     }
 }
@@ -864,10 +904,7 @@ async fn discord_member(
         http.get(format!(
             "https://discord.com/api/v10/guilds/{guild_discord}/members/{user_discord}"
         ))
-        .header(
-            header::AUTHORIZATION,
-            format!("Bot {}", bot_token.trim()),
-        ),
+        .header(header::AUTHORIZATION, format!("Bot {}", bot_token.trim())),
     )
     .await
     .ok()?;
@@ -1079,18 +1116,16 @@ async fn auth_callback(
         Ok(token) => token,
         Err(err) => return plain_error(err),
     };
-    if let Err(err) =
-        store::insert_web_session(
-            &mut db,
-            &token,
-            &me.id,
-            &name,
-            guild_id,
-            membership_id,
-            &allowed,
-            Some(&grant),
-        )
-    {
+    if let Err(err) = store::insert_web_session(
+        &mut db,
+        &token,
+        &me.id,
+        &name,
+        guild_id,
+        membership_id,
+        &allowed,
+        Some(&grant),
+    ) {
         return plain_error(err);
     }
     drop(db);
@@ -1479,7 +1514,10 @@ async fn discord_token(
     .map_err(|err| err.message)
 }
 
-async fn discord_refresh(state: &AppState, refresh: &str) -> Result<store::DiscordGrant, DiscordError> {
+async fn discord_refresh(
+    state: &AppState,
+    refresh: &str,
+) -> Result<store::DiscordGrant, DiscordError> {
     discord_grant(
         state,
         &[("grant_type", "refresh_token"), ("refresh_token", refresh)],
@@ -1487,7 +1525,10 @@ async fn discord_refresh(state: &AppState, refresh: &str) -> Result<store::Disco
     .await
 }
 
-async fn discord_grant(state: &AppState, form: &[(&str, &str)]) -> Result<store::DiscordGrant, DiscordError> {
+async fn discord_grant(
+    state: &AppState,
+    form: &[(&str, &str)],
+) -> Result<store::DiscordGrant, DiscordError> {
     let mut fields = vec![
         ("client_id", state.client_id.as_str()),
         ("client_secret", state.client_secret.as_str()),
@@ -1514,7 +1555,10 @@ async fn discord_grant(state: &AppState, form: &[(&str, &str)]) -> Result<store:
         .await
         .map_err(|_| DiscordError::new(None, "Discord sent an unexpected sign-in reply."))?;
     if body.access_token.is_empty() {
-        return Err(DiscordError::new(None, "Discord sent an unexpected sign-in reply."));
+        return Err(DiscordError::new(
+            None,
+            "Discord sent an unexpected sign-in reply.",
+        ));
     }
     Ok(store::DiscordGrant {
         access: body.access_token,
@@ -1896,11 +1940,16 @@ mod tests {
     async fn a_sign_in_page_shows_no_database_detail() {
         let err = OpError::Db(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation,
-            Box::new(r#"duplicate key value violates unique constraint "google_accounts_pkey""#.to_string()),
+            Box::new(
+                r#"duplicate key value violates unique constraint "google_accounts_pkey""#
+                    .to_string(),
+            ),
         ));
         let response = plain_error(err);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(!body.contains("google_accounts_pkey"), "{body}");
         assert!(body.contains("Something went wrong"), "{body}");
@@ -1923,11 +1972,20 @@ mod tests {
     fn only_the_leader_minds_the_tick() {
         let heartbeat = Heartbeat::new();
         let later = Utc::now().timestamp() + TICK_STALE_AFTER_SECS + 5;
-        assert_eq!(liveness(true, &heartbeat, later).0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(liveness(false, &heartbeat, later), (StatusCode::OK, "ok: follower"));
+        assert_eq!(
+            liveness(true, &heartbeat, later).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            liveness(false, &heartbeat, later),
+            (StatusCode::OK, "ok: follower")
+        );
         heartbeat.beat();
         let now = Utc::now().timestamp();
-        assert_eq!(liveness(true, &heartbeat, now), (StatusCode::OK, "ok: leader"));
+        assert_eq!(
+            liveness(true, &heartbeat, now),
+            (StatusCode::OK, "ok: leader")
+        );
     }
 
     #[test]
@@ -2016,9 +2074,18 @@ mod tests {
         let now = std::time::Instant::now();
         let mut roles = MemberRoles::default();
         assert!(roles.claim("99", "42", now), "the first request asks");
-        assert!(!roles.claim("99", "42", now), "a request fired alongside it waits");
-        assert!(!roles.claim("99", "42", now + std::time::Duration::from_secs(29)), "so does a retry");
-        assert!(roles.claim("99", "42", now + MEMBER_ROLES_TTL), "the next window asks again");
+        assert!(
+            !roles.claim("99", "42", now),
+            "a request fired alongside it waits"
+        );
+        assert!(
+            !roles.claim("99", "42", now + std::time::Duration::from_secs(29)),
+            "so does a retry"
+        );
+        assert!(
+            roles.claim("99", "42", now + MEMBER_ROLES_TTL),
+            "the next window asks again"
+        );
         assert!(roles.claim("7", "42", now), "each server is its own lookup");
     }
 
@@ -2087,8 +2154,14 @@ mod tests {
 
     #[test]
     fn the_public_url_gives_its_origin() {
-        assert_eq!(public_origin("https://marian.example.com/app/").as_deref(), Some("https://marian.example.com"));
-        assert_eq!(public_origin(" http://localhost:8080 ").as_deref(), Some("http://localhost:8080"));
+        assert_eq!(
+            public_origin("https://marian.example.com/app/").as_deref(),
+            Some("https://marian.example.com")
+        );
+        assert_eq!(
+            public_origin(" http://localhost:8080 ").as_deref(),
+            Some("http://localhost:8080")
+        );
         assert_eq!(public_origin(""), None);
         assert_eq!(public_origin("ftp://marian.example.com"), None);
     }
@@ -2115,31 +2188,65 @@ mod tests {
         };
         let pages = Router::new().route(
             "/page",
-            get(|| async { ([(header::CONTENT_SECURITY_POLICY, "from the shell")], axum::response::Html("<p>hi</p>")) }),
+            get(|| async {
+                (
+                    [(header::CONTENT_SECURITY_POLICY, "from the shell")],
+                    axum::response::Html("<p>hi</p>"),
+                )
+            }),
         );
         let app = router(state, pages);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         let client = reqwest::Client::new();
         let csp = |response: &reqwest::Response| {
-            response.headers().get(header::CONTENT_SECURITY_POLICY).map(|v| v.to_str().unwrap().to_string())
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .map(|v| v.to_str().unwrap().to_string())
         };
         let allowed = |response: &reqwest::Response| {
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).map(|v| v.to_str().unwrap().to_string())
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap().to_string())
         };
 
-        let health = client.get(format!("http://{addr}/healthz")).send().await.unwrap();
+        let health = client
+            .get(format!("http://{addr}/healthz"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(csp(&health).as_deref(), Some(NON_PAGE_POLICY));
-        let refused = client.get(format!("http://{addr}/api/servers/1/events")).send().await.unwrap();
+        let refused = client
+            .get(format!("http://{addr}/api/servers/1/events"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(csp(&refused).as_deref(), Some(NON_PAGE_POLICY), "JSON errors too");
-        let page = client.get(format!("http://{addr}/page")).send().await.unwrap();
-        assert_eq!(csp(&page).as_deref(), Some("from the shell"), "a page keeps its own policy");
+        assert_eq!(
+            csp(&refused).as_deref(),
+            Some(NON_PAGE_POLICY),
+            "JSON errors too"
+        );
+        let page = client
+            .get(format!("http://{addr}/page"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            csp(&page).as_deref(),
+            Some("from the shell"),
+            "a page keeps its own policy"
+        );
 
         let own = client
             .get(format!("http://{addr}/healthz"))
@@ -2148,7 +2255,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allowed(&own).as_deref(), Some("https://marian.example.com"));
-        assert_eq!(own.headers().get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS).unwrap(), "true");
+        assert_eq!(
+            own.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
         let foreign = client
             .get(format!("http://{addr}/healthz"))
             .header(header::ORIGIN, "https://evil.example")
@@ -2158,15 +2270,25 @@ mod tests {
         assert_eq!(allowed(&foreign), None);
 
         let preflight = client
-            .request(axum::http::Method::OPTIONS, format!("http://{addr}/api/servers/1/events"))
+            .request(
+                axum::http::Method::OPTIONS,
+                format!("http://{addr}/api/servers/1/events"),
+            )
             .header(header::ORIGIN, "https://marian.example.com")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
             .send()
             .await
             .unwrap();
-        assert!(preflight.status().is_success(), "answered before the login check: {}", preflight.status());
-        assert_eq!(allowed(&preflight).as_deref(), Some("https://marian.example.com"));
+        assert!(
+            preflight.status().is_success(),
+            "answered before the login check: {}",
+            preflight.status()
+        );
+        assert_eq!(
+            allowed(&preflight).as_deref(),
+            Some("https://marian.example.com")
+        );
     }
 
     #[tokio::test]
@@ -2199,12 +2321,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         // No automatic decoding, so the bytes on the wire are what's checked.
-        let client = reqwest::Client::builder().no_gzip().no_brotli().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .build()
+            .unwrap();
         let url = format!("http://{addr}/pkg/marian.wasm");
         let fetch = |encoding: &'static str| {
             let request = client.get(&url).header(header::ACCEPT_ENCODING, encoding);
@@ -2215,11 +2344,18 @@ mod tests {
         assert_eq!(br.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
         assert_eq!(br.headers().get(header::CACHE_CONTROL).unwrap(), "no-cache");
         let modified = br.headers().get(header::LAST_MODIFIED).cloned().unwrap();
-        assert_eq!(br.bytes().await.unwrap().as_ref(), b"brotli bytes", "the stored copy, not compressed again");
+        assert_eq!(
+            br.bytes().await.unwrap().as_ref(),
+            b"brotli bytes",
+            "the stored copy, not compressed again"
+        );
 
         // No .gz copy here: the plain file is compressed on the way instead.
         let gzip = fetch("gzip").await;
-        assert_eq!(gzip.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(
+            gzip.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
         assert!(gzip.bytes().await.unwrap().len() < plain.len());
 
         let identity = fetch("identity").await;
@@ -2237,15 +2373,27 @@ mod tests {
 
         // A file with its content hash in the name is kept for good, compressed copy and all.
         std::fs::write(dir.join("marian.iucsWZX9RG8HB2_vQoyuAw.wasm"), &plain).unwrap();
-        std::fs::write(dir.join("marian.iucsWZX9RG8HB2_vQoyuAw.wasm.br"), b"brotli bytes").unwrap();
+        std::fs::write(
+            dir.join("marian.iucsWZX9RG8HB2_vQoyuAw.wasm.br"),
+            b"brotli bytes",
+        )
+        .unwrap();
         let hashed = client
-            .get(format!("http://{addr}/pkg/marian.iucsWZX9RG8HB2_vQoyuAw.wasm"))
+            .get(format!(
+                "http://{addr}/pkg/marian.iucsWZX9RG8HB2_vQoyuAw.wasm"
+            ))
             .header(header::ACCEPT_ENCODING, "br")
             .send()
             .await
             .unwrap();
-        assert_eq!(hashed.headers().get(header::CACHE_CONTROL).unwrap(), "public, max-age=31536000, immutable");
-        assert_eq!(hashed.headers().get(header::CONTENT_ENCODING).unwrap(), "br");
+        assert_eq!(
+            hashed.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            hashed.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

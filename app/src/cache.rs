@@ -66,7 +66,9 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
     match change {
         dto::Change::Signups { event } => {
             client.invalidate_query(signups_scope(), &(here.clone(), event.clone()));
-            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| *s == here && e == event);
+            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| {
+                *s == here && e == event
+            });
             lists(client);
         }
         dto::Change::Event { event } => {
@@ -74,7 +76,9 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
             client.invalidate_query(event_scope(), &key);
             client.invalidate_query(signups_scope(), &key);
             client.invalidate_query(reminders_scope(), &key);
-            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| *s == here && e == event);
+            client.invalidate_queries_with_predicate(event_activity_scope(), |(s, e, _)| {
+                *s == here && e == event
+            });
             lists(client);
             client.invalidate_query(server_scope(), &here);
             client.invalidate_query(pending_reminders_scope(), &here);
@@ -87,13 +91,13 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
 
 /// Writes settings into the cache without remounting the form.
 pub fn apply_settings(client: QueryClient, server: &str, next: &dto::Settings) {
-    client.update_query(settings_scope(), &server.to_string(), |cached| {
+    client.update_query(settings_scope(), server.to_string(), |cached| {
         if let Some(Ok(settings)) = cached {
             *settings = next.clone();
         }
         client.untrack_update_query();
     });
-    client.update_query(server_scope(), &server.to_string(), |cached| {
+    client.update_query(server_scope(), server.to_string(), |cached| {
         if let Some(Ok(info)) = cached {
             info.hour_24 = next.hour_24;
             info.timezone = next.timezone.clone();
@@ -125,7 +129,11 @@ pub fn apply_event(client: QueryClient, key: &(String, String), next: &dto::Even
 
 /// Changes the cached event in place before a save lands, so a refresh that
 /// arrives first renders the new value, not the old one.
-pub fn preview_event(client: QueryClient, key: &(String, String), change: impl FnOnce(&mut dto::Event)) {
+pub fn preview_event(
+    client: QueryClient,
+    key: &(String, String),
+    change: impl FnOnce(&mut dto::Event),
+) {
     client.update_query(event_scope(), key, |cached| {
         if let Some(Ok(event)) = cached {
             change(event);
@@ -139,8 +147,11 @@ pub fn preview_reminders(client: QueryClient, key: &(String, String), next: &[dt
     client.update_query(reminders_scope(), key, |cached| {
         if let Some(Ok(list)) = cached {
             let sent = |rem: &dto::Reminder| {
-                list.iter()
-                    .any(|old| old.sent && old.offset_minutes == rem.offset_minutes && old.message == rem.message)
+                list.iter().any(|old| {
+                    old.sent
+                        && old.offset_minutes == rem.offset_minutes
+                        && old.message == rem.message
+                })
             };
             *list = next
                 .iter()
@@ -156,7 +167,7 @@ pub fn preview_reminders(client: QueryClient, key: &(String, String), next: &[dt
 
 /// Writes a personal preference into the cached membership without remounting.
 pub fn apply_membership(client: QueryClient, server: &str, change: &dto::MembershipPatch) {
-    client.update_query(membership_scope(), &server.to_string(), |cached| {
+    client.update_query(membership_scope(), server.to_string(), |cached| {
         if let Some(Ok(membership)) = cached {
             if let Some(on) = change.reminders_enabled {
                 membership.reminders_enabled = on;
@@ -189,13 +200,15 @@ pub fn event_key() -> (String, String) {
 /// of a component; a query's key uses `server_key` so it follows the address.
 #[track_caller]
 pub fn server_now() -> String {
-    leptos_router::hooks::use_params_map().with_untracked(|params| params.get("server").unwrap_or_default())
+    leptos_router::hooks::use_params_map()
+        .with_untracked(|params| params.get("server").unwrap_or_default())
 }
 
 /// The event in the address, read once, as `server_now` reads the server.
 #[track_caller]
 pub fn event_now() -> String {
-    leptos_router::hooks::use_params_map().with_untracked(|params| params.get("id").unwrap_or_default())
+    leptos_router::hooks::use_params_map()
+        .with_untracked(|params| params.get("id").unwrap_or_default())
 }
 
 /// Starts a cached read and renders `render` when it is ready. Use this
@@ -274,7 +287,13 @@ fn failed(errors: ArcRwSignal<Errors>) -> impl IntoView {
         let failures: Vec<Failure> = errors.with(|errors| {
             errors
                 .iter()
-                .filter_map(|(_, error)| error.clone().into_inner().downcast_ref::<Failure>().cloned())
+                .filter_map(|(_, error)| {
+                    error
+                        .clone()
+                        .into_inner()
+                        .downcast_ref::<Failure>()
+                        .cloned()
+                })
                 .collect()
         });
         if failures.iter().any(Failure::unreachable) {
@@ -395,7 +414,8 @@ async fn get_server(id: String) -> Result<dto::Server, Failure> {
 }
 
 pub fn membership_scope() -> QueryScope<String, Result<dto::Membership, Failure>> {
-    QueryScope::new(get_membership).with_invalidation_link(|id| ["s".into(), id.clone(), "me".into()])
+    QueryScope::new(get_membership)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "me".into()])
 }
 
 async fn get_membership(id: String) -> Result<dto::Membership, Failure> {
@@ -403,7 +423,8 @@ async fn get_membership(id: String) -> Result<dto::Membership, Failure> {
 }
 
 pub fn settings_scope() -> QueryScope<String, Result<dto::Settings, Failure>> {
-    QueryScope::new(get_settings).with_invalidation_link(|id| ["s".into(), id.clone(), "settings".into()])
+    QueryScope::new(get_settings)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "settings".into()])
 }
 
 async fn get_settings(id: String) -> Result<dto::Settings, Failure> {
@@ -419,7 +440,8 @@ async fn get_roles(id: String) -> Result<Vec<dto::Role>, Failure> {
 }
 
 pub fn members_scope() -> QueryScope<String, Result<Vec<dto::Member>, Failure>> {
-    QueryScope::new(get_members).with_invalidation_link(|id| ["s".into(), id.clone(), "members".into()])
+    QueryScope::new(get_members)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "members".into()])
 }
 
 async fn get_members(id: String) -> Result<Vec<dto::Member>, Failure> {
@@ -427,18 +449,23 @@ async fn get_members(id: String) -> Result<Vec<dto::Member>, Failure> {
 }
 
 pub fn channels_scope() -> QueryScope<String, Result<Vec<dto::Channel>, Failure>> {
-    QueryScope::new(get_channels).with_invalidation_link(|id| ["s".into(), id.clone(), "channels".into()])
+    QueryScope::new(get_channels)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "channels".into()])
 }
 
 async fn get_channels(id: String) -> Result<Vec<dto::Channel>, Failure> {
     api::channels(&id).await
 }
 
-pub fn events_scope() -> QueryScope<(String, String), Result<dto::Paged<dto::EventSummary>, Failure>> {
-    QueryScope::new(get_events).with_invalidation_link(|(id, _)| ["s".into(), id.clone(), "events".into()])
+pub fn events_scope() -> QueryScope<(String, String), Result<dto::Paged<dto::EventSummary>, Failure>>
+{
+    QueryScope::new(get_events)
+        .with_invalidation_link(|(id, _)| ["s".into(), id.clone(), "events".into()])
 }
 
-async fn get_events((server, qs): (String, String)) -> Result<dto::Paged<dto::EventSummary>, Failure> {
+async fn get_events(
+    (server, qs): (String, String),
+) -> Result<dto::Paged<dto::EventSummary>, Failure> {
     let query = serde_json::from_str(&qs).unwrap_or_default();
     api::events(&server, &query).await
 }
@@ -460,7 +487,13 @@ async fn get_event((server, id): (String, String)) -> Result<dto::Event, Failure
 
 pub fn reminders_scope() -> QueryScope<(String, String), Result<Vec<dto::Reminder>, Failure>> {
     QueryScope::new(get_reminders).with_invalidation_link(|(s, id)| {
-        ["s".into(), s.clone(), "e".into(), id.clone(), "reminders".into()]
+        [
+            "s".into(),
+            s.clone(),
+            "e".into(),
+            id.clone(),
+            "reminders".into(),
+        ]
     })
 }
 
@@ -470,7 +503,13 @@ async fn get_reminders((server, id): (String, String)) -> Result<Vec<dto::Remind
 
 pub fn signups_scope() -> QueryScope<(String, String), Result<dto::Signups, Failure>> {
     QueryScope::new(get_signups).with_invalidation_link(|(s, id)| {
-        ["s".into(), s.clone(), "e".into(), id.clone(), "signups".into()]
+        [
+            "s".into(),
+            s.clone(),
+            "e".into(),
+            id.clone(),
+            "signups".into(),
+        ]
     })
 }
 
@@ -479,7 +518,8 @@ async fn get_signups((server, id): (String, String)) -> Result<dto::Signups, Fai
 }
 
 pub fn pending_reminders_scope() -> QueryScope<String, Result<Vec<dto::PendingReminder>, Failure>> {
-    QueryScope::new(get_pending).with_invalidation_link(|id| ["s".into(), id.clone(), "pending".into()])
+    QueryScope::new(get_pending)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "pending".into()])
 }
 
 async fn get_pending(server: String) -> Result<Vec<dto::PendingReminder>, Failure> {
@@ -487,26 +527,40 @@ async fn get_pending(server: String) -> Result<Vec<dto::PendingReminder>, Failur
 }
 
 /// One event's activity: the server, the event, and the page.
-pub fn event_activity_scope() -> QueryScope<(String, String, u32), Result<dto::Paged<dto::Activity>, Failure>> {
+pub fn event_activity_scope(
+) -> QueryScope<(String, String, u32), Result<dto::Paged<dto::Activity>, Failure>> {
     QueryScope::new(get_event_activity).with_invalidation_link(|(s, id, _)| {
-        ["s".into(), s.clone(), "e".into(), id.clone(), "activity".into()]
+        [
+            "s".into(),
+            s.clone(),
+            "e".into(),
+            id.clone(),
+            "activity".into(),
+        ]
     })
 }
 
-async fn get_event_activity((server, event, page): (String, String, u32)) -> Result<dto::Paged<dto::Activity>, Failure> {
+async fn get_event_activity(
+    (server, event, page): (String, String, u32),
+) -> Result<dto::Paged<dto::Activity>, Failure> {
     api::event_activity(&server, &event, page, 25).await
 }
 
-pub fn activity_scope() -> QueryScope<(String, u32, u32), Result<dto::Paged<dto::Activity>, Failure>> {
-    QueryScope::new(get_activity).with_invalidation_link(|(id, _, _)| ["s".into(), id.clone(), "activity".into()])
+pub fn activity_scope() -> QueryScope<(String, u32, u32), Result<dto::Paged<dto::Activity>, Failure>>
+{
+    QueryScope::new(get_activity)
+        .with_invalidation_link(|(id, _, _)| ["s".into(), id.clone(), "activity".into()])
 }
 
-async fn get_activity((server, page, limit): (String, u32, u32)) -> Result<dto::Paged<dto::Activity>, Failure> {
+async fn get_activity(
+    (server, page, limit): (String, u32, u32),
+) -> Result<dto::Paged<dto::Activity>, Failure> {
     api::activity(&server, page, limit).await
 }
 
 pub fn series_list_scope() -> QueryScope<String, Result<Vec<dto::Series>, Failure>> {
-    QueryScope::new(get_series_list).with_invalidation_link(|id| ["s".into(), id.clone(), "series".into()])
+    QueryScope::new(get_series_list)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "series".into()])
 }
 
 async fn get_series_list(server: String) -> Result<Vec<dto::Series>, Failure> {
@@ -514,9 +568,8 @@ async fn get_series_list(server: String) -> Result<Vec<dto::Series>, Failure> {
 }
 
 pub fn series_scope() -> QueryScope<(String, String), Result<dto::Series, Failure>> {
-    QueryScope::new(get_series).with_invalidation_link(|(s, id)| {
-        ["s".into(), s.clone(), "series".into(), id.clone()]
-    })
+    QueryScope::new(get_series)
+        .with_invalidation_link(|(s, id)| ["s".into(), s.clone(), "series".into(), id.clone()])
 }
 
 async fn get_series((server, id): (String, String)) -> Result<dto::Series, Failure> {
@@ -524,7 +577,8 @@ async fn get_series((server, id): (String, String)) -> Result<dto::Series, Failu
 }
 
 pub fn presets_scope() -> QueryScope<String, Result<Vec<dto::Preset>, Failure>> {
-    QueryScope::new(get_presets).with_invalidation_link(|id| ["s".into(), id.clone(), "presets".into()])
+    QueryScope::new(get_presets)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "presets".into()])
 }
 
 async fn get_presets(server: String) -> Result<Vec<dto::Preset>, Failure> {
@@ -532,7 +586,8 @@ async fn get_presets(server: String) -> Result<Vec<dto::Preset>, Failure> {
 }
 
 pub fn library_scope() -> QueryScope<String, Result<Vec<dto::LibraryItem>, Failure>> {
-    QueryScope::new(get_library).with_invalidation_link(|id| ["s".into(), id.clone(), "library".into()])
+    QueryScope::new(get_library)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "library".into()])
 }
 
 async fn get_library(server: String) -> Result<Vec<dto::LibraryItem>, Failure> {
@@ -540,7 +595,8 @@ async fn get_library(server: String) -> Result<Vec<dto::LibraryItem>, Failure> {
 }
 
 pub fn routines_scope() -> QueryScope<String, Result<Vec<dto::RoutineSummary>, Failure>> {
-    QueryScope::new(get_routines).with_invalidation_link(|id| ["s".into(), id.clone(), "routines".into()])
+    QueryScope::new(get_routines)
+        .with_invalidation_link(|id| ["s".into(), id.clone(), "routines".into()])
 }
 
 async fn get_routines(server: String) -> Result<Vec<dto::RoutineSummary>, Failure> {
@@ -548,9 +604,8 @@ async fn get_routines(server: String) -> Result<Vec<dto::RoutineSummary>, Failur
 }
 
 pub fn routine_scope() -> QueryScope<(String, String), Result<dto::RoutineView, Failure>> {
-    QueryScope::new(get_routine).with_invalidation_link(|(s, id)| {
-        ["s".into(), s.clone(), "routines".into(), id.clone()]
-    })
+    QueryScope::new(get_routine)
+        .with_invalidation_link(|(s, id)| ["s".into(), s.clone(), "routines".into(), id.clone()])
 }
 
 async fn get_routine((server, id): (String, String)) -> Result<dto::RoutineView, Failure> {
@@ -565,15 +620,17 @@ async fn get_timezones(selected: String) -> Result<Vec<dto::ZoneGroup>, Failure>
     api::timezones(&selected).await
 }
 
+/// The channels a new event can go to, and the preset it starts from.
+pub type NewEventData = (Vec<dto::Channel>, Option<dto::Preset>);
+
 /// What a new event starts from: the server's channels, and the preset named in
 /// the address or, without one, the server's default.
-pub fn new_event_scope() -> QueryScope<(String, String), Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>>
-{
-    QueryScope::new(get_new_event).with_invalidation_link(|(s, _)| ["s".into(), s.clone(), "form".into()])
+pub fn new_event_scope() -> QueryScope<(String, String), Result<NewEventData, Failure>> {
+    QueryScope::new(get_new_event)
+        .with_invalidation_link(|(s, _)| ["s".into(), s.clone(), "form".into()])
 }
 
-async fn get_new_event((server, preset): (String, String)) -> Result<(Vec<dto::Channel>, Option<dto::Preset>), Failure>
-{
+async fn get_new_event((server, preset): (String, String)) -> Result<NewEventData, Failure> {
     let channels = api::channels(&server).await?;
     let presets = api::presets(&server).await?;
     let chosen = presets

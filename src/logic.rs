@@ -14,38 +14,44 @@ mod signup;
 mod template;
 mod tick;
 
-pub use access::{can_create, can_delete, can_edit, may_pick_attendee_role, sees_channel, sight, sight_for_discord, Overwrite, Sight};
+pub use access::{
+    can_create, can_delete, can_edit, may_pick_attendee_role, sees_channel, sight,
+    sight_for_discord, Overwrite, Sight,
+};
 pub use catalog::{
     bind_channel_discord, create_channel, discard_channel, manual_calendar_sync,
     set_user_reminders, slug_channel,
 };
-pub use library::{
-    add_type, apply_preset, delete_preset, delete_type, ensure_type, preset_types, presets, save_preset,
-    set_default_preset, starting_options, update_type,
-};
 pub use discord::{
-    admit_discord_user, attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
-    discord_channel_gone, discord_role_gone, ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
-    event_thread_name, follow_discord_avatar, follow_discord_name, mark_channel_purged, mention_line, remember_discord_message, set_server_manager,
-    sync_channel_overwrites, sync_discord_channel, sync_discord_channels, sync_discord_permissions,
-    sync_discord_role, sync_discord_roles, web_event_url, Attendance,
-    AttendanceWork, ChannelReverse, EventChannelPurge,
+    admit_discord_user, attendance, channel_reverse_plan, delete_confirm_body,
+    detach_discord_posts, discord_channel_gone, discord_role_gone, discord_view,
+    ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
+    event_thread_name, follow_discord_avatar, follow_discord_name, mark_channel_purged,
+    mention_line, remember_discord_message, set_server_manager, sync_channel_overwrites,
+    sync_discord_channel, sync_discord_channels, sync_discord_permissions, sync_discord_role,
+    sync_discord_roles, web_event_url, Attendance, AttendanceWork, ChannelReverse,
+    EventChannelPurge,
 };
 pub use event::{save_event, save_options};
+pub use library::{
+    add_type, apply_preset, delete_preset, delete_type, ensure_type, preset_types, presets,
+    save_preset, set_default_preset, starting_options, update_type,
+};
 pub use lifecycle::{
     archive_event, delete_event, duplicate_event, end_series, save_series_repeat, skip_event,
 };
 pub use model::{
-    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput, OptionInput, TypeInput,
-    PresetInput, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
+    ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput,
+    OptionInput, PresetInput, ReminderInput, RepeatSpec, SaveAction, SeriesTemplate, TickReport,
+    TypeInput,
 };
 pub use routine::{
-    cast_run, count_active, create_routine, event_from as routine_event_from, open_run_id, run_by_public, list_routines, maintain as maintain_routines,
-    remember_results_message, remember_routine_message, routine_in_guild, routine_page_data, routine_post, save_routine,
-    save_run_days, save_usual_days, stop_routine, DayCheck, PollButton, RoutineEffect, RoutinePost,
-    approval_post, can_decide, check_steps, decide_run, remember_approval_message, save_steps, waiting_run_id,
-    ApprovalPost, Step, StepKind,
-    RoutineSummary, RoutineView, RunHistory, RunView,
+    approval_post, can_decide, cast_run, check_steps, count_active, create_routine, decide_run,
+    event_from as routine_event_from, list_routines, maintain as maintain_routines, open_run_id,
+    remember_approval_message, remember_results_message, remember_routine_message,
+    routine_in_guild, routine_page_data, routine_post, run_by_public, save_routine, save_run_days,
+    save_steps, save_usual_days, stop_routine, waiting_run_id, ApprovalPost, DayCheck, PollButton,
+    RoutineEffect, RoutinePost, RoutineSummary, RoutineView, RunHistory, RunView, Step, StepKind,
 };
 pub use signup::{editor_response, guests_form, signup, signup_guests, GuestsForm};
 pub use template::series_template;
@@ -67,8 +73,8 @@ pub(crate) fn test_option(
 mod tests {
     use super::*;
     use crate::schema;
-    use crate::values::{AccessKind, Cadence, EventStatus, SignupState};
     use crate::store::{self, Connection};
+    use crate::values::{AccessKind, Cadence, EventStatus, SignupState};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use diesel::connection::SimpleConnection;
     use diesel::prelude::*;
@@ -171,7 +177,10 @@ mod tests {
     #[test]
     fn without_the_waitlist_a_full_option_turns_people_away() {
         let mut conn = world();
-        assert!(!store::settings(&mut conn, 1).unwrap().waitlist, "off by default");
+        assert!(
+            !store::settings(&mut conn, 1).unwrap().waitlist,
+            "off by default"
+        );
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.options = vec![OptionInput {
             capacity: Some(1),
@@ -188,11 +197,20 @@ mod tests {
 
     /// A posted event with one option of `capacity` that takes up to
     /// `max_guests`, and the option's id.
-    fn party_event(conn: &mut Connection, capacity: i64, max_guests: i64, waitlist: bool) -> (i64, i64) {
+    fn party_event(
+        conn: &mut Connection,
+        capacity: i64,
+        max_guests: i64,
+        waitlist: bool,
+    ) -> (i64, i64) {
         let mut settings = store::settings(conn, 1).unwrap();
         settings.waitlist = waitlist;
         store::update_settings(conn, &settings).unwrap();
-        let mut event = input("Dinner", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        let mut event = input(
+            "Dinner",
+            Utc::now() + Duration::hours(5),
+            SaveAction::Publish,
+        );
         event.options = vec![OptionInput {
             capacity: Some(capacity),
             max_guests,
@@ -219,13 +237,23 @@ mod tests {
     fn a_party_takes_a_place_for_each_guest() {
         let mut conn = world();
         let (id, option) = party_event(&mut conn, 4, 3, false);
-        let notice = signup_guests(&mut conn, id, option, 2, 2).unwrap().to_string();
+        let notice = signup_guests(&mut conn, id, option, 2, 2)
+            .unwrap()
+            .to_string();
         assert_eq!(notice, "June signed up as Yes, bringing 2 guests.");
         // One place left: a party of two doesn't fit, and nothing is waiting.
-        let err = signup_guests(&mut conn, id, option, 3, 1).unwrap_err().to_string();
+        let err = signup_guests(&mut conn, id, option, 3, 1)
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "Yes has only one spot left.");
         signup(&mut conn, id, option, 3).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 2), (3, SignupState::Confirmed, 0)]);
+        assert_eq!(
+            parties(&mut conn, id),
+            [
+                (2, SignupState::Confirmed, 2),
+                (3, SignupState::Confirmed, 0)
+            ]
+        );
         // A plain click on the option takes June off it, guests and all.
         signup(&mut conn, id, option, 2).unwrap();
         assert_eq!(parties(&mut conn, id), [(3, SignupState::Confirmed, 0)]);
@@ -235,7 +263,9 @@ mod tests {
     fn a_party_bigger_than_the_option_is_refused_even_with_a_waitlist() {
         let mut conn = world();
         let (id, option) = party_event(&mut conn, 3, 5, true);
-        let err = signup_guests(&mut conn, id, option, 2, 4).unwrap_err().to_string();
+        let err = signup_guests(&mut conn, id, option, 2, 4)
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "Yes has 3 spots, too few for a party of 5.");
         assert!(parties(&mut conn, id).is_empty());
     }
@@ -244,10 +274,14 @@ mod tests {
     fn guests_need_an_option_that_takes_them() {
         let mut conn = world();
         let (id, option) = party_event(&mut conn, 10, 0, false);
-        let err = signup_guests(&mut conn, id, option, 2, 1).unwrap_err().to_string();
+        let err = signup_guests(&mut conn, id, option, 2, 1)
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "Yes doesn't take guests.");
         let (id, option) = party_event(&mut conn, 10, 2, false);
-        let err = signup_guests(&mut conn, id, option, 2, 3).unwrap_err().to_string();
+        let err = signup_guests(&mut conn, id, option, 2, 3)
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "Yes lets each person bring at most 2 guests.");
         // Zero is a plain signup.
         signup_guests(&mut conn, id, option, 2, 0).unwrap();
@@ -260,18 +294,30 @@ mod tests {
         let (id, option) = party_event(&mut conn, 3, 3, true);
         signup_guests(&mut conn, id, option, 2, 1).unwrap();
         // Two places are taken; Samir's party of three waits.
-        let notice = signup_guests(&mut conn, id, option, 3, 2).unwrap().to_string();
+        let notice = signup_guests(&mut conn, id, option, 3, 2)
+            .unwrap()
+            .to_string();
         assert_eq!(notice, "Samir and 2 guests are waiting for Yes spots.");
         // Nell alone would fit in the last place, but Samir's party is ahead.
         let notice = signup(&mut conn, id, option, 1).unwrap().to_string();
         assert!(notice.contains("waiting"), "{notice}");
         assert_eq!(
             parties(&mut conn, id),
-            [(1, SignupState::Waitlisted, 0), (2, SignupState::Confirmed, 1), (3, SignupState::Waitlisted, 2)]
+            [
+                (1, SignupState::Waitlisted, 0),
+                (2, SignupState::Confirmed, 1),
+                (3, SignupState::Waitlisted, 2)
+            ]
         );
         // June leaves: Samir's party fits and moves up; Nell still waits.
         signup(&mut conn, id, option, 2).unwrap();
-        assert_eq!(parties(&mut conn, id), [(1, SignupState::Waitlisted, 0), (3, SignupState::Confirmed, 2)]);
+        assert_eq!(
+            parties(&mut conn, id),
+            [
+                (1, SignupState::Waitlisted, 0),
+                (3, SignupState::Confirmed, 2)
+            ]
+        );
     }
 
     #[test]
@@ -280,16 +326,41 @@ mod tests {
         let (id, option) = party_event(&mut conn, 3, 3, true);
         signup(&mut conn, id, option, 2).unwrap();
         signup(&mut conn, id, option, 3).unwrap();
-        let notice = signup_guests(&mut conn, id, option, 2, 1).unwrap().to_string();
+        let notice = signup_guests(&mut conn, id, option, 2, 1)
+            .unwrap()
+            .to_string();
         assert_eq!(notice, "June now brings one guest to Yes.");
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 1), (3, SignupState::Confirmed, 0)]);
+        assert_eq!(
+            parties(&mut conn, id),
+            [
+                (2, SignupState::Confirmed, 1),
+                (3, SignupState::Confirmed, 0)
+            ]
+        );
         // A third would need four places with Samir's; June's party waits.
-        let notice = signup_guests(&mut conn, id, option, 2, 2).unwrap().to_string();
-        assert_eq!(notice, "June's party of 3 no longer fits on Yes and is waiting for spots.");
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Waitlisted, 2), (3, SignupState::Confirmed, 0)]);
+        let notice = signup_guests(&mut conn, id, option, 2, 2)
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            notice,
+            "June's party of 3 no longer fits on Yes and is waiting for spots."
+        );
+        assert_eq!(
+            parties(&mut conn, id),
+            [
+                (2, SignupState::Waitlisted, 2),
+                (3, SignupState::Confirmed, 0)
+            ]
+        );
         // Back to one guest: the party fits again and moves up.
         signup_guests(&mut conn, id, option, 2, 1).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 1), (3, SignupState::Confirmed, 0)]);
+        assert_eq!(
+            parties(&mut conn, id),
+            [
+                (2, SignupState::Confirmed, 1),
+                (3, SignupState::Confirmed, 0)
+            ]
+        );
     }
 
     #[test]
@@ -298,10 +369,14 @@ mod tests {
         let (id, option) = party_event(&mut conn, 2, 3, false);
         editor_response(&mut conn, id, 1, 2, option, "add", Some(1)).unwrap();
         // An editor's change can go past capacity, as an editor's add can.
-        let notice = editor_response(&mut conn, id, 1, 2, option, "add", Some(3)).unwrap().to_string();
+        let notice = editor_response(&mut conn, id, 1, 2, option, "add", Some(3))
+            .unwrap()
+            .to_string();
         assert_eq!(notice, "June now brings 3 guests to Yes.");
         assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 3)]);
-        let err = editor_response(&mut conn, id, 1, 2, option, "add", Some(4)).unwrap_err().to_string();
+        let err = editor_response(&mut conn, id, 1, 2, option, "add", Some(4))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("at most 3"), "{err}");
     }
 
@@ -336,10 +411,19 @@ mod tests {
         // A posted event can lose a type too; the responses on it go with it.
         let dropped = vec![keep(&saved[0]), keep(&saved[2])];
         save_options(&mut conn, id, 1, &dropped).unwrap();
-        let names: Vec<String> = store::options_for(&mut conn, &event).unwrap().into_iter().map(|opt| opt.name).collect();
+        let names: Vec<String> = store::options_for(&mut conn, &event)
+            .unwrap()
+            .into_iter()
+            .map(|opt| opt.name)
+            .collect();
         assert_eq!(names, ["No", "Maybe"]);
-        assert!(store::signups_for(&mut conn, &event).unwrap().is_empty(), "Yes went, and June's response with it");
-        let err = save_options(&mut conn, id, 3, &next).unwrap_err().to_string();
+        assert!(
+            store::signups_for(&mut conn, &event).unwrap().is_empty(),
+            "Yes went, and June's response with it"
+        );
+        let err = save_options(&mut conn, id, 3, &next)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("You can edit events you created"));
     }
 
@@ -356,17 +440,25 @@ mod tests {
             .set(schema::events::discord_message_id.eq("m1"))
             .execute(&mut conn)
             .unwrap();
-        let view = discord_view(&mut conn, id, "https://marian.test").unwrap().unwrap();
+        let view = discord_view(&mut conn, id, "https://marian.test")
+            .unwrap()
+            .unwrap();
         assert!(!view.buttons.is_empty());
         archive_event(&mut conn, id, 1).unwrap();
-        let view = discord_view(&mut conn, id, "https://marian.test").unwrap().unwrap();
+        let view = discord_view(&mut conn, id, "https://marian.test")
+            .unwrap()
+            .unwrap();
         assert!(view.buttons.is_empty());
     }
 
     #[test]
     fn any_of_several_roles_grants_a_permission() {
         let mut conn = world();
-        let id = save_event(&mut conn, input("Raid", Utc::now() + Duration::hours(5), SaveAction::Draft)).unwrap();
+        let id = save_event(
+            &mut conn,
+            input("Raid", Utc::now() + Duration::hours(5), SaveAction::Draft),
+        )
+        .unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
         let mut settings = store::settings(&mut conn, 1).unwrap();
         settings.role_edit = vec![2, 1, 2];
@@ -377,11 +469,17 @@ mod tests {
 
         let june = store::membership(&mut conn, 2).unwrap().unwrap();
         let june_roles = store::membership_role_ids(&mut conn, &june).unwrap();
-        assert!(can_edit(&june, &event, &settings, &june_roles), "June holds role 2, the second one listed");
+        assert!(
+            can_edit(&june, &event, &settings, &june_roles),
+            "June holds role 2, the second one listed"
+        );
         let samir = store::membership(&mut conn, 3).unwrap().unwrap();
         let samir_roles = store::membership_role_ids(&mut conn, &samir).unwrap();
         assert!(!can_edit(&samir, &event, &settings, &samir_roles));
-        assert!(can_create(&samir, &settings, &samir_roles), "no event roles leaves creating open");
+        assert!(
+            can_create(&samir, &settings, &samir_roles),
+            "no event roles leaves creating open"
+        );
     }
 
     #[test]
@@ -398,7 +496,10 @@ mod tests {
         let copy = store::event(&mut conn, copy).unwrap().unwrap();
         let warsaw: chrono_tz::Tz = "Europe/Warsaw".parse().unwrap();
         let local = copy.starts_at.with_timezone(&warsaw);
-        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2030-11-01 19:00");
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M").to_string(),
+            "2030-11-01 19:00"
+        );
         assert_eq!(copy.status, EventStatus::Draft);
     }
 
@@ -411,7 +512,11 @@ mod tests {
         };
         let id = save_event(&mut conn, bare("On")).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!(store::reminders_for(&mut conn, &event).unwrap().len(), 1, "on by default");
+        assert_eq!(
+            store::reminders_for(&mut conn, &event).unwrap().len(),
+            1,
+            "on by default"
+        );
 
         let mut settings = store::settings(&mut conn, 1).unwrap();
         settings.default_reminder_minutes = 0;
@@ -507,7 +612,9 @@ mod tests {
         let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
         event.actor_id = 2;
         event.attendee_role_id = Some(1);
-        let err = save_event(&mut conn, event.clone()).unwrap_err().to_string();
+        let err = save_event(&mut conn, event.clone())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("server managers"), "{err}");
 
         // Her event without one; Nell, who manages the server, gives it one.
@@ -519,14 +626,20 @@ mod tests {
         edit.attendee_role_id = Some(1);
         save_event(&mut conn, edit.clone()).unwrap();
         let saved = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(1), Some(1)));
+        assert_eq!(
+            (saved.attendee_role_id, saved.attendee_role_by),
+            (Some(1), Some(1))
+        );
 
         // June renames her event: the role stays, as Nell's pick.
         edit.actor_id = 2;
         edit.title = "Raid night".into();
         save_event(&mut conn, edit.clone()).unwrap();
         let saved = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(1), Some(1)));
+        assert_eq!(
+            (saved.attendee_role_id, saved.attendee_role_by),
+            (Some(1), Some(1))
+        );
         // She can't swap it for another of the server's roles.
         edit.attendee_role_id = Some(2);
         let err = save_event(&mut conn, edit.clone()).unwrap_err().to_string();
@@ -534,7 +647,13 @@ mod tests {
 
         // Her copy of the event leaves the server's role behind.
         let copy = duplicate_event(&mut conn, id, 2).unwrap();
-        assert_eq!(store::event(&mut conn, copy).unwrap().unwrap().attendee_role_id, None);
+        assert_eq!(
+            store::event(&mut conn, copy)
+                .unwrap()
+                .unwrap()
+                .attendee_role_id,
+            None
+        );
     }
 
     #[test]
@@ -549,7 +668,10 @@ mod tests {
         event.attendee_role_id = Some(3);
         let id = save_event(&mut conn, event).unwrap();
         let saved = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!((saved.attendee_role_id, saved.attendee_role_by), (Some(3), Some(2)));
+        assert_eq!(
+            (saved.attendee_role_id, saved.attendee_role_by),
+            (Some(3), Some(2))
+        );
     }
 
     #[test]
@@ -562,7 +684,23 @@ mod tests {
             ..Default::default()
         };
         let make = |conn: &mut Connection, actor_id| {
-            create_routine(conn, 1, actor_id, 1, "Raid", "", 60, 20 * 60, 0, 9 * 60, 2, 9 * 60, &[3], Some(extras.clone()), Utc::now())
+            create_routine(
+                conn,
+                1,
+                actor_id,
+                1,
+                "Raid",
+                "",
+                60,
+                20 * 60,
+                0,
+                9 * 60,
+                2,
+                9 * 60,
+                &[3],
+                Some(extras.clone()),
+                Utc::now(),
+            )
         };
         let err = make(&mut conn, 2).unwrap_err().to_string();
         assert!(err.contains("server managers"), "{err}");
@@ -641,12 +779,18 @@ mod tests {
             .select(schema::activity::body)
             .load(&mut conn)
             .unwrap();
-        assert!(!logged.iter().any(|line| line.contains("thread")), "{logged:?}");
+        assert!(
+            !logged.iter().any(|line| line.contains("thread")),
+            "{logged:?}"
+        );
         store::set_thread_discord_id(&mut conn, id, "Raid", "t1").unwrap();
         let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
             panic!("expected a Discord attendance plan");
         };
-        assert!(!work.open_thread, "a thread Marian remembers is not opened again");
+        assert!(
+            !work.open_thread,
+            "a thread Marian remembers is not opened again"
+        );
     }
 
     #[test]
@@ -680,7 +824,7 @@ mod tests {
         diesel::update(schema::events::table.filter(schema::events::id.eq(scheduled_id)))
             .set(schema::events::post_at.eq(Utc::now() - Duration::minutes(1)))
             .execute(&mut conn)
-        .unwrap();
+            .unwrap();
         let mut soon = input(
             "Dock",
             Utc::now() + Duration::minutes(10),
@@ -712,7 +856,9 @@ mod tests {
         )));
         // Saved with the changes, so a restart before they run doesn't lose them.
         let mut saved = Vec::new();
-        while let Some((id, job)) = crate::jobs::claim(&mut conn, Utc::now(), crate::jobs::LEASE).unwrap() {
+        while let Some((id, job)) =
+            crate::jobs::claim(&mut conn, Utc::now(), crate::jobs::LEASE).unwrap()
+        {
             crate::jobs::done(&mut conn, id).unwrap();
             saved.push(job);
         }
@@ -733,17 +879,31 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         let report = tick(&mut conn, Utc::now()).unwrap();
-        assert_eq!(store::event(&mut conn, scheduled_id).unwrap().unwrap().status, EventStatus::Posted);
+        assert_eq!(
+            store::event(&mut conn, scheduled_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            EventStatus::Posted
+        );
         assert_eq!(report.guilds, vec![1]);
     }
 
     #[test]
     fn the_tick_leaves_events_that_are_not_due_alone() {
         let mut conn = world();
-        let mut later = input("Later", Utc::now() + Duration::days(3), SaveAction::Schedule);
+        let mut later = input(
+            "Later",
+            Utc::now() + Duration::days(3),
+            SaveAction::Schedule,
+        );
         later.post_at = Some(Utc::now() + Duration::hours(2));
         let later_id = save_event(&mut conn, later).unwrap();
-        let mut failed = input("Failed", Utc::now() + Duration::days(3), SaveAction::Schedule);
+        let mut failed = input(
+            "Failed",
+            Utc::now() + Duration::days(3),
+            SaveAction::Schedule,
+        );
         failed.post_at = Some(Utc::now() + Duration::hours(2));
         let failed_id = save_event(&mut conn, failed).unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(failed_id)))
@@ -754,8 +914,14 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         tick(&mut conn, Utc::now()).unwrap();
-        assert_eq!(store::event(&mut conn, later_id).unwrap().unwrap().status, EventStatus::Scheduled);
-        assert_eq!(store::event(&mut conn, failed_id).unwrap().unwrap().status, EventStatus::Scheduled);
+        assert_eq!(
+            store::event(&mut conn, later_id).unwrap().unwrap().status,
+            EventStatus::Scheduled
+        );
+        assert_eq!(
+            store::event(&mut conn, failed_id).unwrap().unwrap().status,
+            EventStatus::Scheduled
+        );
     }
 
     #[test]
@@ -767,7 +933,10 @@ mod tests {
                     ('new', 2, 1, 'u2', 'June', now() - interval '29 days');",
         )
         .unwrap();
-        assert_eq!(store::delete_expired_sessions(&mut conn, Utc::now()).unwrap(), 1);
+        assert_eq!(
+            store::delete_expired_sessions(&mut conn, Utc::now()).unwrap(),
+            1
+        );
         assert!(store::web_session(&mut conn, "old").unwrap().is_none());
         assert!(store::web_session(&mut conn, "new").unwrap().is_some());
     }
@@ -783,7 +952,10 @@ mod tests {
             Some("https://discord.com/channels/1/2/3"),
             "",
         );
-        assert!(card.title.starts_with("REMINDER: Event starting <t:"), "{card:?}");
+        assert!(
+            card.title.starts_with("REMINDER: Event starting <t:"),
+            "{card:?}"
+        );
         assert!(card.title.ends_with(":R>!"), "{card:?}");
         assert!(
             card.description
@@ -833,7 +1005,7 @@ mod tests {
         diesel::update(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
             .set(schema::events::starts_at.eq(dates[1].starts_at + Duration::days(1)))
             .execute(&mut conn)
-        .unwrap();
+            .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates[2].starts_at, third);
     }

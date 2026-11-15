@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
 use super::access::{can_create, can_edit, may_pick_attendee_role};
-use super::db::{log, must_channel, must_event, must_role, must_membership};
+use super::db::{log, must_channel, must_event, must_membership, must_role};
 use super::library::clean_types;
 use super::model::*;
 use super::series::{apply_series_template, ensure_series, link_new_series, mark_posted};
@@ -25,8 +25,10 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
             if existing.status == EventStatus::Posted {
                 replace_reminders(tx, existing, &clean.reminders)?;
             } else {
-                diesel::delete(schema::reminders::table.filter(schema::reminders::event_id.eq(existing.id)))
-                    .execute(tx)?;
+                diesel::delete(
+                    schema::reminders::table.filter(schema::reminders::event_id.eq(existing.id)),
+                )
+                .execute(tx)?;
                 insert_reminders(tx, existing.id, &clean.reminders, &[])?;
             }
             replace_roles(tx, existing.id, &input)?;
@@ -55,7 +57,10 @@ pub fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64, OpErr
         }
         let event = must_event(tx, id)?;
         if let Some(series_id) = event.series_id {
-            if matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived) {
+            if matches!(
+                event.status,
+                EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
+            ) {
                 ensure_series(tx, series_id, now)?;
             }
         }
@@ -82,7 +87,10 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         if !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
+        if matches!(
+            event.status,
+            EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+        ) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         Some(event)
@@ -123,9 +131,7 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         {
             Some(url.to_string())
         }
-        Some(_) => {
-            return Err(OpError::from(crate::msg!("err-image-link")))
-        }
+        Some(_) => return Err(OpError::from(crate::msg!("err-image-link"))),
     };
     let channel = must_channel(conn, input.channel_id)?;
     if channel.guild_id != input.guild_id {
@@ -139,7 +145,10 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
         }
         // An event keeps the role it has, whoever saves it. Picking another
         // one of the server's roles takes a server manager.
-        match existing.as_ref().filter(|event| event.attendee_role_id == Some(role_id)) {
+        match existing
+            .as_ref()
+            .filter(|event| event.attendee_role_id == Some(role_id))
+        {
             Some(event) => attendee_role_by = event.attendee_role_by,
             None if may_pick_attendee_role(&actor, &role) => attendee_role_by = Some(actor.id),
             None => return Err(OpError::from(crate::msg!("err-attendee-role-managers"))),
@@ -223,8 +232,15 @@ fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInput, Op
 }
 
 /// An option that names an id has to be one of this event's.
-fn known_options(conn: &mut Connection, event: &store::Event, options: &[OptionInput]) -> Result<(), OpError> {
-    let current: HashSet<i64> = store::options_for(conn, event)?.iter().map(|opt| opt.id).collect();
+fn known_options(
+    conn: &mut Connection,
+    event: &store::Event,
+    options: &[OptionInput],
+) -> Result<(), OpError> {
+    let current: HashSet<i64> = store::options_for(conn, event)?
+        .iter()
+        .map(|opt| opt.id)
+        .collect();
     let mut seen = HashSet::new();
     for id in options.iter().filter_map(|opt| opt.id) {
         if !current.contains(&id) || !seen.insert(id) {
@@ -251,7 +267,10 @@ pub fn save_options(
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
+        if matches!(
+            event.status,
+            EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+        ) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let options = clean_types(tx, event.guild_id, input)?;
@@ -290,7 +309,11 @@ pub(super) fn clean_reminders(input: &[ReminderInput]) -> Result<Vec<ReminderInp
 }
 
 /// Checks what a routine's events carry, with the same rules as an event's.
-pub(super) fn clean_extras(conn: &mut Connection, guild_id: i64, extras: &EventExtras) -> Result<EventExtras, OpError> {
+pub(super) fn clean_extras(
+    conn: &mut Connection,
+    guild_id: i64,
+    extras: &EventExtras,
+) -> Result<EventExtras, OpError> {
     let location = extras.location.trim().to_string();
     if location.chars().count() > 200 {
         return Err(OpError::from(crate::msg!("err-location-length")));
@@ -463,7 +486,11 @@ pub(super) fn replace_children(
 /// Makes an event's options these, in this order. An option with an id stays,
 /// with its responses, and takes the new type, capacity, role, and place; one
 /// without is added; options left out go, and their responses with them.
-pub(super) fn sync_options(conn: &mut Connection, event_id: i64, options: &[OptionInput]) -> Result<(), OpError> {
+pub(super) fn sync_options(
+    conn: &mut Connection,
+    event_id: i64,
+    options: &[OptionInput],
+) -> Result<(), OpError> {
     let kept: Vec<i64> = options.iter().filter_map(|opt| opt.id).collect();
     diesel::delete(
         schema::signup_options::table
@@ -506,7 +533,6 @@ pub(super) fn sync_options(conn: &mut Connection, event_id: i64, options: &[Opti
     Ok(())
 }
 
-
 fn replace_reminders(
     conn: &mut Connection,
     event: &store::Event,
@@ -518,8 +544,6 @@ fn replace_reminders(
     insert_reminders(conn, event.id, reminders, &old)?;
     Ok(())
 }
-
-
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::reminders)]
@@ -542,7 +566,9 @@ fn insert_reminders(
         .map(|rem| {
             let sent_at = old
                 .iter()
-                .find(|item| item.offset_minutes == rem.offset_minutes && item.message == rem.message)
+                .find(|item| {
+                    item.offset_minutes == rem.offset_minutes && item.message == rem.message
+                })
                 .and_then(|item| item.sent_at);
             NewReminder {
                 event_id,
@@ -631,10 +657,16 @@ fn transition(
                 &format!("Updated {}.", event.title),
             )?;
         }
-        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Publish) => {
+        (
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
+            SaveAction::Publish,
+        ) => {
             mark_posted(conn, id, now)?;
         }
-        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Schedule)
+        (
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
+            SaveAction::Schedule,
+        )
         | (EventStatus::Scheduled, SaveAction::Save) => {
             let post_at = input
                 .post_at
@@ -653,7 +685,10 @@ fn transition(
                 &format!("Will post {} at {}.", event.title, clock::stamp(post_at)),
             )?;
         }
-        (EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed, SaveAction::Draft | SaveAction::Save) => {
+        (
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed,
+            SaveAction::Draft | SaveAction::Save,
+        ) => {
             diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
                 .set((
                     schema::events::status.eq(EventStatus::Draft),

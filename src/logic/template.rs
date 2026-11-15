@@ -93,9 +93,16 @@ pub fn insert(conn: &mut Connection, template: &EventTemplate) -> Result<i64, Op
 }
 
 /// A template's attendance types, in order, replacing what it had.
-fn write_types(conn: &mut Connection, template_id: i64, options: &[OptionInput]) -> Result<(), OpError> {
-    diesel::delete(schema::template_options::table.filter(schema::template_options::template_id.eq(template_id)))
-        .execute(conn)?;
+fn write_types(
+    conn: &mut Connection,
+    template_id: i64,
+    options: &[OptionInput],
+) -> Result<(), OpError> {
+    diesel::delete(
+        schema::template_options::table
+            .filter(schema::template_options::template_id.eq(template_id)),
+    )
+    .execute(conn)?;
     let rows: Vec<_> = options
         .iter()
         .enumerate()
@@ -110,7 +117,9 @@ fn write_types(conn: &mut Connection, template_id: i64, options: &[OptionInput])
             )
         })
         .collect();
-    diesel::insert_into(schema::template_options::table).values(&rows).execute(conn)?;
+    diesel::insert_into(schema::template_options::table)
+        .values(&rows)
+        .execute(conn)?;
     Ok(())
 }
 
@@ -329,7 +338,12 @@ pub fn spawn(
         .returning(schema::events::id)
         .get_result(conn)?;
     replace_children(conn, id, &template.options, &template.reminders)?;
-    insert_event_roles(conn, id, &template.mention_role_ids, &template.restrict_role_ids)?;
+    insert_event_roles(
+        conn,
+        id,
+        &template.mention_role_ids,
+        &template.restrict_role_ids,
+    )?;
     Ok(id)
 }
 

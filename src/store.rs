@@ -11,11 +11,11 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::error::OpError;
-use crate::schema;
 use crate::i18n::Lang;
+use crate::schema;
 use crate::values::{
-    AccessKind, Cadence, ChannelKind, Digest, EventRoleKind, EventStatus, Permission, ReminderPlace, RunStatus,
-    SignupState,
+    AccessKind, Cadence, ChannelKind, Digest, EventRoleKind, EventStatus, Permission,
+    ReminderPlace, RunStatus, SignupState,
 };
 
 pub use diesel::pg::PgConnection as Connection;
@@ -869,9 +869,10 @@ pub fn pool(database_url: &str) -> Result<Db, OpError> {
 }
 
 pub fn pool_for(conn: &mut Connection) -> Result<Db, OpError> {
-    let schema: String =
-        diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>("current_schema()"))
-            .get_result(conn)?;
+    let schema: String = diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(
+        "current_schema()",
+    ))
+    .get_result(conn)?;
     build_pool(&database_url()?, Some(schema), 4)
 }
 
@@ -976,7 +977,9 @@ pub fn open_memory() -> Result<Connection, OpError> {
     if let Err(err) = conn.batch_execute(&format!("SET search_path TO {schema}")) {
         drop(conn);
         drop_schema(&admin_url, &schema);
-        return Err(OpError::internal(format!("Could not open the database: {err}")));
+        return Err(OpError::internal(format!(
+            "Could not open the database: {err}"
+        )));
     }
     crate::observe::install_query_trace(&mut conn, "postgresql");
     if let Err(err) = migrate(&mut conn) {
@@ -984,10 +987,7 @@ pub fn open_memory() -> Result<Connection, OpError> {
         drop_schema(&admin_url, &schema);
         return Err(err);
     }
-    let guard = SchemaGuard {
-        schema,
-        admin_url,
-    };
+    let guard = SchemaGuard { schema, admin_url };
     TEST_GUARDS.with(|guards| guards.borrow_mut().push(guard));
     Ok(conn)
 }
@@ -1162,9 +1162,7 @@ pub fn set_meta(conn: &mut Connection, key: &str, value: &str) -> Result<(), OpE
 }
 
 pub fn list_guilds(conn: &mut Connection) -> Result<Vec<Guild>, OpError> {
-    Ok(Guild::query()
-        .order(schema::guilds::id.asc())
-        .load(conn)?)
+    Ok(Guild::query().order(schema::guilds::id.asc()).load(conn)?)
 }
 
 pub fn guild(conn: &mut Connection, id: i64) -> Result<Option<Guild>, OpError> {
@@ -1263,12 +1261,20 @@ pub fn seed_attendance(conn: &mut Connection, guild_id: i64) -> Result<(), OpErr
             )
         })
         .collect();
-    diesel::insert_into(schema::preset_options::table).values(&rows).execute(conn)?;
+    diesel::insert_into(schema::preset_options::table)
+        .values(&rows)
+        .execute(conn)?;
     set_default_preset(conn, guild_id, Some(preset_id))
 }
 
 /// The library type with this name (any case), made if missing.
-pub fn insert_type(conn: &mut Connection, guild_id: i64, name: &str, emoji: &str, attending: bool) -> Result<i64, OpError> {
+pub fn insert_type(
+    conn: &mut Connection,
+    guild_id: i64,
+    name: &str,
+    emoji: &str,
+    attending: bool,
+) -> Result<i64, OpError> {
     if let Some(found) = library_type_named(conn, guild_id, name)? {
         return Ok(found.id);
     }
@@ -1283,7 +1289,11 @@ pub fn insert_type(conn: &mut Connection, guild_id: i64, name: &str, emoji: &str
         .get_result(conn)?)
 }
 
-pub fn set_default_preset(conn: &mut Connection, guild_id: i64, preset_id: Option<i64>) -> Result<(), OpError> {
+pub fn set_default_preset(
+    conn: &mut Connection,
+    guild_id: i64,
+    preset_id: Option<i64>,
+) -> Result<(), OpError> {
     diesel::update(schema::settings::table.filter(schema::settings::guild_id.eq(guild_id)))
         .set(schema::settings::default_preset_id.eq(preset_id))
         .execute(conn)?;
@@ -1297,7 +1307,11 @@ pub fn library_type(conn: &mut Connection, id: i64) -> Result<Option<LibraryOpti
         .optional()?)
 }
 
-pub fn library_type_named(conn: &mut Connection, guild_id: i64, name: &str) -> Result<Option<LibraryOption>, OpError> {
+pub fn library_type_named(
+    conn: &mut Connection,
+    guild_id: i64,
+    name: &str,
+) -> Result<Option<LibraryOption>, OpError> {
     Ok(LibraryOption::query()
         .filter(schema::option_library::guild_id.eq(guild_id))
         .filter(schema::lower(schema::option_library::name).eq(name.trim().to_lowercase()))
@@ -1305,7 +1319,11 @@ pub fn library_type_named(conn: &mut Connection, guild_id: i64, name: &str) -> R
         .optional()?)
 }
 
-pub fn library_type_by_public(conn: &mut Connection, guild_id: i64, public_id: &str) -> Result<Option<LibraryOption>, OpError> {
+pub fn library_type_by_public(
+    conn: &mut Connection,
+    guild_id: i64,
+    public_id: &str,
+) -> Result<Option<LibraryOption>, OpError> {
     let Ok(public_id) = Uuid::parse_str(public_id.trim()) else {
         return Ok(None);
     };
@@ -1353,7 +1371,10 @@ impl TypeUsage {
 }
 
 /// Every library type of a server that is in use, and where.
-pub fn type_usage(conn: &mut Connection, guild_id: i64) -> Result<std::collections::HashMap<i64, TypeUsage>, OpError> {
+pub fn type_usage(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<std::collections::HashMap<i64, TypeUsage>, OpError> {
     let mut usage: std::collections::HashMap<i64, TypeUsage> = std::collections::HashMap::new();
     let events: Vec<(i64, i64)> = schema::signup_options::table
         .inner_join(schema::events::table)
@@ -1395,7 +1416,10 @@ pub fn settings(conn: &mut Connection, guild_id: i64) -> Result<Settings, OpErro
     let granted: Vec<(Permission, i64)> = schema::permission_roles::table
         .filter(schema::permission_roles::guild_id.eq(guild_id))
         .order(schema::permission_roles::role_id.asc())
-        .select((schema::permission_roles::kind, schema::permission_roles::role_id))
+        .select((
+            schema::permission_roles::kind,
+            schema::permission_roles::role_id,
+        ))
         .load(conn)?;
     for (kind, role_id) in granted {
         settings.permission_mut(kind).push(role_id);
@@ -1420,7 +1444,8 @@ fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), 
     let row = settings.row();
     diesel::update(&row).set(&row).execute(conn)?;
     diesel::delete(
-        schema::permission_roles::table.filter(schema::permission_roles::guild_id.eq(settings.guild_id)),
+        schema::permission_roles::table
+            .filter(schema::permission_roles::guild_id.eq(settings.guild_id)),
     )
     .execute(conn)?;
     let mut rows = Vec::new();
@@ -1442,7 +1467,11 @@ fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Result<(), 
     Ok(())
 }
 
-pub fn set_guild_timezone(conn: &mut Connection, guild_id: i64, timezone: &str) -> Result<(), OpError> {
+pub fn set_guild_timezone(
+    conn: &mut Connection,
+    guild_id: i64,
+    timezone: &str,
+) -> Result<(), OpError> {
     diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(guild_id)))
         .set(schema::guilds::timezone.eq(timezone))
         .execute(conn)?;
@@ -1558,7 +1587,10 @@ pub fn ensure_user(conn: &mut Connection, discord_id: &str) -> Result<i64, OpErr
         .map_err(Into::into)
 }
 
-pub fn discord_id_for_membership(conn: &mut Connection, membership_id: i64) -> Result<String, OpError> {
+pub fn discord_id_for_membership(
+    conn: &mut Connection,
+    membership_id: i64,
+) -> Result<String, OpError> {
     schema::memberships::table
         .inner_join(schema::users::table)
         .filter(schema::memberships::id.eq(membership_id))
@@ -1593,7 +1625,11 @@ pub fn membership_role_ids(
     Ok(roles.into_iter().map(|role| role.id).collect())
 }
 
-pub fn membership_has_role(conn: &mut Connection, membership_id: i64, role_id: i64) -> Result<bool, OpError> {
+pub fn membership_has_role(
+    conn: &mut Connection,
+    membership_id: i64,
+    role_id: i64,
+) -> Result<bool, OpError> {
     let n: i64 = schema::membership_roles::table
         .filter(schema::membership_roles::membership_id.eq(membership_id))
         .filter(schema::membership_roles::role_id.eq(role_id))
@@ -1612,9 +1648,9 @@ pub fn replace_discord_roles(
     let role_ids: Vec<i64> = known
         .into_iter()
         .filter(|role| {
-            role.discord_id.as_deref().is_some_and(|id| {
-                discord_role_ids.iter().any(|wanted| wanted == id)
-            })
+            role.discord_id
+                .as_deref()
+                .is_some_and(|id| discord_role_ids.iter().any(|wanted| wanted == id))
         })
         .map(|role| role.id)
         .collect();
@@ -1622,8 +1658,11 @@ pub fn replace_discord_roles(
     // the transaction keeps readers from seeing them roleless in between, and
     // the insert skips rows another replacement has just written.
     conn.transaction(|conn| {
-        diesel::delete(schema::membership_roles::table.filter(schema::membership_roles::membership_id.eq(membership_id)))
-            .execute(conn)?;
+        diesel::delete(
+            schema::membership_roles::table
+                .filter(schema::membership_roles::membership_id.eq(membership_id)),
+        )
+        .execute(conn)?;
         insert_membership_roles(conn, membership_id, &role_ids)
     })
 }
@@ -1760,7 +1799,10 @@ fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOp
                 schema::option_library::public_id,
             ),
         ))
-        .order((schema::signup_options::position.asc(), schema::signup_options::id.asc()))
+        .order((
+            schema::signup_options::position.asc(),
+            schema::signup_options::id.asc(),
+        ))
         .into_boxed();
     query = match of {
         OptionsOf::Events(ids) => query.filter(schema::signup_options::event_id.eq_any(ids)),
@@ -1769,20 +1811,22 @@ fn load_options(conn: &mut Connection, of: OptionsOf<'_>) -> Result<Vec<SignupOp
     let rows: Vec<(SignupOptionRow, (String, String, bool, Uuid))> = query.load(conn)?;
     Ok(rows
         .into_iter()
-        .map(|(row, (name, emoji, attending, type_public_id))| SignupOption {
-            id: row.id,
-            event_id: row.event_id,
-            type_id: row.type_id,
-            type_public_id,
-            name,
-            emoji,
-            capacity: row.capacity,
-            max_guests: row.max_guests,
-            role_id: row.role_id,
-            reminders_enabled: attending,
-            position: row.position,
-            public_id: row.public_id,
-        })
+        .map(
+            |(row, (name, emoji, attending, type_public_id))| SignupOption {
+                id: row.id,
+                event_id: row.event_id,
+                type_id: row.type_id,
+                type_public_id,
+                name,
+                emoji,
+                capacity: row.capacity,
+                max_guests: row.max_guests,
+                role_id: row.role_id,
+                reminders_enabled: attending,
+                position: row.position,
+                public_id: row.public_id,
+            },
+        )
         .collect())
 }
 
@@ -1797,7 +1841,12 @@ pub fn options_by_event(
     let rows = load_options(conn, OptionsOf::Events(&ids))?;
     Ok(events
         .iter()
-        .map(|event| rows.iter().filter(|opt| opt.event_id == event.id).cloned().collect())
+        .map(|event| {
+            rows.iter()
+                .filter(|opt| opt.event_id == event.id)
+                .cloned()
+                .collect()
+        })
         .collect())
 }
 
@@ -2063,7 +2112,11 @@ pub fn clear_applied(
     Ok(())
 }
 
-pub fn count_status(conn: &mut Connection, guild_id: i64, status: EventStatus) -> Result<i64, OpError> {
+pub fn count_status(
+    conn: &mut Connection,
+    guild_id: i64,
+    status: EventStatus,
+) -> Result<i64, OpError> {
     Ok(schema::events::table
         .filter(schema::events::guild_id.eq(guild_id))
         .filter(schema::events::status.eq(status))
@@ -2215,7 +2268,11 @@ pub fn web_session(conn: &mut Connection, token: &str) -> Result<Option<WebSessi
         .into_iter()
         .map(|link| link.guild_id)
         .collect();
-    let grant = match (row.discord_access, row.discord_refresh, row.discord_expires_at) {
+    let grant = match (
+        row.discord_access,
+        row.discord_refresh,
+        row.discord_expires_at,
+    ) {
         (Some(access), Some(refresh), Some(expires_at)) => Some(DiscordGrant {
             access,
             refresh,
@@ -2308,7 +2365,9 @@ pub fn sessions_without_guild(
         .filter(schema::web_session_guilds::guild_id.eq(guild_id))
         .select(schema::web_session_guilds::token);
     let mut query = schema::web_sessions::table
-        .filter(schema::web_sessions::created_at.gt(Utc::now() - chrono::Duration::days(SESSION_DAYS)))
+        .filter(
+            schema::web_sessions::created_at.gt(Utc::now() - chrono::Duration::days(SESSION_DAYS)),
+        )
         .filter(diesel::dsl::not(schema::web_sessions::token.eq_any(has_it)))
         .into_boxed();
     if let Some(user) = user {
@@ -2326,7 +2385,11 @@ pub fn sessions_without_guild(
 
 /// Takes a server out of the member's sessions once they leave it. A session
 /// that was on it moves to another of its servers, or ends with none left.
-pub fn drop_session_guild(conn: &mut Connection, discord_user_id: &str, guild_id: i64) -> Result<(), OpError> {
+pub fn drop_session_guild(
+    conn: &mut Connection,
+    discord_user_id: &str,
+    guild_id: i64,
+) -> Result<(), OpError> {
     conn.transaction(|conn| {
         let tokens: Vec<String> = schema::web_sessions::table
             .filter(schema::web_sessions::discord_user_id.eq(discord_user_id))
@@ -2349,14 +2412,20 @@ pub fn drop_session_guild(conn: &mut Connection, discord_user_id: &str, guild_id
                     schema::memberships::table
                         .on(schema::memberships::guild_id.eq(schema::web_session_guilds::guild_id)),
                 )
-                .inner_join(schema::users::table.on(schema::users::id.eq(schema::memberships::user_id)))
+                .inner_join(
+                    schema::users::table.on(schema::users::id.eq(schema::memberships::user_id)),
+                )
                 .filter(schema::web_session_guilds::token.eq(&token))
                 .filter(schema::users::discord_id.eq(discord_user_id))
                 .order(schema::web_session_guilds::guild_id.asc())
-                .select((schema::web_session_guilds::guild_id, schema::memberships::id))
+                .select((
+                    schema::web_session_guilds::guild_id,
+                    schema::memberships::id,
+                ))
                 .first::<(i64, i64)>(conn)
                 .optional()?;
-            let session = schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token));
+            let session =
+                schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token));
             match next {
                 Some((next_guild, membership_id)) => {
                     diesel::update(session)
@@ -2385,12 +2454,15 @@ pub fn add_session_guild(conn: &mut Connection, token: &str, guild_id: i64) -> R
 
 /// Deletes sign-ins older than `SESSION_DAYS`, with the Discord tokens they
 /// hold. Returns how many went.
-pub fn delete_expired_sessions(conn: &mut Connection, now: DateTime<Utc>) -> Result<usize, OpError> {
+pub fn delete_expired_sessions(
+    conn: &mut Connection,
+    now: DateTime<Utc>,
+) -> Result<usize, OpError> {
     let cutoff = now - chrono::Duration::days(SESSION_DAYS);
-    Ok(
-        diesel::delete(schema::web_sessions::table.filter(schema::web_sessions::created_at.le(cutoff)))
-            .execute(conn)?,
+    Ok(diesel::delete(
+        schema::web_sessions::table.filter(schema::web_sessions::created_at.le(cutoff)),
     )
+    .execute(conn)?)
 }
 
 pub fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
@@ -2465,11 +2537,16 @@ mod tests {
             // Queued behind the blocking task on the only worker: it would starve
             // if `blocking` kept the worker to itself.
             let other = tokio::spawn(async move { tx.send(()).unwrap() });
-            assert!(heard.await.unwrap(), "the other task ran while blocking work waited");
+            assert!(
+                heard.await.unwrap(),
+                "the other task ran while blocking work waited"
+            );
             other.await.unwrap();
         });
         // A single-threaded runtime can't hand its tasks over; the work just runs.
-        let single = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let single = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         assert_eq!(single.block_on(async { blocking(|| 7) }), 7);
     }
 
@@ -2515,12 +2592,14 @@ mod tests {
     #[test]
     fn migrations_wait_for_a_replica_already_running_them() {
         let mut conn = open_memory().unwrap();
-        let schema: String =
-            diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>("current_schema()"))
-                .get_result(&mut conn)
-                .unwrap();
+        let schema: String = diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(
+            "current_schema()",
+        ))
+        .get_result(&mut conn)
+        .unwrap();
         // Another replica, starting at the same moment, is migrating.
-        conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})")).unwrap();
+        conn.batch_execute(&format!("SELECT pg_advisory_lock({MIGRATION_LOCK})"))
+            .unwrap();
         let url = database_url().unwrap();
         let (done, finished) = std::sync::mpsc::channel();
         let starting = std::thread::spawn(move || {
@@ -2531,11 +2610,16 @@ mod tests {
             result
         });
         assert!(
-            finished.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            finished
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
             "migrations wait for the lock"
         );
-        conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})")).unwrap();
-        finished.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        conn.batch_execute(&format!("SELECT pg_advisory_unlock({MIGRATION_LOCK})"))
+            .unwrap();
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
         starting.join().unwrap().unwrap();
     }
 
@@ -2666,7 +2750,11 @@ mod tests {
         assert_eq!(stored.refresh, "refresh");
 
         set_session_grant(&mut conn, "t", None).unwrap();
-        assert!(web_session(&mut conn, "t").unwrap().unwrap().grant.is_none());
+        assert!(web_session(&mut conn, "t")
+            .unwrap()
+            .unwrap()
+            .grant
+            .is_none());
     }
 
     #[test]
@@ -2693,12 +2781,19 @@ mod tests {
 
         let waiting = sessions_without_guild(&mut conn, 2, None).unwrap();
         assert_eq!(waiting, vec![("a".into(), "u1".into(), "Nell".into())]);
-        assert!(sessions_without_guild(&mut conn, 2, Some("u2")).unwrap().is_empty());
+        assert!(sessions_without_guild(&mut conn, 2, Some("u2"))
+            .unwrap()
+            .is_empty());
 
         add_session_guild(&mut conn, "a", 2).unwrap();
         add_session_guild(&mut conn, "a", 2).unwrap();
-        assert_eq!(web_session(&mut conn, "a").unwrap().unwrap().guilds, vec![1, 2]);
-        assert!(sessions_without_guild(&mut conn, 2, None).unwrap().is_empty());
+        assert_eq!(
+            web_session(&mut conn, "a").unwrap().unwrap().guilds,
+            vec![1, 2]
+        );
+        assert!(sessions_without_guild(&mut conn, 2, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2741,7 +2836,10 @@ mod tests {
         assert_eq!(ids, vec![91, 93]);
         let held: Vec<(i64, i64)> = schema::membership_roles::table
             .order(schema::membership_roles::membership_id.asc())
-            .select((schema::membership_roles::membership_id, schema::membership_roles::role_id))
+            .select((
+                schema::membership_roles::membership_id,
+                schema::membership_roles::role_id,
+            ))
             .load(&mut conn)
             .unwrap();
         assert_eq!(held, vec![(1, 91), (2, 91)]);
@@ -2751,7 +2849,10 @@ mod tests {
             .unwrap();
         assert_eq!(granted, vec![91]);
         let (mention, restrict): (Vec<i64>, Vec<i64>) = schema::event_templates::table
-            .select((schema::event_templates::mention_role_ids, schema::event_templates::restrict_role_ids))
+            .select((
+                schema::event_templates::mention_role_ids,
+                schema::event_templates::restrict_role_ids,
+            ))
             .first(&mut conn)
             .unwrap();
         assert_eq!(mention, vec![91, 93]);

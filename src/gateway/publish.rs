@@ -237,7 +237,7 @@ async fn push_approval(
     let mut embed = serenity::CreateEmbed::new()
         .title(clip(&post.title, 250))
         .description(clip(&post.body, 4000))
-        .color(serenity::Colour::new(0x1e3a_6e));
+        .color(serenity::Colour::new(0x1e_3a_6e));
     for field in &post.fields {
         embed = embed.field(
             clip(&field.name, 256),
@@ -689,8 +689,8 @@ pub(super) async fn push_remind(
                 message_id,
             ))
         });
-        let link = link
-            .or_else(|| logic::web_event_url(public_url, guild_id.as_deref(), &event.public_id));
+        let link =
+            link.or_else(|| logic::web_event_url(public_url, guild_id.as_deref(), event.public_id));
         RemindPlan {
             lang: i18n::lang_of(&mut conn, event.guild_id),
             channel_id,

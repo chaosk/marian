@@ -1,14 +1,15 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
+use crate::cache::{self, ask, when, Ready};
 use crate::format::{self, clock_of};
 use crate::pages::event::role_cells;
 use crate::widgets::{
-    numbered, routine_problems, tally, template_event, TallyRow, unsaved_signups, ActionButton, EventColor, EventCutoff,
-    EventLocation, EventReminders, LeaveGuard, LocalDraft, MultipleToggle, PollMoment, PollTally, RoutineChannel,
-    RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, SignupPanel, ThreadToggle, UsualDays,
+    numbered, routine_problems, tally, template_event, unsaved_signups, ActionButton, EventColor,
+    EventCutoff, EventLocation, EventReminders, LeaveGuard, LocalDraft, MultipleToggle, PollMoment,
+    PollTally, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime,
+    RoutineTitle, SignupPanel, TallyRow, ThreadToggle, UsualDays,
 };
-use crate::cache::{self, ask, when, Ready};
 use crate::{base, client, title, A};
 
 #[component]
@@ -95,7 +96,12 @@ fn draft_from(routine: &dto::RoutineView) -> dto::RoutineDraft {
         poll_time: routine.poll_time.clone(),
         lock_weekday: routine.lock_weekday.parse().unwrap_or(1),
         lock_time: routine.lock_time.clone(),
-        days: routine.usual.iter().filter(|day| day.on).map(|day| day.n).collect(),
+        days: routine
+            .usual
+            .iter()
+            .filter(|day| day.on)
+            .map(|day| day.n)
+            .collect(),
         event: None,
         steps: Some(routine.steps.clone()).filter(|steps| !steps.is_empty()),
     }
@@ -209,7 +215,11 @@ fn routine_layout(
 }
 
 /// The routine's title, and where its events happen, as an event's page heads them.
-fn routine_heading(local: LocalDraft, edit: RoutineEdit, lede: Option<&'static str>) -> impl IntoView {
+fn routine_heading(
+    local: LocalDraft,
+    edit: RoutineEdit,
+    lede: Option<&'static str>,
+) -> impl IntoView {
     let key = (cache::server_now(), "routine".to_string());
     view! {
         <p class="kicker">"Routine"</p>
@@ -249,7 +259,11 @@ fn poll_schedule(edit: RoutineEdit) -> impl IntoView {
 }
 
 /// What happens after the poll closes, as its own part of the poll panel.
-fn after_poll(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<dto::Role>) -> impl IntoView {
+fn after_poll(
+    edit: RoutineEdit,
+    channels: Vec<dto::Channel>,
+    roles: Vec<dto::Role>,
+) -> impl IntoView {
     view! {
         <div class="poll-part">
             <h3>"After the poll"</h3>
@@ -263,12 +277,21 @@ fn after_poll(edit: RoutineEdit, channels: Vec<dto::Channel>, roles: Vec<dto::Ro
 fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> impl IntoView {
     let server = cache::server_now();
     let url = crate::api::path::routine_decide(&server, &routine.id);
-    let winner = approval.days.iter().find(|day| day.n == approval.winner).map(|day| day.date.clone()).unwrap_or_default();
+    let winner = approval
+        .days
+        .iter()
+        .find(|day| day.n == approval.winner)
+        .map(|day| day.date.clone())
+        .unwrap_or_default();
     let rows = tally(
         approval
             .days
             .iter()
-            .map(|day| TallyRow { label: day.date.clone(), votes: day.votes, voters: Vec::new() })
+            .map(|day| TallyRow {
+                label: day.date.clone(),
+                votes: day.votes,
+                voters: Vec::new(),
+            })
             .collect(),
     );
     let answers = if approval.can_decide {
@@ -295,7 +318,11 @@ fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> im
     } else {
         view! { <p class="muted">"Only the roles the approval names, server managers, and whoever made the routine can answer."</p> }.into_any()
     };
-    let channel = (!approval.channel.is_empty()).then(|| format!(" Asked in #{}.", approval.channel)).unwrap_or_default();
+    let channel = if !approval.channel.is_empty() {
+        format!(" Asked in #{}.", approval.channel)
+    } else {
+        Default::default()
+    };
     view! {
         <div class="poll-part">
             <h3>"Waiting for approval"</h3>
@@ -328,109 +355,133 @@ pub fn NewRoutine() -> impl IntoView {
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let presets = cache::listen(cache::presets_scope(), cache::server_key);
     // The draft lives in this page, so a refresh must not redraw it.
-    cache::when_once(move || (server.get(), channels.get(), roles.get(), settings.get(), presets.get()).ready(), move |(server, channels, roles, settings, presets)| {
-        // The server's default preset, as a new event would start.
-        let preset = presets.iter().find(|preset| preset.default).or_else(|| presets.first()).cloned();
-        let draft = dto::RoutineDraft {
-            channel_id: channels.first().map(|channel| channel.id.clone()).unwrap_or_default(),
-            title: String::new(),
-            description: String::new(),
-            duration_minutes: 120,
-            start_time: "19:00".into(),
-            poll_weekday: 6,
-            poll_time: "10:00".into(),
-            lock_weekday: 1,
-            lock_time: "18:00".into(),
-            days: (0..7).collect(),
-            event: None,
-            steps: Some(
-                ["poll", "post"]
-                    .into_iter()
-                    .map(|kind| dto::RoutineStep { kind: kind.into(), ..Default::default() })
-                    .collect(),
-            ),
-        };
-        let starting = dto::RoutineEvent {
-            color: "#1e3a6e".into(),
-            thread_enabled: settings.event_threads,
-            multiple_signups: preset.as_ref().is_some_and(|preset| preset.multiple_signups),
-            options: preset.map(|preset| preset.options).unwrap_or_default(),
-            reminders: (settings.default_reminder_minutes > 0)
-                .then(|| dto::Reminder {
-                    offset_minutes: settings.default_reminder_minutes,
-                    message: String::new(),
-                    sent: false,
-                })
-                .into_iter()
-                .collect(),
-            ..Default::default()
-        };
-        let edit = RoutineEdit::new(draft, None);
-        let local = event_draft(edit, &starting, &channels, clock_of(&server), false);
-        let problems = RwSignal::new(Vec::<&'static str>::new());
-        let go = client::use_go();
-        let creating = client::action(move |draft: &dto::RoutineDraft| {
-            let draft = draft.clone();
-            let url = crate::api::path::routines(&cache::server_now());
-            let toasts = client::toast_list();
-            let go = go.clone();
-            async move {
-                match crate::api::send::<dto::Done, _>("POST", &url, Some(&draft)).await {
-                    Ok(done) => {
-                        if let Some(list) = toasts {
-                            client::push_toast(list, "Created the routine.");
-                        }
-                        edit.dirty.set(false);
-                        if let Some(to) = done.location {
-                            go(&to);
-                        }
-                    }
-                    Err(failure) => edit.problem.set(failure.message),
-                }
-            }
-        });
-        let create = move |_| {
-            let draft = edit.full();
-            let mut found = routine_problems(&draft);
-            if local.options.with_untracked(|options| options.is_empty()) {
-                found.push("Add at least one attendance type.");
-            }
-            problems.set(found.clone());
-            if !found.is_empty() {
-                return;
-            }
-            edit.problem.set(String::new());
-            creating.dispatch(draft);
-        };
-        title("New routine");
-        view! {
-            <LeaveGuard dirty=edit.dirty/>
-            <div class="event-top">
-                <div>{routine_heading(local, edit, Some("A weekly poll picks the day, and Marian posts the event."))}</div>
-                <div class="actions post-buttons">
-                    <button type="button" class="primary" disabled=move || creating.pending().get() on:click=create>"Create routine"</button>
-                    {move || {
-                        let list = problems.get();
-                        (!list.is_empty()).then(|| view! {
-                            <ul class="error save-problems" role="alert">
-                                {list.into_iter().map(|problem| view! { <li>{problem}</li> }).collect_view()}
-                            </ul>
+    cache::when_once(
+        move || {
+            (
+                server.get(),
+                channels.get(),
+                roles.get(),
+                settings.get(),
+                presets.get(),
+            )
+                .ready()
+        },
+        move |(server, channels, roles, settings, presets)| {
+            // The server's default preset, as a new event would start.
+            let preset = presets
+                .iter()
+                .find(|preset| preset.default)
+                .or_else(|| presets.first())
+                .cloned();
+            let draft = dto::RoutineDraft {
+                channel_id: channels
+                    .first()
+                    .map(|channel| channel.id.clone())
+                    .unwrap_or_default(),
+                title: String::new(),
+                description: String::new(),
+                duration_minutes: 120,
+                start_time: "19:00".into(),
+                poll_weekday: 6,
+                poll_time: "10:00".into(),
+                lock_weekday: 1,
+                lock_time: "18:00".into(),
+                days: (0..7).collect(),
+                event: None,
+                steps: Some(
+                    ["poll", "post"]
+                        .into_iter()
+                        .map(|kind| dto::RoutineStep {
+                            kind: kind.into(),
+                            ..Default::default()
                         })
-                    }}
-                </div>
-            </div>
-            <p class="notice info">"Not saved yet. Nothing goes to Discord until you create it."</p>
-            {routine_layout(edit, local, channels.clone(), roles.clone(), view! {
-                <section>
-                    <div class="section-head"><h2>"Poll"</h2></div>
-                    <div class="panel poll">
-                        {poll_schedule(edit)}
-                        {after_poll(edit, channels, roles)}
+                        .collect(),
+                ),
+            };
+            let starting = dto::RoutineEvent {
+                color: "#1e3a6e".into(),
+                thread_enabled: settings.event_threads,
+                multiple_signups: preset
+                    .as_ref()
+                    .is_some_and(|preset| preset.multiple_signups),
+                options: preset.map(|preset| preset.options).unwrap_or_default(),
+                reminders: (settings.default_reminder_minutes > 0)
+                    .then(|| dto::Reminder {
+                        offset_minutes: settings.default_reminder_minutes,
+                        message: String::new(),
+                        sent: false,
+                    })
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            };
+            let edit = RoutineEdit::new(draft, None);
+            let local = event_draft(edit, &starting, &channels, clock_of(&server), false);
+            let problems = RwSignal::new(Vec::<&'static str>::new());
+            let go = client::use_go();
+            let creating = client::action(move |draft: &dto::RoutineDraft| {
+                let draft = draft.clone();
+                let url = crate::api::path::routines(&cache::server_now());
+                let toasts = client::toast_list();
+                let go = go.clone();
+                async move {
+                    match crate::api::send::<dto::Done, _>("POST", &url, Some(&draft)).await {
+                        Ok(done) => {
+                            if let Some(list) = toasts {
+                                client::push_toast(list, "Created the routine.");
+                            }
+                            edit.dirty.set(false);
+                            if let Some(to) = done.location {
+                                go(&to);
+                            }
+                        }
+                        Err(failure) => edit.problem.set(failure.message),
+                    }
+                }
+            });
+            let create = move |_| {
+                let draft = edit.full();
+                let mut found = routine_problems(&draft);
+                if local.options.with_untracked(|options| options.is_empty()) {
+                    found.push("Add at least one attendance type.");
+                }
+                problems.set(found.clone());
+                if !found.is_empty() {
+                    return;
+                }
+                edit.problem.set(String::new());
+                creating.dispatch(draft);
+            };
+            title("New routine");
+            view! {
+                <LeaveGuard dirty=edit.dirty/>
+                <div class="event-top">
+                    <div>{routine_heading(local, edit, Some("A weekly poll picks the day, and Marian posts the event."))}</div>
+                    <div class="actions post-buttons">
+                        <button type="button" class="primary" disabled=move || creating.pending().get() on:click=create>"Create routine"</button>
+                        {move || {
+                            let list = problems.get();
+                            (!list.is_empty()).then(|| view! {
+                                <ul class="error save-problems" role="alert">
+                                    {list.into_iter().map(|problem| view! { <li>{problem}</li> }).collect_view()}
+                                </ul>
+                            })
+                        }}
                     </div>
-                </section>
-            }.into_any())}
-        }
-    })
+                </div>
+                <p class="notice info">"Not saved yet. Nothing goes to Discord until you create it."</p>
+                {routine_layout(edit, local, channels.clone(), roles.clone(), view! {
+                    <section>
+                        <div class="section-head"><h2>"Poll"</h2></div>
+                        <div class="panel poll">
+                            {poll_schedule(edit)}
+                            {after_poll(edit, channels, roles)}
+                        </div>
+                    </section>
+                }.into_any())}
+            }
+        },
+    )
 }
 
 #[component]
@@ -441,36 +492,45 @@ pub fn RoutinePage() -> impl IntoView {
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
     // Out here so it outlives the redraw each saved change brings.
     let editing_days = RwSignal::new(false);
-    when(move || (server.get(), routine.get(), channels.get(), roles.get()).ready(), move |(server, routine, channels, roles)| {
-        let server_id = cache::server_now();
-        let edit = RoutineEdit::new(draft_from(&routine), Some(crate::api::path::routine(&server_id, &routine.id)));
-        let local = event_draft(edit, &routine.event, &channels, clock_of(&server), true);
-        let (state, note) = match &routine.run {
-            _ if routine.approval.is_some() => ("Approval", String::new()),
-            _ if !routine.active => ("Stopped", String::new()),
-            Some(run) if run.open => ("Voting", format!("Locks {}", run.locks)),
-            Some(run) => ("Waiting", format!("Opens {}", run.opens)),
-            None => ("Waiting", String::new()),
-        };
-        let current = routine.run.clone().filter(|_| routine.active).map(|run| {
-            let heading = if run.open { "This week's votes" } else { "Next poll" };
-            view! {
-                <div class="poll-part">
-                    <h3>{heading}</h3>
-                    <PollTally run routine=routine.id.clone() editing=editing_days/>
-                </div>
-            }
-        });
-        let upcoming = routine.upcoming.clone().map(|event| {
-            view! {
-                <div class="poll-part poll-picked">
-                    <h3>"Picked"</h3>
-                    <A href=event.href>{event.when}</A>
-                    <span class="muted">" · "{event.winner}" won the last poll"</span>
-                </div>
-            }
-        });
-        let history = (!routine.history.is_empty()).then(|| {
+    when(
+        move || (server.get(), routine.get(), channels.get(), roles.get()).ready(),
+        move |(server, routine, channels, roles)| {
+            let server_id = cache::server_now();
+            let edit = RoutineEdit::new(
+                draft_from(&routine),
+                Some(crate::api::path::routine(&server_id, &routine.id)),
+            );
+            let local = event_draft(edit, &routine.event, &channels, clock_of(&server), true);
+            let (state, note) = match &routine.run {
+                _ if routine.approval.is_some() => ("Approval", String::new()),
+                _ if !routine.active => ("Stopped", String::new()),
+                Some(run) if run.open => ("Voting", format!("Locks {}", run.locks)),
+                Some(run) => ("Waiting", format!("Opens {}", run.opens)),
+                None => ("Waiting", String::new()),
+            };
+            let current = routine.run.clone().filter(|_| routine.active).map(|run| {
+                let heading = if run.open {
+                    "This week's votes"
+                } else {
+                    "Next poll"
+                };
+                view! {
+                    <div class="poll-part">
+                        <h3>{heading}</h3>
+                        <PollTally run routine=routine.id.clone() editing=editing_days/>
+                    </div>
+                }
+            });
+            let upcoming = routine.upcoming.clone().map(|event| {
+                view! {
+                    <div class="poll-part poll-picked">
+                        <h3>"Picked"</h3>
+                        <A href=event.href>{event.when}</A>
+                        <span class="muted">" · "{event.winner}" won the last poll"</span>
+                    </div>
+                }
+            });
+            let history = (!routine.history.is_empty()).then(|| {
             let count = routine.history.len();
             let rows = routine
                 .history
@@ -485,38 +545,44 @@ pub fn RoutinePage() -> impl IntoView {
                 </details>
             }
         });
-        let waiting = routine.approval.clone().map(|approval| approval_panel(&routine, approval));
-        let steps = after_poll(edit, channels.clone(), roles.clone());
-        let poll = view! {
-            <section>
-                {poll_head(state, note)}
-                <div class="panel poll">
-                    {waiting}
-                    {current}
-                    {upcoming}
-                    {poll_schedule(edit)}
-                    {steps}
-                    {history}
+            let waiting = routine
+                .approval
+                .clone()
+                .map(|approval| approval_panel(&routine, approval));
+            let steps = after_poll(edit, channels.clone(), roles.clone());
+            let poll = view! {
+                <section>
+                    {poll_head(state, note)}
+                    <div class="panel poll">
+                        {waiting}
+                        {current}
+                        {upcoming}
+                        {poll_schedule(edit)}
+                        {steps}
+                        {history}
+                    </div>
+                </section>
+            }
+            .into_any();
+            let stopped = (!routine.active).then(|| {
+                view! {
+                    <p class="notice info">"This routine is stopped. No more polls go out."</p>
+                }
+            });
+            title(routine.title.clone());
+            view! {
+                <div class="event-top">
+                    <div>{routine_heading(local, edit, None)}</div>
+                    <div class="actions">
+                        {routine.active.then(|| view! {
+                            <ActionButton method="POST" url=crate::api::path::routine_stop(&server_id, &routine.id) label="Stop"
+                                class="danger" confirm="Stop this routine? No more polls go out."/>
+                        })}
+                    </div>
                 </div>
-            </section>
-        }
-        .into_any();
-        let stopped = (!routine.active).then(|| view! {
-            <p class="notice info">"This routine is stopped. No more polls go out."</p>
-        });
-        title(routine.title.clone());
-        view! {
-            <div class="event-top">
-                <div>{routine_heading(local, edit, None)}</div>
-                <div class="actions">
-                    {routine.active.then(|| view! {
-                        <ActionButton method="POST" url=crate::api::path::routine_stop(&server_id, &routine.id) label="Stop"
-                            class="danger" confirm="Stop this routine? No more polls go out."/>
-                    })}
-                </div>
-            </div>
-            {stopped}
-            {routine_layout(edit, local, channels, roles, poll)}
-        }
-    })
+                {stopped}
+                {routine_layout(edit, local, channels, roles, poll)}
+            }
+        },
+    )
 }

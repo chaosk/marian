@@ -94,15 +94,26 @@ pub fn viewer(conn: &mut Connection, headers: &HeaderMap) -> Option<Viewer> {
 }
 
 /// Points the viewer at the server with this Discord id, for this request.
-pub fn bind_server(conn: &mut Connection, viewer: &mut Viewer, server: &str) -> Result<(), OpError> {
+pub fn bind_server(
+    conn: &mut Connection,
+    viewer: &mut Viewer,
+    server: &str,
+) -> Result<(), OpError> {
     let guild = store::guild_by_discord(conn, server)?.ok_or(OpError::NotFound)?;
     bind_guild(conn, viewer, guild.id)
 }
 
 /// A server the viewer didn't sign into reads as one that isn't there, so
 /// nobody can learn which servers Marian is in by asking for them.
-pub fn bind_guild(conn: &mut Connection, viewer: &mut Viewer, guild_id: i64) -> Result<(), OpError> {
-    if guild_id <= 0 || !viewer.allowed.contains(&guild_id) || store::guild(conn, guild_id)?.is_none() {
+pub fn bind_guild(
+    conn: &mut Connection,
+    viewer: &mut Viewer,
+    guild_id: i64,
+) -> Result<(), OpError> {
+    if guild_id <= 0
+        || !viewer.allowed.contains(&guild_id)
+        || store::guild(conn, guild_id)?.is_none()
+    {
         return Err(OpError::NotFound);
     }
     let user = logic::admit_discord_user(
@@ -168,7 +179,9 @@ fn must_member(conn: &mut Connection, viewer: &Viewer) -> Result<store::Membersh
 fn must_manager(conn: &mut Connection, viewer: &Viewer) -> Result<store::Membership, OpError> {
     let user = must_member(conn, viewer)?;
     if !user.server_manager {
-        return Err(OpError::message("Only someone who runs the server can see this."));
+        return Err(OpError::message(
+            "Only someone who runs the server can see this.",
+        ));
     }
     Ok(user)
 }
@@ -180,7 +193,11 @@ fn sight(conn: &mut Connection, viewer: &Viewer) -> Result<logic::Sight, OpError
 }
 
 /// An event in the viewer's server, in a channel they can see.
-fn event_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Event, OpError> {
+fn event_here(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<store::Event, OpError> {
     let event = store::event_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
     if event.guild_id != viewer.guild_id || !sight(conn, viewer)?.sees_event(&event) {
         return Err(OpError::NotFound);
@@ -197,7 +214,11 @@ fn template_channel(conn: &mut Connection, template_id: i64) -> Result<i64, OpEr
         .first(conn)?)
 }
 
-fn series_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Series, OpError> {
+fn series_here(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<store::Series, OpError> {
     let series = store::series_by_public(conn, public_id)?.ok_or(OpError::NotFound)?;
     if series.guild_id != viewer.guild_id
         || !sight(conn, viewer)?.sees_channel(template_channel(conn, series.template_id)?)
@@ -281,7 +302,10 @@ pub fn membership(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Members
         server_manager: user.server_manager,
         can_create_event,
         reminders_enabled: user.reminders_enabled,
-        calendar_url: calendar_feed_url(&std::env::var("MARIAN_PUBLIC_URL").unwrap_or_default(), &token),
+        calendar_url: calendar_feed_url(
+            &std::env::var("MARIAN_PUBLIC_URL").unwrap_or_default(),
+            &token,
+        ),
         google: google(conn, user.user_id)?,
     })
 }
@@ -289,7 +313,10 @@ pub fn membership(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Members
 /// A person's calendar feed: its full address when the server knows its own,
 /// else a path the browser completes with the address it's on.
 fn calendar_feed_url(public_url: &str, token: &str) -> String {
-    format!("{}/calendar/{token}.ics", public_url.trim().trim_end_matches('/'))
+    format!(
+        "{}/calendar/{token}.ics",
+        public_url.trim().trim_end_matches('/')
+    )
 }
 
 fn google(conn: &mut Connection, user_id: i64) -> Result<dto::Google, OpError> {
@@ -368,7 +395,12 @@ pub fn put_settings(
         .map_err(|_| OpError::message("That timezone isn't one Marian knows."))?;
     let mut s = store::settings(conn, viewer.guild_id)?;
     // Zero is "no default reminder".
-    s.default_reminder_minutes = bounded("The default reminder", next.default_reminder_minutes, 0, 10080)?;
+    s.default_reminder_minutes = bounded(
+        "The default reminder",
+        next.default_reminder_minutes,
+        0,
+        10080,
+    )?;
     s.auto_archive_hours = bounded("Archive after", next.auto_archive_hours, 1, 168)?;
     s.post_lead_hours = bounded("Post lead", next.post_lead_hours, 0, 336)?;
     s.digest = match next.digest.as_str() {
@@ -381,7 +413,9 @@ pub fn put_settings(
         .into_iter()
         .map(|role| (role.public_id.to_string(), role.id))
         .collect();
-    let known = |ids: &[String]| -> Vec<i64> { ids.iter().filter_map(|id| roles.get(id).copied()).collect() };
+    let known = |ids: &[String]| -> Vec<i64> {
+        ids.iter().filter_map(|id| roles.get(id).copied()).collect()
+    };
     s.role_event = known(&next.role_event);
     s.role_edit = known(&next.role_edit);
     s.role_delete = known(&next.role_delete);
@@ -471,7 +505,8 @@ pub fn remember_members(
     let mut members = Vec::new();
     let mut redraw = Vec::new();
     for found in found {
-        let (person, renamed) = logic::ensure_discord_user(conn, viewer.guild_id, &found.discord_id, &found.name)?;
+        let (person, renamed) =
+            logic::ensure_discord_user(conn, viewer.guild_id, &found.discord_id, &found.name)?;
         redraw.extend(renamed);
         logic::follow_discord_avatar(conn, &person, found.avatar.as_deref())?;
         members.push(dto::Member {
@@ -513,9 +548,14 @@ fn matches_view(view: dto::EventView, event: &store::Event, now: DateTime<Utc>) 
         },
         dto::EventView::Wrapped => event.status == EventStatus::Posted && ended,
         dto::EventView::Drafts => event.status == EventStatus::Draft,
-        dto::EventView::Queued => matches!(event.status, EventStatus::Scheduled | EventStatus::Failed),
+        dto::EventView::Queued => {
+            matches!(event.status, EventStatus::Scheduled | EventStatus::Failed)
+        }
         dto::EventView::Archive => {
-            matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped)
+            matches!(
+                event.status,
+                EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped
+            )
         }
         dto::EventView::All => true,
     }
@@ -547,7 +587,10 @@ pub fn events(
             .map(|at| at.with_timezone(&Utc))
     };
     let from_day = query.from_day.and_then(midnight);
-    let to_day = query.to_day.and_then(|day| day.succ_opt()).and_then(midnight);
+    let to_day = query
+        .to_day
+        .and_then(|day| day.succ_opt())
+        .and_then(midnight);
     let sight = sight(conn, viewer)?;
     let mut events: Vec<store::Event> = match series_id {
         Some(id) => store::events_in_series(conn, id)?,
@@ -627,19 +670,21 @@ pub fn events(
 fn spots(options: &[store::SignupOption], signups: &[store::Signup]) -> Vec<dto::Spot> {
     options
         .iter()
-        .map(|opt| {
-            dto::Spot {
-                emoji: opt.emoji.clone(),
-                name: opt.name.clone(),
-                capacity: opt.capacity,
-                confirmed: places(signups, opt.id, SignupState::Confirmed),
-                waiting: places(signups, opt.id, SignupState::Waitlisted),
-            }
+        .map(|opt| dto::Spot {
+            emoji: opt.emoji.clone(),
+            name: opt.name.clone(),
+            capacity: opt.capacity,
+            confirmed: places(signups, opt.id, SignupState::Confirmed),
+            waiting: places(signups, opt.id, SignupState::Waitlisted),
         })
         .collect()
 }
 
-pub fn event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Event, OpError> {
+pub fn event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<dto::Event, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let settings = store::settings(conn, viewer.guild_id)?;
     let user = must_member(conn, viewer)?;
@@ -753,7 +798,11 @@ pub fn event_reminders(
         .collect())
 }
 
-pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Signups, OpError> {
+pub fn signups(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<dto::Signups, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let settings = store::settings(conn, viewer.guild_id)?;
     let user = must_member(conn, viewer)?;
@@ -765,7 +814,8 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
     let role_rows = store::list_roles(conn, viewer.guild_id)?;
     let restrict_ids = store::event_role_ids(conn, &event, EventRoleKind::Restrict)?;
     let now = Utc::now();
-    let closed = event.status != EventStatus::Posted || event.signups_closed || cutoff_passed(&event, now);
+    let closed =
+        event.status != EventStatus::Posted || event.signups_closed || cutoff_passed(&event, now);
     let show_names = settings.show_attendees || can_manage;
     let named = |state: SignupState, option_id: i64| -> Vec<dto::Person> {
         if !show_names {
@@ -774,7 +824,12 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
         signups
             .iter()
             .filter(|s| s.option_id == option_id && s.state == state)
-            .filter_map(|s| people.iter().find(|p| p.id == s.membership_id).map(|p| (p, s.guests)))
+            .filter_map(|s| {
+                people
+                    .iter()
+                    .find(|p| p.id == s.membership_id)
+                    .map(|p| (p, s.guests))
+            })
             .map(|(p, guests)| dto::Person {
                 id: p.public_id.to_string(),
                 name: p.name.clone(),
@@ -802,7 +857,9 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
                 waitlist: settings.waitlist,
             };
             let (open, reason, waitlist_next) = gate.button(opt, mine, confirmed, queue);
-            let role = opt.role_id.and_then(|id| role_rows.iter().find(|r| r.id == id));
+            let role = opt
+                .role_id
+                .and_then(|id| role_rows.iter().find(|r| r.id == id));
             dto::OptionSignups {
                 id: opt.public_id.to_string(),
                 type_id: opt.type_public_id.to_string(),
@@ -827,10 +884,24 @@ pub fn signups(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
         .collect();
     Ok(dto::Signups {
         options: rows,
-        notes: signup_notes(&event, &options, &signups, &user, &roles, &restrict_ids, &role_rows, settings.waitlist, now),
+        notes: signup_notes(
+            &event,
+            &options,
+            &signups,
+            &user,
+            &roles,
+            &restrict_ids,
+            &role_rows,
+            settings.waitlist,
+            now,
+        ),
         show_names,
         can_manage,
-        editable: can_manage && !matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled),
+        editable: can_manage
+            && !matches!(
+                event.status,
+                EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+            ),
         posted: event.status == EventStatus::Posted,
     })
 }
@@ -847,12 +918,26 @@ struct Gate<'a> {
 
 impl Gate<'_> {
     /// Whether the person can press this option's button, why not, and whether it waitlists.
-    fn button(&self, opt: &store::SignupOption, mine: bool, confirmed: i64, queue: bool) -> (bool, String, bool) {
+    fn button(
+        &self,
+        opt: &store::SignupOption,
+        mine: bool,
+        confirmed: i64,
+        queue: bool,
+    ) -> (bool, String, bool) {
         if mine {
-            return (self.event.status == EventStatus::Posted, String::new(), false);
+            return (
+                self.event.status == EventStatus::Posted,
+                String::new(),
+                false,
+            );
         }
         if self.event.status != EventStatus::Posted {
-            return (false, "Signups open once the event is posted.".into(), false);
+            return (
+                false,
+                "Signups open once the event is posted.".into(),
+                false,
+            );
         }
         if self.closed {
             return (false, "Signups are closed.".into(), false);
@@ -861,7 +946,11 @@ impl Gate<'_> {
             && !self.user.server_manager
             && !self.restrict_ids.iter().any(|id| self.roles.contains(id))
         {
-            return (false, "This event is limited to another role.".into(), false);
+            return (
+                false,
+                "This event is limited to another role.".into(),
+                false,
+            );
         }
         if let Some(role_id) = opt.role_id {
             if !self.user.server_manager && !self.roles.contains(&role_id) {
@@ -893,7 +982,10 @@ fn signup_notes(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     // A finished event has nothing left to say about signing up.
-    if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
+    if matches!(
+        event.status,
+        EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+    ) {
         return Vec::new();
     }
     let mut notes = Vec::new();
@@ -903,7 +995,10 @@ fn signup_notes(
     if event.signups_closed || cutoff_passed(event, now) {
         notes.push("Signups are closed.".into());
     }
-    if !restrict_ids.is_empty() && !user.server_manager && !restrict_ids.iter().any(|id| roles.contains(id)) {
+    if !restrict_ids.is_empty()
+        && !user.server_manager
+        && !restrict_ids.iter().any(|id| roles.contains(id))
+    {
         notes.push("This event is limited to another role.".into());
     }
     for opt in options {
@@ -948,7 +1043,12 @@ fn cutoff_passed(event: &store::Event, now: DateTime<Utc>) -> bool {
     event.cutoff_at.is_some_and(|dt| now >= dt)
 }
 
-fn signed_up(conn: &mut Connection, event: &store::Event, option_id: i64, membership_id: i64) -> Result<bool, OpError> {
+fn signed_up(
+    conn: &mut Connection,
+    event: &store::Event,
+    option_id: i64,
+    membership_id: i64,
+) -> Result<bool, OpError> {
     Ok(store::signups_for(conn, event)?
         .iter()
         .any(|s| s.option_id == option_id && s.membership_id == membership_id))
@@ -1072,7 +1172,14 @@ fn activity_of(
     let page = page.clamp(1, pages);
     let offset = i64::from((page - 1) * per_page);
     let mut items = Vec::new();
-    for item in store::list_activity(conn, viewer.guild_id, event_id, &hidden, i64::from(per_page), offset)? {
+    for item in store::list_activity(
+        conn,
+        viewer.guild_id,
+        event_id,
+        &hidden,
+        i64::from(per_page),
+        offset,
+    )? {
         let event_id = match item.event_id {
             Some(id) => store::event(conn, id)?.map(|event| event.public_id.to_string()),
             None => None,
@@ -1129,7 +1236,12 @@ fn event_input(
         .take(8)
         .cloned()
         .collect();
-    let options = option_inputs(conn, viewer.guild_id, existing.map(|event| event.id), &named)?;
+    let options = option_inputs(
+        conn,
+        viewer.guild_id,
+        existing.map(|event| event.id),
+        &named,
+    )?;
     Ok(EventInput {
         id: existing.map(|event| event.id),
         guild_id: viewer.guild_id,
@@ -1142,8 +1254,15 @@ fn event_input(
         duration_minutes: draft.duration_minutes,
         color: draft.color.clone(),
         image_url: None,
-        cutoff_at: draft.cutoff_local.map(|dt| local_instant(dt, tz)).transpose()?,
-        attendee_role_id: ids::public::role_id(conn, viewer.guild_id, draft.attendee_role_id.as_deref())?,
+        cutoff_at: draft
+            .cutoff_local
+            .map(|dt| local_instant(dt, tz))
+            .transpose()?,
+        attendee_role_id: ids::public::role_id(
+            conn,
+            viewer.guild_id,
+            draft.attendee_role_id.as_deref(),
+        )?,
         thread_enabled: draft.thread_enabled,
         multiple_signups: draft.multiple_signups,
         mention_everyone: draft.mention_everyone,
@@ -1166,7 +1285,10 @@ fn event_input(
             dto::SaveAction::Publish => logic::SaveAction::Publish,
             dto::SaveAction::Save => logic::SaveAction::Save,
         },
-        post_at: draft.post_local.map(|dt| local_instant(dt, tz)).transpose()?,
+        post_at: draft
+            .post_local
+            .map(|dt| local_instant(dt, tz))
+            .transpose()?,
         apply_series: draft.apply_series,
     })
 }
@@ -1177,7 +1299,11 @@ fn saved(conn: &mut Connection, viewer: &Viewer, event_id: i64) -> Result<Outcom
     Ok(Outcome::ok().at(location).synced(event_id))
 }
 
-pub fn create_event(conn: &mut Connection, viewer: &Viewer, draft: &dto::EventDraft) -> Result<Outcome, OpError> {
+pub fn create_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    draft: &dto::EventDraft,
+) -> Result<Outcome, OpError> {
     let input = event_input(conn, viewer, draft, None)?;
     let id = logic::save_event(conn, input)?;
     saved(conn, viewer, id)
@@ -1215,13 +1341,33 @@ pub fn patch_event(
 }
 
 /// Posts a draft or a scheduled event to Discord right away.
-pub fn publish_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
-    save_stored(conn, viewer, public_id, &dto::EventPatch::default(), Some(Posting::Now))
+pub fn publish_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
+    save_stored(
+        conn,
+        viewer,
+        public_id,
+        &dto::EventPatch::default(),
+        Some(Posting::Now),
+    )
 }
 
 /// Takes a scheduled or failed post back to a draft.
-pub fn unschedule_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
-    save_stored(conn, viewer, public_id, &dto::EventPatch::default(), Some(Posting::Hold))
+pub fn unschedule_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
+    save_stored(
+        conn,
+        viewer,
+        public_id,
+        &dto::EventPatch::default(),
+        Some(Posting::Hold),
+    )
 }
 
 /// Sets when Marian posts a draft, or moves a scheduled post.
@@ -1231,7 +1377,13 @@ pub fn schedule_event(
     public_id: &str,
     when: &dto::PostAt,
 ) -> Result<Outcome, OpError> {
-    save_stored(conn, viewer, public_id, &dto::EventPatch::default(), Some(Posting::At(when.post_local)))
+    save_stored(
+        conn,
+        viewer,
+        public_id,
+        &dto::EventPatch::default(),
+        Some(Posting::At(when.post_local)),
+    )
 }
 
 /// Saves an event from what is stored, with `patch` on top and, when it has
@@ -1244,10 +1396,18 @@ fn save_stored(
     posting: Option<Posting>,
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
-    if posting.is_some() && !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
+    if posting.is_some()
+        && !matches!(
+            event.status,
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+        )
+    {
         return Err(OpError::message("This event has already gone out."));
     }
-    let unposted = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) && event.discord_message_id.is_none();
+    let unposted = matches!(
+        event.status,
+        EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+    ) && event.discord_message_id.is_none();
     let channel_id = match &patch.channel_id {
         Some(public) => channel_seen(conn, viewer, public)?,
         None => event.channel_id,
@@ -1259,7 +1419,9 @@ fn save_stored(
         return Err(OpError::message("This event isn't part of a series."));
     }
     if patch.repeat.is_some() && event.series_id.is_some() {
-        return Err(OpError::message("This date already belongs to a series. Change the repeat there."));
+        return Err(OpError::message(
+            "This date already belongs to a series. Change the repeat there.",
+        ));
     }
     let tz = zone(conn, viewer.guild_id)?;
     let starts_at = match patch.starts_local {
@@ -1268,11 +1430,17 @@ fn save_stored(
     };
     let cutoff_at = match patch.cutoff {
         Some(dto::Cutoff::Never) => None,
-        Some(dto::Cutoff::Before { minutes }) if minutes >= 0 => Some(starts_at - Duration::minutes(minutes)),
-        Some(dto::Cutoff::Before { .. }) => {
-            return Err(OpError::message("Signups have to close before the event starts."))
+        Some(dto::Cutoff::Before { minutes }) if minutes >= 0 => {
+            Some(starts_at - Duration::minutes(minutes))
         }
-        None => event.cutoff_at.map(|cutoff| cutoff + (starts_at - event.starts_at)),
+        Some(dto::Cutoff::Before { .. }) => {
+            return Err(OpError::message(
+                "Signups have to close before the event starts.",
+            ))
+        }
+        None => event
+            .cutoff_at
+            .map(|cutoff| cutoff + (starts_at - event.starts_at)),
     };
     let options = store::options_for(conn, &event)?
         .into_iter()
@@ -1322,7 +1490,10 @@ fn save_stored(
             .description
             .clone()
             .unwrap_or_else(|| event.description.clone()),
-        location: patch.location.clone().unwrap_or_else(|| event.location.clone()),
+        location: patch
+            .location
+            .clone()
+            .unwrap_or_else(|| event.location.clone()),
         starts_at,
         duration_minutes: patch.duration_minutes.unwrap_or(event.duration_minutes),
         color: patch.color.clone().unwrap_or_else(|| event.color.clone()),
@@ -1361,7 +1532,11 @@ fn save_stored(
     Ok(Outcome::ok().synced(event.id))
 }
 
-pub fn delete_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn delete_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     logic::delete_event(conn, event.id, viewer.membership_id)?;
     // A date of a series stays behind as skipped, so only a removed event leaves its page.
@@ -1374,13 +1549,21 @@ pub fn delete_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> 
     Ok(Outcome::ok().at(location).synced(event.id))
 }
 
-pub fn archive_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn archive_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     logic::archive_event(conn, event.id, viewer.membership_id)?;
     Ok(Outcome::ok().synced(event.id))
 }
 
-pub fn duplicate_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn duplicate_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let copy = logic::duplicate_event(conn, event.id, viewer.membership_id)?;
     let copy = store::event(conn, copy)?.ok_or(OpError::NotFound)?;
@@ -1388,7 +1571,11 @@ pub fn duplicate_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) 
     Ok(Outcome::ok().at(location))
 }
 
-pub fn skip_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn skip_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     logic::skip_event(conn, event.id, viewer.membership_id)?;
     Ok(Outcome::ok())
@@ -1399,7 +1586,12 @@ fn series_dto(conn: &mut Connection, series: store::Series) -> Result<dto::Serie
     let events = store::events_in_series(conn, series.id)?;
     let next = events
         .iter()
-        .find(|event| matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Draft))
+        .find(|event| {
+            matches!(
+                event.status,
+                EventStatus::Posted | EventStatus::Scheduled | EventStatus::Draft
+            )
+        })
         .map(|event| event.starts_at);
     Ok(dto::Series {
         id: series.public_id.to_string(),
@@ -1418,7 +1610,9 @@ pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Se
     let sight = sight(conn, viewer)?;
     let mut rows = Vec::new();
     for series in store::list_series(conn, viewer.guild_id)? {
-        if series.cadence != Cadence::Once && sight.sees_channel(template_channel(conn, series.template_id)?) {
+        if series.cadence != Cadence::Once
+            && sight.sees_channel(template_channel(conn, series.template_id)?)
+        {
             rows.push(series_dto(conn, series)?);
         }
     }
@@ -1426,7 +1620,11 @@ pub fn series_list(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Se
 }
 
 /// One series, for a manager or someone who can edit one of its dates.
-pub fn series(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Series, OpError> {
+pub fn series(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<dto::Series, OpError> {
     let series = series_here(conn, viewer, public_id)?;
     let user = must_member(conn, viewer)?;
     if !user.server_manager {
@@ -1463,7 +1661,11 @@ pub fn patch_series(
     Ok(Outcome::ok())
 }
 
-pub fn end_series(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn end_series(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let series = series_here(conn, viewer, public_id)?;
     logic::end_series(conn, series.id, viewer.membership_id)?;
     Ok(Outcome::ok())
@@ -1489,9 +1691,9 @@ fn option_inputs(
     options
         .iter()
         .map(|opt| {
-            let type_id = *types
-                .get(opt.type_id.trim())
-                .ok_or_else(|| OpError::message("That attendance type isn't in this server's library."))?;
+            let type_id = *types.get(opt.type_id.trim()).ok_or_else(|| {
+                OpError::message("That attendance type isn't in this server's library.")
+            })?;
             Ok(OptionInput {
                 id: opt.id.as_ref().and_then(|id| known.get(id).copied()),
                 type_id,
@@ -1523,7 +1725,10 @@ fn option_dto(
     })
 }
 
-fn library_by_id(conn: &mut Connection, guild_id: i64) -> Result<HashMap<i64, store::LibraryOption>, OpError> {
+fn library_by_id(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<HashMap<i64, store::LibraryOption>, OpError> {
     Ok(store::list_library(conn, guild_id)?
         .into_iter()
         .map(|kind| (kind.id, kind))
@@ -1549,7 +1754,11 @@ pub fn presets(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Preset
         .collect()
 }
 
-pub fn preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::Preset, OpError> {
+pub fn preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<dto::Preset, OpError> {
     let preset = preset_here(conn, viewer, public_id)?;
     presets(conn, viewer)?
         .into_iter()
@@ -1557,13 +1766,21 @@ pub fn preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result
         .ok_or(OpError::NotFound)
 }
 
-fn preset_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::Preset, OpError> {
+fn preset_here(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<store::Preset, OpError> {
     store::preset_by_public(conn, public_id)?
         .filter(|preset| preset.guild_id == viewer.guild_id)
         .ok_or(OpError::NotFound)
 }
 
-fn preset_input(conn: &mut Connection, viewer: &Viewer, draft: &dto::PresetDraft) -> Result<logic::PresetInput, OpError> {
+fn preset_input(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    draft: &dto::PresetDraft,
+) -> Result<logic::PresetInput, OpError> {
     Ok(logic::PresetInput {
         name: draft.name.clone(),
         multiple_signups: draft.multiple_signups,
@@ -1571,33 +1788,61 @@ fn preset_input(conn: &mut Connection, viewer: &Viewer, draft: &dto::PresetDraft
     })
 }
 
-pub fn create_preset(conn: &mut Connection, viewer: &Viewer, draft: &dto::PresetDraft) -> Result<Outcome, OpError> {
+pub fn create_preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    draft: &dto::PresetDraft,
+) -> Result<Outcome, OpError> {
     let input = preset_input(conn, viewer, draft)?;
     logic::save_preset(conn, viewer.guild_id, viewer.membership_id, None, &input)?;
     Ok(Outcome::ok())
 }
 
-pub fn update_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str, draft: &dto::PresetDraft) -> Result<Outcome, OpError> {
+pub fn update_preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    draft: &dto::PresetDraft,
+) -> Result<Outcome, OpError> {
     let preset = preset_here(conn, viewer, public_id)?;
     let input = preset_input(conn, viewer, draft)?;
-    logic::save_preset(conn, viewer.guild_id, viewer.membership_id, Some(preset.id), &input)?;
+    logic::save_preset(
+        conn,
+        viewer.guild_id,
+        viewer.membership_id,
+        Some(preset.id),
+        &input,
+    )?;
     Ok(Outcome::ok())
 }
 
-pub fn default_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn default_preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let preset = preset_here(conn, viewer, public_id)?;
     logic::set_default_preset(conn, preset.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
-pub fn delete_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn delete_preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let preset = preset_here(conn, viewer, public_id)?;
     logic::delete_preset(conn, preset.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
 /// Gives an event a preset's attendance; responses on types it keeps stay.
-pub fn apply_preset(conn: &mut Connection, viewer: &Viewer, public_id: &str, body: &dto::ApplyPreset) -> Result<Outcome, OpError> {
+pub fn apply_preset(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    body: &dto::ApplyPreset,
+) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
     let preset = preset_here(conn, viewer, &body.preset)?;
     logic::apply_preset(conn, event.id, viewer.membership_id, preset.id)?;
@@ -1631,8 +1876,17 @@ fn type_input(draft: &dto::TypeDraft) -> logic::TypeInput {
 }
 
 /// Adds a type to the library and returns it, so a page can use it at once.
-pub fn add_library(conn: &mut Connection, viewer: &Viewer, draft: &dto::TypeDraft) -> Result<dto::LibraryItem, OpError> {
-    let made = logic::add_type(conn, viewer.guild_id, viewer.membership_id, &type_input(draft))?;
+pub fn add_library(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    draft: &dto::TypeDraft,
+) -> Result<dto::LibraryItem, OpError> {
+    let made = logic::add_type(
+        conn,
+        viewer.guild_id,
+        viewer.membership_id,
+        &type_input(draft),
+    )?;
     Ok(dto::LibraryItem {
         id: made.public_id.to_string(),
         name: made.name,
@@ -1642,13 +1896,22 @@ pub fn add_library(conn: &mut Connection, viewer: &Viewer, draft: &dto::TypeDraf
     })
 }
 
-fn type_here(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<store::LibraryOption, OpError> {
+fn type_here(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<store::LibraryOption, OpError> {
     store::library_type_by_public(conn, viewer.guild_id, public_id)?.ok_or(OpError::NotFound)
 }
 
 /// Renames a type, or changes its emoji or attending, everywhere it is used.
 /// Posted events that use it are refreshed on Discord.
-pub fn update_library(conn: &mut Connection, viewer: &Viewer, public_id: &str, draft: &dto::TypeDraft) -> Result<Outcome, OpError> {
+pub fn update_library(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    draft: &dto::TypeDraft,
+) -> Result<Outcome, OpError> {
     let kind = type_here(conn, viewer, public_id)?;
     let posted = logic::update_type(conn, kind.id, viewer.membership_id, &type_input(draft))?;
     Ok(Outcome {
@@ -1657,19 +1920,29 @@ pub fn update_library(conn: &mut Connection, viewer: &Viewer, public_id: &str, d
     })
 }
 
-pub fn delete_library(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn delete_library(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let kind = type_here(conn, viewer, public_id)?;
     logic::delete_type(conn, kind.id, viewer.membership_id)?;
     Ok(Outcome::ok())
 }
 
-pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::RoutineSummary>, OpError> {
+pub fn routines(
+    conn: &mut Connection,
+    viewer: &Viewer,
+) -> Result<Vec<dto::RoutineSummary>, OpError> {
     use diesel::prelude::*;
     must_manager(conn, viewer)?;
     let hidden: Vec<String> = crate::schema::routines::table
         .inner_join(crate::schema::event_templates::table)
         .filter(crate::schema::routines::guild_id.eq(viewer.guild_id))
-        .filter(crate::schema::event_templates::channel_id.eq_any(sight(conn, viewer)?.hidden_channels()))
+        .filter(
+            crate::schema::event_templates::channel_id
+                .eq_any(sight(conn, viewer)?.hidden_channels()),
+        )
         .select(crate::schema::routines::public_id)
         .load::<uuid::Uuid>(conn)?
         .into_iter()
@@ -1683,7 +1956,11 @@ pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Routi
 
 /// One routine, for a manager, its creator, or someone who can answer its
 /// waiting approval, which Discord links here.
-pub fn routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<dto::RoutineView, OpError> {
+pub fn routine(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<dto::RoutineView, OpError> {
     use diesel::prelude::*;
     let id = routine_here(conn, viewer, public_id)?;
     let can_decide = logic::can_decide(conn, id, viewer.membership_id)?;
@@ -1704,7 +1981,11 @@ pub fn routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Resul
 }
 
 /// A routine form's steps, with public ids turned into keys.
-fn routine_steps(conn: &mut Connection, viewer: &Viewer, steps: &[dto::RoutineStep]) -> Result<Vec<logic::Step>, OpError> {
+fn routine_steps(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    steps: &[dto::RoutineStep],
+) -> Result<Vec<logic::Step>, OpError> {
     let roles: std::collections::HashMap<String, i64> = store::list_roles(conn, viewer.guild_id)?
         .into_iter()
         .map(|role| (role.public_id.to_string(), role.id))
@@ -1723,7 +2004,11 @@ fn routine_steps(conn: &mut Connection, viewer: &Viewer, steps: &[dto::RoutineSt
             Ok(logic::Step {
                 kind,
                 channel_id,
-                role_ids: step.role_ids.iter().filter_map(|id| roles.get(id).copied()).collect(),
+                role_ids: step
+                    .role_ids
+                    .iter()
+                    .filter_map(|id| roles.get(id).copied())
+                    .collect(),
             })
         })
         .collect()
@@ -1763,7 +2048,11 @@ fn weekday(day: u8) -> Result<u8, OpError> {
     }
 }
 
-pub fn create_routine(conn: &mut Connection, viewer: &Viewer, draft: &dto::RoutineDraft) -> Result<Outcome, OpError> {
+pub fn create_routine(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    draft: &dto::RoutineDraft,
+) -> Result<Outcome, OpError> {
     let (channel_id, extras) = routine_parts(conn, viewer, draft)?;
     let steps = match &draft.steps {
         Some(steps) => {
@@ -1843,7 +2132,8 @@ pub fn decide_routine(
     decision: &dto::Decision,
 ) -> Result<Outcome, OpError> {
     let id = routine_here(conn, viewer, public_id)?;
-    let run = logic::waiting_run_id(conn, id)?.ok_or_else(|| OpError::from(crate::msg!("err-approval-closed")))?;
+    let run = logic::waiting_run_id(conn, id)?
+        .ok_or_else(|| OpError::from(crate::msg!("err-approval-closed")))?;
     let effect = logic::decide_run(conn, run, viewer.membership_id, decision.day, Utc::now())?;
     Ok(Outcome {
         jobs: effect.jobs,
@@ -1873,9 +2163,15 @@ pub fn routine_days(
     }
 }
 
-pub fn vote(conn: &mut Connection, viewer: &Viewer, public_id: &str, vote: &dto::Vote) -> Result<Outcome, OpError> {
+pub fn vote(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    vote: &dto::Vote,
+) -> Result<Outcome, OpError> {
     let id = routine_here(conn, viewer, public_id)?;
-    let run = logic::open_run_id(conn, id)?.ok_or_else(|| OpError::message("That poll is closed."))?;
+    let run =
+        logic::open_run_id(conn, id)?.ok_or_else(|| OpError::message("That poll is closed."))?;
     let effect = logic::cast_run(conn, run, viewer.membership_id, vote.day)?;
     Ok(Outcome {
         jobs: effect.jobs,
@@ -1883,7 +2179,11 @@ pub fn vote(conn: &mut Connection, viewer: &Viewer, public_id: &str, vote: &dto:
     })
 }
 
-pub fn stop_routine(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
+pub fn stop_routine(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
     let id = routine_here(conn, viewer, public_id)?;
     logic::stop_routine(conn, id, viewer.membership_id)?;
     Ok(Outcome::ok())
@@ -1944,7 +2244,9 @@ mod tests {
 
     /// Every id in an API answer is a UUIDv7 string; a row's sequential key never leaves.
     fn assert_public_ids(value: &serde_json::Value, path: &str) {
-        let id_key = |key: &str| key == "id" || key.ends_with("_id") || key.ends_with("_ids") || key.starts_with("role_");
+        let id_key = |key: &str| {
+            key == "id" || key.ends_with("_id") || key.ends_with("_ids") || key.starts_with("role_")
+        };
         match value {
             serde_json::Value::Object(map) => {
                 for (key, inner) in map {
@@ -1955,8 +2257,11 @@ mod tests {
                             other => vec![other],
                         };
                         for id in ids.into_iter().filter(|id| !id.is_null()) {
-                            let text = id.as_str().unwrap_or_else(|| panic!("{here} is {id}, not a public id"));
-                            let parsed = uuid::Uuid::parse_str(text).unwrap_or_else(|_| panic!("{here} is {text:?}"));
+                            let text = id
+                                .as_str()
+                                .unwrap_or_else(|| panic!("{here} is {id}, not a public id"));
+                            let parsed = uuid::Uuid::parse_str(text)
+                                .unwrap_or_else(|_| panic!("{here} is {text:?}"));
                             assert_eq!(parsed.get_version_num(), 7, "{here} is not a UUIDv7");
                         }
                     } else {
@@ -1997,7 +2302,11 @@ mod tests {
                 mention_everyone: false,
                 mention_role_ids: vec![1],
                 restrict_role_ids: vec![1],
-                options: vec![OptionInput { capacity: Some(2), role_id: Some(1), ..OptionInput::of_type(TANK) }],
+                options: vec![OptionInput {
+                    capacity: Some(2),
+                    role_id: Some(1),
+                    ..OptionInput::of_type(TANK)
+                }],
                 reminders: vec![],
                 repeat: None,
                 action: logic::SaveAction::Publish,
@@ -2006,51 +2315,124 @@ mod tests {
             },
         )
         .unwrap();
-        let public = store::event(&mut conn, id).unwrap().unwrap().public_id.to_string();
-        let option = signups(&mut conn, &viewer, &public).unwrap().options[0].id.clone();
-        let june = members(&mut conn, &viewer).unwrap().into_iter().find(|m| m.name == "June").unwrap().id;
+        let public = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .public_id
+            .to_string();
+        let option = signups(&mut conn, &viewer, &public).unwrap().options[0]
+            .id
+            .clone();
+        let june = members(&mut conn, &viewer)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.name == "June")
+            .unwrap()
+            .id;
         set_signup(&mut conn, &viewer, &public, &june, &option, true, None).unwrap();
         let mut next = settings(&mut conn, &viewer).unwrap();
-        next.role_event = roles(&mut conn, &viewer).unwrap().into_iter().map(|role| role.id).collect();
+        next.role_event = roles(&mut conn, &viewer)
+            .unwrap()
+            .into_iter()
+            .map(|role| role.id)
+            .collect();
         put_settings(&mut conn, &viewer, &next).unwrap();
         let routine_id = approved_routine(&mut conn, &viewer);
 
         let answers = [
-            ("event", serde_json::to_value(event(&mut conn, &viewer, &public).unwrap()).unwrap()),
-            ("signups", serde_json::to_value(signups(&mut conn, &viewer, &public).unwrap()).unwrap()),
-            ("settings", serde_json::to_value(settings(&mut conn, &viewer).unwrap()).unwrap()),
-            ("roles", serde_json::to_value(roles(&mut conn, &viewer).unwrap()).unwrap()),
-            ("members", serde_json::to_value(members(&mut conn, &viewer).unwrap()).unwrap()),
-            ("channels", serde_json::to_value(channels(&mut conn, &viewer).unwrap()).unwrap()),
-            ("membership", serde_json::to_value(membership(&mut conn, &viewer).unwrap()).unwrap()),
-            ("routine", serde_json::to_value(routine(&mut conn, &viewer, &routine_id).unwrap()).unwrap()),
+            (
+                "event",
+                serde_json::to_value(event(&mut conn, &viewer, &public).unwrap()).unwrap(),
+            ),
+            (
+                "signups",
+                serde_json::to_value(signups(&mut conn, &viewer, &public).unwrap()).unwrap(),
+            ),
+            (
+                "settings",
+                serde_json::to_value(settings(&mut conn, &viewer).unwrap()).unwrap(),
+            ),
+            (
+                "roles",
+                serde_json::to_value(roles(&mut conn, &viewer).unwrap()).unwrap(),
+            ),
+            (
+                "members",
+                serde_json::to_value(members(&mut conn, &viewer).unwrap()).unwrap(),
+            ),
+            (
+                "channels",
+                serde_json::to_value(channels(&mut conn, &viewer).unwrap()).unwrap(),
+            ),
+            (
+                "membership",
+                serde_json::to_value(membership(&mut conn, &viewer).unwrap()).unwrap(),
+            ),
+            (
+                "routine",
+                serde_json::to_value(routine(&mut conn, &viewer, &routine_id).unwrap()).unwrap(),
+            ),
         ];
         for (name, answer) in &answers {
             assert_public_ids(answer, name);
         }
         let shown = answers[1].1.to_string();
         assert!(shown.contains(&june), "June shows by her public id");
-        assert_eq!(answers[2].1["role_event"].as_array().unwrap().len(), 1, "settings keep the role");
+        assert_eq!(
+            answers[2].1["role_event"].as_array().unwrap().len(),
+            1,
+            "settings keep the role"
+        );
     }
 
     #[test]
     fn the_calendar_feed_is_a_full_address_when_the_server_knows_its_own() {
-        assert_eq!(calendar_feed_url("https://marian.example/ ", "abc"), "https://marian.example/calendar/abc.ics");
-        assert_eq!(calendar_feed_url("", "abc"), "/calendar/abc.ics", "else a path the browser completes");
+        assert_eq!(
+            calendar_feed_url("https://marian.example/ ", "abc"),
+            "https://marian.example/calendar/abc.ics"
+        );
+        assert_eq!(
+            calendar_feed_url("", "abc"),
+            "/calendar/abc.ics",
+            "else a path the browser completes"
+        );
     }
 
     #[test]
     fn membership_says_who_can_create_events() {
         let (mut conn, nell) = world();
-        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), user_id: 2, display_name: "June".into(), ..nell.clone() };
-        assert!(membership(&mut conn, &june).unwrap().can_create_event, "no event roles leaves creating open");
+        let june = Viewer {
+            membership_id: 2,
+            discord_user_id: "u2".into(),
+            user_id: 2,
+            display_name: "June".into(),
+            ..nell.clone()
+        };
+        assert!(
+            membership(&mut conn, &june).unwrap().can_create_event,
+            "no event roles leaves creating open"
+        );
         let mut next = settings(&mut conn, &nell).unwrap();
-        next.role_event = roles(&mut conn, &nell).unwrap().into_iter().map(|role| role.id).collect();
+        next.role_event = roles(&mut conn, &nell)
+            .unwrap()
+            .into_iter()
+            .map(|role| role.id)
+            .collect();
         put_settings(&mut conn, &nell, &next).unwrap();
-        assert!(!membership(&mut conn, &june).unwrap().can_create_event, "June lacks the role");
-        assert!(membership(&mut conn, &nell).unwrap().can_create_event, "Nell manages the server");
-        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
-        assert!(membership(&mut conn, &june).unwrap().can_create_event, "June holds the role now");
+        assert!(
+            !membership(&mut conn, &june).unwrap().can_create_event,
+            "June lacks the role"
+        );
+        assert!(
+            membership(&mut conn, &nell).unwrap().can_create_event,
+            "Nell manages the server"
+        );
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);")
+            .unwrap();
+        assert!(
+            membership(&mut conn, &june).unwrap().can_create_event,
+            "June holds the role now"
+        );
     }
 
     #[test]
@@ -2077,21 +2459,38 @@ mod tests {
             .first::<uuid::Uuid>(&mut conn)
             .unwrap()
             .to_string();
-        assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, &their_member), Err(OpError::NotFound)));
-        assert!(matches!(ids::public::member_id(&mut conn, viewer.guild_id, "9"), Err(OpError::NotFound)), "a row key is not an id here");
+        assert!(matches!(
+            ids::public::member_id(&mut conn, viewer.guild_id, &their_member),
+            Err(OpError::NotFound)
+        ));
+        assert!(
+            matches!(
+                ids::public::member_id(&mut conn, viewer.guild_id, "9"),
+                Err(OpError::NotFound)
+            ),
+            "a row key is not an id here"
+        );
     }
 
     #[test]
     fn a_server_you_cannot_open_reads_as_one_that_does_not_exist() {
         let (mut conn, viewer) = world();
-        conn.batch_execute("INSERT INTO guilds (id, name, timezone, discord_id) VALUES (2, 'Other', 'UTC', '77');")
-            .unwrap();
+        conn.batch_execute(
+            "INSERT INTO guilds (id, name, timezone, discord_id) VALUES (2, 'Other', 'UTC', '77');",
+        )
+        .unwrap();
         let ask = |conn: &mut Connection, server: &str| {
             let mut viewer = viewer.clone();
             bind_server(conn, &mut viewer, server)
         };
-        assert!(matches!(ask(&mut conn, "77"), Err(OpError::NotFound)), "there, but not theirs");
-        assert!(matches!(ask(&mut conn, "78"), Err(OpError::NotFound)), "not there at all");
+        assert!(
+            matches!(ask(&mut conn, "77"), Err(OpError::NotFound)),
+            "there, but not theirs"
+        );
+        assert!(
+            matches!(ask(&mut conn, "78"), Err(OpError::NotFound)),
+            "not there at all"
+        );
         assert!(ask(&mut conn, "99").is_ok(), "their own");
     }
 
@@ -2113,7 +2512,13 @@ mod tests {
             ",
         )
         .unwrap();
-        let public = |conn: &mut Connection, id: i64| store::event(conn, id).unwrap().unwrap().public_id.to_string();
+        let public = |conn: &mut Connection, id: i64| {
+            store::event(conn, id)
+                .unwrap()
+                .unwrap()
+                .public_id
+                .to_string()
+        };
         let raid = public(&mut conn, 11);
         let bodies: Vec<String> = event_activity(&mut conn, &viewer, &raid, 1, 25)
             .unwrap()
@@ -2122,9 +2527,16 @@ mod tests {
             .map(|item| item.body)
             .collect();
         assert_eq!(bodies, ["June signed up for Raid", "Nell created Raid"]);
-        assert_eq!(activity(&mut conn, &viewer, 1, 25).unwrap().total, 4, "the server's log keeps everything");
+        assert_eq!(
+            activity(&mut conn, &viewer, 1, 25).unwrap().total,
+            4,
+            "the server's log keeps everything"
+        );
         let theirs = public(&mut conn, 13);
-        assert!(matches!(event_activity(&mut conn, &viewer, &theirs, 1, 25), Err(OpError::NotFound)));
+        assert!(matches!(
+            event_activity(&mut conn, &viewer, &theirs, 1, 25),
+            Err(OpError::NotFound)
+        ));
     }
 
     #[test]
@@ -2147,30 +2559,62 @@ mod tests {
             ",
         )
         .unwrap();
-        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
-        let officers = store::event(&mut conn, 12).unwrap().unwrap().public_id.to_string();
-        let all = dto::EventQuery { view: dto::EventView::All, ..Default::default() };
+        let june = Viewer {
+            membership_id: 2,
+            discord_user_id: "u2".into(),
+            ..nell.clone()
+        };
+        let officers = store::event(&mut conn, 12)
+            .unwrap()
+            .unwrap()
+            .public_id
+            .to_string();
+        let all = dto::EventQuery {
+            view: dto::EventView::All,
+            ..Default::default()
+        };
         let titles = |conn: &mut Connection, viewer: &Viewer| -> Vec<String> {
-            events(conn, viewer, &all).unwrap().items.into_iter().map(|e| e.title).collect()
+            events(conn, viewer, &all)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|e| e.title)
+                .collect()
         };
         let channel_names = |conn: &mut Connection, viewer: &Viewer| -> Vec<String> {
-            channels(conn, viewer).unwrap().into_iter().map(|c| c.name).collect()
+            channels(conn, viewer)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
         };
 
         assert_eq!(titles(&mut conn, &june), ["Raid"]);
         assert_eq!(channel_names(&mut conn, &june), ["events"]);
-        assert!(matches!(event(&mut conn, &june, &officers), Err(OpError::NotFound)));
-        assert!(matches!(event_activity(&mut conn, &june, &officers, 1, 25), Err(OpError::NotFound)));
+        assert!(matches!(
+            event(&mut conn, &june, &officers),
+            Err(OpError::NotFound)
+        ));
+        assert!(matches!(
+            event_activity(&mut conn, &june, &officers, 1, 25),
+            Err(OpError::NotFound)
+        ));
 
         // The server manager sees everything.
         assert_eq!(titles(&mut conn, &nell).len(), 2);
         assert_eq!(channel_names(&mut conn, &nell), ["events", "elsewhere"]);
 
         // Given Raider, June sees #elsewhere too.
-        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);")
+            .unwrap();
         assert_eq!(titles(&mut conn, &june).len(), 2);
         assert!(event(&mut conn, &june, &officers).is_ok());
-        assert_eq!(event_activity(&mut conn, &june, &officers, 1, 25).unwrap().total, 1);
+        assert_eq!(
+            event_activity(&mut conn, &june, &officers, 1, 25)
+                .unwrap()
+                .total,
+            1
+        );
     }
 
     #[test]
@@ -2209,7 +2653,10 @@ mod tests {
             )
             .unwrap();
             diesel::update(crate::schema::events::table.find(id))
-                .set((crate::schema::events::status.eq(status), crate::schema::events::starts_at.eq(starts_at)))
+                .set((
+                    crate::schema::events::status.eq(status),
+                    crate::schema::events::starts_at.eq(starts_at),
+                ))
                 .execute(&mut conn)
                 .unwrap();
         };
@@ -2219,12 +2666,19 @@ mod tests {
         add("plan", EventStatus::Draft, now + Duration::days(5));
         add("queued", EventStatus::Scheduled, now + Duration::days(9));
         let titles = |conn: &mut Connection, query: dto::EventQuery| -> Vec<String> {
-            events(conn, &viewer, &dto::EventQuery { view: dto::EventView::All, ..query })
-                .unwrap()
-                .items
-                .into_iter()
-                .map(|event| event.title)
-                .collect()
+            events(
+                conn,
+                &viewer,
+                &dto::EventQuery {
+                    view: dto::EventView::All,
+                    ..query
+                },
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|event| event.title)
+            .collect()
         };
         let upcoming = dto::EventQuery {
             status: "scheduled,posted".into(),
@@ -2232,10 +2686,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(titles(&mut conn, upcoming), ["next raid", "queued"]);
-        let drafts = dto::EventQuery { status: "draft".into(), ..Default::default() };
+        let drafts = dto::EventQuery {
+            status: "draft".into(),
+            ..Default::default()
+        };
         assert_eq!(titles(&mut conn, drafts), ["plan"]);
-        let past = dto::EventQuery { when: Some(dto::EventWhen::Past), ..Default::default() };
-        assert_eq!(titles(&mut conn, past), ["last raid", "old raid"], "newest first");
+        let past = dto::EventQuery {
+            when: Some(dto::EventWhen::Past),
+            ..Default::default()
+        };
+        assert_eq!(
+            titles(&mut conn, past),
+            ["last raid", "old raid"],
+            "newest first"
+        );
         let warsaw: Tz = "Europe/Warsaw".parse().unwrap();
         let day = |at: DateTime<Utc>| at.with_timezone(&warsaw).date_naive();
         let days = dto::EventQuery {
@@ -2243,7 +2707,11 @@ mod tests {
             to_day: Some(day(now + Duration::days(5))),
             ..Default::default()
         };
-        assert_eq!(titles(&mut conn, days), ["next raid", "plan"], "both days count");
+        assert_eq!(
+            titles(&mut conn, days),
+            ["next raid", "plan"],
+            "both days count"
+        );
     }
 
     #[test]
@@ -2288,7 +2756,9 @@ mod tests {
         let public = event.public_id.to_string();
 
         let moved = event.starts_at + Duration::hours(2);
-        let local = moved.with_timezone(&chrono_tz::Europe::Warsaw).naive_local();
+        let local = moved
+            .with_timezone(&chrono_tz::Europe::Warsaw)
+            .naive_local();
         patch_event(
             &mut conn,
             &viewer,
@@ -2309,7 +2779,11 @@ mod tests {
         assert!(after.multiple_signups);
         assert_eq!(after.starts_at.timestamp(), moved.timestamp());
         let cutoff = after.cutoff_at.unwrap();
-        assert_eq!((after.starts_at - cutoff).num_minutes(), 60, "the cutoff moves with the start");
+        assert_eq!(
+            (after.starts_at - cutoff).num_minutes(),
+            60,
+            "the cutoff moves with the start"
+        );
         assert_eq!(store::options_for(&mut conn, &after).unwrap()[0].id, option);
         assert_eq!(store::signups_for(&mut conn, &after).unwrap().len(), 1);
 
@@ -2340,13 +2814,18 @@ mod tests {
             &public,
             &dto::EventPatch {
                 // A day before now, wherever the start is.
-                cutoff: Some(dto::Cutoff::Before { minutes: (moved - Utc::now()).num_minutes() + 24 * 60 }),
+                cutoff: Some(dto::Cutoff::Before {
+                    minutes: (moved - Utc::now()).num_minutes() + 24 * 60,
+                }),
                 ..Default::default()
             },
         )
         .unwrap();
         let after = store::event(&mut conn, id).unwrap().unwrap();
-        assert!(after.signups_closed, "a cutoff already past keeps them closed");
+        assert!(
+            after.signups_closed,
+            "a cutoff already past keeps them closed"
+        );
 
         // The API names roles and channels by public id, never the row key.
         let role = ids::public::roles(&mut conn, &[1]).unwrap().remove(0);
@@ -2372,18 +2851,32 @@ mod tests {
         let after = store::event(&mut conn, id).unwrap().unwrap();
         let reminders = store::reminders_for(&mut conn, &after).unwrap();
         assert_eq!(reminders.len(), 1);
-        assert_eq!((reminders[0].offset_minutes, reminders[0].message.as_str()), (120, "Bring flasks"));
+        assert_eq!(
+            (reminders[0].offset_minutes, reminders[0].message.as_str()),
+            (120, "Bring flasks")
+        );
         assert!(after.mention_everyone);
-        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(), [1]);
-        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Restrict).unwrap(), [1]);
+        assert_eq!(
+            store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(),
+            [1]
+        );
+        assert_eq!(
+            store::event_role_ids(&mut conn, &after, EventRoleKind::Restrict).unwrap(),
+            [1]
+        );
         assert_eq!(after.attendee_role_id, Some(1));
 
-        let cleared: dto::EventPatch = serde_json::from_str(r#"{"attendee_role_id":null}"#).unwrap();
+        let cleared: dto::EventPatch =
+            serde_json::from_str(r#"{"attendee_role_id":null}"#).unwrap();
         assert_eq!(cleared.attendee_role_id, Some(None));
         patch_event(&mut conn, &viewer, &public, &cleared).unwrap();
         let after = store::event(&mut conn, id).unwrap().unwrap();
         assert_eq!(after.attendee_role_id, None);
-        assert_eq!(store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(), [1], "unset fields stay");
+        assert_eq!(
+            store::event_role_ids(&mut conn, &after, EventRoleKind::Mention).unwrap(),
+            [1],
+            "unset fields stay"
+        );
 
         patch_event(
             &mut conn,
@@ -2396,7 +2889,10 @@ mod tests {
         )
         .unwrap();
         let after = store::event(&mut conn, id).unwrap().unwrap();
-        assert!(store::reminders_for(&mut conn, &after).unwrap().is_empty(), "reminders can be cleared");
+        assert!(
+            store::reminders_for(&mut conn, &after).unwrap().is_empty(),
+            "reminders can be cleared"
+        );
 
         for (place, expected) in [("  Old keep  ", "Old keep"), ("", "")] {
             patch_event(
@@ -2409,7 +2905,10 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(store::event(&mut conn, id).unwrap().unwrap().location, expected);
+            assert_eq!(
+                store::event(&mut conn, id).unwrap().unwrap().location,
+                expected
+            );
         }
 
         let updates: i64 = crate::schema::activity::table
@@ -2466,28 +2965,54 @@ mod tests {
             },
         )
         .unwrap();
-        let public = store::event(&mut conn, id).unwrap().unwrap().public_id.to_string();
+        let public = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .public_id
+            .to_string();
         let local = |at: DateTime<Utc>| at.with_timezone(&chrono_tz::Europe::Warsaw).naive_local();
 
-        let past = dto::PostAt { post_local: local(Utc::now() - Duration::hours(1)) };
-        let err = schedule_event(&mut conn, &viewer, &public, &past).unwrap_err().to_string();
+        let past = dto::PostAt {
+            post_local: local(Utc::now() - Duration::hours(1)),
+        };
+        let err = schedule_event(&mut conn, &viewer, &public, &past)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("past"), "{err}");
 
         let post_at = starts_at - Duration::days(1);
-        schedule_event(&mut conn, &viewer, &public, &dto::PostAt { post_local: local(post_at) }).unwrap();
+        schedule_event(
+            &mut conn,
+            &viewer,
+            &public,
+            &dto::PostAt {
+                post_local: local(post_at),
+            },
+        )
+        .unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
         assert_eq!(event.status, EventStatus::Scheduled);
-        assert_eq!(event.post_at.unwrap().timestamp() / 60, post_at.timestamp() / 60);
+        assert_eq!(
+            event.post_at.unwrap().timestamp() / 60,
+            post_at.timestamp() / 60
+        );
 
         unschedule_event(&mut conn, &viewer, &public).unwrap();
         let event = store::event(&mut conn, id).unwrap().unwrap();
-        assert_eq!((event.status, event.post_at), (EventStatus::Draft, None), "back to a draft");
+        assert_eq!(
+            (event.status, event.post_at),
+            (EventStatus::Draft, None),
+            "back to a draft"
+        );
 
         // Before posting, an option can go.
         let mut options = store::options_for(&mut conn, &event).unwrap();
         assert_eq!(options.len(), 1);
         let extra = OptionInput::of_type(MAYBE);
-        let keep = OptionInput { id: Some(options[0].id), ..OptionInput::of_type(options[0].type_id) };
+        let keep = OptionInput {
+            id: Some(options[0].id),
+            ..OptionInput::of_type(options[0].type_id)
+        };
         logic::save_options(&mut conn, id, 1, &[keep.clone(), extra]).unwrap();
         options = store::options_for(&mut conn, &event).unwrap();
         assert_eq!(options.len(), 2);
@@ -2495,15 +3020,32 @@ mod tests {
         assert_eq!(store::options_for(&mut conn, &event).unwrap().len(), 1);
 
         publish_event(&mut conn, &viewer, &public).unwrap();
-        assert_eq!(store::event(&mut conn, id).unwrap().unwrap().status, EventStatus::Posted);
-        let moved = dto::EventPatch { channel_id: Some(ids::public::channel(&mut conn, 2).unwrap()), ..Default::default() };
-        let err = patch_event(&mut conn, &viewer, &public, &moved).unwrap_err().to_string();
-        assert!(err.contains("stays in its channel"), "{err}");
-        let err = publish_event(&mut conn, &viewer, &public).unwrap_err().to_string();
-        assert!(err.contains("already gone out"), "{err}");
-        let err = schedule_event(&mut conn, &viewer, &public, &dto::PostAt { post_local: local(post_at) })
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Posted
+        );
+        let moved = dto::EventPatch {
+            channel_id: Some(ids::public::channel(&mut conn, 2).unwrap()),
+            ..Default::default()
+        };
+        let err = patch_event(&mut conn, &viewer, &public, &moved)
             .unwrap_err()
             .to_string();
+        assert!(err.contains("stays in its channel"), "{err}");
+        let err = publish_event(&mut conn, &viewer, &public)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already gone out"), "{err}");
+        let err = schedule_event(
+            &mut conn,
+            &viewer,
+            &public,
+            &dto::PostAt {
+                post_local: local(post_at),
+            },
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("already gone out"), "{err}");
     }
 
@@ -2540,11 +3082,19 @@ mod tests {
             },
         )
         .unwrap();
-        let public = store::event(&mut conn, id).unwrap().unwrap().public_id.to_string();
+        let public = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .public_id
+            .to_string();
         assert!(event(&mut conn, &viewer, &public).unwrap().series.is_none());
 
         let weekly = dto::EventPatch {
-            repeat: Some(dto::Repeat { cadence: "weekly".into(), count: Some(3), until: None }),
+            repeat: Some(dto::Repeat {
+                cadence: "weekly".into(),
+                count: Some(3),
+                until: None,
+            }),
             ..Default::default()
         };
         patch_event(&mut conn, &viewer, &public, &weekly).unwrap();
@@ -2555,23 +3105,36 @@ mod tests {
         assert!(series.active);
         assert_eq!(shown.status, EventStatus::Posted);
 
-        let err = patch_event(&mut conn, &viewer, &public, &weekly).unwrap_err().to_string();
+        let err = patch_event(&mut conn, &viewer, &public, &weekly)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("already belongs to a series"), "{err}");
 
         // Someone who can't manage the server doesn't get the list, and gets
         // one series only once they can edit a date in it.
-        let june = Viewer { membership_id: 2, ..viewer.clone() };
+        let june = Viewer {
+            membership_id: 2,
+            ..viewer.clone()
+        };
         assert_eq!(series_list(&mut conn, &viewer).unwrap().len(), 1);
         assert!(series_list(&mut conn, &june).is_err());
-        assert!(matches!(self::series(&mut conn, &june, &series.id), Err(OpError::NotFound)));
-        conn.batch_execute(&format!("UPDATE events SET created_by = 2 WHERE id = {id}")).unwrap();
+        assert!(matches!(
+            self::series(&mut conn, &june, &series.id),
+            Err(OpError::NotFound)
+        ));
+        conn.batch_execute(&format!("UPDATE events SET created_by = 2 WHERE id = {id}"))
+            .unwrap();
         assert!(self::series(&mut conn, &june, &series.id).is_ok());
     }
 
     #[test]
     fn only_a_server_manager_reads_the_server_wide_pages() {
         let (mut conn, nell) = world();
-        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
+        let june = Viewer {
+            membership_id: 2,
+            discord_user_id: "u2".into(),
+            ..nell.clone()
+        };
         assert!(activity(&mut conn, &nell, 1, 25).is_ok());
         assert!(routines(&mut conn, &nell).is_ok());
         assert!(activity(&mut conn, &june, 1, 25).is_err());
@@ -2581,9 +3144,19 @@ mod tests {
     /// A routine made on the web whose closed poll asks the Raiders in #elsewhere.
     fn approved_routine(conn: &mut Connection, viewer: &Viewer) -> String {
         let channels = channels(conn, viewer).unwrap();
-        let channel = |name: &str| channels.iter().find(|channel| channel.name == name).unwrap().id.clone();
+        let channel = |name: &str| {
+            channels
+                .iter()
+                .find(|channel| channel.name == name)
+                .unwrap()
+                .id
+                .clone()
+        };
         let raider = roles(conn, viewer).unwrap()[0].id.clone();
-        let step = |kind: &str| dto::RoutineStep { kind: kind.into(), ..Default::default() };
+        let step = |kind: &str| dto::RoutineStep {
+            kind: kind.into(),
+            ..Default::default()
+        };
         let draft = dto::RoutineDraft {
             channel_id: channel("events"),
             title: "Raid night".into(),
@@ -2606,7 +3179,13 @@ mod tests {
             ..Default::default()
         };
         let made = create_routine(conn, viewer, &draft).unwrap();
-        made.done.location.unwrap().rsplit('/').next().unwrap().to_string()
+        made.done
+            .location
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -2619,7 +3198,8 @@ mod tests {
         assert!(shown.approval.is_none());
 
         // The poll closes now.
-        conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'").unwrap();
+        conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'")
+            .unwrap();
         logic::maintain_routines(&mut conn, 1, Utc::now()).unwrap();
         let shown = routine(&mut conn, &viewer, &id).unwrap();
         let approval = shown.approval.expect("the poll waits for approval");
@@ -2628,16 +3208,28 @@ mod tests {
 
         let mut june = viewer.clone();
         june.membership_id = 2;
-        assert!(matches!(routine(&mut conn, &june, &id), Err(OpError::NotFound)), "not hers to answer");
+        assert!(
+            matches!(routine(&mut conn, &june, &id), Err(OpError::NotFound)),
+            "not hers to answer"
+        );
         assert!(decide_routine(&mut conn, &june, &id, &dto::Decision { day: None }).is_err());
         // A Raider may answer, so Discord's link opens the routine for her.
-        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
-        assert!(routine(&mut conn, &june, &id).unwrap().approval.unwrap().can_decide);
-        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2;").unwrap();
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);")
+            .unwrap();
+        assert!(
+            routine(&mut conn, &june, &id)
+                .unwrap()
+                .approval
+                .unwrap()
+                .can_decide
+        );
+        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2;")
+            .unwrap();
 
         decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap();
         assert!(routine(&mut conn, &viewer, &id).unwrap().approval.is_none());
-        let again = decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap_err();
+        let again =
+            decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None }).unwrap_err();
         assert_eq!(again.to_string(), "This request has already been answered.");
 
         // Saving the routine without its steps keeps them; sending two steps drops the approval.
@@ -2656,8 +3248,14 @@ mod tests {
         update_routine(&mut conn, &viewer, &id, &draft).unwrap();
         assert_eq!(routine(&mut conn, &viewer, &id).unwrap().steps.len(), 3);
         draft.steps = Some(vec![
-            dto::RoutineStep { kind: "poll".into(), ..Default::default() },
-            dto::RoutineStep { kind: "post".into(), ..Default::default() },
+            dto::RoutineStep {
+                kind: "poll".into(),
+                ..Default::default()
+            },
+            dto::RoutineStep {
+                kind: "post".into(),
+                ..Default::default()
+            },
         ]);
         update_routine(&mut conn, &viewer, &id, &draft).unwrap();
         assert_eq!(routine(&mut conn, &viewer, &id).unwrap().steps.len(), 2);
@@ -2673,16 +3271,26 @@ mod tests {
         let changed = put_settings(&mut conn, &viewer, &next).unwrap();
         assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl");
         assert!(
-            matches!(changed.jobs.as_slice(), [DiscordJob::Commands { guild_id: 1, .. }]),
+            matches!(
+                changed.jobs.as_slice(),
+                [DiscordJob::Commands { guild_id: 1, .. }]
+            ),
             "the commands are described again in Polish"
         );
 
         let same = put_settings(&mut conn, &viewer, &next).unwrap();
-        assert!(same.jobs.is_empty(), "nothing to register when the language stays");
+        assert!(
+            same.jobs.is_empty(),
+            "nothing to register when the language stays"
+        );
 
         next.language = String::new();
         put_settings(&mut conn, &viewer, &next).unwrap();
-        assert_eq!(settings(&mut conn, &viewer).unwrap().language, "pl", "an empty language keeps it");
+        assert_eq!(
+            settings(&mut conn, &viewer).unwrap().language,
+            "pl",
+            "an empty language keeps it"
+        );
 
         next.language = "de".into();
         assert!(put_settings(&mut conn, &viewer, &next).is_err());

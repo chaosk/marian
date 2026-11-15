@@ -123,7 +123,9 @@ pub(super) fn apply_series_template(
     template::set_role_by(conn, series.template_id, clean.attendee_role_by)?;
     let events = store::events_in_series(conn, series_id)?;
     for event in events {
-        if event.id == source_id || !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled) {
+        if event.id == source_id
+            || !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled)
+        {
             continue;
         }
         apply_template_to_event(conn, &event, &template, clean.attendee_role_by)?;
@@ -208,7 +210,10 @@ pub(super) fn retune_series(
         let Some(index) = event.occurrence_index else {
             continue;
         };
-        if !matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) {
+        if !matches!(
+            event.status,
+            EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed
+        ) {
             continue;
         }
         let mut start = event.starts_at;
@@ -278,10 +283,12 @@ pub(super) fn fill_series(
     if !series.active {
         return Ok(());
     }
-    if !existing
-        .iter()
-        .any(|event| matches!(event.status, EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived))
-    {
+    if !existing.iter().any(|event| {
+        matches!(
+            event.status,
+            EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
+        )
+    }) {
         return Ok(());
     }
     let anchor = series.anchor_start;

@@ -78,7 +78,10 @@ pub fn add_type(
     require_editor(conn, guild_id, actor_id)?;
     let input = clean_type(input)?;
     if let Some(existing) = store::library_type_named(conn, guild_id, &input.name)? {
-        return Err(OpError::from(crate::msg!("err-library-has", name = &existing.name)));
+        return Err(OpError::from(crate::msg!(
+            "err-library-has",
+            name = &existing.name
+        )));
     }
     let id = ensure_type(conn, guild_id, &input.name, &input.emoji, input.attending)?;
     store::library_type(conn, id)?.ok_or(OpError::NotFound)
@@ -98,7 +101,10 @@ pub fn update_type(
     let input = clean_type(input)?;
     if let Some(other) = store::library_type_named(conn, current.guild_id, &input.name)? {
         if other.id != type_id {
-            return Err(OpError::from(crate::msg!("err-library-has", name = &other.name)));
+            return Err(OpError::from(crate::msg!(
+                "err-library-has",
+                name = &other.name
+            )));
         }
     }
     store::with_tx(conn, |tx| {
@@ -118,15 +124,19 @@ pub fn update_type(
             .filter(schema::events::guild_id.eq(current.guild_id))
             .filter(schema::events::status.eq(EventStatus::Posted))
             .filter(schema::events::starts_at.gt(now - chrono::Duration::days(1)))
-            .filter(schema::events::id.eq_any(
-                schema::signup_options::table
-                    .filter(schema::signup_options::type_id.eq(type_id))
-                    .select(schema::signup_options::event_id),
-            ))
+            .filter(
+                schema::events::id.eq_any(
+                    schema::signup_options::table
+                        .filter(schema::signup_options::type_id.eq(type_id))
+                        .select(schema::signup_options::event_id),
+                ),
+            )
             .select(store::Event::as_select())
             .load::<store::Event>(tx)?
             .into_iter()
-            .filter(|event| event.starts_at + chrono::Duration::minutes(event.duration_minutes) > now)
+            .filter(|event| {
+                event.starts_at + chrono::Duration::minutes(event.duration_minutes) > now
+            })
             .collect();
         // Attending decides who gets reminders and the attendee role.
         if input.attending != current.attending {
@@ -171,15 +181,20 @@ pub fn save_preset(
     store::with_tx(conn, |tx| match preset_id {
         None => insert_preset(tx, guild_id, name, input.multiple_signups, &options),
         Some(id) => {
-            let preset = store::preset(tx, id)?.filter(|preset| preset.guild_id == guild_id).ok_or(OpError::NotFound)?;
+            let preset = store::preset(tx, id)?
+                .filter(|preset| preset.guild_id == guild_id)
+                .ok_or(OpError::NotFound)?;
             diesel::update(schema::presets::table.find(preset.id))
                 .set((
                     schema::presets::name.eq(name),
                     schema::presets::multiple_signups.eq(input.multiple_signups),
                 ))
                 .execute(tx)?;
-            diesel::delete(schema::preset_options::table.filter(schema::preset_options::preset_id.eq(preset.id)))
-                .execute(tx)?;
+            diesel::delete(
+                schema::preset_options::table
+                    .filter(schema::preset_options::preset_id.eq(preset.id)),
+            )
+            .execute(tx)?;
             insert_preset_options(tx, preset.id, &options)?;
             Ok(preset.id)
         }
@@ -206,7 +221,11 @@ fn insert_preset(
     Ok(id)
 }
 
-fn insert_preset_options(conn: &mut Connection, preset_id: i64, options: &[OptionInput]) -> Result<(), OpError> {
+fn insert_preset_options(
+    conn: &mut Connection,
+    preset_id: i64,
+    options: &[OptionInput],
+) -> Result<(), OpError> {
     let rows: Vec<NewPresetOption> = options
         .iter()
         .enumerate()
@@ -219,7 +238,9 @@ fn insert_preset_options(conn: &mut Connection, preset_id: i64, options: &[Optio
             max_guests: opt.max_guests,
         })
         .collect();
-    diesel::insert_into(schema::preset_options::table).values(&rows).execute(conn)?;
+    diesel::insert_into(schema::preset_options::table)
+        .values(&rows)
+        .execute(conn)?;
     Ok(())
 }
 
@@ -234,7 +255,11 @@ pub fn delete_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Re
 }
 
 /// Makes a preset the one new events start with.
-pub fn set_default_preset(conn: &mut Connection, preset_id: i64, actor_id: i64) -> Result<(), OpError> {
+pub fn set_default_preset(
+    conn: &mut Connection,
+    preset_id: i64,
+    actor_id: i64,
+) -> Result<(), OpError> {
     let preset = store::preset(conn, preset_id)?.ok_or(OpError::NotFound)?;
     require_editor(conn, preset.guild_id, actor_id)?;
     store::set_default_preset(conn, preset.guild_id, Some(preset.id))
@@ -267,9 +292,17 @@ pub(super) fn listed(row: ListedType) -> OptionInput {
 
 /// What a new event starts with: the default preset's types and its
 /// multiple-responses setting. A server without one gets its starting types.
-pub fn starting_options(conn: &mut Connection, guild_id: i64) -> Result<(Vec<OptionInput>, bool), OpError> {
+pub fn starting_options(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<(Vec<OptionInput>, bool), OpError> {
     let settings = store::settings(conn, guild_id)?;
-    if let Some(preset) = settings.default_preset_id.map(|id| store::preset(conn, id)).transpose()?.flatten() {
+    if let Some(preset) = settings
+        .default_preset_id
+        .map(|id| store::preset(conn, id))
+        .transpose()?
+        .flatten()
+    {
         let types = preset_types(conn, preset.id)?;
         if !types.is_empty() {
             return Ok((types, preset.multiple_signups));
@@ -277,7 +310,9 @@ pub fn starting_options(conn: &mut Connection, guild_id: i64) -> Result<(Vec<Opt
     }
     let mut types = Vec::new();
     for (name, emoji, attending) in store::STARTING_TYPES {
-        types.push(OptionInput::of_type(ensure_type(conn, guild_id, name, emoji, attending)?));
+        types.push(OptionInput::of_type(ensure_type(
+            conn, guild_id, name, emoji, attending,
+        )?));
     }
     Ok((types, false))
 }
@@ -299,7 +334,10 @@ pub fn apply_preset(
         if actor.guild_id != event.guild_id || !can_edit(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-event-not-yours")));
         }
-        if matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled) {
+        if matches!(
+            event.status,
+            EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled
+        ) {
             return Err(OpError::from(crate::msg!("err-date-closed")));
         }
         let preset = store::preset(tx, preset_id)?
@@ -344,7 +382,10 @@ pub(super) fn clean_types(
     guild_id: i64,
     input: &[OptionInput],
 ) -> Result<Vec<OptionInput>, OpError> {
-    let library: HashSet<i64> = store::list_library(conn, guild_id)?.into_iter().map(|row| row.id).collect();
+    let library: HashSet<i64> = store::list_library(conn, guild_id)?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
     let mut seen = HashSet::new();
     let mut options = Vec::new();
     for opt in input {
@@ -360,7 +401,10 @@ pub(super) fn clean_types(
             }
         }
         if !(0..=MAX_GUESTS).contains(&opt.max_guests) {
-            return Err(OpError::from(crate::msg!("err-max-guests", most = MAX_GUESTS)));
+            return Err(OpError::from(crate::msg!(
+                "err-max-guests",
+                most = MAX_GUESTS
+            )));
         }
         if let Some(role_id) = opt.role_id {
             if must_role(conn, role_id)?.guild_id != guild_id {
@@ -385,7 +429,9 @@ fn clean_type(input: &TypeInput) -> Result<TypeInput, OpError> {
     }
     let emoji = match input.emoji.trim() {
         "" => "•".to_string(),
-        emoji if emoji.chars().count() > 8 => return Err(OpError::from(crate::msg!("err-emoji-long"))),
+        emoji if emoji.chars().count() > 8 => {
+            return Err(OpError::from(crate::msg!("err-emoji-long")))
+        }
         emoji => emoji.to_string(),
     };
     Ok(TypeInput {
@@ -396,7 +442,11 @@ fn clean_type(input: &TypeInput) -> Result<TypeInput, OpError> {
 }
 
 /// Server managers, and people who may create events or hold a signup-option role.
-pub(super) fn require_editor(conn: &mut Connection, guild_id: i64, actor_id: i64) -> Result<(), OpError> {
+pub(super) fn require_editor(
+    conn: &mut Connection,
+    guild_id: i64,
+    actor_id: i64,
+) -> Result<(), OpError> {
     let actor = must_membership(conn, actor_id)?;
     if actor.guild_id != guild_id {
         return Err(OpError::NotFound);
@@ -419,7 +469,10 @@ pub(super) fn require_editor(conn: &mut Connection, guild_id: i64, actor_id: i64
 }
 
 /// Presets of a server, with their types, default first.
-pub fn presets(conn: &mut Connection, guild_id: i64) -> Result<Vec<(Preset, Vec<OptionInput>, bool)>, OpError> {
+pub fn presets(
+    conn: &mut Connection,
+    guild_id: i64,
+) -> Result<Vec<(Preset, Vec<OptionInput>, bool)>, OpError> {
     let default = store::settings(conn, guild_id)?.default_preset_id;
     let mut list = Vec::new();
     for preset in store::list_presets(conn, guild_id)? {
@@ -458,7 +511,10 @@ mod tests {
     }
 
     fn named(conn: &mut Connection, name: &str) -> i64 {
-        store::library_type_named(conn, 1, name).unwrap().unwrap().id
+        store::library_type_named(conn, 1, name)
+            .unwrap()
+            .unwrap()
+            .id
     }
 
     fn event(conn: &mut Connection, options: Vec<OptionInput>) -> i64 {
@@ -497,9 +553,18 @@ mod tests {
     #[test]
     fn a_new_server_starts_with_three_types_and_a_default_preset() {
         let mut conn = world();
-        let names: Vec<String> = store::list_library(&mut conn, 1).unwrap().into_iter().map(|kind| kind.name).collect();
+        let names: Vec<String> = store::list_library(&mut conn, 1)
+            .unwrap()
+            .into_iter()
+            .map(|kind| kind.name)
+            .collect();
         assert_eq!(names, ["Accepted", "Declined", "Tentative"]);
-        assert!(store::library_type_named(&mut conn, 1, "accepted").unwrap().unwrap().attending);
+        assert!(
+            store::library_type_named(&mut conn, 1, "accepted")
+                .unwrap()
+                .unwrap()
+                .attending
+        );
         let (types, multiple) = starting_options(&mut conn, 1).unwrap();
         assert_eq!(types.len(), 3);
         assert!(!multiple);
@@ -522,33 +587,67 @@ mod tests {
             &mut conn,
             accepted,
             1,
-            &TypeInput { name: "Going".into(), emoji: "🟢".into(), attending: true },
+            &TypeInput {
+                name: "Going".into(),
+                emoji: "🟢".into(),
+                attending: true,
+            },
         )
         .unwrap();
-        assert_eq!(posted, [id], "the posted event gets its Discord post refreshed");
+        assert_eq!(
+            posted,
+            [id],
+            "the posted event gets its Discord post refreshed"
+        );
         // One that has ended keeps its post: no Discord call for it.
         diesel::update(schema::events::table.find(id))
             .set(schema::events::starts_at.eq(Utc::now() - Duration::days(3)))
             .execute(&mut conn)
             .unwrap();
-        let again = update_type(&mut conn, accepted, 1, &TypeInput { name: "Going".into(), emoji: "🟢".into(), attending: true }).unwrap();
+        let again = update_type(
+            &mut conn,
+            accepted,
+            1,
+            &TypeInput {
+                name: "Going".into(),
+                emoji: "🟢".into(),
+                attending: true,
+            },
+        )
+        .unwrap();
         assert!(again.is_empty(), "{again:?}");
         let loaded = must_event(&mut conn, id).unwrap();
         let shown = store::options_for(&mut conn, &loaded).unwrap();
-        assert_eq!((shown[0].name.as_str(), shown[0].emoji.as_str()), ("Going", "🟢"));
+        assert_eq!(
+            (shown[0].name.as_str(), shown[0].emoji.as_str()),
+            ("Going", "🟢")
+        );
 
         let clash = update_type(
             &mut conn,
             accepted,
             1,
-            &TypeInput { name: "declined".into(), emoji: String::new(), attending: true },
+            &TypeInput {
+                name: "declined".into(),
+                emoji: String::new(),
+                attending: true,
+            },
         )
         .unwrap_err()
         .to_string();
         assert!(clash.contains("already has Declined"), "{clash}");
-        let again = add_type(&mut conn, 1, 1, &TypeInput { name: "TENTATIVE".into(), emoji: String::new(), attending: false })
-            .unwrap_err()
-            .to_string();
+        let again = add_type(
+            &mut conn,
+            1,
+            1,
+            &TypeInput {
+                name: "TENTATIVE".into(),
+                emoji: String::new(),
+                attending: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
         assert!(again.contains("already has Tentative"), "{again}");
     }
 
@@ -558,11 +657,26 @@ mod tests {
         let declined = named(&mut conn, "Declined");
         let err = delete_type(&mut conn, declined, 1).unwrap_err().to_string();
         assert_eq!(err, "Declined is still used by 1 preset.");
-        let spare = add_type(&mut conn, 1, 1, &TypeInput { name: "Bench".into(), emoji: String::new(), attending: false }).unwrap();
+        let spare = add_type(
+            &mut conn,
+            1,
+            1,
+            &TypeInput {
+                name: "Bench".into(),
+                emoji: String::new(),
+                attending: false,
+            },
+        )
+        .unwrap();
         assert_eq!(spare.emoji, "•");
         delete_type(&mut conn, spare.id, 1).unwrap();
-        let standard = store::settings(&mut conn, 1).unwrap().default_preset_id.unwrap();
-        let err = delete_preset(&mut conn, standard, 1).unwrap_err().to_string();
+        let standard = store::settings(&mut conn, 1)
+            .unwrap()
+            .default_preset_id
+            .unwrap();
+        let err = delete_preset(&mut conn, standard, 1)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("default preset"), "{err}");
     }
 
@@ -570,7 +684,13 @@ mod tests {
     fn a_preset_keeps_responses_on_the_types_it_shares() {
         let mut conn = world();
         let (accepted, declined) = (named(&mut conn, "Accepted"), named(&mut conn, "Declined"));
-        let id = event(&mut conn, vec![OptionInput::of_type(accepted), OptionInput::of_type(declined)]);
+        let id = event(
+            &mut conn,
+            vec![
+                OptionInput::of_type(accepted),
+                OptionInput::of_type(declined),
+            ],
+        );
         let loaded = must_event(&mut conn, id).unwrap();
         let shown = store::options_for(&mut conn, &loaded).unwrap();
         signup(&mut conn, id, shown[0].id, 1).unwrap();
@@ -586,7 +706,10 @@ mod tests {
                 name: "Raid".into(),
                 multiple_signups: true,
                 options: vec![
-                    OptionInput { capacity: Some(2), ..OptionInput::of_type(tank) },
+                    OptionInput {
+                        capacity: Some(2),
+                        ..OptionInput::of_type(tank)
+                    },
                     OptionInput::of_type(accepted),
                 ],
             },
@@ -595,16 +718,29 @@ mod tests {
         apply_preset(&mut conn, id, 1, raid).unwrap();
 
         let event = must_event(&mut conn, id).unwrap();
-        assert!(event.multiple_signups, "the preset brings its multiple responses");
+        assert!(
+            event.multiple_signups,
+            "the preset brings its multiple responses"
+        );
         let shown = store::options_for(&mut conn, &event).unwrap();
         let names: Vec<&str> = shown.iter().map(|opt| opt.name.as_str()).collect();
         assert_eq!(names, ["Tank", "Accepted"]);
         assert_eq!(shown[0].capacity, Some(2));
         let left = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(left.len(), 1, "Declined went, with June's response");
-        assert_eq!((left[0].option_id, left[0].membership_id), (shown[1].id, 1), "Nell is still on Accepted");
+        assert_eq!(
+            (left[0].option_id, left[0].membership_id),
+            (shown[1].id, 1),
+            "Nell is still on Accepted"
+        );
 
-        let elsewhere = store::settings(&mut conn, 2).unwrap().default_preset_id.unwrap();
-        assert!(matches!(apply_preset(&mut conn, id, 1, elsewhere), Err(OpError::NotFound)));
+        let elsewhere = store::settings(&mut conn, 2)
+            .unwrap()
+            .default_preset_id
+            .unwrap();
+        assert!(matches!(
+            apply_preset(&mut conn, id, 1, elsewhere),
+            Err(OpError::NotFound)
+        ));
     }
 }

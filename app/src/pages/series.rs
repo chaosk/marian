@@ -1,10 +1,10 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::format::{self, cadence_label, clock_of, status_label};
-use crate::widgets::{ActionButton, Finder};
-use crate::pages::lists::table_pager;
 use crate::cache::{self, when, Ready};
+use crate::format::{self, cadence_label, clock_of, status_label};
+use crate::pages::lists::table_pager;
+use crate::widgets::{ActionButton, Finder};
 use crate::{base, client, query, title, A};
 use marian_types::{Cadence, EventStatus};
 
@@ -13,22 +13,24 @@ pub fn Recurring() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
     let series = cache::listen(cache::series_list_scope(), cache::server_key);
     let q = query("q");
-    when(move || (server.get(), series.get()).ready(), move |(server, series)| {
-        let clock = clock_of(&server);
-        let base = base();
-        let needle = q.trim().to_lowercase();
-        let rows: Vec<_> = series
-            .into_iter()
-            .filter(|item| item.cadence != Cadence::Once)
-            .filter(|item| needle.is_empty() || item.title.to_lowercase().contains(&needle))
-            .collect();
-        let searchable = !rows.is_empty() || !q.is_empty();
-        let body = if rows.is_empty() && !q.is_empty() {
-            view! { <section class="empty"><h2>"No matches."</h2></section> }.into_any()
-        } else if rows.is_empty() {
-            view! { <section class="empty"><h2>"No series yet."</h2><p>"Set a repeat when you create an event."</p></section> }.into_any()
-        } else {
-            let lines = rows
+    when(
+        move || (server.get(), series.get()).ready(),
+        move |(server, series)| {
+            let clock = clock_of(&server);
+            let base = base();
+            let needle = q.trim().to_lowercase();
+            let rows: Vec<_> = series
+                .into_iter()
+                .filter(|item| item.cadence != Cadence::Once)
+                .filter(|item| needle.is_empty() || item.title.to_lowercase().contains(&needle))
+                .collect();
+            let searchable = !rows.is_empty() || !q.is_empty();
+            let body = if rows.is_empty() && !q.is_empty() {
+                view! { <section class="empty"><h2>"No matches."</h2></section> }.into_any()
+            } else if rows.is_empty() {
+                view! { <section class="empty"><h2>"No series yet."</h2><p>"Set a repeat when you create an event."</p></section> }.into_any()
+            } else {
+                let lines = rows
                 .into_iter()
                 .map(|item| {
                     let when = item
@@ -53,7 +55,7 @@ pub fn Recurring() -> impl IntoView {
                     }
                 })
                 .collect_view();
-            view! {
+                view! {
                 <div class="sheet">
                     <table>
                         <thead><tr><th>"Series"</th><th class="fit">"Next"</th><th class="fit">"Repeat"</th></tr></thead>
@@ -62,16 +64,17 @@ pub fn Recurring() -> impl IntoView {
                 </div>
             }
             .into_any()
-        };
-        title("Recurring");
-        view! {
-            <div class="page-head">
-                <div><h1>"Recurring"</h1></div>
-                {searchable.then(|| view! { <Finder q=q.clone()/> })}
-            </div>
-            {body}
-        }
-    })
+            };
+            title("Recurring");
+            view! {
+                <div class="page-head">
+                    <div><h1>"Recurring"</h1></div>
+                    {searchable.then(|| view! { <Finder q=q.clone()/> })}
+                </div>
+                {body}
+            }
+        },
+    )
 }
 
 #[component]
@@ -91,26 +94,31 @@ pub fn SeriesPage() -> impl IntoView {
             },
         )
     });
-    when(move || (server.get(), series.get(), events.get()).ready(), move |(server, series, events)| {
-        let clock = clock_of(&server);
-        let base = base();
-        let server_id = cache::server_now();
-        let length = match (series.max_occurrences, series.end_on) {
-            (Some(count), _) => format!("{count} dates"),
-            (None, Some(end)) => format!("until {}", format::format_day(clock.day(end))),
-            (None, None) => "keeps going".into(),
-        };
-        let summary = if series.active {
-            let next = series
-                .next
-                .map(|at| format!(" · next {}", clock.when(at)))
-                .unwrap_or_default();
-            format!("{} · {length}{next}", cadence_label(series.cadence.as_str()))
-        } else {
-            "Ended. Dates that hadn't gone out were skipped.".to_string()
-        };
-        let pager = table_pager(&events, "");
-        let rows = events
+    when(
+        move || (server.get(), series.get(), events.get()).ready(),
+        move |(server, series, events)| {
+            let clock = clock_of(&server);
+            let base = base();
+            let server_id = cache::server_now();
+            let length = match (series.max_occurrences, series.end_on) {
+                (Some(count), _) => format!("{count} dates"),
+                (None, Some(end)) => format!("until {}", format::format_day(clock.day(end))),
+                (None, None) => "keeps going".into(),
+            };
+            let summary = if series.active {
+                let next = series
+                    .next
+                    .map(|at| format!(" · next {}", clock.when(at)))
+                    .unwrap_or_default();
+                format!(
+                    "{} · {length}{next}",
+                    cadence_label(series.cadence.as_str())
+                )
+            } else {
+                "Ended. Dates that hadn't gone out were skipped.".to_string()
+            };
+            let pager = table_pager(&events, "");
+            let rows = events
             .items
             .clone()
             .into_iter()
@@ -137,10 +145,10 @@ pub fn SeriesPage() -> impl IntoView {
                 }
             })
             .collect_view();
-        let dates = if events.items.is_empty() {
-            view! { <p class="muted">"No dates yet."</p> }.into_any()
-        } else {
-            view! {
+            let dates = if events.items.is_empty() {
+                view! { <p class="muted">"No dates yet."</p> }.into_any()
+            } else {
+                view! {
                 <div class="sheet">
                     <table>
                         <thead><tr><th>"Date"</th><th class="fit">"Posts"</th><th class="fit">"Status"</th></tr></thead>
@@ -150,31 +158,32 @@ pub fn SeriesPage() -> impl IntoView {
                 {pager}
             }
             .into_any()
-        };
-        title(series.title.clone());
-        view! {
-            <div class="page-head series-head">
-                <div>
-                    <p class="kicker">"Series"</p>
-                    <h1>{series.title.clone()}</h1>
-                    <p class="lede">{summary}</p>
-                </div>
-                {series.active.then(|| view! {
-                    <div class="actions">
-                        <ActionButton method="POST" url=crate::api::path::series_end(&server_id, &series.id) label="End series"
-                            class="danger" confirm="End the series? Dates that haven't gone out are skipped."/>
+            };
+            title(series.title.clone());
+            view! {
+                <div class="page-head series-head">
+                    <div>
+                        <p class="kicker">"Series"</p>
+                        <h1>{series.title.clone()}</h1>
+                        <p class="lede">{summary}</p>
                     </div>
-                })}
-            </div>
-            <div class="series-page">
-                {series.active.then(|| view! { <RepeatCard series=series.clone() clock/> })}
-                <section class="panel settings-group">
-                    <h2>"Dates"</h2>
-                    {dates}
-                </section>
-            </div>
-        }
-    })
+                    {series.active.then(|| view! {
+                        <div class="actions">
+                            <ActionButton method="POST" url=crate::api::path::series_end(&server_id, &series.id) label="End series"
+                                class="danger" confirm="End the series? Dates that haven't gone out are skipped."/>
+                        </div>
+                    })}
+                </div>
+                <div class="series-page">
+                    {series.active.then(|| view! { <RepeatCard series=series.clone() clock/> })}
+                    <section class="panel settings-group">
+                        <h2>"Dates"</h2>
+                        {dates}
+                    </section>
+                </div>
+            }
+        },
+    )
 }
 
 /// How often a series repeats and when it stops, saved together.

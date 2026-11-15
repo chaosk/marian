@@ -45,7 +45,11 @@ pub fn tick(conn: &mut Connection, now: DateTime<Utc>) -> Result<TickReport, OpE
         }) {
             Ok(piece) => piece,
             Err(err) => {
-                tracing::warn!(guild_id = guild.id, "tick failed for server {}: {err}", guild.id);
+                tracing::warn!(
+                    guild_id = guild.id,
+                    "tick failed for server {}: {err}",
+                    guild.id
+                );
                 continue;
             }
         };
@@ -121,12 +125,7 @@ fn tick_guild(
                 continue;
             }
             let cached = guild_people(conn, guild_id, &mut people)?;
-            let text = reminder_text(
-                conn,
-                cached,
-                &option_groups[index],
-                &signup_groups[index],
-            )?;
+            let text = reminder_text(conn, cached, &option_groups[index], &signup_groups[index])?;
             match text {
                 Some(text) => {
                     let place = if event.thread_enabled && settings.thread_reminders {
@@ -157,11 +156,9 @@ fn tick_guild(
                         clock::human_offset(rem.offset_minutes)
                     );
                     log(conn, guild_id, Some(event.id), &note)?;
-                    report.jobs.push(DiscordJob::remind(
-                        event.id,
-                        text,
-                        rem.message.clone(),
-                    ));
+                    report
+                        .jobs
+                        .push(DiscordJob::remind(event.id, text, rem.message.clone()));
                     report.notes.push(note);
                 }
                 None => {
@@ -378,7 +375,11 @@ pub fn reminder_card(
     description.push('\n');
     description.push_str(&format!("<t:{start_unix}:F> - <t:{end_unix}:t>"));
     ReminderCard {
-        title: crate::tr!(lang, "reminder-title", start = format!("<t:{start_unix}:R>")),
+        title: crate::tr!(
+            lang,
+            "reminder-title",
+            start = format!("<t:{start_unix}:R>")
+        ),
         description,
         footer: crate::tr!(lang, "reminder-footer"),
     }
