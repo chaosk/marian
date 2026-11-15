@@ -1,8 +1,8 @@
 use chrono::Utc;
 use diesel::prelude::*;
 
-use super::access::{can_delete, can_edit};
-use super::db::{log, must_event, must_series, must_membership};
+use super::access::{can_delete, can_edit, may_pick_attendee_role};
+use super::db::{log, must_event, must_role, must_series, must_membership};
 use super::event::save_event;
 use super::model::*;
 use super::series;
@@ -124,6 +124,12 @@ pub fn duplicate_event(
         .map(|guild| guild.timezone)
         .unwrap_or_else(|| "UTC".into());
     let starts_at = crate::clock::occurrence_start(event.starts_at, 2, "weekly", crate::clock::zone(&zone)?);
+    // The copy keeps one of the server's roles only for someone who may pick it.
+    let actor = must_membership(conn, actor_id)?;
+    let attendee_role_id = match event.attendee_role_id {
+        Some(role_id) if may_pick_attendee_role(&actor, &must_role(conn, role_id)?) => Some(role_id),
+        _ => None,
+    };
     let input = EventInput {
         id: None,
         guild_id: event.guild_id,
@@ -137,7 +143,7 @@ pub fn duplicate_event(
         color: event.color.clone(),
         image_url: event.image_url.clone(),
         cutoff_at: None,
-        attendee_role_id: event.attendee_role_id,
+        attendee_role_id,
         thread_enabled: event.thread_enabled,
         multiple_signups: event.multiple_signups,
         mention_everyone: event.mention_everyone,

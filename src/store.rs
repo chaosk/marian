@@ -215,6 +215,8 @@ pub struct Role {
     pub public_id: uuid::Uuid,
     /// When the Discord role was deleted; the row stays for what names it.
     pub gone_at: Option<DateTime<Utc>>,
+    /// Marian made it, as an event's attendee role.
+    pub made_by_marian: bool,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -272,6 +274,9 @@ pub struct Event {
     pub post_attempts: i64,
     pub discord_message_id: Option<String>,
     pub location: String,
+    /// Who picked the attendee role. A role Marian didn't make is given
+    /// only while they manage the server.
+    pub attendee_role_by: Option<i64>,
 }
 
 #[derive(Debug, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -2465,6 +2470,7 @@ mod tests {
                 "20261114090000".to_string(),
                 "20261115120000".to_string(),
                 "20261115140000".to_string(),
+                "20261115150000".to_string(),
             ]
         );
     }

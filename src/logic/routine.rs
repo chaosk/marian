@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use chrono_tz::Tz;
 use diesel::prelude::*;
-use super::access::can_create;
-use super::db::{log, must_guild, must_membership, role_names};
+use super::access::{can_create, may_pick_attendee_role};
+use super::db::{log, must_guild, must_membership, must_role, role_names};
 use super::discord::mention_role_ids;
 use super::event::clean_extras;
 use super::model::{DiscordField, EventExtras, OptionInput, ReminderInput};
@@ -206,7 +206,9 @@ pub fn create_routine(
                 }
             }
         };
+        let picked_by = attendee_role_picker(tx, &actor, extras.attendee_role_id, None, None)?;
         let template_id = template::insert(tx, &with_extras(guild_id, channel_id, &title, &description, duration_minutes, extras))?;
+        template::set_role_by(tx, template_id, picked_by)?;
         let prompt = format!("Next event: {title}");
         let id = diesel::insert_into(schema::routines::table)
             .values(&NewRoutine {
@@ -287,6 +289,11 @@ pub fn save_routine(
         match extras {
             Some(extras) => {
                 let extras = clean_extras(tx, routine.guild_id, &extras)?;
+                let actor = must_membership(tx, actor_id)?;
+                let current = template::load(tx, routine.template_id)?.attendee_role_id;
+                let current_by = template::role_by(tx, routine.template_id)?;
+                let picked_by = attendee_role_picker(tx, &actor, extras.attendee_role_id, current, current_by)?;
+                template::set_role_by(tx, routine.template_id, picked_by)?;
                 template::update(
                     tx,
                     routine.template_id,
@@ -1203,11 +1210,13 @@ fn insert_event(
     now: DateTime<Utc>,
 ) -> Result<i64, OpError> {
     let template = template::load(conn, routine.template_id)?;
+    let attendee_role_by = template::role_by(conn, routine.template_id)?;
     let id = template::spawn(
         conn,
         &template,
         &Spawn {
             created_by: routine.created_by,
+            attendee_role_by,
             starts_at: start,
             post_at: Some(start),
             status: "scheduled",
@@ -1476,6 +1485,27 @@ fn check_clock(weekday: u8, minutes: u16) -> Result<(), OpError> {
         return Err(OpError::from(crate::msg!("err-weekday-time")));
     }
     Ok(())
+}
+
+/// Who picked the attendee role a routine's events will carry: whoever
+/// picked the one it keeps, or `actor` for a new one, if they may pick it.
+fn attendee_role_picker(
+    conn: &mut Connection,
+    actor: &store::Membership,
+    role_id: Option<i64>,
+    current: Option<i64>,
+    current_by: Option<i64>,
+) -> Result<Option<i64>, OpError> {
+    let Some(role_id) = role_id else {
+        return Ok(None);
+    };
+    if current == Some(role_id) {
+        return Ok(current_by);
+    }
+    if !may_pick_attendee_role(actor, &must_role(conn, role_id)?) {
+        return Err(OpError::from(crate::msg!("err-attendee-role-managers")));
+    }
+    Ok(Some(actor.id))
 }
 
 fn require_owner(conn: &mut Connection, routine: &Routine, actor_id: i64) -> Result<(), OpError> {

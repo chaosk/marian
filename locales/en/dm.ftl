@@ -61,6 +61,7 @@ dm-mention-hint = Send the numbers, separated by commas. `everyone` mentions @ev
 dm-restrict-hint = Send the numbers, separated by commas, or `none` to clear the limit.
 dm-role-hint = Send a number, or `none` for no role.
 dm-no-roles = This server has no roles yet.
+dm-no-attendee-roles = Only server managers can pick one of the server's roles for attendees.
 dm-send-numbers = Send the numbers, separated by commas.
 dm-pick-from-list = Send a number from the list.
 dm-not-in-list = That number isn't in the list.

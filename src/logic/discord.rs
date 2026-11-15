@@ -68,10 +68,22 @@ pub fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendance, Op
     let grants = store::grant_membership_ids(conn, &event)?;
     let desired_role = store::discord_ids_for_memberships(conn, &grants)?;
     let applied_role = store::applied_membership_ids(conn, event_id, "role")?;
-    let (role_add, role_remove) = id_diff(&desired_role, &applied_role);
+    let (mut role_add, role_remove) = id_diff(&desired_role, &applied_role);
     let role = event
         .attendee_role_id
         .and_then(|id| store::role(conn, id).ok().flatten());
+    // One of the server's own roles goes out only while whoever picked it
+    // manages the server. Taking it back is always fine.
+    if let Some(role) = &role {
+        if !role_add.is_empty() && !super::access::gives_attendee_role(conn, &event, role)? {
+            tracing::warn!(
+                event_id,
+                role_id = role.id,
+                "not giving the attendee role: it is the server's, and no server manager picked it"
+            );
+            role_add.clear();
+        }
+    }
     Ok(Attendance::Ready(AttendanceWork {
         title: event.title.clone(),
         guild_discord_id,

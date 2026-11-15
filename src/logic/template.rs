@@ -33,6 +33,8 @@ pub struct EventTemplate {
 
 pub struct Spawn<'a> {
     pub created_by: Option<i64>,
+    /// Who picked the template's attendee role.
+    pub attendee_role_by: Option<i64>,
     pub starts_at: DateTime<Utc>,
     pub post_at: Option<DateTime<Utc>>,
     pub status: &'a str,
@@ -168,6 +170,23 @@ pub fn update_wording(
     Ok(())
 }
 
+/// Who picked a template's attendee role.
+pub fn role_by(conn: &mut Connection, id: i64) -> Result<Option<i64>, OpError> {
+    Ok(schema::event_templates::table
+        .filter(schema::event_templates::id.eq(id))
+        .select(schema::event_templates::attendee_role_by)
+        .first(conn)
+        .optional()?
+        .flatten())
+}
+
+pub fn set_role_by(conn: &mut Connection, id: i64, by: Option<i64>) -> Result<(), OpError> {
+    diesel::update(schema::event_templates::table.filter(schema::event_templates::id.eq(id)))
+        .set(schema::event_templates::attendee_role_by.eq(by))
+        .execute(conn)?;
+    Ok(())
+}
+
 pub fn load(conn: &mut Connection, id: i64) -> Result<EventTemplate, OpError> {
     let row = StoredTemplate::query()
         .filter(schema::event_templates::id.eq(id))
@@ -263,6 +282,7 @@ struct NewSpawnedEvent<'a> {
     cutoff_at: Option<DateTime<Utc>>,
     mention_everyone: bool,
     attendee_role_id: Option<i64>,
+    attendee_role_by: Option<i64>,
     thread_enabled: bool,
     multiple_signups: bool,
     created_by: Option<i64>,
@@ -298,6 +318,7 @@ pub fn spawn(
             cutoff_at: cutoff,
             mention_everyone: template.mention_everyone,
             attendee_role_id: template.attendee_role_id,
+            attendee_role_by: spec.attendee_role_by,
             thread_enabled: template.thread_enabled,
             multiple_signups: template.multiple_signups,
             created_by: spec.created_by,

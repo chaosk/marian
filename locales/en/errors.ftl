@@ -70,6 +70,7 @@ err-color = Pick one of the event colors.
 err-image-link = Image links need to start with http:// or https://.
 err-channel-elsewhere = Pick a channel from this server.
 err-attendee-role-elsewhere = The attendee role isn't from this server.
+err-attendee-role-managers = Only server managers can make one of the server's roles the attendee role.
 err-selected-role-elsewhere = A selected role isn't from this server.
 err-cutoff-late = The signup cutoff has to be before the event starts.
 err-reminders-many = An event can have up to 5 reminders.

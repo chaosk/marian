@@ -492,7 +492,7 @@ pub fn answer_event_dm(
             just(finish_card(&draft, lang))
         }
         "restrict" => answer_restrict(conn, discord_user_id, guild_id, text, &mut draft, lang),
-        "role" => answer_attendee_role(conn, discord_user_id, guild_id, text, &mut draft, lang),
+        "role" => answer_attendee_role(conn, discord_user_id, membership_id, text, &mut draft, lang),
         "cutoff" => answer_clock_field(
             conn,
             discord_user_id,
@@ -989,11 +989,18 @@ fn answer_finish(
         }
         _ => return just(finish_card(draft, lang)),
     };
-    let roles = store::list_roles(conn, guild_id)?;
+    let roles = match step {
+        "role" => attendee_roles(conn, membership_id)?,
+        _ => store::list_roles(conn, guild_id)?,
+    };
     save_draft(conn, discord_user_id, step, draft)?;
     if roles.is_empty() {
         save_draft(conn, discord_user_id, "finish", draft)?;
-        return just(note(&finish_card(draft, lang), &tr!(lang, "dm-no-roles")));
+        let why = match step {
+            "role" => tr!(lang, "dm-no-attendee-roles"),
+            _ => tr!(lang, "dm-no-roles"),
+        };
+        return just(note(&finish_card(draft, lang), &why));
     }
     just(role_card(step, &roles, lang))
 }
@@ -1083,15 +1090,25 @@ fn answer_restrict(
     just(finish_card(draft, lang))
 }
 
+/// The roles someone may make an event's attendee role: any for a server
+/// manager, else only the ones Marian made.
+fn attendee_roles(conn: &mut Connection, membership_id: i64) -> Result<Vec<store::Role>, OpError> {
+    let actor = store::membership(conn, membership_id)?.ok_or(OpError::NotFound)?;
+    Ok(store::list_roles(conn, actor.guild_id)?
+        .into_iter()
+        .filter(|role| crate::logic::may_pick_attendee_role(&actor, role))
+        .collect())
+}
+
 fn answer_attendee_role(
     conn: &mut Connection,
     discord_user_id: &str,
-    guild_id: i64,
+    membership_id: i64,
     text: &str,
     draft: &mut EventDraft,
     lang: Lang,
 ) -> Result<Option<Vec<DmReply>>, OpError> {
-    let roles = store::list_roles(conn, guild_id)?;
+    let roles = attendee_roles(conn, membership_id)?;
     if said(text, &NONE) {
         draft.attendee_role_id = None;
     } else {

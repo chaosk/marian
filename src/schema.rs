@@ -56,6 +56,7 @@ diesel::table! {
         public_id -> Uuid,
         gone_at -> Nullable<Timestamptz>,
         permissions -> BigInt,
+        made_by_marian -> Bool,
     }
 }
 
@@ -132,6 +133,7 @@ diesel::table! {
         restrict_role_ids -> Array<BigInt>,
         created_at -> Timestamptz,
         location -> Text,
+        attendee_role_by -> Nullable<BigInt>,
     }
 }
 
@@ -182,6 +184,7 @@ diesel::table! {
         post_attempts -> BigInt,
         discord_message_id -> Nullable<Text>,
         location -> Text,
+        attendee_role_by -> Nullable<BigInt>,
     }
 }
 

@@ -42,6 +42,7 @@ pub(super) fn link_new_series(
     let settings = store::settings(conn, event.guild_id)?;
     let template = template_from(input, clean);
     let template_id = template::insert(conn, &template::from_series(event.guild_id, &template))?;
+    template::set_role_by(conn, template_id, clean.attendee_role_by)?;
     let series_id: i64 = diesel::insert_into(schema::series::table)
         .values(&NewSeries {
             public_id: crate::ids::series_id(),
@@ -118,12 +119,13 @@ pub(super) fn apply_series_template(
         series.template_id,
         &template::from_series(series.guild_id, &template),
     )?;
+    template::set_role_by(conn, series.template_id, clean.attendee_role_by)?;
     let events = store::events_in_series(conn, series_id)?;
     for event in events {
         if event.id == source_id || !matches!(event.status.as_str(), "draft" | "scheduled") {
             continue;
         }
-        apply_template_to_event(conn, &event, &template)?;
+        apply_template_to_event(conn, &event, &template, clean.attendee_role_by)?;
     }
     Ok(())
 }
@@ -132,6 +134,7 @@ fn apply_template_to_event(
     conn: &mut Connection,
     event: &Event,
     template: &SeriesTemplate,
+    attendee_role_by: Option<i64>,
 ) -> Result<(), OpError> {
     let start = event.starts_at;
     let cutoff = template
@@ -149,6 +152,7 @@ fn apply_template_to_event(
             schema::events::cutoff_at.eq(cutoff),
             schema::events::mention_everyone.eq(template.mention_everyone),
             schema::events::attendee_role_id.eq(template.attendee_role_id),
+            schema::events::attendee_role_by.eq(attendee_role_by),
             schema::events::thread_enabled.eq(template.thread_enabled),
             schema::events::multiple_signups.eq(template.multiple_signups),
             schema::events::updated_at.eq(Utc::now()),
@@ -347,11 +351,13 @@ pub(super) fn insert_occurrence(
 ) -> Result<i64, OpError> {
     let post_at = start - Duration::hours(series.post_lead_hours);
     let stored = template::from_series(series.guild_id, template);
+    let attendee_role_by = template::role_by(conn, series.template_id)?;
     template::spawn(
         conn,
         &stored,
         &Spawn {
             created_by: creator,
+            attendee_role_by,
             starts_at: start,
             post_at: Some(post_at),
             status: "scheduled",

@@ -417,9 +417,11 @@ pub fn timezones(selected: &str) -> Vec<dto::ZoneGroup> {
 }
 
 pub fn roles(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::Role>, OpError> {
+    let member = store::membership(conn, viewer.membership_id)?.ok_or(OpError::NotFound)?;
     Ok(store::list_roles(conn, viewer.guild_id)?
         .into_iter()
         .map(|role| dto::Role {
+            attendee: logic::may_pick_attendee_role(&member, &role),
             id: role.public_id.to_string(),
             name: role.name,
         })
