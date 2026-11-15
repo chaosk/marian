@@ -41,6 +41,31 @@ async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Re
     deliver(ctx, &actor, label, outcome).await
 }
 
+/// A `/settings` subcommand that takes one value and saves it as
+/// `commands::Setting::$variant`: the command `rename`d `$name` with the
+/// description `$about`, and one option `$param` described as `$param_about`.
+macro_rules! setting_command {
+    ($fn:ident, $name:tt, $about:tt, $param:ident: $ty:ident = $param_about:tt, $variant:ident) => {
+        #[poise::command(
+                    slash_command,
+                    guild_only,
+                    rename = $name,
+                    description_localized("en-US", $about)
+                )]
+        async fn $fn(
+            ctx: Context<'_>,
+            #[description = $param_about] $param: $ty,
+        ) -> Result<(), Error> {
+            setting(
+                ctx,
+                concat!("/settings ", $name),
+                commands::Setting::$variant($param),
+            )
+            .await
+        }
+    };
+}
+
 #[poise::command(
     slash_command,
     guild_only,
@@ -68,216 +93,101 @@ pub(super) async fn settings(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "reminder_interval",
-    description_localized("en-US", "Default reminder, in minutes")
-)]
-async fn settings_reminder_interval(
-    ctx: Context<'_>,
-    #[description = "Minutes before the event"] minutes: i64,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings reminder_interval",
-        commands::Setting::ReminderInterval(minutes),
-    )
-    .await
-}
+setting_command!(
+    settings_reminder_interval,
+    "reminder_interval",
+    "Default reminder, in minutes",
+    minutes: i64 = "Minutes before the event",
+    ReminderInterval
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "hour_24",
-    description_localized("en-US", "Use a 24-hour clock")
-)]
-async fn settings_hour_24(
-    ctx: Context<'_>,
-    #[description = "On uses a 24-hour clock"] enabled: bool,
-) -> Result<(), Error> {
-    setting(ctx, "/settings hour_24", commands::Setting::Hour24(enabled)).await
-}
+setting_command!(
+    settings_hour_24,
+    "hour_24",
+    "Use a 24-hour clock",
+    enabled: bool = "On uses a 24-hour clock",
+    Hour24
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "auto_archive",
-    description_localized("en-US", "Archive posted events on a timer")
-)]
-async fn settings_auto_archive(
-    ctx: Context<'_>,
-    #[description = "Archive posted events after they end"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings auto_archive",
-        commands::Setting::AutoArchive(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_auto_archive,
+    "auto_archive",
+    "Archive posted events on a timer",
+    enabled: bool = "Archive posted events after they end",
+    AutoArchive
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "auto_archive_interval",
-    description_localized("en-US", "Hours after which a posted event archives")
-)]
-async fn settings_auto_archive_interval(
-    ctx: Context<'_>,
-    #[description = "Hours after the event ends"] hours: i64,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings auto_archive_interval",
-        commands::Setting::AutoArchiveHours(hours),
-    )
-    .await
-}
+setting_command!(
+    settings_auto_archive_interval,
+    "auto_archive_interval",
+    "Hours after which a posted event archives",
+    hours: i64 = "Hours after the event ends",
+    AutoArchiveHours
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "auto_join_threads",
-    description_localized("en-US", "Join event threads for attendees")
-)]
-async fn settings_auto_join_threads(
-    ctx: Context<'_>,
-    #[description = "Add attendees to the event thread"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings auto_join_threads",
-        commands::Setting::AutoJoinThreads(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_auto_join_threads,
+    "auto_join_threads",
+    "Join event threads for attendees",
+    enabled: bool = "Add attendees to the event thread",
+    AutoJoinThreads
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "event_threads",
-    description_localized("en-US", "Open a thread for each posted event")
-)]
-async fn settings_event_threads(
-    ctx: Context<'_>,
-    #[description = "Open a thread when an event is posted"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings event_threads",
-        commands::Setting::EventThreads(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_event_threads,
+    "event_threads",
+    "Open a thread for each posted event",
+    enabled: bool = "Open a thread when an event is posted",
+    EventThreads
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "localize_time",
-    description_localized("en-US", "Show the start in each member's own zone")
-)]
-async fn settings_localize_time(
-    ctx: Context<'_>,
-    #[description = "Members see the start in their own zone"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings localize_time",
-        commands::Setting::LocalizeTime(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_localize_time,
+    "localize_time",
+    "Show the start in each member's own zone",
+    enabled: bool = "Members see the start in their own zone",
+    LocalizeTime
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "purge",
-    description_localized("en-US", "Purge other messages from event channels")
-)]
-async fn settings_purge(
-    ctx: Context<'_>,
-    #[description = "On removes other messages when an event is posted or deleted"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings purge",
-        commands::Setting::PurgeChannels(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_purge,
+    "purge",
+    "Purge other messages from event channels",
+    enabled: bool = "On removes other messages when an event is posted or deleted",
+    PurgeChannels
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "thread_reminders",
-    description_localized("en-US", "Post reminders in the event thread")
-)]
-async fn settings_thread_reminders(
-    ctx: Context<'_>,
-    #[description = "Reminders post in the event thread"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings thread_reminders",
-        commands::Setting::ThreadReminders(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_thread_reminders,
+    "thread_reminders",
+    "Post reminders in the event thread",
+    enabled: bool = "Reminders post in the event thread",
+    ThreadReminders
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "show_attendees",
-    description_localized("en-US", "List names on the Discord post")
-)]
-async fn settings_show_attendees(
-    ctx: Context<'_>,
-    #[description = "The post lists who accepted each option"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings show_attendees",
-        commands::Setting::ShowAttendees(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_show_attendees,
+    "show_attendees",
+    "List names on the Discord post",
+    enabled: bool = "The post lists who accepted each option",
+    ShowAttendees
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "temp_roles",
-    description_localized("en-US", "Give attendees a temporary role")
-)]
-async fn settings_temp_roles(
-    ctx: Context<'_>,
-    #[description = "Create an attendee role for the event"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings temp_roles",
-        commands::Setting::TempRoles(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_temp_roles,
+    "temp_roles",
+    "Give attendees a temporary role",
+    enabled: bool = "Create an attendee role for the event",
+    TempRoles
+);
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "waitlist",
-    description_localized("en-US", "Let full options take a waitlist")
-)]
-async fn settings_waitlist(
-    ctx: Context<'_>,
-    #[description = "Sign people up to a waitlist when an option is full"] enabled: bool,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings waitlist",
-        commands::Setting::Waitlist(enabled),
-    )
-    .await
-}
+setting_command!(
+    settings_waitlist,
+    "waitlist",
+    "Let full options take a waitlist",
+    enabled: bool = "Sign people up to a waitlist when an option is full",
+    Waitlist
+);
 
 #[poise::command(
     slash_command,
@@ -299,23 +209,13 @@ async fn settings_digest(
     .await
 }
 
-#[poise::command(
-    slash_command,
-    guild_only,
-    rename = "post_lead",
-    description_localized("en-US", "How early a series date is posted")
-)]
-async fn settings_post_lead(
-    ctx: Context<'_>,
-    #[description = "Hours before the start"] hours: i64,
-) -> Result<(), Error> {
-    setting(
-        ctx,
-        "/settings post_lead",
-        commands::Setting::PostLeadHours(hours),
-    )
-    .await
-}
+setting_command!(
+    settings_post_lead,
+    "post_lead",
+    "How early a series date is posted",
+    hours: i64 = "Hours before the start",
+    PostLeadHours
+);
 
 #[poise::command(
     slash_command,
