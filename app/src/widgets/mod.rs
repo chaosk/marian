@@ -16,10 +16,10 @@ pub use inline::{
     EventWhen, LeaveGuard, LocalDraft, MultipleToggle, PostButtons, ThreadToggle,
 };
 pub use routine::{
-    routine_problems, tally, template_event, PollMoment, PollTally, RoutineChannel,
-    RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime, RoutineTitle, TallyRow, UsualDays,
+    PollMoment, PollTally, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps,
+    RoutineTime, RoutineTitle, TallyRow, UsualDays, routine_problems, tally, template_event,
 };
-pub use signups::{numbered, unsaved_signups, SignupPanel};
+pub use signups::{SignupPanel, numbered, unsaved_signups};
 
 /// A newer frontend than the one this page runs is being served.
 #[derive(Clone, Copy)]
@@ -69,8 +69,8 @@ struct LiveStream {
 #[cfg(feature = "hydrate")]
 impl LiveStream {
     fn open(self: &std::rc::Rc<Self>) {
-        use wasm_bindgen::closure::Closure;
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
         if self.stopped.get() {
             return;
         }
@@ -96,10 +96,12 @@ impl LiveStream {
             move |event: web_sys::MessageEvent| {
                 let served = event.data().as_string().unwrap_or_default();
                 let mine = api::site().build;
-                if !served.is_empty() && !mine.is_empty() && served != mine {
-                    if let Some(flag) = new_build {
-                        flag.try_set(true);
-                    }
+                if !served.is_empty()
+                    && !mine.is_empty()
+                    && served != mine
+                    && let Some(flag) = new_build
+                {
+                    flag.try_set(true);
                 }
             },
         );
@@ -333,17 +335,17 @@ impl FocusBack {
         let trigger = NodeRef::<leptos::html::Button>::new();
         let wanted = RwSignal::new(name.is_some_and(returning));
         Effect::new(move |_| {
-            if let Some(button) = trigger.get() {
-                if wanted.get_untracked() {
-                    wanted.set(false);
-                    // A redrawn one only takes focus nobody else has. The page
-                    // can redraw more than once as a save settles, so the wish
-                    // stands for each of them until it runs out.
-                    if name.is_some() && !focus_lost() {
-                        return;
-                    }
-                    let _ = button.focus();
+            if let Some(button) = trigger.get()
+                && wanted.get_untracked()
+            {
+                wanted.set(false);
+                // A redrawn one only takes focus nobody else has. The page
+                // can redraw more than once as a save settles, so the wish
+                // stands for each of them until it runs out.
+                if name.is_some() && !focus_lost() {
+                    return;
                 }
+                let _ = button.focus();
             }
         });
         Self {
@@ -576,10 +578,10 @@ fn read_form(form: &web_sys::HtmlFormElement) -> Value {
             match input.type_().as_str() {
                 "checkbox" if kind == "ints" => {
                     let list = out.entry(name).or_insert_with(|| Value::Array(Vec::new()));
-                    if input.checked() {
-                        if let Value::Array(items) = list {
-                            items.push(typed(&input.value(), "int"));
-                        }
+                    if input.checked()
+                        && let Value::Array(items) = list
+                    {
+                        items.push(typed(&input.value(), "int"));
                     }
                 }
                 "checkbox" => {
@@ -1027,10 +1029,10 @@ pub fn RoleCombo(
         open.set(false);
         needle.set(String::new());
         let now = chosen.get_untracked();
-        if now != at_open.get_value() {
-            if let Some(on_change) = on_change {
-                on_change.run(now);
-            }
+        if now != at_open.get_value()
+            && let Some(on_change) = on_change
+        {
+            on_change.run(now);
         }
     };
     let toggle = move |id: String| {
@@ -1532,8 +1534,8 @@ pub(crate) fn close_on_outside_press(
     open: impl Fn() -> bool + 'static,
     close: impl Fn() + 'static,
 ) {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     let on_press = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
         if !open() {
             return;
@@ -1588,8 +1590,8 @@ pub(crate) fn close_on_outside_press(
 pub(crate) fn watch_presses() {
     use std::cell::Cell;
     use std::rc::Rc;
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
 
     // Whether the press under way was held, so its click is held too.
     let held = Rc::new(Cell::new(false));
@@ -1818,8 +1820,8 @@ fn let_go(editor: &web_sys::Element) {
 /// Shakes an editor that is waiting for Save or Cancel, and brings it into view.
 #[cfg(feature = "hydrate")]
 fn nudge(editor: &web_sys::Element) {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     let options = web_sys::ScrollIntoViewOptions::new();
     options.set_block(web_sys::ScrollLogicalPosition::Nearest);
     options.set_behavior(web_sys::ScrollBehavior::Smooth);

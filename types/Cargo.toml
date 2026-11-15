@@ -1,7 +1,7 @@
 [package]
 name = "marian-types"
 version = "0.13.0"
-edition = "2021"
+edition = "2024"
 description = "Shapes and wording Marian's server and browser share"
 license = "MIT"
 publish = false

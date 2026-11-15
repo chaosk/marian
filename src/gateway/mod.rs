@@ -27,7 +27,7 @@ use follow::{
 };
 use publish::{push_sync, tell_pages};
 use slash::{all_commands, register_commands};
-use worker::{job_loop, DRAIN};
+use worker::{DRAIN, job_loop};
 
 pub use slash::channel::open_event_channel;
 pub use worker::Saver;
@@ -413,13 +413,11 @@ async fn handle_event(
                 }
             }
             let mut replies = replies;
-            if let (Some(replies), Some(event_id)) = (replies.as_mut(), posts.first()) {
-                if let Ok(mut conn) = data.db.get().await {
-                    if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id).await
-                    {
-                        commands::link_created_event(replies, &url);
-                    }
-                }
+            if let (Some(replies), Some(event_id)) = (replies.as_mut(), posts.first())
+                && let Ok(mut conn) = data.db.get().await
+                && let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id).await
+            {
+                commands::link_created_event(replies, &url);
             }
             if let Some(replies) = replies {
                 for reply in replies {
@@ -509,11 +507,7 @@ async fn command_lang(ctx: &Context<'_>) -> Lang {
 
 fn presence_line(status: &str) -> Option<String> {
     let line: String = status.trim().chars().take(128).collect();
-    if line.is_empty() {
-        None
-    } else {
-        Some(line)
-    }
+    if line.is_empty() { None } else { Some(line) }
 }
 
 fn dm_message(reply: &commands::DmReply) -> serenity::CreateMessage {
@@ -561,7 +555,7 @@ fn clip(text: &str, max: usize) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use super::{embed_parts, presence_line, serenity, MemberView};
+    use super::{MemberView, embed_parts, presence_line, serenity};
     use crate::commands::DmReply;
 
     #[test]

@@ -10,7 +10,7 @@ use crate::logic;
 use crate::store;
 
 use super::buttons::action_button;
-use super::{clip, Error};
+use super::{Error, clip};
 use crate::values::{AccessKind, EventStatus};
 
 pub(super) async fn push_sync(
@@ -162,10 +162,10 @@ pub(super) async fn post_event(
         None
     };
     drop(conn);
-    if let Some(plan) = plan {
-        if let Err(err) = purge_event_channel(db, &http, plan).await {
-            tracing::warn!("could not purge the event channel: {err}");
-        }
+    if let Some(plan) = plan
+        && let Err(err) = purge_event_channel(db, &http, plan).await
+    {
+        tracing::warn!("could not purge the event channel: {err}");
     }
     Ok(())
 }
@@ -347,10 +347,10 @@ async fn push_poll(
             }
         }
         let mut message = serenity::CreateMessage::new().embed(embed);
-        if thread.is_none() {
-            if let Some(parent) = post.reply_to.as_deref().and_then(|id| id.parse().ok()) {
-                message = message.reference_message((channel_id, serenity::MessageId::new(parent)));
-            }
+        if thread.is_none()
+            && let Some(parent) = post.reply_to.as_deref().and_then(|id| id.parse().ok())
+        {
+            message = message.reference_message((channel_id, serenity::MessageId::new(parent)));
         }
         let message = target.send_message(&http, message).await?;
         let mut conn = db

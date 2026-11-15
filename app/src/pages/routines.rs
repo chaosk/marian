@@ -1,16 +1,16 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::cache::{self, ask, when, Ready};
+use crate::cache::{self, Ready, ask, when};
 use crate::format::{self, clock_of};
 use crate::pages::event::role_cells;
 use crate::widgets::{
-    numbered, routine_problems, tally, template_event, unsaved_signups, ActionButton, EventColor,
-    EventCutoff, EventLocation, EventReminders, LeaveGuard, LocalDraft, MultipleToggle, PollMoment,
-    PollTally, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps, RoutineTime,
-    RoutineTitle, SignupPanel, TallyRow, ThreadToggle, UsualDays,
+    ActionButton, EventColor, EventCutoff, EventLocation, EventReminders, LeaveGuard, LocalDraft,
+    MultipleToggle, PollMoment, PollTally, RoutineChannel, RoutineDescription, RoutineEdit,
+    RoutineSteps, RoutineTime, RoutineTitle, SignupPanel, TallyRow, ThreadToggle, UsualDays,
+    numbered, routine_problems, tally, template_event, unsaved_signups,
 };
-use crate::{base, client, title, A};
+use crate::{A, base, client, title};
 
 #[component]
 pub fn Routines() -> impl IntoView {
@@ -274,7 +274,10 @@ fn after_poll(
 
 /// A closed poll waiting for its day to be confirmed, with the answers for
 /// whoever may give them.
-fn approval_panel(routine: &dto::RoutineView, approval: dto::ApprovalView) -> impl IntoView {
+fn approval_panel(
+    routine: &dto::RoutineView,
+    approval: dto::ApprovalView,
+) -> impl IntoView + use<> {
     let server = cache::server_now();
     let url = crate::api::path::routine_decide(&server, &routine.id);
     let winner = approval

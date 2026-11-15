@@ -217,8 +217,8 @@ fn next_toast() -> u64 {
 pub(crate) fn later(ms: i32, work: impl FnOnce() + 'static) {
     #[cfg(feature = "hydrate")]
     {
-        use wasm_bindgen::prelude::Closure;
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::prelude::Closure;
         let cb = Closure::once_into_js(work);
         let _ = leptos::prelude::window()
             .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ms);

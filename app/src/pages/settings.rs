@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::cache::{self, ask, Ready};
+use crate::cache::{self, Ready, ask};
 use crate::head;
 use crate::widgets::{JsonForm, RolePicker, SaveState, ZonePicker};
 
@@ -39,9 +39,21 @@ const POST_TOGGLES: &[Toggle] = &[
 ];
 
 const THREAD_TOGGLES: &[Toggle] = &[
-    ("event_threads", "Threads on new events", "A new event opens a Discord thread."),
-    ("thread_reminders", "Reminders in the thread", "Reminders post in the event thread instead of the channel."),
-    ("auto_join_threads", "Pull attendees into the thread", "Off, reminders mention attendees in the thread, which brings them in. On, Marian also adds people on an attending option right away and removes them when they leave it."),
+    (
+        "event_threads",
+        "Threads on new events",
+        "A new event opens a Discord thread.",
+    ),
+    (
+        "thread_reminders",
+        "Reminders in the thread",
+        "Reminders post in the event thread instead of the channel.",
+    ),
+    (
+        "auto_join_threads",
+        "Pull attendees into the thread",
+        "Off, reminders mention attendees in the thread, which brings them in. On, Marian also adds people on an attending option right away and removes them when they leave it.",
+    ),
 ];
 
 /// A permission: its field, title, note, and what choosing no role means.
@@ -188,10 +200,10 @@ fn focus_setting(name: String) {
         let selector = format!(
             ".settings-page [data-setting=\"{name}\"] :is(input:not([type=hidden]):not(:disabled), select, button)"
         );
-        if let Ok(Some(control)) = document().query_selector(&selector) {
-            if let Ok(control) = control.dyn_into::<leptos::web_sys::HtmlElement>() {
-                let _ = control.focus();
-            }
+        if let Ok(Some(control)) = document().query_selector(&selector)
+            && let Ok(control) = control.dyn_into::<leptos::web_sys::HtmlElement>()
+        {
+            let _ = control.focus();
         }
     });
 }
@@ -271,7 +283,11 @@ fn settings_rows(
         "Archive automatically",
         "Marian archives a posted event once it has ended and the time below has passed.",
     ));
-    let waitlist_switch = switch(&("waitlist", "Waitlist", "When an option is full, people can still sign up and wait. As spots open, the first in line takes them."));
+    let waitlist_switch = switch(&(
+        "waitlist",
+        "Waitlist",
+        "When an option is full, people can still sign up and wait. As spots open, the first in line takes them.",
+    ));
     let role_switch = switch(&(
         "temp_roles",
         "Temporary attendee role",

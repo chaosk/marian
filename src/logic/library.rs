@@ -14,7 +14,7 @@ use diesel_async::RunQueryDsl;
 use super::access::{can_create, can_edit, holds_any};
 use super::db::{log, must_event, must_membership, must_role};
 use super::event::sync_options;
-use super::model::{OptionInput, PresetInput, TypeInput, MAX_GUESTS};
+use super::model::{MAX_GUESTS, OptionInput, PresetInput, TypeInput};
 use super::signup::{fill_all, sync_access};
 use crate::error::OpError;
 use crate::schema;
@@ -104,13 +104,13 @@ pub async fn update_type(
         .ok_or(OpError::NotFound)?;
     require_editor(conn, current.guild_id, actor_id).await?;
     let input = clean_type(input)?;
-    if let Some(other) = store::library_type_named(conn, current.guild_id, &input.name).await? {
-        if other.id != type_id {
-            return Err(OpError::from(crate::msg!(
-                "err-library-has",
-                name = &other.name
-            )));
-        }
+    if let Some(other) = store::library_type_named(conn, current.guild_id, &input.name).await?
+        && other.id != type_id
+    {
+        return Err(OpError::from(crate::msg!(
+            "err-library-has",
+            name = &other.name
+        )));
     }
     store::with_tx(conn, async |tx| {
         diesel::update(schema::option_library::table.find(type_id))
@@ -440,10 +440,10 @@ pub(super) async fn clean_types(
         if !seen.insert(opt.type_id) {
             return Err(OpError::from(crate::msg!("err-type-twice")));
         }
-        if let Some(cap) = opt.capacity {
-            if !(1..=500).contains(&cap) {
-                return Err(OpError::from(crate::msg!("err-capacity")));
-            }
+        if let Some(cap) = opt.capacity
+            && !(1..=500).contains(&cap)
+        {
+            return Err(OpError::from(crate::msg!("err-capacity")));
         }
         if !(0..=MAX_GUESTS).contains(&opt.max_guests) {
             return Err(OpError::from(crate::msg!(
@@ -451,10 +451,10 @@ pub(super) async fn clean_types(
                 most = MAX_GUESTS
             )));
         }
-        if let Some(role_id) = opt.role_id {
-            if must_role(conn, role_id).await?.guild_id != guild_id {
-                return Err(OpError::from(crate::msg!("err-type-role-elsewhere")));
-            }
+        if let Some(role_id) = opt.role_id
+            && must_role(conn, role_id).await?.guild_id != guild_id
+        {
+            return Err(OpError::from(crate::msg!("err-type-role-elsewhere")));
         }
         options.push(opt.clone());
     }
@@ -475,7 +475,7 @@ fn clean_type(input: &TypeInput) -> Result<TypeInput, OpError> {
     let emoji = match input.emoji.trim() {
         "" => "•".to_string(),
         emoji if emoji.chars().count() > 8 => {
-            return Err(OpError::from(crate::msg!("err-emoji-long")))
+            return Err(OpError::from(crate::msg!("err-emoji-long")));
         }
         emoji => emoji.to_string(),
     };
@@ -532,7 +532,7 @@ pub async fn presets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::{save_event, signup, EventInput, SaveAction};
+    use crate::logic::{EventInput, SaveAction, save_event, signup};
     use chrono::Duration;
     use diesel_async::SimpleAsyncConnection;
 

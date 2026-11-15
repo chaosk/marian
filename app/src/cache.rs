@@ -5,8 +5,8 @@ use std::hash::Hash;
 use leptos::prelude::*;
 use leptos_fetch::{QueryClient, QueryScope};
 use marian_types as dto;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::api::{self, Failure};
 
@@ -527,8 +527,8 @@ async fn get_pending(server: String) -> Result<Vec<dto::PendingReminder>, Failur
 }
 
 /// One event's activity: the server, the event, and the page.
-pub fn event_activity_scope(
-) -> QueryScope<(String, String, u32), Result<dto::Paged<dto::Activity>, Failure>> {
+pub fn event_activity_scope()
+-> QueryScope<(String, String, u32), Result<dto::Paged<dto::Activity>, Failure>> {
     QueryScope::new(get_event_activity).with_invalidation_link(|(s, id, _)| {
         [
             "s".into(),

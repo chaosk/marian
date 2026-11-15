@@ -248,8 +248,8 @@ fn escape_char(c: char) -> String {
 /// on a link inside a closed spoiler only opens it, as in Discord.
 #[cfg(feature = "hydrate")]
 pub fn reveal_spoilers() {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     thread_local! {
         static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }

@@ -1,11 +1,11 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::format::{self, cadence_label, clock_of, status_label};
 use crate::pages::lists::table_pager;
 use crate::widgets::{ActionButton, Finder};
-use crate::{base, client, query, title, A};
+use crate::{A, base, client, query, title};
 use marian_types::{Cadence, EventStatus};
 
 #[component]

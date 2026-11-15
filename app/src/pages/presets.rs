@@ -7,9 +7,9 @@ use leptos::prelude::*;
 use marian_types as dto;
 
 use crate::api::path;
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::widgets::{ActionButton, Choice, InlineConfirm};
-use crate::{api, base, client, head, A};
+use crate::{A, api, base, client, head};
 
 #[component]
 pub fn Presets() -> impl IntoView {
@@ -251,13 +251,13 @@ impl Rows {
 
     /// Moves row `from` to where `to` is.
     fn move_to(self, from: &str, to: usize) {
-        if let Some(at) = self.at(from) {
-            if at != to {
-                self.types.update(|list| {
-                    let row = list.remove(at);
-                    list.insert(to.min(list.len()), row);
-                });
-            }
+        if let Some(at) = self.at(from)
+            && at != to
+        {
+            self.types.update(|list| {
+                let row = list.remove(at);
+                list.insert(to.min(list.len()), row);
+            });
         }
     }
 

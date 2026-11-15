@@ -195,9 +195,11 @@ mod tests {
         assert_eq!(fold_escape("one\r\ntwo\nthree"), "one\\ntwo\\nthree");
         assert_eq!(fold_escape("bell\u{7}\ttab"), "bell\ttab");
         assert_eq!(fold_escape("a,b;c\\d"), "a\\,b\\;c\\\\d");
-        assert!(!fold_escape("x\ry\u{b}z\u{85}")
-            .chars()
-            .any(char::is_control));
+        assert!(
+            !fold_escape("x\ry\u{b}z\u{85}")
+                .chars()
+                .any(char::is_control)
+        );
     }
 
     #[tokio::test]

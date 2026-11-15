@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::Json;
+use axum::Router;
 use axum::extract::{ConnectInfo, Form, MatchedPath, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use chrono::Utc;
 use diesel_async::RunQueryDsl;
 use tokio::sync::mpsc::UnboundedSender;
@@ -322,7 +322,7 @@ async fn lead(state: AppState, token: String, status: String, term: Term) {
     }
 }
 
-use crate::api::{cookie, Viewer as Session};
+use crate::api::{Viewer as Session, cookie};
 use crate::leader::Term;
 
 /// Runs Marian: the web service with `pages` for everything else, on every
@@ -633,12 +633,10 @@ async fn mark_page_trace(mut request: Request, next: Next) -> Response {
     let page = request.method() == axum::http::Method::GET
         && !path.starts_with("/api/")
         && !path.starts_with("/pkg/");
-    if page {
-        if let Some(trace) = crate::observe::traceparent() {
-            request
-                .extensions_mut()
-                .insert(crate::observe::PageTrace(trace));
-        }
+    if page && let Some(trace) = crate::observe::traceparent() {
+        request
+            .extensions_mut()
+            .insert(crate::observe::PageTrace(trace));
     }
     next.run(request).await
 }
@@ -932,11 +930,7 @@ async fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[Stri
 fn server_in_path(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/servers/")?;
     let id = rest.split('/').next()?;
-    if snowflake(id) {
-        Some(id)
-    } else {
-        None
-    }
+    if snowflake(id) { Some(id) } else { None }
 }
 
 fn snowflake(id: &str) -> bool {
@@ -2026,10 +2020,10 @@ fn collect_ids(text: &str, ids: &mut Vec<i64>) {
                 continue;
             }
             let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            if let Ok(id) = digits.parse::<i64>() {
-                if id > 0 {
-                    ids.push(id);
-                }
+            if let Ok(id) = digits.parse::<i64>()
+                && id > 0
+            {
+                ids.push(id);
             }
         }
     }

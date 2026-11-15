@@ -4,8 +4,8 @@
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
 use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::Instrument;
@@ -14,9 +14,9 @@ use crate::jobs::DiscordJob;
 use crate::leader::Term;
 use crate::store;
 
+use super::Error;
 use super::publish::{push_attendance, push_remind, push_routine, push_sync};
 use super::slash::register_commands;
-use super::Error;
 
 /// Saves the job queue to the `discord_jobs` table, on every replica: the web
 /// adds jobs wherever it runs, and the bot's handlers where it leads.
@@ -388,7 +388,7 @@ async fn push_commands(
 mod tests {
     #[test]
     fn every_job_kind_gets_a_zero_count_at_startup() {
-        use super::{job_kind, DiscordJob, JobMetrics, JOB_KINDS, JOB_OUTCOMES};
+        use super::{DiscordJob, JOB_KINDS, JOB_OUTCOMES, JobMetrics, job_kind};
         use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
         use opentelemetry_sdk::metrics::{
             InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,

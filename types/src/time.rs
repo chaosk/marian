@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
-use chrono_tz::{Tz, TZ_VARIANTS};
+use chrono_tz::{TZ_VARIANTS, Tz};
 use serde::{Deserialize, Serialize};
 
 /// The moment a wall-clock time in `tz` names. When clocks go back and the

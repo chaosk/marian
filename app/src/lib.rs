@@ -3,7 +3,7 @@
 #![recursion_limit = "256"]
 
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, HashedStylesheet, Link, Meta, MetaTags, Title};
+use leptos_meta::{HashedStylesheet, Link, Meta, MetaTags, Title, provide_meta_context};
 use leptos_router::components::{ParentRoute, Route, Router, Routes};
 use leptos_router::hooks::{use_params_map, use_query_map};
 use leptos_router::path;
@@ -247,7 +247,7 @@ pub(crate) fn paint(class: &'static str, color: String) -> impl IntoView {
     }
 }
 
-fn md(source: &str) -> impl IntoView {
+fn md(source: &str) -> impl IntoView + use<> {
     view! { <div class="md" inner_html=markdown::render(source)></div> }
 }
 

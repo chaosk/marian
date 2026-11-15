@@ -398,11 +398,10 @@ fn OptionCard(panel: Panel, id: String) -> impl IntoView {
             on:dragend=end_drag
         >
             {move || {
-                if panel.editing.get() == Edit::Old(id.get_value()) {
-                    if let Some(opt) = opt.get_untracked() {
+                if panel.editing.get() == Edit::Old(id.get_value())
+                    && let Some(opt) = opt.get_untracked() {
                         return edit_form(panel, opt).into_any();
                     }
-                }
                 let tools = manage().then(|| view! {
                     <button type="button" class="drag-handle" title="Drag to reorder" aria-label="Move this option"
                         on:pointerdown=move |_| panel.grab.set(Some(id.get_value()))
@@ -546,10 +545,10 @@ fn guest_setter(panel: Panel, option: String, member: String) -> impl Fn(i64) + 
         );
         let server = server.clone();
         client::spawn(async move {
-            if let Err(failure) = api::send::<dto::Done, ()>("PUT", &url, None).await {
-                if let Some(list) = toasts {
-                    client::push_error(list, failure.message);
-                }
+            if let Err(failure) = api::send::<dto::Done, ()>("PUT", &url, None).await
+                && let Some(list) = toasts
+            {
+                client::push_error(list, failure.message);
             }
             cache::refresh_in(queries, &server);
         });

@@ -105,16 +105,17 @@ async fn signup_tx(
             )));
         }
     }
-    if let Some(role_id) = option.role_id {
-        if !user.server_manager && !store::membership_has_role(conn, user.id, role_id).await? {
-            let role = must_role(conn, role_id).await?;
-            return Err(OpError::from(crate::msg!(
-                "err-option-limited",
-                name = &user.name,
-                option = &option.name,
-                role = &role.name,
-            )));
-        }
+    if let Some(role_id) = option.role_id
+        && !user.server_manager
+        && !store::membership_has_role(conn, user.id, role_id).await?
+    {
+        let role = must_role(conn, role_id).await?;
+        return Err(OpError::from(crate::msg!(
+            "err-option-limited",
+            name = &user.name,
+            option = &option.name,
+            role = &role.name,
+        )));
     }
     let guests = guests.unwrap_or(0);
     check_guests(&option, guests)?;
@@ -193,27 +194,27 @@ async fn set_guests(
     let size = 1 + guests;
     let mut state = existing.state;
     let mut created_at = existing.created_at;
-    if guests > existing.guests {
-        if let Some(cap) = option.capacity {
-            if size > cap {
-                return Err(too_big(option, cap, size));
-            }
-            if state == SignupState::Confirmed {
-                let others = places_used(conn, option.id).await? - (1 + existing.guests);
-                if others + size > cap {
-                    if !store::settings(conn, event.guild_id).await?.waitlist {
-                        return Err(OpError::from(crate::msg!(
-                            "err-party-too-big",
-                            option = &option.name,
-                            left = cap - others - 1,
-                        )));
-                    }
-                    state = SignupState::Waitlisted;
-                    created_at = now;
+    if guests > existing.guests
+        && let Some(cap) = option.capacity
+    {
+        if size > cap {
+            return Err(too_big(option, cap, size));
+        }
+        if state == SignupState::Confirmed {
+            let others = places_used(conn, option.id).await? - (1 + existing.guests);
+            if others + size > cap {
+                if !store::settings(conn, event.guild_id).await?.waitlist {
+                    return Err(OpError::from(crate::msg!(
+                        "err-party-too-big",
+                        option = &option.name,
+                        left = cap - others - 1,
+                    )));
                 }
-            } else {
+                state = SignupState::Waitlisted;
                 created_at = now;
             }
+        } else {
+            created_at = now;
         }
     }
     diesel::update(schema::signups::table.filter(schema::signups::id.eq(existing.id)))

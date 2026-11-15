@@ -4,7 +4,7 @@ use crate::commands;
 use crate::i18n::{self, Lang};
 use crate::tr;
 
-use super::{deliver, remember_actor, Actor};
+use super::{Actor, deliver, remember_actor};
 use crate::gateway::{Context, Error};
 
 async fn setting(ctx: Context<'_>, label: &str, change: commands::Setting) -> Result<(), Error> {

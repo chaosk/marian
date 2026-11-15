@@ -1,9 +1,9 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use crate::cache::{self, show, when, Ready};
+use crate::cache::{self, Ready, show, when};
 use crate::format::{self, clock_of, spot_count, status_label};
-use crate::{base, md, title, A};
+use crate::{A, base, md, title};
 use marian_types::EventStatus;
 
 #[component]
@@ -103,7 +103,7 @@ fn week_cell(
     server: &dto::Server,
     week: dto::Paged<dto::EventSummary>,
     now: chrono::DateTime<chrono::Utc>,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     let clock = clock_of(server);
     let base = base();
     let hero = week
@@ -188,7 +188,7 @@ fn wrapped_cell(
     server: &dto::Server,
     wrapped: dto::Paged<dto::EventSummary>,
     _now: chrono::DateTime<chrono::Utc>,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     let clock = clock_of(server);
     let base = base();
     (!wrapped.items.is_empty()).then(|| {
@@ -255,7 +255,7 @@ fn card(
     clock: &format::Clock,
     now: chrono::DateTime<chrono::Utc>,
     event: dto::EventSummary,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     let pills = event
         .spots
         .iter()
@@ -290,7 +290,7 @@ fn links(
     items: &[dto::EventSummary],
     clock: &format::Clock,
     post: bool,
-) -> impl IntoView {
+) -> impl IntoView + use<> {
     if items.is_empty() {
         return view! { <p class="muted">"Nothing is queued."</p> }.into_any();
     }

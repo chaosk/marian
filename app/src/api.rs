@@ -34,9 +34,9 @@ impl Failure {
 pub(crate) mod local {
     use axum::http::request::Parts;
     use leptos::prelude::use_context;
+    use marian::OpError;
     use marian::api::{self, Viewer, Web};
     use marian::store::Connection;
-    use marian::OpError;
 
     use super::Failure;
 
@@ -146,8 +146,8 @@ pub(crate) mod local {
 
 #[cfg(not(feature = "ssr"))]
 pub(crate) mod remote {
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
 
     use super::Failure;
 
@@ -190,8 +190,8 @@ pub(crate) mod remote {
     async fn pause(ms: i32) {
         #[cfg(feature = "hydrate")]
         {
-            use wasm_bindgen::prelude::Closure;
             use wasm_bindgen::JsCast;
+            use wasm_bindgen::prelude::Closure;
             let promise = js_sys::Promise::new(&mut |resolve, _| {
                 let cb = Closure::once_into_js(move || {
                     let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
@@ -235,10 +235,10 @@ pub(crate) mod remote {
                 return response.json::<T>().await.map_err(|_| offline());
             }
             let problem = response.json::<marian_types::Problem>().await.ok();
-            if status == 401 {
-                if let Some(to) = problem.as_ref().and_then(|p| p.redirect.clone()) {
-                    let _ = leptos::prelude::window().location().assign(&to);
-                }
+            if status == 401
+                && let Some(to) = problem.as_ref().and_then(|p| p.redirect.clone())
+            {
+                let _ = leptos::prelude::window().location().assign(&to);
             }
             Err(Failure {
                 status,
@@ -325,18 +325,18 @@ fn site_from_document() -> Site {
 /// The notice a sign-in or sign-out left, cleared once read.
 pub fn take_notice() -> String {
     #[cfg(feature = "ssr")]
-    if let Some((_, parts)) = local::web() {
-        if let Some(raw) = marian::api::cookie(&parts.headers, "marian_notice") {
-            if let Some(response) = leptos::prelude::use_context::<leptos_axum::ResponseOptions>() {
-                response.append_header(
-                    axum::http::header::SET_COOKIE,
-                    axum::http::HeaderValue::from_static(
-                        "marian_notice=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
-                    ),
-                );
-            }
-            return marian::api::percent_decode(&raw);
+    if let Some((_, parts)) = local::web()
+        && let Some(raw) = marian::api::cookie(&parts.headers, "marian_notice")
+    {
+        if let Some(response) = leptos::prelude::use_context::<leptos_axum::ResponseOptions>() {
+            response.append_header(
+                axum::http::header::SET_COOKIE,
+                axum::http::HeaderValue::from_static(
+                    "marian_notice=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+                ),
+            );
         }
+        return marian::api::percent_decode(&raw);
     }
     #[cfg(feature = "hydrate")]
     {

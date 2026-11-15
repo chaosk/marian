@@ -83,7 +83,7 @@ impl Target {
                         other => {
                             return Err(format!(
                                 "sslmode={other} isn't one of disable, allow, prefer, require, verify-ca or verify-full."
-                            ))
+                            ));
                         }
                     }
                 }
@@ -91,7 +91,7 @@ impl Target {
                 "sslcert" | "sslkey" | "sslpassword" | "sslcrl" | "sslcrldir" => {
                     return Err(format!(
                         "{key} isn't supported: Marian doesn't send client certificates or read CRLs."
-                    ))
+                    ));
                 }
                 _ => kept.push(pair),
             }
@@ -160,15 +160,14 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if let Some(byte) = value
+        if bytes[i] == b'%'
+            && let Some(byte) = value
                 .get(i + 1..i + 3)
                 .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-            {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -438,10 +437,12 @@ mod tests {
         );
         assert!(mode(&format!("{base}?sslmode=sometimes")).is_err());
         assert!(mode(&format!("{base}?sslmode=require&sslcert=/tmp/me.crt")).is_err());
-        assert!(mode(&format!(
-            "{base}?sslmode=verify-ca&sslrootcert=/no/such/file"
-        ))
-        .is_err());
+        assert!(
+            mode(&format!(
+                "{base}?sslmode=verify-ca&sslrootcert=/no/such/file"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

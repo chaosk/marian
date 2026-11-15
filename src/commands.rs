@@ -31,12 +31,12 @@ async fn find_event(
     sight: &logic::Sight,
     token: &str,
 ) -> Result<Event, OpError> {
-    if crate::ids::parse_event_id(token).is_some() {
-        if let Some(event) = store::event_by_public(conn, token).await? {
-            if event.guild_id == guild_id && sight.sees_event(&event) {
-                return Ok(event);
-            }
-        }
+    if crate::ids::parse_event_id(token).is_some()
+        && let Some(event) = store::event_by_public(conn, token).await?
+        && event.guild_id == guild_id
+        && sight.sees_event(&event)
+    {
+        return Ok(event);
     }
     Err(OpError::from(crate::msg!("err-event-elsewhere")))
 }
@@ -1072,7 +1072,7 @@ async fn answer_finish(
                 public_url,
                 lang,
             )
-            .await
+            .await;
         }
         "2" => {
             save_draft(conn, discord_user_id, PromptStep::Signup, draft).await?;
@@ -1277,15 +1277,14 @@ async fn answer_clock_field(
             &tr!(lang, "dm-time-unreadable"),
         ));
     } else if cutoff {
-        if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz)) {
-            if let Some(when) = parse::parse_when(text, Utc::now(), tz) {
-                if when >= start {
-                    return just(note(
-                        &clock_card(cutoff, lang),
-                        &tr!(lang, "err-signups-close-late"),
-                    ));
-                }
-            }
+        if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz))
+            && let Some(when) = parse::parse_when(text, Utc::now(), tz)
+            && when >= start
+        {
+            return just(note(
+                &clock_card(cutoff, lang),
+                &tr!(lang, "err-signups-close-late"),
+            ));
         }
         draft.cutoff_raw = Some(text.to_string());
     } else {
@@ -2031,7 +2030,7 @@ pub async fn apply_setting(
                     return Err(OpError::from(crate::msg!(
                         "err-unknown-role-setting",
                         name = other
-                    )))
+                    )));
                 }
             }
             "role"
@@ -2441,11 +2440,13 @@ mod tests {
             .into_iter()
             .find(|opt| opt.name == "Healer")
             .unwrap();
-        assert!(store::signups_for(&mut conn, &event)
-            .await
-            .unwrap()
-            .iter()
-            .any(|s| s.option_id == healer.id && s.membership_id == 2));
+        assert!(
+            store::signups_for(&mut conn, &event)
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.option_id == healer.id && s.membership_id == 2)
+        );
         // A typed name still works.
         roster_action(&mut conn, 1, &token, 2, "tank", "add", None, Lang::En)
             .await
@@ -2675,9 +2676,10 @@ mod tests {
             "the web link is a button: {}",
             view.body
         );
-        assert!(view
-            .body
-            .contains("[+](http://www.google.com/calendar/event"),);
+        assert!(
+            view.body
+                .contains("[+](http://www.google.com/calendar/event"),
+        );
         assert_eq!(view.footer, "Created by Nell");
         assert!(
             view.fields

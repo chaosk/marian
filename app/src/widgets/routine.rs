@@ -4,8 +4,8 @@
 use leptos::prelude::*;
 use marian_types as dto;
 
-use super::inline::{escape, focus_when_shown, pencil, LocalDraft};
 use super::RoleCombo;
+use super::inline::{LocalDraft, escape, focus_when_shown, pencil};
 use crate::format::{human_duration, weekday_name};
 use crate::{api, cache, client};
 use marian_types::EventStatus;

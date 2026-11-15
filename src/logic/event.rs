@@ -52,19 +52,19 @@ pub async fn save_event(conn: &mut Connection, input: EventInput) -> Result<i64,
             link_new_series(tx, &event, &input, &clean, now).await?;
         }
         let event = must_event(tx, id).await?;
-        if input.apply_series {
-            if let Some(series_id) = event.series_id {
-                apply_series_template(tx, series_id, id, &input, &clean).await?;
-            }
+        if input.apply_series
+            && let Some(series_id) = event.series_id
+        {
+            apply_series_template(tx, series_id, id, &input, &clean).await?;
         }
         let event = must_event(tx, id).await?;
-        if let Some(series_id) = event.series_id {
-            if matches!(
+        if let Some(series_id) = event.series_id
+            && matches!(
                 event.status,
                 EventStatus::Posted | EventStatus::Scheduled | EventStatus::Archived
-            ) {
-                ensure_series(tx, series_id, now).await?;
-            }
+            )
+        {
+            ensure_series(tx, series_id, now).await?;
         }
         if event.status == EventStatus::Posted {
             fill_all(tx, &event).await?;
@@ -167,10 +167,10 @@ async fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInp
             return Err(OpError::from(crate::msg!("err-selected-role-elsewhere")));
         }
     }
-    if let Some(cutoff) = input.cutoff_at {
-        if cutoff > input.starts_at {
-            return Err(OpError::from(crate::msg!("err-cutoff-late")));
-        }
+    if let Some(cutoff) = input.cutoff_at
+        && cutoff > input.starts_at
+    {
+        return Err(OpError::from(crate::msg!("err-cutoff-late")));
     }
 
     let options = clean_types(conn, input.guild_id, &input.options).await?;
@@ -199,15 +199,15 @@ async fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInp
         if repeat.cadence == Cadence::Once {
             return Err(OpError::from(crate::msg!("err-repeat-values")));
         }
-        if let Some(max) = repeat.max_occurrences {
-            if max < 2 {
-                return Err(OpError::from(crate::msg!("err-series-two-dates")));
-            }
+        if let Some(max) = repeat.max_occurrences
+            && max < 2
+        {
+            return Err(OpError::from(crate::msg!("err-series-two-dates")));
         }
-        if let Some(end) = repeat.end_on {
-            if end < input.starts_at {
-                return Err(OpError::from(crate::msg!("err-series-end-early")));
-            }
+        if let Some(end) = repeat.end_on
+            && end < input.starts_at
+        {
+            return Err(OpError::from(crate::msg!("err-series-end-early")));
         }
     }
     if matches!(input.action, SaveAction::Schedule) {

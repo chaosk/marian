@@ -2,9 +2,9 @@ use leptos::prelude::*;
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_params_map};
 
-use crate::cache::{self, when, Ready};
+use crate::cache::{self, Ready, when};
 use crate::widgets::{AccountMenu, Flash, Live};
-use crate::{api, A};
+use crate::{A, api};
 
 /// The sidebar: a path under the server, its label, and whether it sits under
 /// Events. Upcoming, Drafts, and Scheduled are filters on the Events page.
@@ -147,7 +147,7 @@ fn server_gate(_: &str) -> Option<crate::api::Failure> {
 
 /// A full page for a server that can't be opened, with the way back to the
 /// front page. One that doesn't exist and one that isn't theirs read the same.
-fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView {
+fn server_gone(id: &str, failure: crate::api::Failure) -> impl IntoView + use<> {
     crate::status(404);
     crate::title("Missing");
     // The logo would lead back to this server, so it goes to the front page too.
