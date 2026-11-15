@@ -62,9 +62,17 @@ fn describe_command(command: &mut poise::Command<Data, Error>, lang: Lang, paren
     } else {
         format!("{parent}-{}", command.name)
     };
+    // The English text is written as the en-US description, which Discord
+    // shows only to readers set to US English; everyone else got the plain
+    // description, "A slash command". It's the plain one now, and a reader's
+    // own locale no longer overrides the server's language.
+    if let Some(english) = command.description_localizations.remove("en-US") {
+        if command.description.is_none() {
+            command.description = Some(english);
+        }
+    }
     if lang != Lang::En {
-        // Discord shows a description for the reader's own locale over the
-        // plain one; the server's language wins here.
+        // The server's language wins over the reader's own locale.
         command.description_localizations.clear();
         if let Some(text) = command_text(lang, &format!("cmd-{path}")) {
             command.description = Some(text);

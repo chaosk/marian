@@ -4,10 +4,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Start an event. Marian asks for the details in a DM"
-      },
+      "description": "Start an event. Marian asks for the details in a DM",
+      "description_localizations": {},
       "name": "event",
       "name_localizations": {},
       "nsfw": false,
@@ -17,10 +15,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Change an event"
-      },
+      "description": "Change an event",
+      "description_localizations": {},
       "name": "edit",
       "name_localizations": {},
       "nsfw": false,
@@ -115,10 +111,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Turn your reminders on or off"
-      },
+      "description": "Turn your reminders on or off",
+      "description_localizations": {},
       "name": "reminders",
       "name_localizations": {},
       "nsfw": false,
@@ -143,10 +137,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Add, remove, or move a response"
-      },
+      "description": "Add, remove, or move a response",
+      "description_localizations": {},
       "name": "response",
       "name_localizations": {},
       "nsfw": false,
@@ -155,10 +147,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Add someone to a signup option"
-          },
+          "description": "Add someone to a signup option",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -229,10 +218,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Remove someone from a signup option"
-          },
+          "description": "Remove someone from a signup option",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -289,10 +275,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Move someone to another signup option"
-          },
+          "description": "Move someone to another signup option",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -365,10 +348,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Change a server setting"
-      },
+      "description": "Change a server setting",
+      "description_localizations": {},
       "name": "settings",
       "name_localizations": {},
       "nsfw": false,
@@ -377,10 +358,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Default reminder, in minutes"
-          },
+          "description": "Default reminder, in minutes",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -409,10 +387,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Use a 24-hour clock"
-          },
+          "description": "Use a 24-hour clock",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -441,10 +416,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Archive posted events on a timer"
-          },
+          "description": "Archive posted events on a timer",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -473,10 +445,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Hours after which a posted event archives"
-          },
+          "description": "Hours after which a posted event archives",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -505,10 +474,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Join event threads for attendees"
-          },
+          "description": "Join event threads for attendees",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -537,10 +503,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Open a thread for each posted event"
-          },
+          "description": "Open a thread for each posted event",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -569,10 +532,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Show the start in each member's own zone"
-          },
+          "description": "Show the start in each member's own zone",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -601,10 +561,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Purge other messages from event channels"
-          },
+          "description": "Purge other messages from event channels",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -633,10 +590,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Post reminders in the event thread"
-          },
+          "description": "Post reminders in the event thread",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -665,10 +619,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "List names on the Discord post"
-          },
+          "description": "List names on the Discord post",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -697,10 +648,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Give attendees a temporary role"
-          },
+          "description": "Give attendees a temporary role",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -729,10 +677,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Let full options take a waitlist"
-          },
+          "description": "Let full options take a waitlist",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -761,10 +706,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "How often Marian posts a digest"
-          },
+          "description": "How often Marian posts a digest",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -809,10 +751,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "How early a series date is posted"
-          },
+          "description": "How early a series date is posted",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -841,10 +780,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Choose which role may do something"
-          },
+          "description": "Choose which role may do something",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -913,10 +849,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "The language Marian writes in on this server"
-          },
+          "description": "The language Marian writes in on this server",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -958,10 +891,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "List, add, or remove a library option"
-      },
+      "description": "List, add, or remove a library option",
+      "description_localizations": {},
       "name": "signup_options",
       "name_localizations": {},
       "nsfw": false,
@@ -970,10 +901,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "List the option library"
-          },
+          "description": "List the option library",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -987,10 +915,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Save an option in the library"
-          },
+          "description": "Save an option in the library",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1047,10 +972,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Remove an option from the library"
-          },
+          "description": "Remove an option from the library",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1081,10 +1003,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "List, save, or remove a signup preset"
-      },
+      "description": "List, save, or remove a signup preset",
+      "description_localizations": {},
       "name": "signup_presets",
       "name_localizations": {},
       "nsfw": false,
@@ -1093,10 +1013,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "List signup presets"
-          },
+          "description": "List signup presets",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1110,10 +1027,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Save a signup preset"
-          },
+          "description": "Save a signup preset",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1156,10 +1070,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Remove a signup preset"
-          },
+          "description": "Remove a signup preset",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1190,10 +1101,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Create an event channel"
-      },
+      "description": "Create an event channel",
+      "description_localizations": {},
       "name": "channel",
       "name_localizations": {},
       "nsfw": false,
@@ -1218,10 +1127,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Connect, update, or disconnect a Google Calendar"
-      },
+      "description": "Connect, update, or disconnect a Google Calendar",
+      "description_localizations": {},
       "name": "google",
       "name_localizations": {},
       "nsfw": false,
@@ -1230,10 +1137,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Sign in with Google"
-          },
+          "description": "Sign in with Google",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1247,10 +1151,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Keep your Google Calendar updated"
-          },
+          "description": "Keep your Google Calendar updated",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1279,10 +1180,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Add one event to your Google Calendar"
-          },
+          "description": "Add one event to your Google Calendar",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1311,10 +1209,7 @@
           "autocomplete": false,
           "channel_types": [],
           "choices": [],
-          "description": "A slash command",
-          "description_localizations": {
-            "en-US": "Disconnect Google Calendar"
-          },
+          "description": "Disconnect Google Calendar",
           "max_length": null,
           "max_value": null,
           "min_length": null,
@@ -1330,10 +1225,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "Reverse the posts in this event channel"
-      },
+      "description": "Reverse the posts in this event channel",
+      "description_localizations": {},
       "name": "sort",
       "name_localizations": {},
       "nsfw": false,
@@ -1343,10 +1236,8 @@
       "contexts": [
         0
       ],
-      "description": "A slash command",
-      "description_localizations": {
-        "en-US": "How /event works, and where the other commands are explained"
-      },
+      "description": "How /event works, and where the other commands are explained",
+      "description_localizations": {},
       "name": "help",
       "name_localizations": {},
       "nsfw": false,
