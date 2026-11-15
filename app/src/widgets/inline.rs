@@ -303,7 +303,7 @@ impl Sender {
     fn error(self) -> impl IntoView {
         move || {
             let text = self.problem.get();
-            (!text.is_empty()).then(|| view! { <p class="error inline-error">{text}</p> })
+            (!text.is_empty()).then(|| view! { <p class="error inline-error" role="alert">{text}</p> })
         }
     }
 
@@ -397,10 +397,15 @@ pub fn EventTitle(key: (String, String), event: dto::Event) -> impl IntoView {
     let text = RwSignal::new(event.title);
     let field = NodeRef::<leptos::html::Input>::new();
     focus_when_shown(field);
+    let focus = super::FocusBack::named("event-title");
+    let close = move || {
+        focus.back();
+        open.set(false);
+    };
     let cancel = move || {
         text.set(shown.get_value());
         sender.problem.set(String::new());
-        open.set(false);
+        close();
     };
     let save = move || {
         let next = text.get_untracked().trim().to_string();
@@ -408,15 +413,18 @@ pub fn EventTitle(key: (String, String), event: dto::Event) -> impl IntoView {
             return sender.fail("Give the event a title.");
         }
         if next == shown.get_value() {
-            open.set(false);
+            close();
             return;
         }
+        // Before sending: the page shows the change at once and may draw the
+        // title afresh, and focus goes to the new one.
+        focus.back();
         sender.send(
             dto::EventPatch {
                 title: Some(next),
                 ..Default::default()
             },
-            move || open.set(false),
+            close,
             || (),
         );
     };
@@ -435,7 +443,8 @@ pub fn EventTitle(key: (String, String), event: dto::Event) -> impl IntoView {
         } else {
             view! {
                 <h1>
-                    <button type="button" class="inline-edit" title="Change the title" on:click=move |_| open.set(true)>
+                    <button type="button" class="inline-edit" title="Change the title" node_ref=focus.trigger
+                        on:click=move |_| open.set(true)>
                         {move || {
                             let text = shown.get_value();
                             if text.is_empty() {
@@ -638,6 +647,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
         }
     };
     let stopping = RwSignal::new(false);
+    let stop_focus = super::FocusBack::new();
     let stop = move || {
         let Some(id) = series_id.get_value() else {
             return;
@@ -695,7 +705,10 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
                                     question="Stop repeating? Dates that haven't gone out yet are skipped."
                                     yes="Stop repeating"
                                     on_yes=Callback::new(move |_| stop())
-                                    on_no=Callback::new(move |_| stopping.set(false))/>
+                                    on_no=Callback::new(move |_| {
+                                        stop_focus.back();
+                                        stopping.set(false);
+                                    })/>
                             </div>
                         }
                         .into_any()
@@ -703,7 +716,8 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
                         view! {
                             <div class="inline-actions">
                                 {in_series.then(|| view! {
-                                    <button type="button" class="danger repeat-stop" on:click=move |_| stopping.set(true)>"Stop repeating"</button>
+                                    <button type="button" class="danger repeat-stop" node_ref=stop_focus.trigger
+                                        on:click=move |_| stopping.set(true)>"Stop repeating"</button>
                                 })}
                                 <button type="submit" class="primary" disabled=move || sender.busy().get()>"Save"</button>
                                 <button type="button" class="ghost" on:click=move |_| cancel()>"Cancel"</button>
@@ -1021,23 +1035,29 @@ pub fn EventLocation(key: (String, String), event: dto::Event) -> impl IntoView 
     let text = RwSignal::new(event.location);
     let field = NodeRef::<leptos::html::Input>::new();
     focus_when_shown(field);
+    let focus = super::FocusBack::named("event-location");
+    let close = move || {
+        focus.back();
+        open.set(false);
+    };
     let cancel = move || {
         text.set(shown.get_value());
         sender.problem.set(String::new());
-        open.set(false);
+        close();
     };
     let save = move || {
         let next = text.get_untracked().trim().to_string();
         if next == shown.get_value() {
-            open.set(false);
+            close();
             return;
         }
+        focus.back();
         sender.send(
             dto::EventPatch {
                 location: Some(next),
                 ..Default::default()
             },
-            move || open.set(false),
+            close,
             || (),
         );
     };
@@ -1058,7 +1078,8 @@ pub fn EventLocation(key: (String, String), event: dto::Event) -> impl IntoView 
             let place = shown.get_value();
             view! {
                 <p class="event-place">
-                    <button type="button" class="inline-edit" title="Change the location" on:click=move |_| open.set(true)>
+                    <button type="button" class="inline-edit" title="Change the location" node_ref=focus.trigger
+                        on:click=move |_| open.set(true)>
                         {if place.is_empty() {
                             view! { <span class="muted">"📍 Add a location"</span> }.into_any()
                         } else {
@@ -1239,18 +1260,24 @@ pub fn EventDescription(key: (String, String), event: dto::Event) -> impl IntoVi
     let text = RwSignal::new(event.description);
     let field = NodeRef::<leptos::html::Textarea>::new();
     focus_when_shown(field);
+    let focus = super::FocusBack::named("event-description");
+    let close = move || {
+        focus.back();
+        open.set(false);
+    };
     let cancel = move || {
         text.set(shown.get_value());
         sender.problem.set(String::new());
-        open.set(false);
+        close();
     };
     let save = move || {
+        focus.back();
         sender.send(
             dto::EventPatch {
                 description: Some(text.get_untracked()),
                 ..Default::default()
             },
-            move || open.set(false),
+            close,
             || (),
         );
     };
@@ -1280,7 +1307,7 @@ pub fn EventDescription(key: (String, String), event: dto::Event) -> impl IntoVi
             } else {
                 view! {
                     <button type="button" class="icon-btn desc-edit" title="Change the description"
-                        aria-label="Change the description">{pencil()}</button>
+                        aria-label="Change the description" node_ref=focus.trigger>{pencil()}</button>
                     {body()}
                 }
                 .into_any()
@@ -1540,6 +1567,7 @@ pub fn ApplyToSeries(key: (String, String), event: dto::Event) -> impl IntoView 
     }
     let sender = Sender::new(key);
     let asking = RwSignal::new(false);
+    let focus = super::FocusBack::new();
     let apply = move || {
         asking.set(false);
         sender.send(
@@ -1560,13 +1588,20 @@ pub fn ApplyToSeries(key: (String, String), event: dto::Event) -> impl IntoView 
                     question="Copy this date's title, description, options, reminders, and roles to the upcoming dates?"
                     yes="Copy to upcoming dates"
                     class="primary"
-                    on_yes=Callback::new(move |_| apply())
-                    on_no=Callback::new(move |_| asking.set(false))/>
+                    on_yes=Callback::new(move |_| {
+                        focus.back();
+                        apply();
+                    })
+                    on_no=Callback::new(move |_| {
+                        focus.back();
+                        asking.set(false);
+                    })/>
             }
             .into_any()
         } else {
             view! {
-                <button type="button" class="link" disabled=move || sender.busy().get() on:click=move |_| asking.set(true)>
+                <button type="button" class="link" node_ref=focus.trigger
+                    disabled=move || sender.busy().get() on:click=move |_| asking.set(true)>
                     "Use these details for upcoming dates."
                 </button>
             }

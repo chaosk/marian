@@ -258,25 +258,118 @@ pub fn ActionButton(
         }
     };
     let confirm_class = format!("{class} confirm-yes");
+    let focus = FocusBack::new();
     view! {
         {move || if asking.get() {
             view! {
                 <InlineConfirm question=question.get_value() yes=label.clone() class=confirm_class.clone()
                     on_yes=Callback::new(move |_| {
+                        focus.back();
                         asking.set(false);
                         send.with_value(|send| send());
                     })
-                    on_no=Callback::new(move |_| asking.set(false))/>
+                    on_no=Callback::new(move |_| {
+                        focus.back();
+                        asking.set(false);
+                    })/>
             }
             .into_any()
         } else {
-            view! { <button type="button" class=class.clone() disabled=move || run.pending().get() on:click=press>{label.clone()}</button> }.into_any()
+            view! {
+                <button type="button" class=class.clone() node_ref=focus.trigger
+                    disabled=move || run.pending().get() on:click=press>{label.clone()}</button>
+            }
+            .into_any()
         }}
         {move || {
             let text = problem.get();
-            (!text.is_empty()).then(|| view! { <span class="error inline">{text}</span> })
+            (!text.is_empty()).then(|| view! { <span class="error inline" role="alert">{text}</span> })
         }}
     }
+}
+
+/// Focus for a control that an editor or a question replaces while it's open.
+/// The control is drawn afresh when it comes back, so `trigger` points at the
+/// new one; `back()` before closing sends focus to it, rather than to the
+/// page, which is where it fell with the editor gone.
+#[derive(Clone, Copy)]
+pub(crate) struct FocusBack {
+    pub trigger: NodeRef<leptos::html::Button>,
+    wanted: RwSignal<bool>,
+    /// Names the control, for a save that redraws the whole section around
+    /// it: the one drawn in its place picks up that focus should come back.
+    name: Option<&'static str>,
+}
+
+thread_local! {
+    /// The named control focus should come back to, and until when (ms):
+    /// a few seconds, for the answer and the redraws after it.
+    static RETURNING: std::cell::Cell<Option<(&'static str, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+impl FocusBack {
+    pub fn new() -> Self {
+        Self::make(None)
+    }
+
+    /// One whose control may be drawn again by another editor instance.
+    pub fn named(name: &'static str) -> Self {
+        Self::make(Some(name))
+    }
+
+    fn make(name: Option<&'static str>) -> Self {
+        let trigger = NodeRef::<leptos::html::Button>::new();
+        let wanted = RwSignal::new(name.is_some_and(returning));
+        Effect::new(move |_| {
+            if let Some(button) = trigger.get() {
+                if wanted.get_untracked() {
+                    wanted.set(false);
+                    // A redrawn one only takes focus nobody else has. The page
+                    // can redraw more than once as a save settles, so the wish
+                    // stands for each of them until it runs out.
+                    if name.is_some() && !focus_lost() {
+                        return;
+                    }
+                    let _ = button.focus();
+                }
+            }
+        });
+        Self { trigger, wanted, name }
+    }
+
+    /// The control gets focus once it's drawn again.
+    pub fn back(self) {
+        self.wanted.set(true);
+        if let Some(name) = self.name {
+            RETURNING.with(|slot| slot.set(Some((name, now_ms() + 4000.0))));
+        }
+    }
+}
+
+/// Whether focus should come back to the control named `name`.
+fn returning(name: &'static str) -> bool {
+    RETURNING.with(|slot| slot.get()).is_some_and(|(waiting, until)| waiting == name && now_ms() < until)
+}
+
+#[cfg(feature = "hydrate")]
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn now_ms() -> f64 {
+    0.0
+}
+
+/// Focus is on nothing in particular: the editor that had it is gone.
+#[cfg(feature = "hydrate")]
+fn focus_lost() -> bool {
+    document().active_element().is_none_or(|element| element.tag_name() == "BODY")
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn focus_lost() -> bool {
+    false
 }
 
 /// A question asked in place: the confirm button and Cancel, with the confirm button
@@ -314,6 +407,14 @@ pub fn InlineConfirm(
     }
 }
 
+/// How an autosaved change is going, for the field that changed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaveState {
+    Saving,
+    Saved,
+    Failed(String),
+}
+
 /// A form sent as JSON. Fields say how they read with `data-kind`: `int` is a number
 /// or null, `opt` is text or null, `csv` splits on commas, `json` is parsed as is, and checkboxes with
 /// `ints` gather the checked numbers into a list. Other checkboxes are true or false.
@@ -328,6 +429,11 @@ pub fn JsonForm(
     /// What the toast says after a successful change.
     #[prop(optional, into)]
     done: Option<String>,
+    /// Hears how each autosaved change goes, by the field that changed: the
+    /// `data-setting` of the element around the control, else its `name`. The
+    /// form then says nothing itself; without this, it toasts.
+    #[prop(optional)]
+    on_status: Option<Callback<(String, SaveState)>>,
     children: Children,
 ) -> impl IntoView {
     let form = NodeRef::<leptos::html::Form>::new();
@@ -337,8 +443,8 @@ pub fn JsonForm(
     let said = done.unwrap_or_else(|| "Saved.".into());
     let request = StoredValue::new((method, url, said));
     let follow = client::use_follow();
-    let save = client::action(move |body: &Value| {
-        let body = body.clone();
+    let save = client::action(move |(body, field): &(Value, String)| {
+        let (body, field) = (body.clone(), field.clone());
         let (method, url, said) = request.get_value();
         let follow = follow.clone();
         let toasts = client::toast_list();
@@ -347,11 +453,16 @@ pub fn JsonForm(
         async move {
             match api::send::<Value, Value>(&method, &url, Some(&body)).await {
                 Ok(_reply) if autosave => {
-                    if let Some(list) = toasts {
-                        client::push_toast(list, said.clone());
-                    }
                     if let Ok(next) = serde_json::from_value::<dto::Settings>(body) {
                         crate::cache::apply_settings(queries, &server, &next);
+                    }
+                    match on_status {
+                        Some(status) => status.run((field, SaveState::Saved)),
+                        None => {
+                            if let Some(list) = toasts {
+                                client::push_toast(list, said.clone());
+                            }
+                        }
                     }
                 }
                 Ok(reply) => {
@@ -360,14 +471,23 @@ pub fn JsonForm(
                     }
                     follow(reply_done(&reply));
                 }
+                // An autosaving form is long, and the end of it is off screen.
+                Err(failure) if autosave => match (on_status, toasts) {
+                    (Some(status), _) => status.run((field, SaveState::Failed(failure.message))),
+                    (None, Some(list)) => client::push_error(list, failure.message),
+                    (None, None) => problem.set(failure.message),
+                },
                 Err(failure) => problem.set(failure.message),
             }
         }
     });
-    let send = move || {
+    let send = move |field: String| {
         if let Some(element) = form.get_untracked() {
             problem.set(String::new());
-            save.dispatch(read_form(&element));
+            if let (true, Some(status)) = (autosave, on_status) {
+                status.run((field.clone(), SaveState::Saving));
+            }
+            save.dispatch((read_form(&element), field));
         }
     };
     view! {
@@ -376,21 +496,43 @@ pub fn JsonForm(
             class=class
             on:submit=move |ev| {
                 ev.prevent_default();
-                send();
+                send(String::new());
             }
-            on:change=move |_| {
+            on:change=move |ev| {
                 if autosave {
-                    send();
+                    send(changed_field(&ev));
                 }
             }
         >
             {children()}
             {move || {
                 let text = problem.get();
-                (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
             }}
         </form>
     }
+}
+
+/// The field a change event came from: the `data-setting` of the element
+/// around the control, else the control's own `name`.
+#[cfg(feature = "hydrate")]
+fn changed_field(ev: &web_sys::Event) -> String {
+    use wasm_bindgen::JsCast;
+    let Some(element) = ev.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) else {
+        return String::new();
+    };
+    element
+        .closest("[data-setting]")
+        .ok()
+        .flatten()
+        .and_then(|row| row.get_attribute("data-setting"))
+        .or_else(|| element.get_attribute("name"))
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn changed_field(_: &leptos::ev::Event) -> String {
+    String::new()
 }
 
 #[cfg(feature = "hydrate")]
@@ -477,8 +619,29 @@ pub fn Flash() -> impl IntoView {
                 key=|row| row.id
                 children=move |row| {
                     let leaving = row.leaving;
+                    let id = row.id;
+                    let error = row.error;
+                    // An error is said at once and stays until closed; a notice
+                    // waits while the pointer or focus is on it.
                     view! {
-                        <p class=move || if leaving.get() { "toast out" } else { "toast" }>{row.text}</p>
+                        <div
+                            class=move || match (error, leaving.get()) {
+                                (true, true) => "toast toast-error out",
+                                (true, false) => "toast toast-error",
+                                (false, true) => "toast out",
+                                (false, false) => "toast",
+                            }
+                            role=error.then_some("alert")
+                            on:mouseenter=move |_| client::hold_toast(id, true)
+                            on:mouseleave=move |_| client::hold_toast(id, false)
+                            on:focusin=move |_| client::hold_toast(id, true)
+                            on:focusout=move |_| client::hold_toast(id, false)>
+                            <p>{row.text}</p>
+                            <button type="button" class="toast-close" aria-label="Dismiss"
+                                on:click=move |_| client::close_toast(id)>
+                                <span aria-hidden="true">"×"</span>
+                            </button>
+                        </div>
                     }
                 }
             />
@@ -621,7 +784,7 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
                 </button>
                 {move || {
                     let text = problem.get();
-                    (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                    (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
                 }}
                 {google}
                 <a class="calendar" href=membership.calendar_url rel="external">"Calendar feed"</a>

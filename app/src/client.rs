@@ -13,8 +13,12 @@ const TOAST_OUT_MS: i32 = 180;
 pub(crate) struct Toast {
     pub id: u64,
     pub text: String,
+    /// Something went wrong: it stays until dismissed.
+    pub error: bool,
     /// Reference counted rather than owned: a toast outlives the component that raised it.
     pub leaving: ArcRwSignal<bool>,
+    /// The pointer or focus is on it, so it waits before going.
+    pub held: ArcRwSignal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -24,6 +28,8 @@ thread_local! {
     static TOASTS: std::cell::Cell<Option<RwSignal<Vec<Toast>>>> = const { std::cell::Cell::new(None) };
     static WAITING: std::cell::Cell<Option<RwSignal<bool>>> = const { std::cell::Cell::new(None) };
     static OFFLINE_SAID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The toast saying Marian can't be reached, closed once it can be.
+    static OFFLINE_TOAST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Puts the toast list on the app so a notice survives a page change.
@@ -54,6 +60,9 @@ pub(crate) fn waiting() -> bool {
 #[cfg(not(feature = "ssr"))]
 pub(crate) fn note_reached() {
     OFFLINE_SAID.with(|slot| slot.set(false));
+    if let Some(id) = OFFLINE_TOAST.with(std::cell::Cell::take) {
+        close_toast(id);
+    }
     set_waiting(false);
 }
 
@@ -67,7 +76,8 @@ pub(crate) fn say_offline(message: &str) {
         !said
     });
     if first {
-        toast(message);
+        let id = toast_error(message);
+        OFFLINE_TOAST.with(|slot| slot.set(id));
     }
 }
 
@@ -85,29 +95,86 @@ pub fn toast(notice: impl Into<String>) {
     }
 }
 
+/// Shows that something went wrong, until it's dismissed.
+#[cfg(not(feature = "ssr"))]
+pub(crate) fn toast_error(notice: impl Into<String>) -> Option<u64> {
+    match toast_list() {
+        Some(list) => push(list, notice.into(), true),
+        None => {
+            flash(&notice.into());
+            None
+        }
+    }
+}
+
 /// Same as `toast`, for a list captured before an async jump.
 pub fn push_toast(list: RwSignal<Vec<Toast>>, notice: impl Into<String>) {
-    let text = notice.into();
+    let _ = push(list, notice.into(), false);
+}
+
+/// Same as `toast_error`, for a list captured before an async jump.
+pub fn push_error(list: RwSignal<Vec<Toast>>, notice: impl Into<String>) {
+    let _ = push(list, notice.into(), true);
+}
+
+/// Shows a toast and gives its id.
+fn push(list: RwSignal<Vec<Toast>>, text: String, error: bool) -> Option<u64> {
     if text.is_empty() {
-        return;
+        return None;
     }
     let id = next_toast();
     let leaving = ArcRwSignal::new(false);
+    let held = ArcRwSignal::new(false);
     list.update(|rows| {
-        rows.push(Toast { id, text, leaving: leaving.clone() });
+        rows.push(Toast { id, text, error, leaving: leaving.clone(), held: held.clone() });
     });
-    let live: Vec<(u64, ArcRwSignal<bool>)> = list.with_untracked(|rows| {
+    // Past three, the oldest goes, a notice before an error.
+    let live: Vec<(u64, bool, ArcRwSignal<bool>)> = list.with_untracked(|rows| {
         rows.iter()
             .filter(|row| !row.leaving.get_untracked())
-            .map(|row| (row.id, row.leaving.clone()))
+            .map(|row| (row.id, row.error, row.leaving.clone()))
             .collect()
     });
     if live.len() > 3 {
-        if let Some((old, flag)) = live.into_iter().next() {
+        let oldest = live.iter().find(|(_, error, _)| !error).or(live.first()).cloned();
+        if let Some((old, _, flag)) = oldest {
             dismiss_toast(list, old, flag);
         }
     }
-    later(TOAST_MS, move || dismiss_toast(list, id, leaving));
+    if !error {
+        expire_toast(list, id, leaving, held, TOAST_MS);
+    }
+    Some(id)
+}
+
+/// Lets a notice go after `ms`, unless the pointer or focus is on it then;
+/// letting go of it starts a shorter wait.
+fn expire_toast(list: RwSignal<Vec<Toast>>, id: u64, leaving: ArcRwSignal<bool>, held: ArcRwSignal<bool>, ms: i32) {
+    later(ms, move || {
+        if !held.get_untracked() {
+            dismiss_toast(list, id, leaving);
+        }
+    });
+}
+
+/// The pointer or focus came to a toast (`true`) or left it.
+pub(crate) fn hold_toast(id: u64, on: bool) {
+    let Some(list) = toast_list() else { return };
+    let Some(row) = list.with_untracked(|rows| rows.iter().find(|row| row.id == id).cloned()) else {
+        return;
+    };
+    row.held.set(on);
+    if !on && !row.error {
+        expire_toast(list, id, row.leaving, row.held, TOAST_MS / 2);
+    }
+}
+
+/// Closes a toast now.
+pub(crate) fn close_toast(id: u64) {
+    let Some(list) = toast_list() else { return };
+    if let Some(leaving) = list.with_untracked(|rows| rows.iter().find(|row| row.id == id).map(|row| row.leaving.clone())) {
+        dismiss_toast(list, id, leaving);
+    }
 }
 
 fn dismiss_toast(list: RwSignal<Vec<Toast>>, id: u64, leaving: ArcRwSignal<bool>) {

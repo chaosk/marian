@@ -84,7 +84,7 @@ impl RoutineEdit {
     pub fn error(self) -> impl IntoView {
         move || {
             let text = self.problem.get();
-            (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+            (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
         }
     }
 }
@@ -138,7 +138,7 @@ pub fn RoutineTitle(edit: RoutineEdit) -> impl IntoView {
                 </form>
                 {move || {
                     let text = fault.get();
-                    (!text.is_empty()).then(|| view! { <p class="error inline-error">{text}</p> })
+                    (!text.is_empty()).then(|| view! { <p class="error inline-error" role="alert">{text}</p> })
                 }}
             }
             .into_any()
@@ -637,7 +637,7 @@ pub fn PollTally(run: dto::RunView, routine: String, editing: RwSignal<bool>) ->
         }}
         {move || {
             let text = problem.get();
-            (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+            (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
         }}
         <button type="button" class="link-button poll-days-toggle" on:click=move |_| editing.update(|on| *on = !*on)>
             {move || if editing.get() { "Done" } else { "Change this poll's days" }}

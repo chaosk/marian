@@ -282,7 +282,7 @@ fn failed(errors: ArcRwSignal<Errors>) -> impl IntoView {
         }
         match failures.into_iter().next() {
             Some(failure) => crate::failed(failure).into_any(),
-            None => view! { <p class="error">"Something went wrong."</p> }.into_any(),
+            None => view! { <p class="error" role="alert">"Something went wrong."</p> }.into_any(),
         }
     }
 }

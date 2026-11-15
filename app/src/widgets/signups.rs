@@ -279,7 +279,7 @@ pub fn SignupPanel(
             </div>
             {move || {
                 let text = panel.problem.get();
-                (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
+                (!text.is_empty()).then(|| view! { <p class="error" role="alert">{text}</p> })
             }}
             {notes}
             <div class="attend-grid">
@@ -523,7 +523,7 @@ fn guest_setter(panel: Panel, option: String, member: String) -> impl Fn(i64) + 
         client::spawn(async move {
             if let Err(failure) = api::send::<dto::Done, ()>("PUT", &url, None).await {
                 if let Some(list) = toasts {
-                    client::push_toast(list, failure.message);
+                    client::push_error(list, failure.message);
                 }
             }
             cache::refresh_in(queries, &server);
@@ -586,6 +586,7 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
         panel.save(list, None);
     };
     let asking = RwSignal::new(false);
+    let focus = super::FocusBack::new();
     let remove = move || {
         let id = id.get_value();
         let list: Vec<dto::SignupOption> = panel.wire().into_iter().filter(|opt| opt.id.as_ref() != Some(&id)).collect();
@@ -654,7 +655,10 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
                     <div class="attend-edit-actions">
                         <super::InlineConfirm question=question.clone() yes="Remove"
                             on_yes=Callback::new(move |_| remove())
-                            on_no=Callback::new(move |_| asking.set(false))/>
+                            on_no=Callback::new(move |_| {
+                                focus.back();
+                                asking.set(false);
+                            })/>
                     </div>
                 }
                 .into_any()
@@ -662,7 +666,8 @@ fn edit_form(panel: Panel, opt: dto::OptionSignups) -> impl IntoView {
                 view! {
                     <div class="attend-edit-actions">
                         {removable.then(|| view! {
-                            <button type="button" class="danger option-remove" on:click=move |_| asking.set(true)>"Remove"</button>
+                            <button type="button" class="danger option-remove" node_ref=focus.trigger
+                                on:click=move |_| asking.set(true)>"Remove"</button>
                         })}
                         <button type="submit" class="primary" disabled=move || panel.saving.pending().get()>"Save"</button>
                         <button type="button" class="ghost" on:click=move |_| cancel()>"Cancel"</button>
@@ -1109,7 +1114,7 @@ fn MemberPicker(panel: Panel, option: String) -> impl IntoView {
                 // The card already shows the picks; the picker is gone, so a
                 // failure can only be said in a toast.
                 if let (Some(list), Some(message)) = (toasts, failed) {
-                    client::push_toast(list, message);
+                    client::push_error(list, message);
                 }
                 cache::refresh_in(queries, &server);
             });
