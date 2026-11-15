@@ -2609,7 +2609,6 @@ async fn deliver(
     };
     let refresh = {
         let mut conn = data.db.get().map_err(|_| "Could not reach the database.")?;
-        let _ = logic::record_command(&mut conn, actor.guild_id, actor.membership_id, label, &text);
         crate::serve::events_to_refresh(&mut conn, label, &text)
     };
     crate::live::server(actor.guild_id);
@@ -3508,16 +3507,6 @@ async fn google_authorize(ctx: Context<'_>) -> Result<(), Error> {
         Ok(url) => url,
         Err(err) => return deliver(ctx, &actor, "/google authorize", Err(err)).await,
     };
-    {
-        let mut conn = ctx.data().db.get().map_err(|_| "Could not reach the database.")?;
-        let _ = logic::record_command(
-            &mut conn,
-            actor.guild_id,
-            actor.membership_id,
-            "/google authorize",
-            "Sent a Google sign-in button.",
-        );
-    }
     ctx.send(
         poise::CreateReply::default()
             .content(tr!(actor.lang, "reply-google-click"))

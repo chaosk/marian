@@ -539,14 +539,6 @@ async fn get_library(server: String) -> Result<Vec<dto::LibraryItem>, Failure> {
     api::library(&server).await
 }
 
-pub fn commands_scope() -> QueryScope<String, Result<Vec<dto::CommandLog>, Failure>> {
-    QueryScope::new(get_commands).with_invalidation_link(|id| ["s".into(), id.clone(), "commands".into()])
-}
-
-async fn get_commands(server: String) -> Result<Vec<dto::CommandLog>, Failure> {
-    api::commands(&server).await
-}
-
 pub fn routines_scope() -> QueryScope<String, Result<Vec<dto::RoutineSummary>, Failure>> {
     QueryScope::new(get_routines).with_invalidation_link(|id| ["s".into(), id.clone(), "routines".into()])
 }

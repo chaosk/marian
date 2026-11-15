@@ -1,5 +1,4 @@
 pub mod channels;
-pub mod commands;
 pub mod event;
 pub mod home;
 pub mod lists;

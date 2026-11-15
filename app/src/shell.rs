@@ -19,14 +19,13 @@ const NAV: &[(&str, &str, bool)] = &[
     ("/archive", "Archive", false),
     ("/presets", "Presets", false),
     ("/channels", "Channels", false),
-    ("/commands", "Command desk", false),
     ("/activity", "Activity", false),
     ("/settings", "Settings", false),
 ];
 
 /// Pages only someone who can manage the server sees; everyone else gets the
 /// events they have access to.
-const MANAGERS_ONLY: &[&str] = &["/recurring", "/routines", "/presets", "/channels", "/commands", "/activity", "/settings"];
+const MANAGERS_ONLY: &[&str] = &["/recurring", "/routines", "/presets", "/channels", "/activity", "/settings"];
 
 /// The logo and name, linking to the server in the address. Away from a
 /// server, it links to the one this browser opened last, once the page has

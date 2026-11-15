@@ -8,12 +8,10 @@ use axum::{Json, Router};
 use marian_types as dto;
 use serde::Deserialize;
 
-use super::{clip, enqueue, events_to_refresh, read_session, AppState, Session};
+use super::{enqueue, read_session, AppState, Session};
 use crate::api::{self, Outcome};
-use crate::commands;
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
-use crate::logic;
 use crate::store::Connection;
 
 pub(super) fn router() -> Router<AppState> {
@@ -66,7 +64,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/servers/{server}/library", get(library).post(add_library))
         .route("/servers/{server}/library/{id}", axum::routing::patch(update_library).delete(delete_library))
         .route("/servers/{server}/events/{id}/preset", post(apply_preset))
-        .route("/servers/{server}/commands", get(command_log).post(run_command))
         .route("/servers/{server}/routines", get(routines).post(create_routine))
         .route("/servers/{server}/routines/{id}", get(routine).put(update_routine))
         .route("/servers/{server}/routines/{id}/days", put(routine_days))
@@ -705,50 +702,6 @@ async fn update_library(
 
 async fn delete_library(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
     change(&state, &headers, &server, |db, v| api::delete_library(db, v, &id))
-}
-
-async fn command_log(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::CommandLog>> {
-    read(&state, &headers, &server, api::commands)
-}
-
-async fn run_command(
-    State(state): S,
-    headers: HeaderMap,
-    Path(server): One,
-    Json(run): Json<dto::CommandRun>,
-) -> Reply<dto::CommandReply> {
-    let viewer = scoped(&state, &headers, &server, |_, v| Ok(v.clone()))?;
-    let line = run.line;
-    if let Some(name) = commands::channel_request(&line) {
-        let reply = match open_channel(&state, &viewer, &name).await {
-            Ok(text) => text,
-            Err(Problem(_, text)) => text,
-        };
-        if let Ok(mut db) = state.db.get() {
-            let _ = logic::record_command(&mut db, viewer.guild_id, viewer.membership_id, &line, &reply);
-        }
-        crate::live::server(viewer.guild_id);
-        return Ok(Json(dto::CommandReply {
-            reply: clip(&reply, 700),
-        }));
-    }
-    let (reply, ids) = {
-        let mut db = state
-            .db
-            .get()
-            .map_err(|_| Problem(StatusCode::SERVICE_UNAVAILABLE, "The database is busy.".into()))?;
-        let reply = commands::execute(&mut db, viewer.guild_id, viewer.membership_id, &line);
-        let ids = events_to_refresh(&mut db, &line, &reply);
-        (reply, ids)
-    };
-    crate::live::server(viewer.guild_id);
-    for id in ids {
-        enqueue(&state.discord, DiscordJob::sync(id));
-        enqueue(&state.discord, DiscordJob::attend(id));
-    }
-    Ok(Json(dto::CommandReply {
-        reply: clip(&reply, 700),
-    }))
 }
 
 async fn routines(State(state): S, headers: HeaderMap, Path(server): One) -> Reply<Vec<dto::RoutineSummary>> {

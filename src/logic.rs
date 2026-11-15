@@ -16,7 +16,7 @@ mod tick;
 
 pub use access::{can_create, can_delete, can_edit, sees_channel, sight, sight_for_discord, Overwrite, Sight};
 pub use catalog::{
-    bind_channel_discord, create_channel, discard_channel, manual_calendar_sync, record_command,
+    bind_channel_discord, create_channel, discard_channel, manual_calendar_sync,
     set_user_reminders, slug_channel,
 };
 pub use library::{
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn one_date_can_move_without_the_rest_of_the_series() {
         let mut conn = world();
-        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
             cadence: "weekly".into(),
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn changing_the_cadence_moves_upcoming_dates() {
         let mut conn = world();
-        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
             cadence: "weekly".into(),
@@ -739,18 +739,18 @@ mod tests {
         assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
             dates[1].starts_at,
-            Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2027, 10, 28, 19, 0, 0).unwrap()
         );
         assert_eq!(
             dates[3].starts_at,
-            Utc.with_ymd_and_hms(2026, 11, 26, 19, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2027, 11, 25, 19, 0, 0).unwrap()
         );
     }
 
     #[test]
     fn a_shorter_series_drops_upcoming_dates_and_a_longer_one_brings_them_back() {
         let mut conn = world();
-        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
             cadence: "weekly".into(),
@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(dates.len(), 4);
         assert_eq!(
             dates[2].starts_at,
-            Utc.with_ymd_and_hms(2026, 10, 29, 19, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2027, 10, 28, 19, 0, 0).unwrap()
         );
         skip_event(&mut conn, dates[2].id, 1).unwrap();
         save_series_repeat(
@@ -823,14 +823,14 @@ mod tests {
         assert_eq!(dates[3].status, "scheduled");
         assert_eq!(
             dates[3].starts_at,
-            Utc.with_ymd_and_hms(2026, 11, 5, 19, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2027, 11, 4, 19, 0, 0).unwrap()
         );
     }
 
     #[test]
     fn an_end_date_drops_dates_after_it() {
         let mut conn = world();
-        let anchor = Utc.with_ymd_and_hms(2026, 10, 15, 19, 0, 0).unwrap();
+        let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
             cadence: "weekly".into(),
@@ -849,7 +849,7 @@ mod tests {
             1,
             RepeatSpec {
                 cadence: "weekly".into(),
-                end_on: Some(Utc.with_ymd_and_hms(2026, 10, 25, 23, 59, 0).unwrap()),
+                end_on: Some(Utc.with_ymd_and_hms(2027, 10, 24, 23, 59, 0).unwrap()),
                 max_occurrences: None,
             },
         )
@@ -859,7 +859,69 @@ mod tests {
         assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
             dates[1].starts_at,
-            Utc.with_ymd_and_hms(2026, 10, 22, 19, 0, 0).unwrap()
+            Utc.with_ymd_and_hms(2027, 10, 21, 19, 0, 0).unwrap()
         );
+    }
+
+    fn weekly_series(conn: &mut Connection, start: DateTime<Utc>, max: Option<i64>) -> i64 {
+        let mut event = input("Vault", start, SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: "weekly".into(),
+            end_on: None,
+            max_occurrences: max,
+        });
+        let id = save_event(conn, event).unwrap();
+        store::event(conn, id).unwrap().unwrap().series_id.unwrap()
+    }
+
+    #[test]
+    fn a_deleted_date_stays_out_of_its_series() {
+        let mut conn = world();
+        let series_id = weekly_series(&mut conn, Utc::now() + Duration::days(1), Some(3));
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        assert_eq!(dates.len(), 3);
+        assert_eq!(dates[1].status, "scheduled");
+        delete_event(&mut conn, dates[1].id, 1).unwrap();
+        tick(&mut conn, Utc::now()).unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        let second: Vec<_> = dates
+            .iter()
+            .filter(|date| date.occurrence_index == Some(2))
+            .map(|date| date.status.as_str())
+            .collect();
+        assert_eq!(second, ["skipped"]);
+    }
+
+    #[test]
+    fn a_series_does_not_bring_back_dates_already_past() {
+        let mut conn = world();
+        let anchor = Utc::now() + Duration::hours(1);
+        let series_id = weekly_series(&mut conn, anchor, None);
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        // A date missing from before deletes were kept as skipped.
+        diesel::delete(schema::events::table.filter(schema::events::id.eq(dates[1].id)))
+            .execute(&mut conn)
+            .unwrap();
+        series::ensure_series(&mut conn, series_id, anchor + Duration::days(8)).unwrap();
+        let indexes: Vec<_> = store::events_in_series(&mut conn, series_id)
+            .unwrap()
+            .iter()
+            .filter_map(|date| date.occurrence_index)
+            .collect();
+        assert!(!indexes.contains(&2), "{indexes:?}");
+    }
+
+    #[test]
+    fn a_lone_draft_of_a_series_is_deleted() {
+        let mut conn = world();
+        let mut event = input("Vault", Utc::now() + Duration::days(1), SaveAction::Draft);
+        event.repeat = Some(RepeatSpec {
+            cadence: "weekly".into(),
+            end_on: None,
+            max_occurrences: Some(3),
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        delete_event(&mut conn, id, 1).unwrap();
+        assert!(store::event(&mut conn, id).unwrap().is_none());
     }
 }

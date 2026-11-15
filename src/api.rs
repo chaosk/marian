@@ -1347,8 +1347,9 @@ fn save_stored(
 
 pub fn delete_event(conn: &mut Connection, viewer: &Viewer, public_id: &str) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id)?;
-    let gone = matches!(event.status.as_str(), "draft" | "scheduled" | "failed");
     logic::delete_event(conn, event.id, viewer.membership_id)?;
+    // A date of a series stays behind as skipped, so only a removed event leaves its page.
+    let gone = store::event(conn, event.id)?.is_none();
     let location = if gone {
         path(conn, viewer, "")?
     } else {
@@ -1644,24 +1645,6 @@ pub fn delete_library(conn: &mut Connection, viewer: &Viewer, public_id: &str) -
     let kind = type_here(conn, viewer, public_id)?;
     logic::delete_type(conn, kind.id, viewer.membership_id)?;
     Ok(Outcome::ok())
-}
-
-pub fn commands(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::CommandLog>, OpError> {
-    must_manager(conn, viewer)?;
-    let people = store::list_memberships(conn, viewer.guild_id)?;
-    Ok(store::list_commands(conn, viewer.guild_id, 30)?
-        .into_iter()
-        .rev()
-        .map(|row| dto::CommandLog {
-            user: people
-                .iter()
-                .find(|p| row.membership_id == Some(p.id))
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "Marian".into()),
-            line: row.line,
-            reply: row.reply,
-        })
-        .collect())
 }
 
 pub fn routines(conn: &mut Connection, viewer: &Viewer) -> Result<Vec<dto::RoutineSummary>, OpError> {
@@ -2542,10 +2525,8 @@ mod tests {
         let (mut conn, nell) = world();
         let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), ..nell.clone() };
         assert!(activity(&mut conn, &nell, 1, 25).is_ok());
-        assert!(commands(&mut conn, &nell).is_ok());
         assert!(routines(&mut conn, &nell).is_ok());
         assert!(activity(&mut conn, &june, 1, 25).is_err());
-        assert!(commands(&mut conn, &june).is_err());
         assert!(routines(&mut conn, &june).is_err());
     }
 
