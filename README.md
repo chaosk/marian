@@ -4,7 +4,7 @@ Marian keeps a Discord community's events, signups, reminders, and recurring dat
 
 ## Run it locally
 
-Rust 1.99.1 (see `rust-toolchain.toml`).
+Rust 1.100.0 (see `rust-toolchain.toml`).
 
 ```sh
 docker compose up -d
