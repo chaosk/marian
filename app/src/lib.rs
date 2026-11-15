@@ -18,7 +18,7 @@ mod cache;
 mod shell;
 
 use api::Failure;
-use widgets::ManagersOnly;
+use widgets::{CreatorsOnly, ManagersOnly};
 
 pub(crate) use leptos_router::components::A;
 
@@ -158,7 +158,7 @@ pub fn App() -> impl IntoView {
                 <ParentRoute path=path!("/servers/:server") view=shell::ServerShell>
                     <Route path=path!("") view=pages::home::Schedule/>
                     <Route path=path!("events") view=pages::lists::AllEvents/>
-                    <Route path=path!("events/new") view=pages::event::NewEvent/>
+                    <Route path=path!("events/new") view=|| view! { <CreatorsOnly><pages::event::NewEvent/></CreatorsOnly> }/>
                     <Route path=path!("events/:id") view=pages::event::EventPage/>
                     <Route path=path!("events/:id/activity") view=pages::lists::EventActivity/>
                     <Route path=path!("upcoming") view=pages::lists::Upcoming/>

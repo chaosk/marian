@@ -1712,6 +1712,32 @@ fn nudge(editor: &web_sys::Element) {
 }
 
 
+/// The new event page, for someone who can create events. Everyone else reads
+/// why, and the page's own reads never start. Decided once, like
+/// `ManagersOnly`.
+#[component]
+pub fn CreatorsOnly(children: ChildrenFn) -> impl IntoView {
+    let membership = crate::cache::listen(crate::cache::membership_scope(), crate::cache::server_key);
+    let children = StoredValue::new(children);
+    crate::cache::when_once(
+        move || membership.get().map(|read| read.map(|m| m.can_create_event)),
+        move |create| {
+            if create {
+                children.with_value(|children| children()).into_any()
+            } else {
+                view! {
+                    {crate::head("New event")}
+                    <p class="notice info">
+                        "This server lets only some roles create events, and you don't have one of them. "
+                        "Someone who can manage the Discord server can give you one, or change who can in Settings."
+                    </p>
+                }
+                .into_any()
+            }
+        },
+    )
+}
+
 /// A page only someone who can manage the server sees. Everyone else reads
 /// why, and the page's own reads never start. It decides once, so a later
 /// change to their membership, like turning reminders off, never remounts

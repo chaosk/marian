@@ -187,7 +187,8 @@ fn shell(
                             let base = format!("/servers/{}", server.id);
                             view! {
                                 <Switcher me server=server.clone()/>
-                                <Nav base=base.clone() counts=server.counts manager=membership.server_manager/>
+                                <Nav base=base.clone() counts=server.counts manager=membership.server_manager
+                                    create=membership.can_create_event/>
                                 <AccountMenu base membership/>
                             }
                         },
@@ -290,7 +291,7 @@ fn close_menu(ev: &leptos::ev::MouseEvent) {
 fn close_menu(_: &leptos::ev::MouseEvent) {}
 
 #[component]
-fn Nav(base: String, counts: marian_types::Counts, manager: bool) -> impl IntoView {
+fn Nav(base: String, counts: marian_types::Counts, manager: bool, create: bool) -> impl IntoView {
     use crate::pages::lists::Filters;
     // Both from the router's location. `use_query_map` would make a memo owned
     // by this sidebar, which a link could still read after the sidebar is gone.
@@ -345,7 +346,8 @@ fn Nav(base: String, counts: marian_types::Counts, manager: bool) -> impl IntoVi
             };
             let sub = *sub;
             let path = *path;
-            let new_event = events.then(|| format!("{events_href}/new"));
+            // Only someone who can create events gets the way to start one.
+            let new_event = (events && create).then(|| format!("{events_href}/new"));
             let showing = std::sync::Arc::clone(&showing);
             let link = view! {
                 <A href=href exact=schedule attr:class=move || {

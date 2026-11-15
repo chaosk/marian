@@ -271,10 +271,14 @@ pub fn server(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Server, OpE
 pub fn membership(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Membership, OpError> {
     let user = must_member(conn, viewer)?;
     let token = store::ensure_calendar_token(conn, user.user_id)?;
+    let settings = store::settings(conn, user.guild_id)?;
+    let roles = store::membership_role_ids(conn, &user)?;
+    let can_create_event = crate::logic::can_create(&user, &settings, &roles);
     Ok(dto::Membership {
         name: user.name,
         avatar: user.avatar,
         server_manager: user.server_manager,
+        can_create_event,
         reminders_enabled: user.reminders_enabled,
         calendar_url: calendar_feed_url(&std::env::var("MARIAN_PUBLIC_URL").unwrap_or_default(), &token),
         google: google(conn, user.user_id)?,
@@ -2029,6 +2033,20 @@ mod tests {
     fn the_calendar_feed_is_a_full_address_when_the_server_knows_its_own() {
         assert_eq!(calendar_feed_url("https://marian.example/ ", "abc"), "https://marian.example/calendar/abc.ics");
         assert_eq!(calendar_feed_url("", "abc"), "/calendar/abc.ics", "else a path the browser completes");
+    }
+
+    #[test]
+    fn membership_says_who_can_create_events() {
+        let (mut conn, nell) = world();
+        let june = Viewer { membership_id: 2, discord_user_id: "u2".into(), user_id: 2, display_name: "June".into(), ..nell.clone() };
+        assert!(membership(&mut conn, &june).unwrap().can_create_event, "no event roles leaves creating open");
+        let mut next = settings(&mut conn, &nell).unwrap();
+        next.role_event = roles(&mut conn, &nell).unwrap().into_iter().map(|role| role.id).collect();
+        put_settings(&mut conn, &nell, &next).unwrap();
+        assert!(!membership(&mut conn, &june).unwrap().can_create_event, "June lacks the role");
+        assert!(membership(&mut conn, &nell).unwrap().can_create_event, "Nell manages the server");
+        conn.batch_execute("INSERT INTO membership_roles (membership_id, role_id) VALUES (2, 1);").unwrap();
+        assert!(membership(&mut conn, &june).unwrap().can_create_event, "June holds the role now");
     }
 
     #[test]
