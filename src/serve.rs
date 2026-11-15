@@ -93,10 +93,14 @@ async fn with_db<T: Send + 'static>(
 }
 
 /// Every 5 seconds: posts, reminders, archiving, series dates and routines.
-fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: Heartbeat) {
+/// Stops at shutdown, after the round in progress.
+fn spawn_tick(db: store::Db, heartbeat: Heartbeat) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = crate::shutdown::wait() => break,
+            }
             // Instrumented, not entered: a guard held across the await below
             // stayed entered on the thread, and other tasks' spans joined this
             // trace until it ran past Tempo's size limit.
@@ -113,8 +117,9 @@ fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: He
                         for note in report.notes {
                             tracing::info!("{note}");
                         }
-                        for job in report.jobs {
-                            enqueue(&discord, job);
+                        // Saved with the tick's changes; the worker picks them up.
+                        if !report.jobs.is_empty() {
+                            crate::jobs::wake();
                         }
                         for guild_id in report.guilds {
                             crate::live::server(guild_id);
@@ -127,7 +132,7 @@ fn spawn_tick(db: store::Db, discord: UnboundedSender<DiscordJob>, heartbeat: He
             .instrument(span)
             .await;
         }
-    });
+    })
 }
 
 /// Every 5 seconds, apart from the tick, so a slow Google API never holds up
@@ -179,7 +184,7 @@ use crate::api::{cookie, Viewer as Session};
 /// Runs Marian: the gateway, the tick, and the web service with `pages` for everything else.
 pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> anyhow::Result<()> {
     store::load_dotenv();
-    let _telemetry = crate::observe::init();
+    let telemetry = crate::observe::init();
 
     let database_url = store::database_url()?;
     let port: u16 = env::var("PORT")
@@ -221,15 +226,17 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         heartbeat: Heartbeat::new(),
     };
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
+        tokio::spawn(crate::shutdown::on_signal());
         let web = crate::api::Web {
             db: state.db.clone(),
             invite_url: state.invite_url.clone(),
             oauth_ready: oauth_ready(&state),
         };
         let app = router(state.clone(), pages(web));
-        crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status, state.members.clone());
-        spawn_tick(state.db.clone(), state.discord.clone(), state.heartbeat.clone());
+        let gateway =
+            crate::gateway::start(token, state.db.clone(), rx, tx, public_url, status, state.members.clone());
+        let tick = spawn_tick(state.db.clone(), state.heartbeat.clone());
         spawn_google_sync(
             state.db.clone(),
             state.http.clone(),
@@ -242,13 +249,34 @@ pub fn run(pages: impl FnOnce(crate::api::Web) -> Router + Send + 'static) -> an
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Marian is listening on {addr}");
-        axum::serve(
+        let served = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .await?;
-        Ok(())
-    })
+        .with_graceful_shutdown(crate::shutdown::wait());
+        let served = std::future::IntoFuture::into_future(served);
+        tokio::pin!(served);
+        // Requests still open this long after the signal are cut off.
+        let cut_off = async {
+            crate::shutdown::wait().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        };
+        tokio::select! {
+            served = &mut served => served?,
+            _ = cut_off => tracing::warn!("Requests still open at shutdown were cut off."),
+        }
+        // A tick in progress finishes, with its jobs saved.
+        if tokio::time::timeout(std::time::Duration::from_secs(10), tick).await.is_err() {
+            tracing::warn!("The tick didn't finish in time.");
+        }
+        gateway.stop().await;
+        tracing::info!("Marian stopped.");
+        Ok::<_, anyhow::Error>(())
+    });
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
+    // Sends the last spans and metrics.
+    drop(telemetry);
+    result
 }
 
 fn router(state: AppState, pages: Router) -> Router {

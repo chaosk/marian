@@ -35,6 +35,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Marian finishes requests, the tick and due Discord jobs on SIGTERM,
+      # within about 45 seconds at worst; usually a few.
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

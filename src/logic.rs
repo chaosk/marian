@@ -709,6 +709,13 @@ mod tests {
             crate::jobs::DiscordJob::Remind { text, message, .. }
                 if text == "<@u2>" && message == "Boots on."
         )));
+        // Saved with the changes, so a restart before they run doesn't lose them.
+        let mut saved = Vec::new();
+        while let Some((id, job)) = crate::jobs::next_due(&mut conn, Utc::now()).unwrap() {
+            crate::jobs::done(&mut conn, id).unwrap();
+            saved.push(job);
+        }
+        assert_eq!(saved, report.jobs);
     }
 
     #[test]

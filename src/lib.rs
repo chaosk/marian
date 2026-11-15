@@ -19,6 +19,7 @@ pub mod parse;
 mod release_version;
 mod schema;
 pub mod serve;
+mod shutdown;
 pub mod store;
 
 pub use error::OpError;
