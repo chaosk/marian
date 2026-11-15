@@ -11,6 +11,8 @@ metadata:
   labels:
     {{- include "marian.labels" . | nindent 4 }}
 spec:
+  # Always one. The bot and the reminder clock run in this process, and two
+  # would answer Discord twice. Recreate stops the old pod before the new one.
   replicas: 1
   strategy:
     type: Recreate
@@ -27,6 +29,8 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
     spec:
+      # Marian never calls the Kubernetes API.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -101,6 +105,14 @@ spec:
                   name: {{ include "marian.secretName" . }}
                   key: googleClientSecret
             {{- end }}
+          # Migrations run before the listener binds, so a slow migration gets
+          # up to five minutes before the liveness probe can restart the pod.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /readyz
