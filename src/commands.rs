@@ -31,12 +31,12 @@ async fn find_event(
     sight: &logic::Sight,
     token: &str,
 ) -> Result<Event, OpError> {
-    if crate::ids::parse_event_id(token).is_some() {
-        if let Some(event) = store::event_by_public(conn, token).await? {
-            if event.guild_id == guild_id && sight.sees_event(&event) {
-                return Ok(event);
-            }
-        }
+    if crate::ids::parse_event_id(token).is_some()
+        && let Some(event) = store::event_by_public(conn, token).await?
+        && event.guild_id == guild_id
+        && sight.sees_event(&event)
+    {
+        return Ok(event);
     }
     Err(OpError::from(crate::msg!("err-event-elsewhere")))
 }
@@ -1277,15 +1277,14 @@ async fn answer_clock_field(
             &tr!(lang, "dm-time-unreadable"),
         ));
     } else if cutoff {
-        if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz)) {
-            if let Some(when) = parse::parse_when(text, Utc::now(), tz) {
-                if when >= start {
-                    return just(note(
-                        &clock_card(cutoff, lang),
-                        &tr!(lang, "err-signups-close-late"),
-                    ));
-                }
-            }
+        if let Some(start) = start_raw.and_then(|raw| parse::parse_when(raw, Utc::now(), tz))
+            && let Some(when) = parse::parse_when(text, Utc::now(), tz)
+            && when >= start
+        {
+            return just(note(
+                &clock_card(cutoff, lang),
+                &tr!(lang, "err-signups-close-late"),
+            ));
         }
         draft.cutoff_raw = Some(text.to_string());
     } else {

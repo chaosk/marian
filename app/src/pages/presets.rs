@@ -251,13 +251,13 @@ impl Rows {
 
     /// Moves row `from` to where `to` is.
     fn move_to(self, from: &str, to: usize) {
-        if let Some(at) = self.at(from) {
-            if at != to {
-                self.types.update(|list| {
-                    let row = list.remove(at);
-                    list.insert(to.min(list.len()), row);
-                });
-            }
+        if let Some(at) = self.at(from)
+            && at != to
+        {
+            self.types.update(|list| {
+                let row = list.remove(at);
+                list.insert(to.min(list.len()), row);
+            });
         }
     }
 

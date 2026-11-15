@@ -141,14 +141,13 @@ pub fn normalize(input: &str) -> String {
         }
         if last == Some("at") {
             // "o 19.30" is a clock time.
-            if let Some((hour, minute)) = plain.split_once('.') {
-                if hour.chars().all(|ch| ch.is_ascii_digit())
-                    && minute.len() == 2
-                    && minute.chars().all(|ch| ch.is_ascii_digit())
-                {
-                    out.push(format!("{hour}:{minute}"));
-                    continue;
-                }
+            if let Some((hour, minute)) = plain.split_once('.')
+                && hour.chars().all(|ch| ch.is_ascii_digit())
+                && minute.len() == 2
+                && minute.chars().all(|ch| ch.is_ascii_digit())
+            {
+                out.push(format!("{hour}:{minute}"));
+                continue;
             }
         }
         out.push(word.clone());
@@ -320,12 +319,12 @@ fn weekday_prefix(text: &str) -> Option<(Weekday, &str)> {
         ("sun", Weekday::Sun),
     ];
     for (name, weekday) in DAYS {
-        if let Some(tail) = text.strip_prefix(name) {
-            if tail.is_empty() || tail.starts_with(' ') || tail.starts_with(',') {
-                let tail = tail.trim_start_matches([',', ' ']);
-                let tail = tail.strip_prefix("at").unwrap_or(tail).trim();
-                return Some((*weekday, tail));
-            }
+        if let Some(tail) = text.strip_prefix(name)
+            && (tail.is_empty() || tail.starts_with(' ') || tail.starts_with(','))
+        {
+            let tail = tail.trim_start_matches([',', ' ']);
+            let tail = tail.strip_prefix("at").unwrap_or(tail).trim();
+            return Some((*weekday, tail));
         }
     }
     None

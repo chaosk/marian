@@ -146,12 +146,13 @@ pub fn percent_decode(text: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                out.push(value);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+        {
+            out.push(value);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -1004,18 +1005,19 @@ impl Gate<'_> {
                 false,
             );
         }
-        if let Some(role_id) = opt.role_id {
-            if !self.user.server_manager && !self.roles.contains(&role_id) {
-                return (false, "Your roles don't include this option.".into(), false);
-            }
+        if let Some(role_id) = opt.role_id
+            && !self.user.server_manager
+            && !self.roles.contains(&role_id)
+        {
+            return (false, "Your roles don't include this option.".into(), false);
         }
-        if let Some(cap) = opt.capacity {
-            if confirmed >= cap || queue {
-                if self.waitlist {
-                    return (true, String::new(), true);
-                }
-                return (false, format!("{} is full.", opt.name), false);
+        if let Some(cap) = opt.capacity
+            && (confirmed >= cap || queue)
+        {
+            if self.waitlist {
+                return (true, String::new(), true);
             }
+            return (false, format!("{} is full.", opt.name), false);
         }
         (true, String::new(), false)
     }
@@ -1060,20 +1062,22 @@ fn signup_notes(
         if yours {
             continue;
         }
-        if let Some(role_id) = opt.role_id {
-            if !user.server_manager && !roles.contains(&role_id) {
-                let role_name = role_rows
-                    .iter()
-                    .find(|role| role.id == role_id)
-                    .map(|role| role.name.as_str())
-                    .unwrap_or("another role");
-                notes.push(format!("{} is limited to {role_name}.", opt.name));
-            }
+        if let Some(role_id) = opt.role_id
+            && !user.server_manager
+            && !roles.contains(&role_id)
+        {
+            let role_name = role_rows
+                .iter()
+                .find(|role| role.id == role_id)
+                .map(|role| role.name.as_str())
+                .unwrap_or("another role");
+            notes.push(format!("{} is limited to {role_name}.", opt.name));
         }
-        if let Some(cap) = opt.capacity {
-            if places(signups, opt.id, SignupState::Confirmed) >= cap && !waitlist {
-                notes.push(format!("{} is full.", opt.name));
-            }
+        if let Some(cap) = opt.capacity
+            && places(signups, opt.id, SignupState::Confirmed) >= cap
+            && !waitlist
+        {
+            notes.push(format!("{} is full.", opt.name));
         }
     }
     if notes.len() > 1 {

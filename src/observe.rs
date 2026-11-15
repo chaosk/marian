@@ -40,15 +40,15 @@ pub struct Telemetry {
 
 impl Drop for Telemetry {
     fn drop(&mut self) {
-        if let Some(provider) = self.provider.take() {
-            if let Err(err) = provider.shutdown() {
-                eprintln!("OpenTelemetry shutdown failed: {err}");
-            }
+        if let Some(provider) = self.provider.take()
+            && let Err(err) = provider.shutdown()
+        {
+            eprintln!("OpenTelemetry shutdown failed: {err}");
         }
-        if let Some(meters) = self.meters.take() {
-            if let Err(err) = meters.shutdown() {
-                eprintln!("OpenTelemetry metrics shutdown failed: {err}");
-            }
+        if let Some(meters) = self.meters.take()
+            && let Err(err) = meters.shutdown()
+        {
+            eprintln!("OpenTelemetry metrics shutdown failed: {err}");
         }
     }
 }

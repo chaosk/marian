@@ -92,15 +92,16 @@ pub async fn attendance(conn: &mut Connection, event_id: i64) -> Result<Attendan
     };
     // One of the server's own roles goes out only while whoever picked it
     // manages the server. Taking it back is always fine.
-    if let Some(role) = &role {
-        if !role_add.is_empty() && !super::access::gives_attendee_role(conn, &event, role).await? {
-            tracing::warn!(
-                event_id,
-                role_id = role.id,
-                "not giving the attendee role: it is the server's, and no server manager picked it"
-            );
-            role_add.clear();
-        }
+    if let Some(role) = &role
+        && !role_add.is_empty()
+        && !super::access::gives_attendee_role(conn, &event, role).await?
+    {
+        tracing::warn!(
+            event_id,
+            role_id = role.id,
+            "not giving the attendee role: it is the server's, and no server manager picked it"
+        );
+        role_add.clear();
     }
     Ok(Attendance::Ready(AttendanceWork {
         title: event.title.clone(),

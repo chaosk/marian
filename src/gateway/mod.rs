@@ -413,13 +413,11 @@ async fn handle_event(
                 }
             }
             let mut replies = replies;
-            if let (Some(replies), Some(event_id)) = (replies.as_mut(), posts.first()) {
-                if let Ok(mut conn) = data.db.get().await {
-                    if let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id).await
-                    {
-                        commands::link_created_event(replies, &url);
-                    }
-                }
+            if let (Some(replies), Some(event_id)) = (replies.as_mut(), posts.first())
+                && let Ok(mut conn) = data.db.get().await
+                && let Ok(Some(url)) = commands::posted_message_url(&mut conn, *event_id).await
+            {
+                commands::link_created_event(replies, &url);
             }
             if let Some(replies) = replies {
                 for reply in replies {

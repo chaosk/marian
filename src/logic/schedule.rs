@@ -448,10 +448,10 @@ pub async fn sync_event(
         None => drop_task(conn, TaskKind::Archive, event.id).await?,
     }
     // Whoever has the event in their calendar, or might now.
-    if let Some(created_by) = event.created_by {
-        if let Some(member) = store::membership(conn, created_by).await? {
-            note_google(conn, member.user_id, now).await?;
-        }
+    if let Some(created_by) = event.created_by
+        && let Some(member) = store::membership(conn, created_by).await?
+    {
+        note_google(conn, member.user_id, now).await?;
     }
     let signed: Vec<i64> = schema::signups::table
         .inner_join(schema::memberships::table)

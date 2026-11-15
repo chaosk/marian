@@ -200,10 +200,10 @@ fn focus_setting(name: String) {
         let selector = format!(
             ".settings-page [data-setting=\"{name}\"] :is(input:not([type=hidden]):not(:disabled), select, button)"
         );
-        if let Ok(Some(control)) = document().query_selector(&selector) {
-            if let Ok(control) = control.dyn_into::<leptos::web_sys::HtmlElement>() {
-                let _ = control.focus();
-            }
+        if let Ok(Some(control)) = document().query_selector(&selector)
+            && let Ok(control) = control.dyn_into::<leptos::web_sys::HtmlElement>()
+        {
+            let _ = control.focus();
         }
     });
 }

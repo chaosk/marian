@@ -1149,12 +1149,11 @@ pub async fn open_memory() -> Result<Connection, OpError> {
     };
     // Measured from outside the schema, the way recycling measures it, so
     // names read the same.
-    if TEST_SHAPE.get().is_none() {
-        if let Ok(mut admin) = connect(&admin_url).await {
-            if let Some(shape) = schema_shape(&mut admin, &schema).await {
-                let _ = TEST_SHAPE.set(shape);
-            }
-        }
+    if TEST_SHAPE.get().is_none()
+        && let Ok(mut admin) = connect(&admin_url).await
+        && let Some(shape) = schema_shape(&mut admin, &schema).await
+    {
+        let _ = TEST_SHAPE.set(shape);
     }
     let guard = SchemaGuard { schema, admin_url };
     TEST_GUARDS.with(|guards| guards.borrow_mut().push(guard));

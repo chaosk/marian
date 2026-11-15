@@ -633,12 +633,10 @@ async fn mark_page_trace(mut request: Request, next: Next) -> Response {
     let page = request.method() == axum::http::Method::GET
         && !path.starts_with("/api/")
         && !path.starts_with("/pkg/");
-    if page {
-        if let Some(trace) = crate::observe::traceparent() {
-            request
-                .extensions_mut()
-                .insert(crate::observe::PageTrace(trace));
-        }
+    if page && let Some(trace) = crate::observe::traceparent() {
+        request
+            .extensions_mut()
+            .insert(crate::observe::PageTrace(trace));
     }
     next.run(request).await
 }
@@ -2022,10 +2020,10 @@ fn collect_ids(text: &str, ids: &mut Vec<i64>) {
                 continue;
             }
             let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            if let Ok(id) = digits.parse::<i64>() {
-                if id > 0 {
-                    ids.push(id);
-                }
+            if let Ok(id) = digits.parse::<i64>()
+                && id > 0
+            {
+                ids.push(id);
             }
         }
     }

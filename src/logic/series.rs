@@ -189,18 +189,18 @@ pub(super) async fn retune_series(
     if repeat.cadence == Cadence::Once {
         return Err(OpError::from(crate::msg!("err-repeat-values")));
     }
-    if let Some(max) = repeat.max_occurrences {
-        if max < 2 {
-            return Err(OpError::from(crate::msg!("err-series-two-dates")));
-        }
+    if let Some(max) = repeat.max_occurrences
+        && max < 2
+    {
+        return Err(OpError::from(crate::msg!("err-series-two-dates")));
     }
     let guild = must_guild(conn, series.guild_id).await?;
     let tz = clock::zone(&guild.timezone)?;
     let anchor = series.anchor_start;
-    if let Some(end) = repeat.end_on {
-        if end < anchor {
-            return Err(OpError::from(crate::msg!("err-series-end-early")));
-        }
+    if let Some(end) = repeat.end_on
+        && end < anchor
+    {
+        return Err(OpError::from(crate::msg!("err-series-end-early")));
     }
     let cadence_changed = series.cadence != repeat.cadence;
     diesel::update(schema::series::table.filter(schema::series::id.eq(series_id)))
@@ -312,20 +312,20 @@ pub(super) async fn fill_series(
     let mut last_start = None;
     let mut template = None;
     loop {
-        if let Some(max) = series.max_occurrences {
-            if index > max {
-                break;
-            }
+        if let Some(max) = series.max_occurrences
+            && index > max
+        {
+            break;
         }
         let start = occurrence_start(anchor, index, series.cadence, tz);
         if last_start.is_some_and(|previous| start <= previous) {
             break;
         }
         last_start = Some(start);
-        if let Some(end) = series.end_on {
-            if start > end {
-                break;
-            }
+        if let Some(end) = series.end_on
+            && start > end
+        {
+            break;
         }
         if series.max_occurrences.is_none() && start > now + Duration::days(120) {
             break;

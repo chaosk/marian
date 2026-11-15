@@ -96,10 +96,12 @@ impl LiveStream {
             move |event: web_sys::MessageEvent| {
                 let served = event.data().as_string().unwrap_or_default();
                 let mine = api::site().build;
-                if !served.is_empty() && !mine.is_empty() && served != mine {
-                    if let Some(flag) = new_build {
-                        flag.try_set(true);
-                    }
+                if !served.is_empty()
+                    && !mine.is_empty()
+                    && served != mine
+                    && let Some(flag) = new_build
+                {
+                    flag.try_set(true);
                 }
             },
         );
@@ -333,17 +335,17 @@ impl FocusBack {
         let trigger = NodeRef::<leptos::html::Button>::new();
         let wanted = RwSignal::new(name.is_some_and(returning));
         Effect::new(move |_| {
-            if let Some(button) = trigger.get() {
-                if wanted.get_untracked() {
-                    wanted.set(false);
-                    // A redrawn one only takes focus nobody else has. The page
-                    // can redraw more than once as a save settles, so the wish
-                    // stands for each of them until it runs out.
-                    if name.is_some() && !focus_lost() {
-                        return;
-                    }
-                    let _ = button.focus();
+            if let Some(button) = trigger.get()
+                && wanted.get_untracked()
+            {
+                wanted.set(false);
+                // A redrawn one only takes focus nobody else has. The page
+                // can redraw more than once as a save settles, so the wish
+                // stands for each of them until it runs out.
+                if name.is_some() && !focus_lost() {
+                    return;
                 }
+                let _ = button.focus();
             }
         });
         Self {
@@ -576,10 +578,10 @@ fn read_form(form: &web_sys::HtmlFormElement) -> Value {
             match input.type_().as_str() {
                 "checkbox" if kind == "ints" => {
                     let list = out.entry(name).or_insert_with(|| Value::Array(Vec::new()));
-                    if input.checked() {
-                        if let Value::Array(items) = list {
-                            items.push(typed(&input.value(), "int"));
-                        }
+                    if input.checked()
+                        && let Value::Array(items) = list
+                    {
+                        items.push(typed(&input.value(), "int"));
                     }
                 }
                 "checkbox" => {
@@ -1027,10 +1029,10 @@ pub fn RoleCombo(
         open.set(false);
         needle.set(String::new());
         let now = chosen.get_untracked();
-        if now != at_open.get_value() {
-            if let Some(on_change) = on_change {
-                on_change.run(now);
-            }
+        if now != at_open.get_value()
+            && let Some(on_change) = on_change
+        {
+            on_change.run(now);
         }
     };
     let toggle = move |id: String| {

@@ -535,17 +535,17 @@ async fn delete_from_button(
                 .execute(&mut *conn)
                 .await?;
         }
-        if let Some(plan) = plan {
-            if let Err(err) = purge_event_channel(&data.db, &http, plan).await {
-                tracing::warn!("could not purge the event channel: {err}");
-            }
+        if let Some(plan) = plan
+            && let Err(err) = purge_event_channel(&data.db, &http, plan).await
+        {
+            tracing::warn!("could not purge the event channel: {err}");
         }
     } else if let Some(plan) = plan {
         let http = data.http.lock().ok().and_then(|guard| guard.clone());
-        if let Some(http) = http {
-            if let Err(err) = purge_event_channel(&data.db, &http, plan).await {
-                tracing::warn!("could not purge the event channel: {err}");
-            }
+        if let Some(http) = http
+            && let Err(err) = purge_event_channel(&data.db, &http, plan).await
+        {
+            tracing::warn!("could not purge the event channel: {err}");
         }
     }
     if let Err(err) = component
