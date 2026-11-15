@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, Utc, Weekday};
 use chrono_tz::Tz;
 
 use crate::error::OpError;
@@ -81,11 +81,7 @@ pub fn next_weekday_at(
 
 pub fn at_local(date: NaiveDate, hour: u32, minute: u32, tz: Tz) -> DateTime<Utc> {
     let time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap_or(NaiveTime::MIN);
-    date.and_time(time)
-        .and_local_timezone(tz)
-        .earliest()
-        .unwrap_or_else(|| tz.from_utc_datetime(&date.and_time(time)))
-        .with_timezone(&Utc)
+    marian_types::time::local_to_utc(date.and_time(time), tz)
 }
 
 pub fn anchor_at_clock(raw: &str, tz: Tz) -> Result<DateTime<Utc>, OpError> {
@@ -145,17 +141,44 @@ pub fn occurrence_start(
             .unwrap_or(local.date_naive()),
         Cadence::Once => local.date_naive(),
     };
-    date.and_time(time)
-        .and_local_timezone(tz)
-        .earliest()
-        .unwrap_or_else(|| tz.from_utc_datetime(&date.and_time(time)))
-        .with_timezone(&Utc)
+    marian_types::time::local_to_utc(date.and_time(time), tz)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
+
+    #[test]
+    fn a_weekly_time_in_the_skipped_hour_moves_forward_by_the_gap() {
+        // Warsaw goes from 02:00 to 03:00 on 29 March 2026.
+        let warsaw: Tz = "Europe/Warsaw".parse().unwrap();
+        let anchor = at_local(NaiveDate::from_ymd_opt(2026, 3, 22).unwrap(), 2, 30, warsaw);
+        let skipped = occurrence_start(anchor, 2, Cadence::Weekly, warsaw);
+        assert_eq!(
+            skipped.with_timezone(&warsaw).to_rfc3339(),
+            "2026-03-29T03:30:00+02:00"
+        );
+        let after = occurrence_start(anchor, 3, Cadence::Weekly, warsaw);
+        assert_eq!(
+            after.with_timezone(&warsaw).to_rfc3339(),
+            "2026-04-05T02:30:00+02:00"
+        );
+
+        // New York goes from 02:00 to 03:00 on 8 March 2026; this used to land
+        // at 21:30 the evening before.
+        let new_york: Tz = "America/New_York".parse().unwrap();
+        let at = at_local(
+            NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(),
+            2,
+            30,
+            new_york,
+        );
+        assert_eq!(
+            at.with_timezone(&new_york).to_rfc3339(),
+            "2026-03-08T03:30:00-04:00"
+        );
+    }
 
     #[test]
     fn weekly_step_keeps_local_hour_across_dst() {
