@@ -67,6 +67,7 @@ notice-guests = { $name } now brings { $guests ->
 notice-guests-waiting = { $name }'s party of { $size } no longer fits on { $option } and is waiting for spots.
 notice-was-not-on = { $name } wasn't on { $option }.
 notice-deleted = Deleted { $title }.
+notice-deleted-series-date = Skipped { $title }. It stays in its series as a skipped date, so the series doesn't bring it back.
 notice-cancelled = Cancelled { $title }.
 guests-form-title = Guests for { $option }
 guests-form-label = How many guests? (0–{ $most })

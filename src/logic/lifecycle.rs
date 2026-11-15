@@ -61,7 +61,21 @@ pub fn delete_event(
         if !can_delete(&actor, &event, &settings, &roles) {
             return Err(OpError::from(crate::msg!("err-cant-delete")));
         }
-        if matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
+        if matches!(event.status.as_str(), "draft" | "scheduled" | "failed")
+            && series_keeps_its_dates(tx, &event)?
+        {
+            // Deleting the row would leave a gap the series fills straight back in,
+            // so a date of a series stays behind as skipped.
+            diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+                .set((
+                    schema::events::status.eq("skipped"),
+                    schema::events::updated_at.eq(Utc::now()),
+                ))
+                .execute(tx)?;
+            let notice = crate::msg!("notice-deleted-series-date", title = &event.title);
+            log(tx, event.guild_id, Some(event.id), &notice.to_string())?;
+            Ok(notice)
+        } else if matches!(event.status.as_str(), "draft" | "scheduled" | "failed") {
             let title = event.title.clone();
             diesel::delete(schema::events::table.filter(schema::events::id.eq(event.id)))
                 .execute(tx)?;
@@ -84,6 +98,17 @@ pub fn delete_event(
             Err(OpError::from(crate::msg!("err-event-closed")))
         }
     })
+}
+
+/// Whether the event is a date of a series that has other dates, which would refill
+/// the date if its row went away.
+fn series_keeps_its_dates(conn: &mut Connection, event: &Event) -> Result<bool, OpError> {
+    let Some(series_id) = event.series_id else {
+        return Ok(false);
+    };
+    Ok(store::events_in_series(conn, series_id)?
+        .iter()
+        .any(|date| date.id != event.id))
 }
 
 pub fn duplicate_event(
