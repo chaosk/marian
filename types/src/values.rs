@@ -86,39 +86,13 @@ macro_rules! text_enum {
     };
 }
 
-/// Reads and writes a `text_enum!` as a Postgres `TEXT`. Put
-/// `#[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]` and
-/// `#[diesel(sql_type = diesel::sql_types::Text)]` on the enum too. A stored
-/// word outside the set fails the query.
-#[macro_export]
-macro_rules! text_sql {
-    ($name:ident) => {
-        impl ::diesel::serialize::ToSql<::diesel::sql_types::Text, ::diesel::pg::Pg> for $name {
-            fn to_sql<'b>(
-                &'b self,
-                out: &mut ::diesel::serialize::Output<'b, '_, ::diesel::pg::Pg>,
-            ) -> ::diesel::serialize::Result {
-                ::std::io::Write::write_all(out, self.as_str().as_bytes())?;
-                Ok(::diesel::serialize::IsNull::No)
-            }
-        }
-
-        impl ::diesel::deserialize::FromSql<::diesel::sql_types::Text, ::diesel::pg::Pg> for $name {
-            fn from_sql(value: ::diesel::pg::PgValue<'_>) -> ::diesel::deserialize::Result<Self> {
-                let text = ::std::str::from_utf8(value.as_bytes())?;
-                Ok(text.parse::<$name>()?)
-            }
-        }
-    };
-}
-
 #[doc(hidden)]
 pub use serde as __serde;
 
 text_enum! {
     /// Where an event is in its life.
-    #[cfg_attr(feature = "diesel", derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow))]
-    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text))]
+    #[cfg_attr(feature = "diesel", derive(diesel::types::Enum))]
+    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case"))]
     pub enum EventStatus("event status") {
         /// Saved but not to be posted yet.
         Draft = "draft",
@@ -135,13 +109,10 @@ text_enum! {
     }
 }
 
-#[cfg(feature = "diesel")]
-text_sql!(EventStatus);
-
 text_enum! {
     /// How often a series repeats.
-    #[cfg_attr(feature = "diesel", derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow))]
-    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text))]
+    #[cfg_attr(feature = "diesel", derive(diesel::types::Enum))]
+    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case"))]
     pub enum Cadence("cadence") {
         Once = "once",
         Daily = "daily",
@@ -151,13 +122,10 @@ text_enum! {
     }
 }
 
-#[cfg(feature = "diesel")]
-text_sql!(Cadence);
-
 text_enum! {
     /// Where one week's run of a routine is.
-    #[cfg_attr(feature = "diesel", derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow))]
-    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text))]
+    #[cfg_attr(feature = "diesel", derive(diesel::types::Enum))]
+    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case"))]
     pub enum RunStatus("routine run status") {
         /// Its poll opens later.
         Scheduled = "scheduled",
@@ -174,13 +142,10 @@ text_enum! {
     }
 }
 
-#[cfg(feature = "diesel")]
-text_sql!(RunStatus);
-
 text_enum! {
     /// What a channel is for.
-    #[cfg_attr(feature = "diesel", derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow))]
-    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text))]
+    #[cfg_attr(feature = "diesel", derive(diesel::types::Enum))]
+    #[cfg_attr(feature = "diesel", diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case"))]
     pub enum ChannelKind("channel kind") {
         /// One of the server's channels.
         Text = "text",
@@ -188,9 +153,6 @@ text_enum! {
         Event = "event",
     }
 }
-
-#[cfg(feature = "diesel")]
-text_sql!(ChannelKind);
 
 #[cfg(test)]
 mod tests {

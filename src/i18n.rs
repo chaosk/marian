@@ -17,19 +17,10 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use crate::schema;
 use crate::store::Connection;
 
-/// A language Marian writes in. Stored by its code.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    diesel::expression::AsExpression,
-    diesel::deserialize::FromSqlRow,
-)]
-#[diesel(sql_type = diesel::sql_types::Text)]
+/// A language Marian writes in. Stored by its code, `code()`; a stored code
+/// that isn't one of the languages' exactly fails the query.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, diesel::types::Enum)]
+#[diesel(sql_type = diesel::sql_types::Text, rename_all = "snake_case")]
 pub enum Lang {
     #[default]
     En,
@@ -61,28 +52,6 @@ impl Lang {
             Lang::En => "English",
             Lang::Pl => "Polski",
         }
-    }
-}
-
-impl diesel::serialize::ToSql<diesel::sql_types::Text, diesel::pg::Pg> for Lang {
-    fn to_sql<'b>(
-        &'b self,
-        out: &mut diesel::serialize::Output<'b, '_, diesel::pg::Pg>,
-    ) -> diesel::serialize::Result {
-        std::io::Write::write_all(out, self.code().as_bytes())?;
-        Ok(diesel::serialize::IsNull::No)
-    }
-}
-
-/// A stored code must be one of the languages' exactly; anything else fails
-/// the query.
-impl diesel::deserialize::FromSql<diesel::sql_types::Text, diesel::pg::Pg> for Lang {
-    fn from_sql(value: diesel::pg::PgValue<'_>) -> diesel::deserialize::Result<Self> {
-        let code = std::str::from_utf8(value.as_bytes())?;
-        Lang::ALL
-            .into_iter()
-            .find(|lang| lang.code() == code)
-            .ok_or_else(|| format!("unknown language {code:?}").into())
     }
 }
 
