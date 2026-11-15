@@ -127,6 +127,7 @@ pub fn App() -> impl IntoView {
     client::provide_toasts();
     // Effects run only in the browser, after hydration.
     Effect::new(|_| widgets::watch_presses());
+    Effect::new(|_| markdown::reveal_spoilers());
     let page = RwSignal::new(String::new());
     let server = RwSignal::new(String::new());
     provide_context(PageTitle(page));

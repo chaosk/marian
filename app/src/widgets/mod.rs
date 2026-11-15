@@ -592,6 +592,113 @@ pub fn Avatar(name: String, color: String, avatar: Option<String>, #[prop(option
     }
 }
 
+/// The signed-in person's calendar feed, behind a button in their menu: the
+/// address to copy, a link that subscribes in their calendar app, one for
+/// Google Calendar, and a word on what the link is. The link itself only ever
+/// downloaded a one-off copy. The panel draws only once opened, in the
+/// browser, which knows the address the site is on.
+#[component]
+fn CalendarFeed(url: String) -> impl IntoView {
+    let open = RwSignal::new(false);
+    // Whether the last Copy worked, until the button reads "Copy" again.
+    let copied = RwSignal::new(None::<bool>);
+    let url = StoredValue::new(url);
+    let field = NodeRef::<leptos::html::Input>::new();
+    let copy = move |_| {
+        let feed = feed_address(&url.get_value());
+        copy_text(feed, field, copied);
+    };
+    let panel = move || {
+        open.get().then(|| {
+            let feed = feed_address(&url.get_value());
+            let webcal = format!("webcal://{}", feed.split_once("://").map_or(feed.as_str(), |(_, rest)| rest));
+            let google = format!("https://calendar.google.com/calendar/r?cid={}", api::encode(&webcal));
+            view! {
+                <div class="feed-panel" id="calendar-feed">
+                    <label class="account-note" for="calendar-feed-url">"Your feed's address"</label>
+                    <div class="feed-copy">
+                        <input id="calendar-feed-url" type="text" readonly value=feed node_ref=field
+                            on:focus=move |_| select_all(field)/>
+                        <button type="button" class="feed-copy-button" on:click=copy>
+                            {move || if copied.get() == Some(true) { "Copied" } else { "Copy" }}
+                        </button>
+                    </div>
+                    <a href=webcal>"Subscribe"</a>
+                    <a href=google target="_blank" rel="external noopener">"Add to Google Calendar"</a>
+                    <p class="account-note">
+                        "The link is private: anyone who has it sees your events. "
+                        "Calendar apps refresh it on their own schedule, often every few hours."
+                    </p>
+                    <p class="visually-hidden" role="status">
+                        {move || match copied.get() {
+                            Some(true) => "Copied the feed's address.",
+                            Some(false) => "Couldn't copy. The address is selected; copy it from the field.",
+                            None => "",
+                        }}
+                    </p>
+                </div>
+            }
+        })
+    };
+    view! {
+        <button type="button" class="feed-toggle" aria-controls="calendar-feed"
+            aria-expanded=move || if open.get() { "true" } else { "false" }
+            on:click=move |_| {
+                copied.set(None);
+                open.update(|open| *open = !*open);
+            }>
+            <span>"Calendar feed"</span>
+            <span class="switcher-chevron" aria-hidden="true"></span>
+        </button>
+        {panel}
+    }
+}
+
+/// The feed's full address. The server gives one when it knows its public
+/// address; otherwise a path on this site, which the browser completes.
+fn feed_address(url: &str) -> String {
+    if !url.starts_with('/') {
+        return url.to_string();
+    }
+    #[cfg(feature = "hydrate")]
+    if let Ok(origin) = window().location().origin() {
+        return format!("{origin}{url}");
+    }
+    url.to_string()
+}
+
+#[cfg(feature = "hydrate")]
+fn select_all(field: NodeRef<leptos::html::Input>) {
+    if let Some(input) = field.get_untracked() {
+        input.select();
+    }
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn select_all(_: NodeRef<leptos::html::Input>) {}
+
+/// Puts `text` on the clipboard. When the browser won't, the field's text is
+/// selected so the person can copy it themselves.
+#[cfg(feature = "hydrate")]
+fn copy_text(text: String, field: NodeRef<leptos::html::Input>, copied: RwSignal<Option<bool>>) {
+    let promise = window().navigator().clipboard().write_text(&text);
+    client::spawn(async move {
+        let done = wasm_bindgen_futures::JsFuture::from(promise).await.is_ok();
+        if !done {
+            select_all(field);
+        }
+        copied.try_set(Some(done));
+        if done {
+            client::later(2000, move || {
+                copied.try_set(None);
+            });
+        }
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn copy_text(_: String, _: NodeRef<leptos::html::Input>, _: RwSignal<Option<bool>>) {}
+
 /// The signed-in person's menu: reminders, Google Calendar, the feed, and sign out.
 #[component]
 pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
@@ -695,7 +802,7 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
                     (!text.is_empty()).then(|| view! { <p class="error">{text}</p> })
                 }}
                 {google}
-                <a class="calendar" href=membership.calendar_url rel="external">"Calendar feed"</a>
+                <CalendarFeed url=membership.calendar_url/>
                 <form method="post" action="/logout">
                     <button type="submit">"Sign out"</button>
                 </form>
