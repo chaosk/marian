@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Once;
+use std::sync::{Mutex, Once, OnceLock};
 
 use diesel::connection::Connection as DbConnection;
 use diesel::connection::SimpleConnection;
@@ -24,6 +24,11 @@ pub type Db = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<Connection>>;
 
 static TEST_SCHEMAS: AtomicU64 = AtomicU64::new(0);
 static TEST_CLEANUP: Once = Once::new();
+/// Test schemas already migrated and emptied, ready for the next test.
+static TEST_POOL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The shape of a freshly migrated schema, so one a test changed (a trigger
+/// it added, say) isn't handed to the next test.
+static TEST_SHAPE: OnceLock<String> = OnceLock::new();
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -928,7 +933,9 @@ fn set_search_path(conn: &mut Connection, schema: &str) -> Result<(), diesel::re
             "The database schema name is not usable.".into(),
         ));
     }
-    conn.batch_execute(&format!("SET search_path TO {schema}"))
+    conn.batch_execute(&format!(
+        "SET search_path TO {schema}; SET application_name TO '{schema}'"
+    ))
 }
 
 struct SchemaGuard {
@@ -938,8 +945,90 @@ struct SchemaGuard {
 
 impl Drop for SchemaGuard {
     fn drop(&mut self) {
-        drop_schema(&self.admin_url, &self.schema);
+        if !recycle_schema(&self.admin_url, &self.schema) {
+            drop_schema(&self.admin_url, &self.schema);
+        }
     }
+}
+
+/// Migrating a fresh schema takes most of a database test's time, so a test's
+/// schema is emptied and kept for the next one, unless the test changed its
+/// shape or something still holds a connection to it.
+fn recycle_schema(admin_url: &str, schema: &str) -> bool {
+    let Some(shape) = TEST_SHAPE.get() else {
+        return false;
+    };
+    let Ok(mut admin) = Connection::establish(admin_url) else {
+        return false;
+    };
+    let still_used: i64 =
+        match diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(&format!(
+            "(SELECT count(*) FROM pg_stat_activity \
+              WHERE application_name = '{schema}' AND pid <> pg_backend_pid())"
+        )))
+        .get_result(&mut admin)
+        {
+            Ok(count) => count,
+            Err(_) => return false,
+        };
+    if still_used > 0 || schema_shape(&mut admin, schema).as_deref() != Some(shape) {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let emptied = admin.batch_execute(&format!(
+        "DO $$ DECLARE tables text; BEGIN
+           SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') INTO tables
+             FROM pg_tables
+            WHERE schemaname = '{schema}' AND tablename <> '__diesel_schema_migrations';
+           IF tables IS NOT NULL THEN
+             EXECUTE 'TRUNCATE ' || tables || ' RESTART IDENTITY CASCADE';
+           END IF;
+         END $$;
+         COMMENT ON SCHEMA {schema} IS 'pooled {now}'"
+    ));
+    if emptied.is_err() {
+        return false;
+    }
+    TEST_POOL
+        .lock()
+        .map(|mut pool| pool.push(schema.to_string()))
+        .is_ok()
+}
+
+/// A fingerprint of everything in `schema` but its rows: tables and columns
+/// with their types and defaults, constraints, indexes, triggers (and whether
+/// they're on), functions, and sequences.
+fn schema_shape(conn: &mut Connection, schema: &str) -> Option<String> {
+    diesel::select(diesel::dsl::sql::<diesel::sql_types::Text>(&format!(
+        "md5(replace(concat_ws('|',
+           (SELECT string_agg(c.relname || '.' || a.attname || ':' || format_type(a.atttypid, a.atttypmod)
+                              || ':' || a.attnotnull || ':' || coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
+                              ',' ORDER BY c.relname, a.attnum)
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE n.nspname = '{schema}' AND a.attnum > 0 AND NOT a.attisdropped),
+           (SELECT string_agg(k.conname || ':' || pg_get_constraintdef(k.oid), ',' ORDER BY k.conname)
+              FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
+             WHERE n.nspname = '{schema}'),
+           (SELECT string_agg(i.indexname || ':' || i.indexdef, ',' ORDER BY i.indexname)
+              FROM pg_indexes i WHERE i.schemaname = '{schema}'),
+           (SELECT string_agg(t.tgname || ':' || t.tgenabled::text, ',' ORDER BY t.tgname)
+              FROM pg_trigger t
+              JOIN pg_class c ON c.oid = t.tgrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = '{schema}' AND NOT t.tgisinternal),
+           (SELECT string_agg(p.proname || ':' || md5(p.prosrc), ',' ORDER BY p.proname)
+              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = '{schema}'),
+           (SELECT string_agg(s.sequencename, ',' ORDER BY s.sequencename)
+              FROM pg_sequences s WHERE s.schemaname = '{schema}')), '{schema}.', ''))"
+    )))
+    .get_result(conn)
+    .ok()
 }
 
 thread_local! {
@@ -948,6 +1037,9 @@ thread_local! {
 
 pub fn open_memory() -> Result<Connection, OpError> {
     let admin_url = database_url()?;
+    if let Some(conn) = reuse_schema(&admin_url) {
+        return Ok(conn);
+    }
     let schema = format!(
         "marian_t{}_{}",
         std::process::id(),
@@ -959,6 +1051,13 @@ pub fn open_memory() -> Result<Connection, OpError> {
         let _ = admin.batch_execute(&format!(
             "DO $$ DECLARE name text; BEGIN
                FOR name IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'marian_t{pid}_%'
+               LOOP EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', name); END LOOP;
+               -- Kept schemas outlive their test run; drop those idle a while.
+               FOR name IN SELECT nspname FROM pg_namespace
+                            WHERE nspname LIKE 'marian_t%'
+                              AND obj_description(oid, 'pg_namespace') ~ '^pooled [0-9]+$'
+                              AND split_part(obj_description(oid, 'pg_namespace'), ' ', 2)::bigint
+                                  < extract(epoch FROM now()) - 900
                LOOP EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', name); END LOOP;
              END $$"
         ));
@@ -974,7 +1073,7 @@ pub fn open_memory() -> Result<Connection, OpError> {
             return Err(err);
         }
     };
-    if let Err(err) = conn.batch_execute(&format!("SET search_path TO {schema}")) {
+    if let Err(err) = set_search_path(&mut conn, &schema) {
         drop(conn);
         drop_schema(&admin_url, &schema);
         return Err(OpError::internal(format!(
@@ -987,9 +1086,37 @@ pub fn open_memory() -> Result<Connection, OpError> {
         drop_schema(&admin_url, &schema);
         return Err(err);
     }
+    // Measured from outside the schema, the way recycling measures it, so
+    // names read the same.
+    if TEST_SHAPE.get().is_none() {
+        if let Some(shape) = Connection::establish(&admin_url)
+            .ok()
+            .and_then(|mut admin| schema_shape(&mut admin, &schema))
+        {
+            let _ = TEST_SHAPE.set(shape);
+        }
+    }
     let guard = SchemaGuard { schema, admin_url };
     TEST_GUARDS.with(|guards| guards.borrow_mut().push(guard));
     Ok(conn)
+}
+
+/// A schema an earlier test left migrated and empty, if there is one.
+fn reuse_schema(admin_url: &str) -> Option<Connection> {
+    let schema = TEST_POOL.lock().ok()?.pop()?;
+    let mut conn = Connection::establish(admin_url).ok()?;
+    if set_search_path(&mut conn, &schema).is_err() {
+        drop(conn);
+        drop_schema(admin_url, &schema);
+        return None;
+    }
+    crate::observe::install_query_trace(&mut conn, "postgresql");
+    let guard = SchemaGuard {
+        schema,
+        admin_url: admin_url.to_string(),
+    };
+    TEST_GUARDS.with(|guards| guards.borrow_mut().push(guard));
+    Some(conn)
 }
 
 fn connect(url: &str) -> Result<Connection, OpError> {
