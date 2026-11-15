@@ -82,6 +82,10 @@ pub struct Membership {
     #[serde(default)]
     pub avatar: Option<String>,
     pub server_manager: bool,
+    /// Whether they can create events here: they manage the server, the
+    /// server limits it to no roles, or they hold one of its roles.
+    #[serde(default)]
+    pub can_create_event: bool,
     pub reminders_enabled: bool,
     pub calendar_url: String,
     pub google: Google,

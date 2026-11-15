@@ -158,6 +158,7 @@ pub fn Scheduled() -> impl IntoView {
 #[component]
 pub fn AllEvents() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
+    let membership = cache::listen(cache::membership_scope(), cache::server_key);
     let events = cache::listen(cache::events_scope(), move || {
         let (q, page, filters) = leptos_router::hooks::use_query_map().with(|map| {
             (
@@ -180,7 +181,7 @@ pub fn AllEvents() -> impl IntoView {
             },
         )
     });
-    when(move || (server.get(), events.get()).ready(), move |(server, rows)| {
+    when(move || (server.get(), membership.get(), events.get()).ready(), move |(server, membership, rows)| {
         let q = query("q");
         let filters = leptos_router::hooks::use_query_map().with_untracked(Filters::read);
         let clock = clock_of(&server);
@@ -209,8 +210,10 @@ pub fn AllEvents() -> impl IntoView {
         let empty = rows.items.is_empty().then(|| {
             let (headline, note) = if narrowed {
                 ("No events match.", "Change the filters or the search above.")
-            } else {
+            } else if membership.can_create_event {
                 ("No events yet.", "Create one with New event on the Schedule.")
+            } else {
+                ("No events yet.", "Events show up here once someone posts one.")
             };
             view! {
                 <tr><td colspan="3" class="empty-row"><strong>{headline}</strong>" "{note}</td></tr>

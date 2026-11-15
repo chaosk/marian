@@ -42,7 +42,14 @@ pub fn Schedule() -> impl IntoView {
                 <h1>"Schedule"</h1>
                 <p class="lede">"This week, Monday to Sunday."</p>
             </div>
-            <A href=format!("{}/events/new", base()) attr:class="primary">"New event"</A>
+            // Only for someone who can create events. Read inside the
+            // Transition, so the server waits for the answer and draws what
+            // the browser will.
+            <Transition fallback=|| ()>
+                {move || membership.get().and_then(Result::ok).filter(|m| m.can_create_event).map(|_| view! {
+                    <A href=format!("{}/events/new", base()) attr:class="primary">"New event"</A>
+                })}
+            </Transition>
         </div>
         {when(move || (server.get(), week.get()).ready(), move |(server, week)| week_cell(&server, week, now))}
         {when(move || (server.get(), wrapped.get()).ready(), move |(server, wrapped)| wrapped_cell(&server, wrapped, now))}
