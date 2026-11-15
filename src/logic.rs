@@ -924,4 +924,73 @@ mod tests {
         delete_event(&mut conn, id, 1).unwrap();
         assert!(store::event(&mut conn, id).unwrap().is_none());
     }
+
+    /// Runs `body` twice at once, each turn in its own transaction on its own
+    /// connection to the test schema. Each turn holds its commit until the other
+    /// is done too, or for half a second if the other is waiting on it.
+    fn race(conn: &mut Connection, body: impl Fn(&mut Connection, usize) + Sync) {
+        use diesel::Connection as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration as Wait, Instant};
+        let db = store::pool_for(conn).unwrap();
+        let start = std::sync::Barrier::new(2);
+        let done = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for turn in 0..2 {
+                let (db, start, done, body) = (&db, &start, &done, &body);
+                scope.spawn(move || {
+                    let mut conn = db.get().unwrap();
+                    conn.transaction::<_, diesel::result::Error, _>(|tx| {
+                        start.wait();
+                        body(tx, turn);
+                        done.fetch_add(1, Ordering::SeqCst);
+                        let deadline = Instant::now() + Wait::from_millis(500);
+                        while done.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                            std::thread::sleep(Wait::from_millis(5));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn two_people_at_once_cannot_both_take_the_last_place() {
+        let mut conn = world();
+        let mut event = input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish);
+        event.options = vec![OptionInput {
+            capacity: Some(1),
+            ..OptionInput::of_type(DPS)
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let option = store::options_for(&mut conn, &event).unwrap()[0].id;
+        race(&mut conn, |tx, turn| {
+            let _ = signup(tx, id, option, 2 + turn as i64);
+        });
+        let confirmed = store::signups_for(&mut conn, &event)
+            .unwrap()
+            .iter()
+            .filter(|signup| signup.state == "confirmed")
+            .count();
+        assert_eq!(confirmed, 1);
+    }
+
+    #[test]
+    fn one_person_clicking_two_options_at_once_lands_on_one() {
+        let mut conn = world();
+        let id = save_event(
+            &mut conn,
+            input("Raid", Utc::now() + Duration::hours(5), SaveAction::Publish),
+        )
+        .unwrap();
+        let event = store::event(&mut conn, id).unwrap().unwrap();
+        let options = store::options_for(&mut conn, &event).unwrap();
+        race(&mut conn, |tx, turn| {
+            let _ = signup(tx, id, options[turn].id, 2);
+        });
+        assert_eq!(store::signups_for(&mut conn, &event).unwrap().len(), 1);
+    }
 }
