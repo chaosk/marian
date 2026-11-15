@@ -15,7 +15,7 @@ metadata:
     {{- include "marian.labels" . | nindent 4 }}
 spec:
   # Every replica serves the web. One at a time, whichever holds a Postgres
-  # lock, runs the bot, the tick and Discord jobs; the others take over when
+  # lock, runs the bot, the task worker and Discord jobs; the others take over when
   # it stops.
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -48,7 +48,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # Marian finishes requests, the tick and due Discord jobs on SIGTERM,
+      # Marian finishes requests, the task in hand and due Discord jobs on SIGTERM,
       # within about 45 seconds at worst; usually a few.
       terminationGracePeriodSeconds: 60
       securityContext:

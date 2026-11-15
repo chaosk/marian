@@ -9,6 +9,7 @@ mod library;
 mod lifecycle;
 mod model;
 mod routine;
+mod schedule;
 mod series;
 mod signup;
 mod template;
@@ -53,6 +54,7 @@ pub use routine::{
     save_steps, save_usual_days, stop_routine, waiting_run_id, ApprovalPost, DayCheck, PollButton,
     RoutineEffect, RoutinePost, RoutineSummary, RoutineView, RunHistory, RunView, Step, StepKind,
 };
+pub use schedule::{claim_google, finish_google, mark_everything, next_google, run_tasks, Pass};
 pub use signup::{editor_response, guests_form, signup, signup_guests, GuestsForm};
 pub use template::series_template;
 pub use tick::{discord_message_link, reminder_card, tick, ReminderCard};
@@ -74,7 +76,7 @@ mod tests {
     use super::*;
     use crate::schema;
     use crate::store::{self, Connection};
-    use crate::values::{AccessKind, Cadence, EventStatus, SignupState};
+    use crate::values::{AccessKind, Cadence, EventStatus, SignupState, TaskKind};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use diesel::connection::SimpleConnection;
     use diesel::prelude::*;
@@ -813,6 +815,465 @@ mod tests {
         let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].option_id, options[1].id);
+    }
+
+    /// A time as Postgres keeps it, to the second.
+    fn secs(at: DateTime<Utc>) -> DateTime<Utc> {
+        Utc.timestamp_opt(at.timestamp(), 0).unwrap()
+    }
+
+    /// When the task for `kind` and `subject` is due, once marks are turned
+    /// into tasks.
+    fn task(
+        conn: &mut Connection,
+        now: DateTime<Utc>,
+        kind: TaskKind,
+        subject: i64,
+    ) -> Option<DateTime<Utc>> {
+        schedule::drain(conn, now).unwrap();
+        schema::tasks::table
+            .filter(schema::tasks::kind.eq(kind))
+            .filter(schema::tasks::subject_id.eq(subject))
+            .select(schema::tasks::run_at)
+            .first(conn)
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_events_tasks_follow_it_whichever_way_it_changes() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let start = now + Duration::days(2);
+        let cutoff = now + Duration::days(1);
+        let mut event = input("Raid", start, SaveAction::Publish);
+        event.cutoff_at = Some(cutoff);
+        event.reminders = vec![ReminderInput {
+            offset_minutes: 60,
+            message: String::new(),
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        let ends = |start: DateTime<Utc>, hours: i64| {
+            start + Duration::minutes(60) + Duration::hours(hours)
+        };
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Remind, reminder),
+            Some(start - Duration::minutes(60))
+        );
+        assert_eq!(
+            task(&mut conn, now, TaskKind::CloseSignups, id),
+            Some(cutoff)
+        );
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Archive, id),
+            Some(ends(start, 12))
+        );
+
+        // A write from anywhere moves them, even one no code path knows about.
+        conn.batch_execute("UPDATE events SET starts_at = starts_at + interval '1 day'")
+            .unwrap();
+        let later = start + Duration::days(1);
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Remind, reminder),
+            Some(later - Duration::minutes(60))
+        );
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Archive, id),
+            Some(ends(later, 12))
+        );
+        conn.batch_execute("UPDATE settings SET auto_archive = false")
+            .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Archive, id),
+            None,
+            "the server stopped archiving"
+        );
+        conn.batch_execute("UPDATE settings SET auto_archive = true, auto_archive_hours = 2")
+            .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Archive, id),
+            Some(ends(later, 2))
+        );
+        conn.batch_execute(&format!(
+            "UPDATE reminders SET offset_minutes = 30 WHERE id = {reminder}"
+        ))
+        .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Remind, reminder),
+            Some(later - Duration::minutes(30))
+        );
+
+        conn.batch_execute(&format!("DELETE FROM events WHERE id = {id}"))
+            .unwrap();
+        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder), None);
+        assert_eq!(task(&mut conn, now, TaskKind::CloseSignups, id), None);
+        assert_eq!(task(&mut conn, now, TaskKind::Archive, id), None);
+    }
+
+    #[test]
+    fn a_scheduled_event_posts_on_time_and_then_reminds() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let start = now + Duration::hours(3);
+        let mut event = input("Dock", start, SaveAction::Schedule);
+        event.post_at = Some(now + Duration::hours(1));
+        event.reminders = vec![ReminderInput {
+            offset_minutes: 30,
+            message: String::new(),
+        }];
+        let id = save_event(&mut conn, event).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        let reminder = store::reminders_for(&mut conn, &stored).unwrap()[0].id;
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Post, id),
+            Some(now + Duration::hours(1))
+        );
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Remind, reminder),
+            None,
+            "nothing to remind of before it posts"
+        );
+
+        tick(&mut conn, now + Duration::minutes(30)).unwrap();
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Scheduled
+        );
+        let report = tick(&mut conn, now + Duration::hours(1)).unwrap();
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Posted
+        );
+        assert!(report.guilds.contains(&1), "open pages hear about it");
+        assert_eq!(task(&mut conn, now, TaskKind::Post, id), None);
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Remind, reminder),
+            Some(start - Duration::minutes(30))
+        );
+
+        tick(&mut conn, start - Duration::minutes(30)).unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        assert!(store::reminders_for(&mut conn, &stored).unwrap()[0]
+            .sent_at
+            .is_some());
+        assert_eq!(task(&mut conn, now, TaskKind::Remind, reminder), None);
+    }
+
+    #[test]
+    fn a_post_whose_channel_is_gone_is_tried_three_times_then_fails() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let id = due_post(&mut conn, now);
+        conn.batch_execute(&format!(
+            "ALTER TABLE events DROP CONSTRAINT IF EXISTS events_channel_id_fkey; \
+             UPDATE events SET channel_id = 999 WHERE id = {id}"
+        ))
+        .unwrap();
+        let report = tick(&mut conn, now + Duration::minutes(5)).unwrap();
+        let failed = report
+            .notes
+            .iter()
+            .filter(|note| note.starts_with("Post failed"))
+            .count();
+        assert_eq!(failed, 3);
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Failed
+        );
+        assert_eq!(task(&mut conn, now, TaskKind::Post, id), None);
+    }
+
+    #[test]
+    fn the_digest_and_series_fills_keep_their_own_clock() {
+        let mut conn = world();
+        let noon = Utc.with_ymd_and_hms(2026, 12, 1, 12, 0, 0).unwrap();
+        conn.batch_execute("UPDATE settings SET digest = 'daily'")
+            .unwrap();
+        assert_eq!(
+            task(&mut conn, noon, TaskKind::Digest, 1),
+            Some(noon),
+            "today's is late, so now"
+        );
+        let report = tick(&mut conn, noon).unwrap();
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.starts_with("Daily digest")),
+            "{:?}",
+            report.notes
+        );
+        let tomorrow = Utc.with_ymd_and_hms(2026, 12, 2, 9, 0, 0).unwrap();
+        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), Some(tomorrow));
+        conn.batch_execute("UPDATE settings SET digest = 'weekly'")
+            .unwrap();
+        let monday = Utc.with_ymd_and_hms(2026, 12, 7, 9, 0, 0).unwrap();
+        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), Some(monday));
+        conn.batch_execute("UPDATE guilds SET timezone = 'Europe/Warsaw'")
+            .unwrap();
+        let warsaw = Utc.with_ymd_and_hms(2026, 12, 7, 8, 0, 0).unwrap();
+        assert_eq!(
+            task(&mut conn, noon, TaskKind::Digest, 1),
+            Some(warsaw),
+            "9:00 in the server's zone"
+        );
+        conn.batch_execute("UPDATE settings SET digest = 'off'")
+            .unwrap();
+        assert_eq!(task(&mut conn, noon, TaskKind::Digest, 1), None);
+
+        let now = secs(Utc::now());
+        let mut event = input("Raid", now + Duration::hours(1), SaveAction::Publish);
+        event.repeat = Some(RepeatSpec {
+            cadence: Cadence::Daily,
+            end_on: None,
+            max_occurrences: None,
+        });
+        let id = save_event(&mut conn, event).unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::FillSeries, 1),
+            Some(now),
+            "a new series fills now"
+        );
+        tick(&mut conn, now).unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::FillSeries, 1),
+            Some(now + Duration::hours(1)),
+            "then hourly"
+        );
+        let series_id = store::event(&mut conn, id)
+            .unwrap()
+            .unwrap()
+            .series_id
+            .unwrap();
+        let dates = store::events_in_series(&mut conn, series_id).unwrap();
+        assert!(dates.len() > 1);
+        for date in &dates {
+            let due = match date.status {
+                EventStatus::Scheduled => task(&mut conn, now, TaskKind::Post, date.id),
+                _ => task(&mut conn, now, TaskKind::Archive, date.id),
+            };
+            assert!(
+                due.is_some(),
+                "each date has its own tasks: {} {}",
+                date.id,
+                date.status
+            );
+        }
+        // A date taken out leaves room for another: the fill comes now,
+        // not within the hour.
+        delete_event(&mut conn, dates[1].id, 1).unwrap();
+        assert_eq!(task(&mut conn, now, TaskKind::FillSeries, 1), Some(now));
+        conn.batch_execute("UPDATE series SET active = false")
+            .unwrap();
+        assert_eq!(task(&mut conn, now, TaskKind::FillSeries, 1), None);
+    }
+
+    #[test]
+    fn calendars_follow_signups_and_changes_to_their_events() {
+        let mut conn = world();
+        conn.batch_execute(
+            "INSERT INTO google_accounts (user_id, refresh_token, email, connected_at, last_error, auto_sync, revoking)
+             SELECT user_id, 'token', 'june@example.com', now(), '', true, false FROM memberships WHERE id = 2",
+        )
+        .unwrap();
+        let june: i64 = schema::memberships::table
+            .find(2)
+            .select(schema::memberships::user_id)
+            .first(&mut conn)
+            .unwrap();
+        let now = secs(Utc::now());
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            Some(now),
+            "connecting marks a sync"
+        );
+        // The Google loop takes it, syncs, and comes back in six hours.
+        let (user, lease) = schedule::claim_google(&mut conn, now).unwrap().unwrap();
+        assert_eq!(user, june);
+        assert_eq!(
+            schedule::claim_google(&mut conn, now).unwrap(),
+            None,
+            "leased"
+        );
+        schedule::finish_google(&mut conn, june, lease, None, now).unwrap();
+        let full_pass = Some(now + Duration::hours(6));
+        assert_eq!(task(&mut conn, now, TaskKind::GoogleSync, june), full_pass);
+
+        let id = save_event(
+            &mut conn,
+            input("Raid", now + Duration::days(1), SaveAction::Publish),
+        )
+        .unwrap();
+        let stored = store::event(&mut conn, id).unwrap().unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            full_pass,
+            "June isn't on it yet"
+        );
+        let option = store::options_for(&mut conn, &stored).unwrap()[0].id;
+        signup(&mut conn, id, option, 2).unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            Some(now),
+            "her signup puts it in her calendar"
+        );
+        let reset = |conn: &mut Connection| {
+            conn.batch_execute(
+                "UPDATE tasks SET run_at = run_at + interval '6 hours' WHERE kind = 'google_sync'",
+            )
+            .unwrap();
+        };
+        reset(&mut conn);
+        conn.batch_execute(&format!(
+            "UPDATE events SET title = 'Raid night' WHERE id = {id}"
+        ))
+        .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            Some(now),
+            "a renamed event changes her calendar"
+        );
+        reset(&mut conn);
+        conn.batch_execute("UPDATE signups SET guests = 2").unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            Some(now + Duration::hours(6)),
+            "guests don't change her calendar"
+        );
+        conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2")
+            .unwrap();
+        assert_eq!(
+            task(&mut conn, now, TaskKind::GoogleSync, june),
+            Some(now),
+            "what she can see changed"
+        );
+        // A change while a sync runs isn't lost when it finishes.
+        let (_, lease) = schedule::claim_google(&mut conn, now).unwrap().unwrap();
+        conn.batch_execute("UPDATE channels SET name = 'raids'")
+            .unwrap();
+        schedule::drain(&mut conn, now).unwrap();
+        schedule::finish_google(&mut conn, june, lease, None, now).unwrap();
+        assert_eq!(task(&mut conn, now, TaskKind::GoogleSync, june), Some(now));
+    }
+
+    /// An event due to post now, and its tasks set.
+    fn due_post(conn: &mut Connection, now: DateTime<Utc>) -> i64 {
+        let mut event = input("Q&A", now + Duration::days(3), SaveAction::Schedule);
+        event.post_at = Some(now + Duration::hours(2));
+        let id = save_event(conn, event).unwrap();
+        diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
+            .set(schema::events::post_at.eq(now - Duration::minutes(1)))
+            .execute(conn)
+            .unwrap();
+        schedule::drain(conn, now).unwrap();
+        id
+    }
+
+    fn saved_jobs(conn: &mut Connection) -> i64 {
+        schema::discord_jobs::table
+            .count()
+            .get_result(conn)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_tasks_discord_jobs_are_saved_in_its_transaction() {
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let id = due_post(&mut conn, now);
+        // Saving the jobs fails, so the post is undone with them.
+        conn.batch_execute(
+            "CREATE FUNCTION refuse_jobs() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN RAISE EXCEPTION 'no jobs today'; END $$;
+             CREATE TRIGGER refuse_jobs BEFORE INSERT ON discord_jobs
+               FOR EACH ROW EXECUTE FUNCTION refuse_jobs();",
+        )
+        .unwrap();
+        let report = schedule::run_next(&mut conn, now).unwrap().unwrap();
+        assert!(report.notes.is_empty() && report.jobs.is_empty());
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Scheduled,
+            "not marked posted without its jobs"
+        );
+        assert_eq!(saved_jobs(&mut conn), 0);
+        assert_eq!(
+            task(&mut conn, now, TaskKind::Post, id),
+            Some(now + Duration::minutes(1)),
+            "tried again in a minute"
+        );
+        assert!(schedule::run_next(&mut conn, now).unwrap().is_none());
+
+        conn.batch_execute("DROP TRIGGER refuse_jobs ON discord_jobs")
+            .unwrap();
+        let report = tick(&mut conn, now + Duration::minutes(1)).unwrap();
+        assert_eq!(report.jobs.len(), 2);
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Posted
+        );
+        assert_eq!(saved_jobs(&mut conn), 2, "posted, and its jobs with it");
+    }
+
+    #[test]
+    fn a_task_claimed_by_one_worker_is_not_run_by_another() {
+        use std::sync::mpsc;
+        let mut conn = world();
+        let now = secs(Utc::now());
+        let id = due_post(&mut conn, now);
+        let db = store::pool_for(&mut conn).unwrap();
+
+        // The old leader, still running, has claimed the post and is mid-way.
+        let (claimed_tx, claimed) = mpsc::channel();
+        let (go_tx, go) = mpsc::channel::<()>();
+        let old = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                let mut conn = db.get().unwrap();
+                store::with_tx(&mut conn, |tx| {
+                    store::lock_tick(tx, 1)?;
+                    let task = schedule::claim(tx, Some(1), now)?.expect("due");
+                    claimed_tx.send(task.kind).unwrap();
+                    go.recv().unwrap();
+                    let report = schedule::perform(tx, task.kind, task.subject, now)?;
+                    crate::jobs::save(tx, &report.jobs)?;
+                    Ok(report)
+                })
+                .unwrap()
+            })
+        };
+        assert_eq!(claimed.recv().unwrap(), TaskKind::Post);
+        // The new leader looks for due work meanwhile: it waits its turn for
+        // the server, then finds the post already done.
+        let new = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                let mut conn = db.get().unwrap();
+                let first = schedule::run_next(&mut conn, now).unwrap();
+                let second = schedule::run_next(&mut conn, now).unwrap();
+                (first, second)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!new.is_finished(), "waits for the server's lock");
+        go_tx.send(()).unwrap();
+        let old = old.join().unwrap();
+        assert!(old.notes.iter().any(|note| note == "Posted Q&A"));
+        let (first, second) = new.join().unwrap();
+        let first = first.expect("the post looked due when it began");
+        assert!(
+            first.notes.is_empty() && first.jobs.is_empty(),
+            "{:?}",
+            first.notes
+        );
+        assert!(second.is_none(), "nothing left");
+        assert_eq!(
+            store::event(&mut conn, id).unwrap().unwrap().status,
+            EventStatus::Posted
+        );
+        assert_eq!(saved_jobs(&mut conn), 2, "one sync and one attend, once");
     }
 
     #[test]
