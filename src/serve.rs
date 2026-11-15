@@ -1543,8 +1543,14 @@ fn error_json(status: StatusCode, text: &str) -> Response {
     (status, Json(serde_json::json!({ "error": text }))).into_response()
 }
 
+/// An error for a sign-in or Google page. Database detail stays in the log.
 fn plain_error(err: OpError) -> Response {
-    error_json(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string())
+    let status = match &err {
+        OpError::NotFound => StatusCode::NOT_FOUND,
+        OpError::Message(_) | OpError::Text(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        OpError::Db(_) | OpError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_json(status, &err.localized(crate::i18n::Lang::En))
 }
 
 fn safe_path(path: &str) -> &str {
@@ -1680,6 +1686,20 @@ mod tests {
     use super::*;
     use crate::api::percent_decode;
     use crate::schema;
+
+    #[tokio::test]
+    async fn a_sign_in_page_shows_no_database_detail() {
+        let err = OpError::Db(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            Box::new(r#"duplicate key value violates unique constraint "google_accounts_pkey""#.to_string()),
+        ));
+        let response = plain_error(err);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!body.contains("google_accounts_pkey"), "{body}");
+        assert!(body.contains("Something went wrong"), "{body}");
+    }
 
     #[test]
     fn a_server_list_accepts_string_and_integer_permissions() {

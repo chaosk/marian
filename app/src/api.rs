@@ -55,9 +55,10 @@ pub(crate) mod local {
                 status: 422,
                 message: message.to_string(),
             },
-            OpError::Db(_) => Failure {
+            // Logs the detail and says only that something went wrong.
+            err @ (OpError::Db(_) | OpError::Internal(_)) => Failure {
                 status: 500,
-                message: "Something went wrong.".into(),
+                message: err.localized(marian::i18n::Lang::En),
             },
         }
     }
