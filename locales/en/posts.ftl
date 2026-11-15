@@ -17,7 +17,6 @@ status-archived = Archived
 status-cancelled = Cancelled
 status-skipped = Skipped
 status-failed = Post failed
-status-unknown = Unknown
 # $start is a Discord timestamp that counts down, such as "in 15 minutes".
 reminder-title = REMINDER: Event starting { $start }!
 reminder-footer = Opt out of reminders with /reminders off

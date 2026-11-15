@@ -21,7 +21,6 @@ status-archived = Zarchiwizowane
 status-cancelled = Odwołane
 status-skipped = Pominięte
 status-failed = Publikacja nieudana
-status-unknown = Nieznany
 # $start to znacznik czasu Discorda, który odlicza, np. „za 15 minut”.
 reminder-title = PRZYPOMNIENIE: wydarzenie zaczyna się { $start }!
 reminder-footer = Wyłącz przypomnienia komendą /reminders off

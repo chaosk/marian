@@ -17,8 +17,11 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use crate::schema;
 use crate::store::Connection;
 
-/// A language Marian writes in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// A language Marian writes in. Stored by its code.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow,
+)]
+#[diesel(sql_type = diesel::sql_types::Text)]
 pub enum Lang {
     #[default]
     En,
@@ -53,14 +56,31 @@ impl Lang {
     }
 }
 
+impl diesel::serialize::ToSql<diesel::sql_types::Text, diesel::pg::Pg> for Lang {
+    fn to_sql<'b>(&'b self, out: &mut diesel::serialize::Output<'b, '_, diesel::pg::Pg>) -> diesel::serialize::Result {
+        std::io::Write::write_all(out, self.code().as_bytes())?;
+        Ok(diesel::serialize::IsNull::No)
+    }
+}
+
+/// A stored code must be one of the languages' exactly; anything else fails
+/// the query.
+impl diesel::deserialize::FromSql<diesel::sql_types::Text, diesel::pg::Pg> for Lang {
+    fn from_sql(value: diesel::pg::PgValue<'_>) -> diesel::deserialize::Result<Self> {
+        let code = std::str::from_utf8(value.as_bytes())?;
+        Lang::ALL
+            .into_iter()
+            .find(|lang| lang.code() == code)
+            .ok_or_else(|| format!("unknown language {code:?}").into())
+    }
+}
+
 /// The language a server picked; English when it hasn't, or can't be read.
 pub fn lang_of(conn: &mut Connection, guild_id: i64) -> Lang {
     schema::settings::table
         .filter(schema::settings::guild_id.eq(guild_id))
         .select(schema::settings::language)
-        .first::<String>(conn)
-        .ok()
-        .and_then(|code| Lang::from_code(&code))
+        .first::<Lang>(conn)
         .unwrap_or_default()
 }
 

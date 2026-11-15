@@ -8,6 +8,7 @@ use marian_types::labels::PALETTE;
 
 use crate::format::{self, cadence_label, color_name, human_duration, human_offset, Clock};
 use crate::{api, cache, client};
+use marian_types::{Cadence, EventStatus};
 
 const DURATIONS: [i64; 12] = [15, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440];
 const CUTOFFS: [i64; 11] = [0, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080];
@@ -15,7 +16,7 @@ const MAX_REMINDERS: usize = 5;
 
 /// Whether this person can change the event from its page.
 fn editable(event: &dto::Event) -> bool {
-    event.can.edit && !matches!(event.status.as_str(), "archived" | "skipped" | "cancelled")
+    event.can.edit && !matches!(event.status, EventStatus::Archived | EventStatus::Skipped | EventStatus::Cancelled)
 }
 
 pub(super) fn pencil() -> impl IntoView {
@@ -90,17 +91,19 @@ impl LocalDraft {
                 event.channel = name;
             }
             if patch.repeat.is_some() {
-                event.series = repeat.as_ref().map(|repeat| dto::Series {
-                    id: String::new(),
-                    title: event.title.clone(),
-                    cadence: repeat.cadence.clone(),
-                    active: true,
-                    max_occurrences: repeat.count,
-                    end_on: repeat.until.and_then(|day| {
-                        clock.tz.from_local_datetime(&day.and_hms_opt(23, 59, 0)?).earliest()
-                    }).map(|end| end.with_timezone(&Utc)),
-                    next: None,
-                    dates: 0,
+                event.series = repeat.as_ref().and_then(|repeat| {
+                    Some(dto::Series {
+                        id: String::new(),
+                        title: event.title.clone(),
+                        cadence: repeat.cadence.parse().ok()?,
+                        active: true,
+                        max_occurrences: repeat.count,
+                        end_on: repeat.until.and_then(|day| {
+                            clock.tz.from_local_datetime(&day.and_hms_opt(23, 59, 0)?).earliest()
+                        }).map(|end| end.with_timezone(&Utc)),
+                        next: None,
+                        dates: 0,
+                    })
                 });
             }
         });
@@ -469,7 +472,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     if let Some(draft) = use_context::<LocalDraft>() {
         return new_event_buttons(key, draft, clock).into_any();
     }
-    let waiting = matches!(event.status.as_str(), "draft" | "scheduled" | "failed");
+    let waiting = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed);
     if !event.can.edit || !waiting {
         return ().into_any();
     }
@@ -484,7 +487,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     let when = RwSignal::new(initial.get_value());
     let zone = clock.label(now);
     let starts = clock.when(event.starts_at);
-    let scheduled = event.status == "scheduled";
+    let scheduled = event.status == EventStatus::Scheduled;
     let field = NodeRef::<leptos::html::Input>::new();
     focus_when_shown(field);
     let cancel = move || {
@@ -510,7 +513,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
                 on:click=move |_| if open.get_untracked() { cancel() } else { open.set(true) }>
                 {if scheduled { "Reschedule" } else { "Schedule post" }}
             </button>
-            {(event.status != "draft").then(|| view! {
+            {(event.status != EventStatus::Draft).then(|| view! {
                 <button type="button" class="ghost" disabled=move || sender.busy().get()
                     on:click=move |_| sender.go(api::path::event_draft, None, "Back to a draft. It won't post on its own.", || ())>
                     "Back to draft"
@@ -537,7 +540,7 @@ pub fn PostButtons(key: (String, String), event: dto::Event, clock: Clock) -> im
     .into_any()
 }
 
-const CADENCES: [&str; 4] = ["daily", "weekly", "biweekly", "monthly"];
+const CADENCES: [Cadence; 4] = [Cadence::Daily, Cadence::Weekly, Cadence::Biweekly, Cadence::Monthly];
 
 /// How a series reads in a line: its repeat and how long it runs.
 fn repeat_line(series: &dto::Series, clock: &Clock) -> String {
@@ -549,13 +552,13 @@ fn repeat_line(series: &dto::Series, clock: &Clock) -> String {
         (None, Some(end)) => format!("until {}", format::format_day(clock.day(end))),
         (None, None) => "keeps going".into(),
     };
-    format!("{} · {length}", cadence_label(&series.cadence))
+    format!("{} · {length}", cadence_label(series.cadence.as_str()))
 }
 
 /// Whether the event repeats, and a form to start, change, or stop the repeat.
 #[component]
 pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> impl IntoView {
-    let series = event.series.clone().filter(|series| series.cadence != "once");
+    let series = event.series.clone().filter(|series| series.cadence != Cadence::Once);
     let face = series
         .as_ref()
         .map(|series| repeat_line(series, &clock))
@@ -578,7 +581,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
     let sender = Sender::new(key);
     let open = RwSignal::new(false);
     let start = (
-        series.as_ref().map(|series| series.cadence.clone()).unwrap_or_else(|| "none".into()),
+        series.as_ref().map(|series| series.cadence.to_string()).unwrap_or_else(|| "none".into()),
         series
             .as_ref()
             .and_then(|series| series.max_occurrences)
@@ -666,7 +669,7 @@ pub fn EventRepeat(key: (String, String), event: dto::Event, clock: Clock) -> im
         let none = (!in_series).then(|| view! { <option value="none" selected=now == "none">"Doesn't repeat"</option> });
         let rest = CADENCES
             .iter()
-            .map(|value| view! { <option value=*value selected=now == *value>{cadence_label(value)}</option> })
+            .map(|value| view! { <option value=value.as_str() selected=now == value.as_str()>{cadence_label(value.as_str())}</option> })
             .collect_view();
         view! { {none}{rest} }
     };
@@ -1495,7 +1498,7 @@ pub fn ThreadToggle(key: (String, String), event: dto::Event) -> impl IntoView {
 #[component]
 pub fn EventChannel(key: (String, String), event: dto::Event, channels: Vec<dto::Channel>) -> impl IntoView {
     let name = format!("#{}", event.channel);
-    let unposted = matches!(event.status.as_str(), "draft" | "scheduled" | "failed") && event.discord_url.is_none();
+    let unposted = matches!(event.status, EventStatus::Draft | EventStatus::Scheduled | EventStatus::Failed) && event.discord_url.is_none();
     if !editable(&event) || !unposted {
         return match event.discord_url.clone() {
             Some(url) => view! { <p><a href=url title="Open in Discord">{name}</a></p> }.into_any(),

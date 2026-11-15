@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::error::OpError;
 use crate::jobs::DiscordJob;
 use crate::store::Event;
+use crate::values::Cadence;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveAction {
@@ -14,9 +16,21 @@ pub enum SaveAction {
 
 #[derive(Debug, Clone)]
 pub struct RepeatSpec {
-    pub cadence: String,
+    /// Anything but `Once`.
+    pub cadence: Cadence,
     pub end_on: Option<DateTime<Utc>>,
     pub max_occurrences: Option<i64>,
+}
+
+impl RepeatSpec {
+    /// A repeat's cadence as a form or command gives it: daily, weekly,
+    /// biweekly or monthly.
+    pub fn cadence(text: &str) -> Result<Cadence, OpError> {
+        match text.trim().parse() {
+            Ok(Cadence::Once) | Err(_) => Err(OpError::from(crate::msg!("err-repeat-values"))),
+            Ok(cadence) => Ok(cadence),
+        }
+    }
 }
 
 /// The most guests an option may let one signup bring.

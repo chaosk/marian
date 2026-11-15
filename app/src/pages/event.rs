@@ -11,6 +11,7 @@ use crate::widgets::{
 };
 use crate::cache::{self, show, when, Ready};
 use crate::{base, title, A};
+use marian_types::{Cadence, EventStatus};
 
 /// What differs between a saved event's page and a new one. The layout around
 /// these is the same, so a new event looks the way it will once saved.
@@ -112,7 +113,7 @@ pub fn EventPage() -> impl IntoView {
             let localize = localize_note(&server);
             let key = (cache::server_now(), event.id.clone());
             let series_note = event.series.as_ref().and_then(|series| {
-                (series.cadence != "once").then(|| {
+                (series.cadence != Cadence::Once).then(|| {
                     let href = format!("{}/recurring/{}", base(), series.id);
                     view! {
                         <p class="notice info">
@@ -142,8 +143,8 @@ pub fn EventPage() -> impl IntoView {
             }
             .into_any();
             let status = view! {
-                <p>{status_label(&event.status)}</p>
-                {(event.status == "scheduled").then(|| event.post_at).flatten().map(|at| view! {
+                <p>{status_label(event.status.as_str())}</p>
+                {(event.status == EventStatus::Scheduled).then(|| event.post_at).flatten().map(|at| view! {
                     <p class="muted">"Posts "{clock.when(at)}</p>
                 })}
             }
@@ -195,7 +196,7 @@ pub fn NewEvent() -> impl IntoView {
                 title: String::new(),
                 description: String::new(),
                 location: String::new(),
-                status: "draft".into(),
+                status: EventStatus::Draft,
                 starts_at,
                 duration_minutes: 60,
                 cutoff_at: None,
@@ -390,7 +391,7 @@ fn embed_view(
     let image = event.image_url.clone();
     let color = event.color.clone();
     // A finished event's post keeps only its link to the web, as on Discord.
-    let finished = matches!(event.status.as_str(), "archived" | "cancelled" | "skipped");
+    let finished = matches!(event.status, EventStatus::Archived | EventStatus::Cancelled | EventStatus::Skipped);
     // The message text above the embed, as the post words it: @everyone, then each role.
     let mentions: Vec<String> = event
         .mention_everyone
@@ -476,7 +477,7 @@ fn embed_view(
                     <p class="d-desc"><span class="d-time">{start_full}</span>" - "<span class="d-time">{end_time}</span></p>
                     {event.calendar_url.clone().map(|url| view! { <p class="d-links"><a href=url>"+"</a></p> })}
                     <p class="d-desc">"🕐 "<span class="d-time">{format::format_rel(event.starts_at, now)}</span></p>
-                    {(event.status != "posted").then(|| view! { <p class="d-desc"><em>{status_label(&event.status)}</em></p> })}
+                    {(event.status != EventStatus::Posted).then(|| view! { <p class="d-desc"><em>{status_label(event.status.as_str())}</em></p> })}
                     <div class="d-fields">{fields}</div>
                     {image.as_ref().map(|url| view! { <img class="d-image" src=url.clone() alt=""/> })}
                     <p class="d-foot">"Created by "{event.creator.clone()}</p>

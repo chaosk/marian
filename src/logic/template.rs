@@ -9,6 +9,7 @@ use super::model::{OptionInput, ReminderInput, SeriesTemplate};
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{Connection, Series, StoredTemplate};
+use crate::values::EventStatus;
 
 #[derive(Debug, Clone)]
 pub struct EventTemplate {
@@ -31,13 +32,13 @@ pub struct EventTemplate {
     pub restrict_role_ids: Vec<i64>,
 }
 
-pub struct Spawn<'a> {
+pub struct Spawn {
     pub created_by: Option<i64>,
     /// Who picked the template's attendee role.
     pub attendee_role_by: Option<i64>,
     pub starts_at: DateTime<Utc>,
     pub post_at: Option<DateTime<Utc>>,
-    pub status: &'a str,
+    pub status: EventStatus,
     pub series_id: Option<i64>,
     pub occurrence_index: Option<i64>,
 }
@@ -275,7 +276,7 @@ struct NewSpawnedEvent<'a> {
     location: &'a str,
     starts_at: DateTime<Utc>,
     duration_minutes: i64,
-    status: &'a str,
+    status: EventStatus,
     post_at: Option<DateTime<Utc>>,
     color: &'a str,
     image_url: Option<&'a str>,
@@ -293,7 +294,7 @@ struct NewSpawnedEvent<'a> {
 pub fn spawn(
     conn: &mut Connection,
     template: &EventTemplate,
-    spec: &Spawn<'_>,
+    spec: &Spawn,
 ) -> Result<i64, OpError> {
     let stamp = Utc::now();
     let cutoff = template

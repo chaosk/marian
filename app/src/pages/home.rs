@@ -4,6 +4,7 @@ use marian_types as dto;
 use crate::format::{self, clock_of, spot_count, status_label};
 use crate::cache::{self, show, when, Ready};
 use crate::{base, md, title, A};
+use marian_types::EventStatus;
 
 #[component]
 pub fn Schedule() -> impl IntoView {
@@ -107,7 +108,7 @@ fn week_cell(server: &dto::Server, week: dto::Paged<dto::EventSummary>, now: chr
     let hero = week
         .items
         .iter()
-        .filter(|event| event.status == "posted")
+        .filter(|event| event.status == EventStatus::Posted)
         .min_by_key(|event| event.starts_at)
         .cloned();
     let mut days: Vec<(String, bool, Vec<dto::EventSummary>)> = Vec::new();
@@ -255,7 +256,7 @@ fn card(
     let when = clock.when(event.starts_at);
     let end = clock.end(event.starts_at, event.duration_minutes);
     let rel = format::format_rel(event.starts_at, now);
-    let status = status_label(&event.status);
+    let status = status_label(event.status.as_str());
     view! {
         <A href=href attr:class="card">
             {stripe}

@@ -2,6 +2,7 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, TimeZone, 
 use chrono_tz::Tz;
 
 use crate::error::OpError;
+use crate::values::Cadence;
 
 pub const ZONES: &[&str] = &[
     "America/Los_Angeles",
@@ -125,19 +126,19 @@ fn at_local_result(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, OpError> {
         .ok_or_else(|| OpError::from(crate::msg!("err-date-missing")))
 }
 
-pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: &str, tz: Tz) -> DateTime<Utc> {
+pub fn occurrence_start(anchor: DateTime<Utc>, index: i64, cadence: Cadence, tz: Tz) -> DateTime<Utc> {
     let delta = (index - 1).max(0);
     let local = anchor.with_timezone(&tz);
     let time = local.time();
     let date = match cadence {
-        "daily" => shift_days(local.date_naive(), delta),
-        "weekly" => shift_days(local.date_naive(), delta * 7),
-        "biweekly" => shift_days(local.date_naive(), delta * 14),
-        "monthly" => local
+        Cadence::Daily => shift_days(local.date_naive(), delta),
+        Cadence::Weekly => shift_days(local.date_naive(), delta * 7),
+        Cadence::Biweekly => shift_days(local.date_naive(), delta * 14),
+        Cadence::Monthly => local
             .date_naive()
             .checked_add_months(chrono::Months::new(delta as u32))
             .unwrap_or(local.date_naive()),
-        _ => local.date_naive(),
+        Cadence::Once => local.date_naive(),
     };
     date.and_time(time)
         .and_local_timezone(tz)
@@ -161,7 +162,7 @@ mod tests {
             19,
             0,
         );
-        let next = occurrence_start(anchor, 2, "weekly", tz);
+        let next = occurrence_start(anchor, 2, Cadence::Weekly, tz);
         let local = next.with_timezone(&tz);
         assert_eq!(local.date_naive().to_string(), "2026-03-12");
         assert_eq!(local.hour(), 19);
@@ -217,7 +218,7 @@ mod tests {
     fn month_end_clamps() {
         let tz = Tz::UTC;
         let anchor = Utc.with_ymd_and_hms(2026, 1, 31, 18, 0, 0).unwrap();
-        let next = occurrence_start(anchor, 2, "monthly", tz);
+        let next = occurrence_start(anchor, 2, Cadence::Monthly, tz);
         assert_eq!(
             next.with_timezone(&tz).date_naive().to_string(),
             "2026-02-28"

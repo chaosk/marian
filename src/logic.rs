@@ -27,7 +27,7 @@ pub use discord::{
     admit_discord_user, attendance, channel_reverse_plan, delete_confirm_body, detach_discord_posts, discord_view,
     discord_channel_gone, discord_role_gone, ensure_discord_channel, ensure_discord_guild, ensure_discord_user, event_channel_purge,
     event_thread_name, follow_discord_avatar, follow_discord_name, mark_channel_purged, mention_line, remember_discord_message, set_server_manager,
-    status_label, sync_channel_overwrites, sync_discord_channel, sync_discord_channels, sync_discord_permissions,
+    sync_channel_overwrites, sync_discord_channel, sync_discord_channels, sync_discord_permissions,
     sync_discord_role, sync_discord_roles, web_event_url, Attendance,
     AttendanceWork, ChannelReverse, EventChannelPurge,
 };
@@ -67,6 +67,7 @@ pub(crate) fn test_option(
 mod tests {
     use super::*;
     use crate::schema;
+    use crate::values::{AccessKind, Cadence, EventStatus, SignupState};
     use crate::store::{self, Connection};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use diesel::connection::SimpleConnection;
@@ -164,7 +165,7 @@ mod tests {
         let signups = store::signups_for(&mut conn, &event).unwrap();
         assert_eq!(signups.len(), 1);
         assert_eq!(signups[0].membership_id, 3);
-        assert_eq!(signups[0].state, "confirmed");
+        assert_eq!(signups[0].state, SignupState::Confirmed);
     }
 
     #[test]
@@ -203,14 +204,14 @@ mod tests {
     }
 
     /// Each person's state and guests on an event, by membership id.
-    fn parties(conn: &mut Connection, id: i64) -> Vec<(i64, String, i64)> {
+    fn parties(conn: &mut Connection, id: i64) -> Vec<(i64, SignupState, i64)> {
         let event = store::event(conn, id).unwrap().unwrap();
         let mut rows: Vec<_> = store::signups_for(conn, &event)
             .unwrap()
             .into_iter()
             .map(|s| (s.membership_id, s.state, s.guests))
             .collect();
-        rows.sort();
+        rows.sort_by_key(|(id, state, guests)| (*id, state.as_str(), *guests));
         rows
     }
 
@@ -224,10 +225,10 @@ mod tests {
         let err = signup_guests(&mut conn, id, option, 3, 1).unwrap_err().to_string();
         assert_eq!(err, "Yes has only one spot left.");
         signup(&mut conn, id, option, 3).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 2), (3, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 2), (3, SignupState::Confirmed, 0)]);
         // A plain click on the option takes June off it, guests and all.
         signup(&mut conn, id, option, 2).unwrap();
-        assert_eq!(parties(&mut conn, id), [(3, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(3, SignupState::Confirmed, 0)]);
     }
 
     #[test]
@@ -250,7 +251,7 @@ mod tests {
         assert_eq!(err, "Yes lets each person bring at most 2 guests.");
         // Zero is a plain signup.
         signup_guests(&mut conn, id, option, 2, 0).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 0)]);
     }
 
     #[test]
@@ -266,11 +267,11 @@ mod tests {
         assert!(notice.contains("waiting"), "{notice}");
         assert_eq!(
             parties(&mut conn, id),
-            [(1, "waitlisted".into(), 0), (2, "confirmed".into(), 1), (3, "waitlisted".into(), 2)]
+            [(1, SignupState::Waitlisted, 0), (2, SignupState::Confirmed, 1), (3, SignupState::Waitlisted, 2)]
         );
         // June leaves: Samir's party fits and moves up; Nell still waits.
         signup(&mut conn, id, option, 2).unwrap();
-        assert_eq!(parties(&mut conn, id), [(1, "waitlisted".into(), 0), (3, "confirmed".into(), 2)]);
+        assert_eq!(parties(&mut conn, id), [(1, SignupState::Waitlisted, 0), (3, SignupState::Confirmed, 2)]);
     }
 
     #[test]
@@ -281,14 +282,14 @@ mod tests {
         signup(&mut conn, id, option, 3).unwrap();
         let notice = signup_guests(&mut conn, id, option, 2, 1).unwrap().to_string();
         assert_eq!(notice, "June now brings one guest to Yes.");
-        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 1), (3, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 1), (3, SignupState::Confirmed, 0)]);
         // A third would need four places with Samir's; June's party waits.
         let notice = signup_guests(&mut conn, id, option, 2, 2).unwrap().to_string();
         assert_eq!(notice, "June's party of 3 no longer fits on Yes and is waiting for spots.");
-        assert_eq!(parties(&mut conn, id), [(2, "waitlisted".into(), 2), (3, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Waitlisted, 2), (3, SignupState::Confirmed, 0)]);
         // Back to one guest: the party fits again and moves up.
         signup_guests(&mut conn, id, option, 2, 1).unwrap();
-        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 1), (3, "confirmed".into(), 0)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 1), (3, SignupState::Confirmed, 0)]);
     }
 
     #[test]
@@ -299,7 +300,7 @@ mod tests {
         // An editor's change can go past capacity, as an editor's add can.
         let notice = editor_response(&mut conn, id, 1, 2, option, "add", Some(3)).unwrap().to_string();
         assert_eq!(notice, "June now brings 3 guests to Yes.");
-        assert_eq!(parties(&mut conn, id), [(2, "confirmed".into(), 3)]);
+        assert_eq!(parties(&mut conn, id), [(2, SignupState::Confirmed, 3)]);
         let err = editor_response(&mut conn, id, 1, 2, option, "add", Some(4)).unwrap_err().to_string();
         assert!(err.contains("at most 3"), "{err}");
     }
@@ -398,7 +399,7 @@ mod tests {
         let warsaw: chrono_tz::Tz = "Europe/Warsaw".parse().unwrap();
         let local = copy.starts_at.with_timezone(&warsaw);
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2030-11-01 19:00");
-        assert_eq!(copy.status, "draft");
+        assert_eq!(copy.status, EventStatus::Draft);
     }
 
     #[test]
@@ -488,8 +489,8 @@ mod tests {
         assert_eq!(work.thread_add, vec!["u2".to_string()]);
         assert_eq!(work.role_add, vec!["u2".to_string()]);
         assert_eq!(work.role_discord_id.as_deref(), Some("r2"));
-        store::mark_applied(&mut conn, id, "thread", "u2").unwrap();
-        store::mark_applied(&mut conn, id, "role", "u2").unwrap();
+        store::mark_applied(&mut conn, id, AccessKind::Thread, "u2").unwrap();
+        store::mark_applied(&mut conn, id, AccessKind::Role, "u2").unwrap();
         signup(&mut conn, id, options[1].id, 2).unwrap();
         let Attendance::Ready(work) = attendance(&mut conn, id).unwrap() else {
             panic!("expected a Discord attendance plan");
@@ -699,7 +700,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "posted"
+            EventStatus::Posted
         );
         let reminder = store::reminders_for(&mut conn, &soon).unwrap();
         assert!(reminder[0].sent_at.is_some());
@@ -732,7 +733,7 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         let report = tick(&mut conn, Utc::now()).unwrap();
-        assert_eq!(store::event(&mut conn, scheduled_id).unwrap().unwrap().status, "posted");
+        assert_eq!(store::event(&mut conn, scheduled_id).unwrap().unwrap().status, EventStatus::Posted);
         assert_eq!(report.guilds, vec![1]);
     }
 
@@ -753,8 +754,8 @@ mod tests {
             .execute(&mut conn)
             .unwrap();
         tick(&mut conn, Utc::now()).unwrap();
-        assert_eq!(store::event(&mut conn, later_id).unwrap().unwrap().status, "scheduled");
-        assert_eq!(store::event(&mut conn, failed_id).unwrap().unwrap().status, "scheduled");
+        assert_eq!(store::event(&mut conn, later_id).unwrap().unwrap().status, EventStatus::Scheduled);
+        assert_eq!(store::event(&mut conn, failed_id).unwrap().unwrap().status, EventStatus::Scheduled);
     }
 
     #[test]
@@ -816,7 +817,7 @@ mod tests {
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(3),
         });
@@ -843,7 +844,7 @@ mod tests {
         let anchor = Utc::now();
         let mut event = input("Raid", anchor + Duration::hours(1), SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "daily".into(),
+            cadence: Cadence::Daily,
             end_on: None,
             max_occurrences: None,
         });
@@ -856,7 +857,7 @@ mod tests {
         let mut now = anchor;
         for _ in 0..8 {
             diesel::update(schema::events::table.filter(schema::events::series_id.eq(series_id)))
-                .set(schema::events::status.eq("posted"))
+                .set(schema::events::status.eq(EventStatus::Posted))
                 .execute(&mut conn)
                 .unwrap();
             now += Duration::days(8);
@@ -877,7 +878,7 @@ mod tests {
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(4),
         });
@@ -897,7 +898,7 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "biweekly".into(),
+                cadence: Cadence::Biweekly,
                 end_on: None,
                 max_occurrences: Some(4),
             },
@@ -905,7 +906,7 @@ mod tests {
         .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 4);
-        assert_eq!(dates[0].status, "posted");
+        assert_eq!(dates[0].status, EventStatus::Posted);
         assert_eq!(dates[0].starts_at, anchor);
         assert_eq!(
             dates[1].starts_at,
@@ -923,7 +924,7 @@ mod tests {
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(4),
         });
@@ -938,7 +939,7 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "weekly".into(),
+                cadence: Cadence::Weekly,
                 end_on: None,
                 max_occurrences: Some(2),
             },
@@ -953,7 +954,7 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "weekly".into(),
+                cadence: Cadence::Weekly,
                 end_on: None,
                 max_occurrences: Some(4),
             },
@@ -971,7 +972,7 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "weekly".into(),
+                cadence: Cadence::Weekly,
                 end_on: None,
                 max_occurrences: Some(2),
             },
@@ -982,15 +983,15 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "weekly".into(),
+                cadence: Cadence::Weekly,
                 end_on: None,
                 max_occurrences: Some(4),
             },
         )
         .unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
-        assert_eq!(dates[2].status, "skipped");
-        assert_eq!(dates[3].status, "scheduled");
+        assert_eq!(dates[2].status, EventStatus::Skipped);
+        assert_eq!(dates[3].status, EventStatus::Scheduled);
         assert_eq!(
             dates[3].starts_at,
             Utc.with_ymd_and_hms(2027, 11, 4, 19, 0, 0).unwrap()
@@ -1003,7 +1004,7 @@ mod tests {
         let anchor = Utc.with_ymd_and_hms(2027, 10, 14, 19, 0, 0).unwrap();
         let mut event = input("Vault", anchor, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(4),
         });
@@ -1018,7 +1019,7 @@ mod tests {
             series_id,
             1,
             RepeatSpec {
-                cadence: "weekly".into(),
+                cadence: Cadence::Weekly,
                 end_on: Some(Utc.with_ymd_and_hms(2027, 10, 24, 23, 59, 0).unwrap()),
                 max_occurrences: None,
             },
@@ -1036,7 +1037,7 @@ mod tests {
     fn weekly_series(conn: &mut Connection, start: DateTime<Utc>, max: Option<i64>) -> i64 {
         let mut event = input("Vault", start, SaveAction::Publish);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: max,
         });
@@ -1050,16 +1051,16 @@ mod tests {
         let series_id = weekly_series(&mut conn, Utc::now() + Duration::days(1), Some(3));
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         assert_eq!(dates.len(), 3);
-        assert_eq!(dates[1].status, "scheduled");
+        assert_eq!(dates[1].status, EventStatus::Scheduled);
         delete_event(&mut conn, dates[1].id, 1).unwrap();
         tick(&mut conn, Utc::now()).unwrap();
         let dates = store::events_in_series(&mut conn, series_id).unwrap();
         let second: Vec<_> = dates
             .iter()
             .filter(|date| date.occurrence_index == Some(2))
-            .map(|date| date.status.as_str())
+            .map(|date| date.status)
             .collect();
-        assert_eq!(second, ["skipped"]);
+        assert_eq!(second, [EventStatus::Skipped]);
     }
 
     #[test]
@@ -1086,7 +1087,7 @@ mod tests {
         let mut conn = world();
         let mut event = input("Vault", Utc::now() + Duration::days(1), SaveAction::Draft);
         event.repeat = Some(RepeatSpec {
-            cadence: "weekly".into(),
+            cadence: Cadence::Weekly,
             end_on: None,
             max_occurrences: Some(3),
         });
@@ -1143,7 +1144,7 @@ mod tests {
         let confirmed = store::signups_for(&mut conn, &event)
             .unwrap()
             .iter()
-            .filter(|signup| signup.state == "confirmed")
+            .filter(|signup| signup.state == SignupState::Confirmed)
             .count();
         assert_eq!(confirmed, 1);
     }

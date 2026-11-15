@@ -3,6 +3,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::values::{Cadence, ChannelKind, EventStatus, RunStatus};
+
 pub use crate::time::{ZoneGroup, ZoneRow};
 
 /// What changed on a server, sent to its open pages so they fetch only that.
@@ -123,7 +125,7 @@ pub struct Role {
 pub struct Channel {
     pub id: String,
     pub name: String,
-    pub kind: String,
+    pub kind: ChannelKind,
     pub events: i64,
     pub purged_at: Option<DateTime<Utc>>,
 }
@@ -188,7 +190,7 @@ pub struct EventSummary {
     pub id: String,
     pub title: String,
     pub description: String,
-    pub status: String,
+    pub status: EventStatus,
     pub starts_at: DateTime<Utc>,
     pub duration_minutes: i64,
     pub post_at: Option<DateTime<Utc>>,
@@ -275,7 +277,7 @@ pub struct Event {
     pub title: String,
     pub description: String,
     pub location: String,
-    pub status: String,
+    pub status: EventStatus,
     pub starts_at: DateTime<Utc>,
     pub duration_minutes: i64,
     pub cutoff_at: Option<DateTime<Utc>>,
@@ -533,7 +535,7 @@ where
 pub struct Series {
     pub id: String,
     pub title: String,
-    pub cadence: String,
+    pub cadence: Cadence,
     pub active: bool,
     pub max_occurrences: Option<i64>,
     pub end_on: Option<DateTime<Utc>>,
@@ -682,7 +684,7 @@ pub struct Decision {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunView {
     pub open: bool,
-    pub status: String,
+    pub status: RunStatus,
     /// Every weekday, in the order their events would fall after the poll locks.
     pub days: Vec<DayCheck>,
     #[serde(default)]

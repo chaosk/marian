@@ -6,35 +6,9 @@ use chrono::TimeZone;
 use super::*;
 use crate::logic::access::holds_any;
 use crate::logic::model::ButtonTone;
+use crate::values::RunStatus;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepKind {
-    /// The weekly poll for the day.
-    Poll,
-    /// Asks some roles in a channel to confirm the day, pick another, or skip.
-    Approval,
-    /// Posts the event, taking over the poll's message.
-    Post,
-}
-
-impl StepKind {
-    pub fn code(self) -> &'static str {
-        match self {
-            StepKind::Poll => "poll",
-            StepKind::Approval => "approval",
-            StepKind::Post => "post",
-        }
-    }
-
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "poll" => Some(StepKind::Poll),
-            "approval" => Some(StepKind::Approval),
-            "post" => Some(StepKind::Post),
-            _ => None,
-        }
-    }
-}
+pub use crate::values::StepKind;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
@@ -61,7 +35,7 @@ impl Step {
 struct NewStep<'a> {
     routine_id: i64,
     position: i64,
-    kind: &'a str,
+    kind: StepKind,
     channel_id: Option<i64>,
     role_ids: &'a [i64],
 }
@@ -72,7 +46,7 @@ pub fn default_steps() -> Vec<Step> {
 }
 
 pub fn load_steps(conn: &mut Connection, routine_id: i64) -> Result<Vec<Step>, OpError> {
-    let rows: Vec<(String, Option<i64>, Vec<i64>)> = schema::routine_steps::table
+    let rows: Vec<(StepKind, Option<i64>, Vec<i64>)> = schema::routine_steps::table
         .filter(schema::routine_steps::routine_id.eq(routine_id))
         .order(schema::routine_steps::position.asc())
         .select((
@@ -83,12 +57,10 @@ pub fn load_steps(conn: &mut Connection, routine_id: i64) -> Result<Vec<Step>, O
         .load(conn)?;
     let steps: Vec<Step> = rows
         .into_iter()
-        .filter_map(|(kind, channel_id, role_ids)| {
-            Some(Step {
-                kind: StepKind::from_code(&kind)?,
-                channel_id,
-                role_ids,
-            })
+        .map(|(kind, channel_id, role_ids)| Step {
+            kind,
+            channel_id,
+            role_ids,
         })
         .collect();
     Ok(if steps.is_empty() { default_steps() } else { steps })
@@ -140,7 +112,7 @@ pub(super) fn store_steps(conn: &mut Connection, routine_id: i64, steps: &[Step]
             .values(&NewStep {
                 routine_id,
                 position: position as i64,
-                kind: step.kind.code(),
+                kind: step.kind,
                 channel_id: step.channel_id,
                 role_ids: &step.role_ids,
             })
@@ -182,7 +154,7 @@ fn ask_approval(
     let lapses = decide_by(run.locks_at, day, routine.start_minutes, tz);
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
         .set((
-            schema::routine_runs::status.eq("approval"),
+            schema::routine_runs::status.eq(RunStatus::Approval),
             schema::routine_runs::step.eq(position as i64),
             schema::routine_runs::winner_weekday.eq(i64::from(day)),
             schema::routine_runs::decide_by.eq(lapses),
@@ -221,7 +193,7 @@ pub(super) fn decide_by(locks_at: DateTime<Utc>, day: u8, start_minutes: u16, tz
 /// Lapses an approval nobody answered in time.
 pub(super) fn expire(conn: &mut Connection, routine: &Routine, run: &Run) -> Result<Vec<DiscordJob>, OpError> {
     diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
-        .set(schema::routine_runs::status.eq("expired"))
+        .set(schema::routine_runs::status.eq(RunStatus::Expired))
         .execute(conn)?;
     log(
         conn,
@@ -266,7 +238,7 @@ pub fn waiting_run_id(conn: &mut Connection, routine_id: i64) -> Result<Option<i
 }
 
 pub(super) fn waiting_run(conn: &mut Connection, routine_id: i64) -> Result<Option<Run>, OpError> {
-    Ok(runs_for(conn, routine_id)?.into_iter().find(|run| run.status == "approval"))
+    Ok(runs_for(conn, routine_id)?.into_iter().find(|run| run.status == RunStatus::Approval))
 }
 
 /// Answers an approval: post the event on `day`, or skip the week when there
@@ -280,7 +252,7 @@ pub fn decide_run(
 ) -> Result<RoutineEffect, OpError> {
     store::with_tx(conn, |tx| {
         let run = must_run(tx, run_id)?;
-        if run.status != "approval" {
+        if run.status != RunStatus::Approval {
             return Err(OpError::from(crate::msg!("err-approval-closed")));
         }
         let routine = must_routine(tx, run.routine_id)?;
@@ -298,7 +270,7 @@ pub fn decide_run(
         let jobs = match day {
             None => {
                 diesel::update(schema::routine_runs::table.filter(schema::routine_runs::id.eq(run.id)))
-                    .set(schema::routine_runs::status.eq("skipped"))
+                    .set(schema::routine_runs::status.eq(RunStatus::Skipped))
                     .execute(tx)?;
                 log(tx, routine.guild_id, None, &format!("{} skipped {} this week.", user.name, routine.title))?;
                 vec![DiscordJob::routine(run.id)]
@@ -345,7 +317,7 @@ pub fn approval_post(
     now: DateTime<Utc>,
 ) -> Result<Option<ApprovalPost>, OpError> {
     let run = must_run(conn, run_id)?;
-    if !matches!(run.status.as_str(), "approval" | "locked" | "skipped" | "expired") {
+    if !matches!(run.status, RunStatus::Approval | RunStatus::Locked | RunStatus::Skipped | RunStatus::Expired) {
         return Ok(None);
     }
     let routine = must_routine(conn, run.routine_id)?;
@@ -353,7 +325,7 @@ pub fn approval_post(
         return Ok(None);
     };
     // A run that never asked has nothing to show.
-    if run.status != "approval" && run.approval_message_id.is_none() {
+    if run.status != RunStatus::Approval && run.approval_message_id.is_none() {
         return Ok(None);
     }
     let Some(channel) = step.channel_id.map(|id| store::channel(conn, id)).transpose()?.flatten() else {
@@ -365,7 +337,7 @@ pub fn approval_post(
     let guild = must_guild(conn, routine.guild_id)?;
     let tz = clock::zone(&guild.timezone)?;
     let settings = store::settings(conn, routine.guild_id)?;
-    let lang = crate::i18n::Lang::from_code(&settings.language).unwrap_or_default();
+    let lang = settings.language;
     let counts = vote_counts(conn, run.id)?;
     let winner = run.winner_weekday.unwrap_or(run.days[0]);
     let label = |day: u8| {
@@ -376,9 +348,9 @@ pub fn approval_post(
         Some(id) => store::membership(conn, id)?.map(|person| person.name).unwrap_or_default(),
         None => String::new(),
     };
-    let waiting = run.status == "approval";
-    let body = match run.status.as_str() {
-        "approval" => {
+    let waiting = run.status == RunStatus::Approval;
+    let body = match run.status {
+        RunStatus::Approval => {
             let lapses = run.decide_by.unwrap_or(run.locks_at);
             let when = if settings.localize_time {
                 format!("<t:{}:R>", lapses.timestamp())
@@ -393,8 +365,8 @@ pub fn approval_post(
                 when = when,
             )
         }
-        "locked" => crate::tr!(lang, "approval-posted", name = decider.as_str(), day = label(winner)),
-        "skipped" => crate::tr!(lang, "approval-skipped", name = decider.as_str()),
+        RunStatus::Locked => crate::tr!(lang, "approval-posted", name = decider.as_str(), day = label(winner)),
+        RunStatus::Skipped => crate::tr!(lang, "approval-skipped", name = decider.as_str()),
         _ => crate::tr!(lang, "approval-expired"),
     };
     let body = if waiting {

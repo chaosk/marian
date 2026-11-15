@@ -5,6 +5,7 @@ use diesel::prelude::*;
 use crate::error::OpError;
 use crate::schema;
 use crate::store::{self, Connection, Event, Membership, Role, Settings};
+use crate::values::OverwriteKind;
 
 /// Whether someone with `roles` holds any of the roles a permission names.
 pub fn holds_any(allowed: &[i64], roles: &[i64]) -> bool {
@@ -164,7 +165,7 @@ fn sight_of(
         .filter(schema::channels::discord_id.ne(""))
         .select(schema::channels::id)
         .load(conn)?;
-    let rows: Vec<(i64, String, String, i64, i64)> = schema::channel_overwrites::table
+    let rows: Vec<(i64, OverwriteKind, String, i64, i64)> = schema::channel_overwrites::table
         .inner_join(schema::channels::table)
         .filter(schema::channels::guild_id.eq(guild_id))
         .select((
@@ -178,7 +179,7 @@ fn sight_of(
     let mut overwrites: HashMap<i64, Vec<Overwrite>> = HashMap::new();
     for (channel_id, kind, target, allow, deny) in rows {
         overwrites.entry(channel_id).or_default().push(Overwrite {
-            member: kind == "member",
+            member: kind == OverwriteKind::Member,
             target,
             allow: allow as u64,
             deny: deny as u64,
