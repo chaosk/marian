@@ -815,7 +815,6 @@ pub async fn event(
             edit: can_edit,
             delete: can_delete,
             archive: can_edit && event.status == EventStatus::Posted,
-            cancel: can_delete && event.status == EventStatus::Posted,
             reinstate: can_delete
                 && event.status == EventStatus::Cancelled
                 && event.starts_at > Utc::now(),
@@ -1636,16 +1635,6 @@ pub async fn archive_event(
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id).await?;
     logic::archive_event(conn, event.id, viewer.membership_id).await?;
-    Ok(Outcome::ok().synced(event.id))
-}
-
-pub async fn cancel_event(
-    conn: &mut Connection,
-    viewer: &Viewer,
-    public_id: &str,
-) -> Result<Outcome, OpError> {
-    let event = event_here(conn, viewer, public_id).await?;
-    logic::cancel_event(conn, event.id, viewer.membership_id).await?;
     Ok(Outcome::ok().synced(event.id))
 }
 

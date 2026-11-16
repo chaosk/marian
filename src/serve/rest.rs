@@ -67,7 +67,6 @@ pub(super) fn router() -> Router<AppState> {
             put(add_member).delete(remove_member),
         )
         .route("/servers/{server}/events/{id}/archive", post(archive))
-        .route("/servers/{server}/events/{id}/cancel", post(cancel))
         .route("/servers/{server}/events/{id}/reinstate", post(reinstate))
         .route("/servers/{server}/events/{id}/duplicate", post(duplicate))
         .route("/servers/{server}/events/{id}/skip", post(skip))
@@ -695,13 +694,6 @@ async fn remove_member(
 async fn archive(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
     change(&state, &headers, &server, async |db, v| {
         api::archive_event(db, v, &id).await
-    })
-    .await
-}
-
-async fn cancel(State(state): S, headers: HeaderMap, Path((server, id)): Two) -> Reply<dto::Done> {
-    change(&state, &headers, &server, async |db, v| {
-        api::cancel_event(db, v, &id).await
     })
     .await
 }

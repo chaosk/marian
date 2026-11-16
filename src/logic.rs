@@ -39,8 +39,8 @@ pub use library::{
     save_preset, set_default_preset, starting_options, update_type,
 };
 pub use lifecycle::{
-    archive_event, cancel_event, delete_event, duplicate_event, end_series, reinstate_event,
-    save_series_repeat, skip_event,
+    archive_event, delete_event, duplicate_event, end_series, reinstate_event, save_series_repeat,
+    skip_event,
 };
 pub use model::{
     ButtonRole, ButtonTone, DiscordButton, DiscordField, DiscordView, EventExtras, EventInput,
@@ -1941,16 +1941,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_event_keeps_its_post_and_says_so_in_its_thread() {
+    async fn deleting_a_posted_event_cancels_it_and_says_so_in_its_thread() {
         let mut conn = world().await;
         let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), true).await;
         // June neither made it nor manages the server.
-        let err = cancel_event(&mut conn, id, 2)
+        let err = delete_event(&mut conn, id, 2)
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "You can't cancel this event.");
-        cancel_event(&mut conn, id, 1).await.unwrap();
+        assert_eq!(err, "You can't delete this event.");
+        delete_event(&mut conn, id, 1).await.unwrap();
         let event = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(event.status, EventStatus::Cancelled);
         let view = discord_view(&mut conn, id, "https://marian.test")
@@ -1971,12 +1971,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancel_notice(&mut conn, id).await.unwrap(), None);
-        // Cancelling again doesn't post a second reply.
-        let err = cancel_event(&mut conn, id, 1)
+        // Deleting it again doesn't post a second reply.
+        let err = delete_event(&mut conn, id, 1)
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "Only a posted event can be cancelled.");
+        assert_eq!(err, "That event is already closed.");
         assert_eq!(cancel_notice(&mut conn, id).await.unwrap(), None);
     }
 
@@ -1984,7 +1984,7 @@ mod tests {
     async fn without_a_thread_the_reply_goes_under_the_post() {
         let mut conn = world().await;
         let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), false).await;
-        cancel_event(&mut conn, id, 1).await.unwrap();
+        delete_event(&mut conn, id, 1).await.unwrap();
         assert_eq!(
             cancel_notice(&mut conn, id).await.unwrap(),
             Some(CancelNotice::Post {
@@ -1999,7 +1999,7 @@ mod tests {
     async fn reinstating_reopens_the_event_and_takes_the_reply_back() {
         let mut conn = world().await;
         let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), true).await;
-        cancel_event(&mut conn, id, 1).await.unwrap();
+        delete_event(&mut conn, id, 1).await.unwrap();
         remember_cancel_notice(&mut conn, id, "t1", "r1")
             .await
             .unwrap();
@@ -2007,7 +2007,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "You can't cancel this event.");
+        assert_eq!(err, "You can't reinstate this event.");
         reinstate_event(&mut conn, id, 1).await.unwrap();
         let event = store::event(&mut conn, id).await.unwrap().unwrap();
         assert_eq!(event.status, EventStatus::Posted);
@@ -2037,7 +2037,7 @@ mod tests {
     async fn a_reply_not_posted_yet_is_dropped_when_the_event_comes_back() {
         let mut conn = world().await;
         let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), true).await;
-        cancel_event(&mut conn, id, 1).await.unwrap();
+        delete_event(&mut conn, id, 1).await.unwrap();
         reinstate_event(&mut conn, id, 1).await.unwrap();
         assert_eq!(cancel_notice(&mut conn, id).await.unwrap(), None);
         // Nothing waits to be posted if it's cancelled again later.
@@ -2050,34 +2050,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_posted_event_cancels_it_without_a_reply_and_it_can_come_back() {
+    async fn a_cancelled_event_comes_back_only_before_it_starts() {
         let mut conn = world().await;
-        let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), true).await;
-        delete_event(&mut conn, id, 1).await.unwrap();
-        let event = store::event(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!(event.status, EventStatus::Cancelled);
-        assert_eq!(cancel_notice(&mut conn, id).await.unwrap(), None);
-        reinstate_event(&mut conn, id, 1).await.unwrap();
-        let event = store::event(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!(event.status, EventStatus::Posted);
-    }
-
-    #[tokio::test]
-    async fn only_a_posted_event_is_cancelled_and_only_before_it_starts_does_it_come_back() {
-        let mut conn = world().await;
-        let draft = save_event(
-            &mut conn,
-            input("Vault", Utc::now() + Duration::days(1), SaveAction::Draft),
-        )
-        .await
-        .unwrap();
-        let err = cancel_event(&mut conn, draft, 1)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "Only a posted event can be cancelled.");
         let id = posted(&mut conn, "Raid", Utc::now() + Duration::hours(5), false).await;
-        cancel_event(&mut conn, id, 1).await.unwrap();
+        delete_event(&mut conn, id, 1).await.unwrap();
         diesel::update(schema::events::table.filter(schema::events::id.eq(id)))
             .set(schema::events::starts_at.eq(Utc::now() - Duration::minutes(1)))
             .execute(&mut conn)
