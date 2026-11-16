@@ -892,6 +892,7 @@ pub async fn event(
     let user = must_member(conn, viewer).await?;
     let roles = store::membership_role_ids(conn, &user).await?;
     let can_edit = logic::can_edit(&user, &event, &settings, &roles);
+    let can_delete = logic::can_delete(&user, &event, &settings, &roles);
     let channel = store::channel(conn, event.channel_id).await?;
     let channel_name = channel
         .as_ref()
@@ -963,8 +964,12 @@ pub async fn event(
         google_synced: crate::google::on_calendar(conn, user.user_id, event.id).await?,
         can: dto::Abilities {
             edit: can_edit,
-            delete: logic::can_delete(&user, &event, &settings, &roles),
+            delete: can_delete,
             archive: can_edit && event.status == EventStatus::Posted,
+            cancel: can_delete && event.status == EventStatus::Posted,
+            reinstate: can_delete
+                && event.status == EventStatus::Cancelled
+                && event.starts_at > Utc::now(),
             skip: can_edit
                 && event.series_id.is_some()
                 && matches!(event.status, EventStatus::Scheduled | EventStatus::Draft),
@@ -1788,6 +1793,26 @@ pub async fn archive_event(
 ) -> Result<Outcome, OpError> {
     let event = event_here(conn, viewer, public_id).await?;
     logic::archive_event(conn, event.id, viewer.membership_id).await?;
+    Ok(Outcome::ok().synced(event.id))
+}
+
+pub async fn cancel_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
+    let event = event_here(conn, viewer, public_id).await?;
+    logic::cancel_event(conn, event.id, viewer.membership_id).await?;
+    Ok(Outcome::ok().synced(event.id))
+}
+
+pub async fn reinstate_event(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+) -> Result<Outcome, OpError> {
+    let event = event_here(conn, viewer, public_id).await?;
+    logic::reinstate_event(conn, event.id, viewer.membership_id).await?;
     Ok(Outcome::ok().synced(event.id))
 }
 

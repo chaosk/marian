@@ -247,6 +247,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    cancel_notices (event_id) {
+        event_id -> BigInt,
+        discord_channel_id -> Nullable<Text>,
+        discord_message_id -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     threads (event_id) {
         event_id -> BigInt,
         name -> Text,
@@ -556,6 +564,7 @@ diesel::joinable!(signups -> events (event_id));
 diesel::joinable!(signups -> signup_options (option_id));
 diesel::joinable!(signups -> memberships (membership_id));
 diesel::joinable!(reminders -> events (event_id));
+diesel::joinable!(cancel_notices -> events (event_id));
 diesel::joinable!(threads -> events (event_id));
 diesel::joinable!(applied_access -> events (event_id));
 diesel::joinable!(thread_members -> events (event_id));
@@ -590,6 +599,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     activity,
     applied_access,
     calendar_feeds,
+    cancel_notices,
     channel_overwrites,
     channels,
     event_prompts,
