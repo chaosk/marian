@@ -235,6 +235,20 @@ pub(super) async fn job_loop(
                 "done",
                 db_work(&db, async move |conn| crate::jobs::done(conn, row).await).await,
             ),
+            // The event or poll went away after the job was queued: there is
+            // nothing left to post, and trying again won't bring it back.
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<crate::error::OpError>(),
+                    Some(crate::error::OpError::NotFound)
+                ) =>
+            {
+                span.in_scope(|| tracing::info!("Discord job dropped: its record is gone"));
+                (
+                    "gone",
+                    db_work(&db, async move |conn| crate::jobs::done(conn, row).await).await,
+                )
+            }
             Err(err) => match job.bump() {
                 Some(next) => {
                     let pause = crate::jobs::backoff(next.tries());
@@ -297,7 +311,7 @@ static JOB_METRICS: LazyLock<JobMetrics> =
 
 /// Every `kind` a job can have, as `job_kind` names them.
 const JOB_KINDS: [&str; 5] = ["sync", "remind", "attend", "routine", "commands"];
-const JOB_OUTCOMES: [&str; 3] = ["done", "failed", "dropped"];
+const JOB_OUTCOMES: [&str; 4] = ["done", "failed", "dropped", "gone"];
 
 impl JobMetrics {
     fn new(meter: &opentelemetry::metrics::Meter) -> Self {

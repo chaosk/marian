@@ -1621,7 +1621,13 @@ pub async fn delete_event(
     } else {
         path(conn, viewer, &format!("/events/{public_id}")).await?
     };
-    Ok(Outcome::ok().at(location).synced(event.id))
+    // A removed event was never posted, so Discord has nothing of it to change.
+    let outcome = Outcome::ok().at(location);
+    Ok(if gone {
+        outcome
+    } else {
+        outcome.synced(event.id)
+    })
 }
 
 pub async fn archive_event(
@@ -2663,6 +2669,38 @@ mod tests {
             event_activity(&mut conn, &viewer, &theirs, 1, 25).await,
             Err(OpError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn deleting_an_unposted_event_leaves_discord_alone() {
+        let (mut conn, nell) = world().await;
+        conn.batch_execute(
+            "
+            INSERT INTO events (id, public_id, guild_id, channel_id, title, starts_at, status, created_by, created_at, updated_at)
+            VALUES (11, marian_uuid_v7(), 1, 1, 'Draft', now(), 'draft', 1, now(), now()),
+                   (12, marian_uuid_v7(), 1, 1, 'Posted', now(), 'posted', 1, now(), now());
+            ",
+        )
+        .await.unwrap();
+        let public = async |conn: &mut Connection, id| {
+            store::event(conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .public_id
+                .to_string()
+        };
+        let draft = public(&mut conn, 11).await;
+        let posted = public(&mut conn, 12).await;
+
+        // The draft's row goes; Discord never had it, so nothing is queued for it.
+        let removed = delete_event(&mut conn, &nell, &draft).await.unwrap();
+        assert!(store::event(&mut conn, 11).await.unwrap().is_none());
+        assert_eq!(removed.sync, None);
+
+        // A posted event is cancelled, and its post is updated to say so.
+        let cancelled = delete_event(&mut conn, &nell, &posted).await.unwrap();
+        assert_eq!(cancelled.sync, Some(12));
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use std::hash::Hash;
 
 use leptos::prelude::*;
 use leptos_fetch::{QueryClient, QueryScope};
+use leptos_router::params::ParamsMap;
 use marian_types as dto;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -181,14 +182,12 @@ pub fn apply_membership(client: QueryClient, server: &str, change: &dto::Members
 }
 
 /// The server in the address, tracked so a switcher change refetches.
-#[track_caller]
 pub fn server_key() -> String {
-    leptos_router::hooks::use_params_map().with(|params| params.get("server").unwrap_or_default())
+    route_params(true, |params| params.get("server").unwrap_or_default())
 }
 
-#[track_caller]
 pub fn event_key() -> (String, String) {
-    leptos_router::hooks::use_params_map().with(|params| {
+    route_params(true, |params| {
         (
             params.get("server").unwrap_or_default(),
             params.get("id").unwrap_or_default(),
@@ -198,17 +197,37 @@ pub fn event_key() -> (String, String) {
 
 /// The server in the address, read once. For handlers, actions, and the body
 /// of a component; a query's key uses `server_key` so it follows the address.
-#[track_caller]
 pub fn server_now() -> String {
-    leptos_router::hooks::use_params_map()
-        .with_untracked(|params| params.get("server").unwrap_or_default())
+    route_params(false, |params| params.get("server").unwrap_or_default())
 }
 
 /// The event in the address, read once, as `server_now` reads the server.
-#[track_caller]
 pub fn event_now() -> String {
-    leptos_router::hooks::use_params_map()
-        .with_untracked(|params| params.get("id").unwrap_or_default())
+    route_params(false, |params| params.get("id").unwrap_or_default())
+}
+
+thread_local! {
+    static LAST_PARAMS: std::cell::RefCell<ParamsMap> = Default::default();
+}
+
+/// Reads the matched route's params. A query's key can run once more while its
+/// page is being torn down, after the route's params have gone (another tab's
+/// change refetching an event page that has just been left). It then reads the
+/// params last seen, so the key stays put instead of panicking.
+fn route_params<T>(tracked: bool, read: impl Fn(&ParamsMap) -> T) -> T {
+    match use_context::<ArcMemo<ParamsMap>>() {
+        Some(params) => {
+            let current = if tracked {
+                params.get()
+            } else {
+                params.get_untracked()
+            };
+            let value = read(&current);
+            LAST_PARAMS.with(|last| *last.borrow_mut() = current);
+            value
+        }
+        None => LAST_PARAMS.with(|last| read(&last.borrow())),
+    }
 }
 
 /// Starts a cached read and renders `render` when it is ready. Use this
