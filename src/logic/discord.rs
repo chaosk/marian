@@ -475,6 +475,124 @@ pub async fn remember_discord_message(
     Ok(())
 }
 
+/// What the Discord sync does about the reply that says an event is cancelled.
+#[derive(Debug, PartialEq)]
+pub enum CancelNotice {
+    /// Post `text` in the thread `channel_id`, or in the post's channel as a
+    /// reply to the post `reply_to`.
+    Post {
+        channel_id: String,
+        reply_to: Option<String>,
+        text: String,
+    },
+    /// Take the reply back: the event isn't cancelled any more.
+    Remove {
+        channel_id: String,
+        message_id: String,
+    },
+}
+
+/// The step that brings an event's cancellation reply in line with the
+/// event: none when there's nothing to do. A row with no reply posted is
+/// dropped here once the event is back, so nothing is posted later.
+pub async fn cancel_notice(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<CancelNotice>, OpError> {
+    let row: Option<(Option<String>, Option<String>)> = schema::cancel_notices::table
+        .find(event_id)
+        .select((
+            schema::cancel_notices::discord_channel_id,
+            schema::cancel_notices::discord_message_id,
+        ))
+        .first(conn)
+        .await
+        .optional()?;
+    let Some((channel_id, message_id)) = row else {
+        return Ok(None);
+    };
+    let posted = channel_id
+        .filter(|id| !id.is_empty())
+        .zip(message_id.filter(|id| !id.is_empty()));
+    let event = must_event(conn, event_id).await?;
+    if event.status != EventStatus::Cancelled {
+        return Ok(match posted {
+            Some((channel_id, message_id)) => Some(CancelNotice::Remove {
+                channel_id,
+                message_id,
+            }),
+            None => {
+                forget_cancel_notice(conn, event_id).await?;
+                None
+            }
+        });
+    }
+    if posted.is_some() {
+        return Ok(None);
+    }
+    let lang = i18n::lang_of(conn, event.guild_id).await;
+    let fallback = tr!(lang, "post-event-fallback");
+    let title = match event.title.trim() {
+        "" => fallback.as_str(),
+        title => title,
+    };
+    let text = tr!(lang, "post-cancelled-reply", title = title);
+    if let Some(thread) = store::thread_discord_id(conn, event_id)
+        .await?
+        .filter(|id| !id.is_empty())
+    {
+        return Ok(Some(CancelNotice::Post {
+            channel_id: thread,
+            reply_to: None,
+            text,
+        }));
+    }
+    let channel = must_channel(conn, event.channel_id).await?;
+    Ok(channel
+        .discord_id
+        .filter(|id| !id.is_empty())
+        .zip(event.discord_message_id.filter(|id| !id.is_empty()))
+        .map(|(channel_id, message_id)| CancelNotice::Post {
+            channel_id,
+            reply_to: Some(message_id),
+            text,
+        }))
+}
+
+/// Records where the cancellation reply went. Kept even if the event was
+/// reinstated meanwhile, so the next sync takes the reply back.
+pub async fn remember_cancel_notice(
+    conn: &mut Connection,
+    event_id: i64,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), OpError> {
+    diesel::insert_into(schema::cancel_notices::table)
+        .values((
+            schema::cancel_notices::event_id.eq(event_id),
+            schema::cancel_notices::discord_channel_id.eq(channel_id),
+            schema::cancel_notices::discord_message_id.eq(message_id),
+        ))
+        .on_conflict(schema::cancel_notices::event_id)
+        .do_update()
+        .set((
+            schema::cancel_notices::discord_channel_id.eq(channel_id),
+            schema::cancel_notices::discord_message_id.eq(message_id),
+        ))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Drops the cancellation reply's row once the reply is gone, or was never
+/// posted.
+pub async fn forget_cancel_notice(conn: &mut Connection, event_id: i64) -> Result<(), OpError> {
+    diesel::delete(schema::cancel_notices::table.find(event_id))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct ChannelReverse {
     pub name: String,
