@@ -532,14 +532,11 @@ mod tests {
     async fn a_title_is_saved_with_plain_spaces() {
         let mut conn = world().await;
         let start = Utc.with_ymd_and_hms(2030, 10, 25, 17, 0, 0).unwrap();
-        let id = save_event(
-            &mut conn,
-            input("Jakiś\u{a0}bufet", start, SaveAction::Draft),
-        )
-        .await
-        .unwrap();
+        let id = save_event(&mut conn, input("Ktoś\u{a0}nowy", start, SaveAction::Draft))
+            .await
+            .unwrap();
         let event = store::event(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!(event.title, "Jakiś bufet");
+        assert_eq!(event.title, "Ktoś nowy");
     }
 
     #[tokio::test]
@@ -1620,7 +1617,7 @@ mod tests {
         // Option+Space on a Mac, straight after Option+S for the "ś".
         let card = reminder_card(
             crate::i18n::Lang::En,
-            "Jakiś\u{a0}bufet",
+            "Ktoś\u{a0}nowy",
             start.timestamp(),
             (start + Duration::minutes(105)).timestamp(),
             Some("https://discord.com/channels/1/2/3"),
@@ -1628,7 +1625,7 @@ mod tests {
         );
         assert!(
             card.description
-                .contains("[Jakiś bufet](https://discord.com/channels/1/2/3)"),
+                .contains("[Ktoś nowy](https://discord.com/channels/1/2/3)"),
             "{card:?}"
         );
     }
