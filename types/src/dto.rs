@@ -317,8 +317,6 @@ pub struct Abilities {
     pub delete: bool,
     pub archive: bool,
     pub skip: bool,
-    /// Call off the posted event, keeping its post marked cancelled.
-    pub cancel: bool,
     /// Put the cancelled event back; only before it starts.
     pub reinstate: bool,
 }
