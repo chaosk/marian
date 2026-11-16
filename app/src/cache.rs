@@ -217,7 +217,11 @@ thread_local! {
 fn route_params<T>(tracked: bool, read: impl Fn(&ParamsMap) -> T) -> T {
     match use_context::<ArcMemo<ParamsMap>>() {
         Some(params) => {
-            let current = if tracked { params.get() } else { params.get_untracked() };
+            let current = if tracked {
+                params.get()
+            } else {
+                params.get_untracked()
+            };
             let value = read(&current);
             LAST_PARAMS.with(|last| *last.borrow_mut() = current);
             value

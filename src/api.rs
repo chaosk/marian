@@ -1623,7 +1623,11 @@ pub async fn delete_event(
     };
     // A removed event was never posted, so Discord has nothing of it to change.
     let outcome = Outcome::ok().at(location);
-    Ok(if gone { outcome } else { outcome.synced(event.id) })
+    Ok(if gone {
+        outcome
+    } else {
+        outcome.synced(event.id)
+    })
 }
 
 pub async fn archive_event(
@@ -2679,7 +2683,12 @@ mod tests {
         )
         .await.unwrap();
         let public = async |conn: &mut Connection, id| {
-            store::event(conn, id).await.unwrap().unwrap().public_id.to_string()
+            store::event(conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .public_id
+                .to_string()
         };
         let draft = public(&mut conn, 11).await;
         let posted = public(&mut conn, 12).await;
