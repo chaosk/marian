@@ -400,7 +400,7 @@ pub fn reminder_card(
     link: Option<&str>,
     message: &str,
 ) -> ReminderCard {
-    let label = event_title.replace(['[', ']'], "");
+    let label = super::db::plain_spaces(event_title).replace(['[', ']'], "");
     let label = if label.trim().is_empty() {
         crate::tr!(lang, "post-event-fallback")
     } else {

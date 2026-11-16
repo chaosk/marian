@@ -529,6 +529,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_title_is_saved_with_plain_spaces() {
+        let mut conn = world().await;
+        let start = Utc.with_ymd_and_hms(2030, 10, 25, 17, 0, 0).unwrap();
+        let id = save_event(
+            &mut conn,
+            input("Jakiś\u{a0}bufet", start, SaveAction::Draft),
+        )
+        .await
+        .unwrap();
+        let event = store::event(&mut conn, id).await.unwrap().unwrap();
+        assert_eq!(event.title, "Jakiś bufet");
+    }
+
+    #[tokio::test]
     async fn a_duplicate_keeps_the_clock_time_across_a_daylight_saving_change() {
         let mut conn = world().await;
         diesel::update(schema::guilds::table.filter(schema::guilds::id.eq(1)))
@@ -1598,6 +1612,25 @@ mod tests {
         );
         assert!(card.description.contains(":F> - <t:"), "{card:?}");
         assert_eq!(card.footer, "Opt out of reminders with /reminders off");
+    }
+
+    #[test]
+    fn a_reminder_links_a_title_typed_with_a_no_break_space_as_written() {
+        let start = Utc.with_ymd_and_hms(2026, 10, 14, 17, 30, 0).unwrap();
+        // Option+Space on a Mac, straight after Option+S for the "ś".
+        let card = reminder_card(
+            crate::i18n::Lang::En,
+            "Jakiś\u{a0}bufet",
+            start.timestamp(),
+            (start + Duration::minutes(105)).timestamp(),
+            Some("https://discord.com/channels/1/2/3"),
+            "",
+        );
+        assert!(
+            card.description
+                .contains("[Jakiś bufet](https://discord.com/channels/1/2/3)"),
+            "{card:?}"
+        );
     }
 
     #[test]

@@ -104,7 +104,7 @@ async fn normalize(conn: &mut Connection, input: &EventInput) -> Result<CleanInp
         None
     };
 
-    let title = input.title.trim().to_string();
+    let title = super::db::plain_spaces(input.title.trim());
     if title.is_empty() || title.chars().count() > 120 {
         return Err(OpError::from(crate::msg!("err-title-length")));
     }

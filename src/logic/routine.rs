@@ -1624,11 +1624,11 @@ fn default_reminder() -> Vec<ReminderInput> {
 }
 
 fn clean_title(title: &str) -> Result<String, OpError> {
-    let title = title.trim();
+    let title = super::db::plain_spaces(title.trim());
     if title.is_empty() || title.chars().count() > 120 {
         return Err(OpError::from(crate::msg!("err-title-length")));
     }
-    Ok(title.to_string())
+    Ok(title)
 }
 
 fn clean_description(description: &str) -> Result<String, OpError> {

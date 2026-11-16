@@ -10,6 +10,16 @@ pub(super) fn trim_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+/// A one-line name with every kind of whitespace as a plain space. A Mac
+/// keyboard types a no-break space for Option+Space, easy to hit straight after
+/// a letter like "ś" (Option+S), and Discord drops it from a link's text.
+pub(super) fn plain_spaces(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+        .collect()
+}
+
 pub(super) async fn role_names(conn: &mut Connection, ids: &[i64]) -> Result<Vec<String>, OpError> {
     let mut names = Vec::new();
     for id in ids {
