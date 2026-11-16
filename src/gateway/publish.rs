@@ -19,7 +19,87 @@ pub(super) async fn push_sync(
     public_url: &str,
     event_id: i64,
 ) -> Result<(), Error> {
-    post_event(db, http, public_url, event_id, true).await
+    post_event(db, http, public_url, event_id, true).await?;
+    sync_cancel_notice(db, http, event_id).await
+}
+
+/// Posts the reply saying an event is cancelled, or takes it back once the
+/// event is reinstated.
+async fn sync_cancel_notice(
+    db: &store::Db,
+    http: &Arc<Mutex<Option<Arc<serenity::Http>>>>,
+    event_id: i64,
+) -> Result<(), Error> {
+    let step = {
+        let mut conn = db
+            .get()
+            .await
+            .map_err(|_| "Could not reach the database.")?;
+        logic::cancel_notice(&mut conn, event_id).await?
+    };
+    let Some(step) = step else {
+        return Ok(());
+    };
+    let http = http
+        .lock()
+        .map_err(|_| "http lock")?
+        .clone()
+        .ok_or("Discord is not connected")?;
+    match step {
+        logic::CancelNotice::Post {
+            channel_id,
+            reply_to,
+            text,
+        } => {
+            let mut message = serenity::CreateMessage::new()
+                .content(text)
+                .allowed_mentions(serenity::CreateAllowedMentions::new());
+            if let Some(reply_to) = reply_to {
+                message = message.reference_message(serenity::MessageReference::from((
+                    serenity::ChannelId::new(channel_id.parse()?),
+                    serenity::MessageId::new(reply_to.parse()?),
+                )));
+            }
+            let sent = serenity::ChannelId::new(channel_id.parse()?)
+                .send_message(&http, message)
+                .await?;
+            let mut conn = db
+                .get()
+                .await
+                .map_err(|_| "Could not reach the database.")?;
+            logic::remember_cancel_notice(&mut conn, event_id, &channel_id, &sent.id.to_string())
+                .await?;
+        }
+        logic::CancelNotice::Remove {
+            channel_id,
+            message_id,
+        } => {
+            let removed = serenity::ChannelId::new(channel_id.parse()?)
+                .delete_message(&http, serenity::MessageId::new(message_id.parse()?))
+                .await;
+            // Someone may have deleted it already, or the thread with it.
+            if let Err(err) = removed
+                && !gone(&err)
+            {
+                return Err(err.into());
+            }
+            let mut conn = db
+                .get()
+                .await
+                .map_err(|_| "Could not reach the database.")?;
+            logic::forget_cancel_notice(&mut conn, event_id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether Discord refused because the message or its channel is gone.
+fn gone(err: &serenity::Error) -> bool {
+    matches!(
+        err,
+        serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(response))
+            if response.status_code == serenity::StatusCode::NOT_FOUND
+    )
 }
 
 /// Tells open pages about a change made from Discord to one event: to who is

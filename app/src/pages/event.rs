@@ -143,6 +143,15 @@ pub fn EventPage() -> impl IntoView {
                 {can.skip.then(|| view! {
                     <ActionButton method="POST" url=at(path::event_skip) label="Skip this date" class="ghost"/>
                 })}
+                {can.reinstate.then(|| view! {
+                    <ActionButton method="POST" url=at(path::event_reinstate) label="Reinstate" class="ghost"
+                        confirm="Reinstate this event? Signups open again, and the reply saying it was cancelled is removed."/>
+                })}
+                {can.cancel.then(|| view! {
+                    <ActionButton method="POST" url=at(path::event_cancel) label="Cancel event" class="danger"
+                        confirm="Cancel this event? Its Discord post stays, marked cancelled, and its thread gets a reply saying so. You can reinstate it until it starts."
+                        done="Event cancelled."/>
+                })}
                 {can.delete.then(|| view! {
                     <ActionButton method="DELETE" url=at(path::event) label="Delete" class="danger" confirm="Remove this event?"/>
                 })}
