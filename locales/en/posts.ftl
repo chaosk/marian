@@ -17,6 +17,8 @@ status-archived = Archived
 status-cancelled = Cancelled
 status-skipped = Skipped
 status-failed = Post failed
+# The reply in a cancelled event's thread, or under its post.
+post-cancelled-reply = **{ $title }** is cancelled.
 # $start is a Discord timestamp that counts down, such as "in 15 minutes".
 reminder-title = REMINDER: Event starting { $start }!
 reminder-footer = Opt out of reminders with /reminders off
