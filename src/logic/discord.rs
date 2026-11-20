@@ -207,7 +207,7 @@ pub fn delete_confirm_body(
     } else {
         name
     };
-    let label = trim_chars(&name.replace(['\n', '\r'], " "), 200);
+    let label = trim_chars(&super::db::plain_spaces(name), 200);
     let label = label
         .replace('\\', "\\\\")
         .replace('[', "\\[")
