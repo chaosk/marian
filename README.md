@@ -110,6 +110,23 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
   cargo leptos watch --release
 ```
 
+## MCP
+
+Marian is an MCP server at `https://marian.example.com/mcp` (Streamable HTTP). Add that URL to Claude, Claude Code (`claude mcp add --transport http marian https://marian.example.com/mcp`) or another MCP client. The client registers itself and sends you to Marian, which asks for your Discord sign-in and then whether to allow the client. Nothing else needs setting up, apart from `MARIAN_PUBLIC_URL`.
+
+The client acts as you, with what you may do on the website, in the servers you were in when you allowed it, for 30 days. Its token opens `/mcp` only, not the website or `/api`. Its tools:
+
+| Tool | Does |
+| --- | --- |
+| `list_servers` | The servers you share with Marian |
+| `get_server` | A server's time zone, whether you may create events, its channels and signup presets |
+| `list_events` | A server's events, by view, day, or words in the title |
+| `get_event` | An event and who signed up |
+| `create_event` | A new event, as a draft unless asked to post it now or at a time |
+| `update_event` | An event's title, description, start, length or location |
+| `post_event` | Posts a draft or scheduled event to Discord now |
+| `delete_event` | Deletes an event |
+
 ## Install on Kubernetes
 
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces. A tag also publishes the chart and a GitHub release, with the tag's commit message as its notes and the static binary and chart attached.

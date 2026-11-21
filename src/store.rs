@@ -581,6 +581,7 @@ struct SessionRow {
     discord_refresh: Option<String>,
     discord_expires_at: Option<DateTime<Utc>>,
     guilds_checked_at: DateTime<Utc>,
+    mcp_client: Option<String>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations)]
@@ -2511,6 +2512,8 @@ pub struct WebSession {
     pub guilds: Vec<i64>,
     pub grant: Option<DiscordGrant>,
     pub guilds_checked_at: DateTime<Utc>,
+    /// The MCP client holding it; `None` for a browser sign-in.
+    pub mcp_client: Option<String>,
 }
 
 /// The member's Discord OAuth grant, kept to re-read their server list.
@@ -2644,6 +2647,7 @@ pub async fn web_session(
         guilds,
         grant,
         guilds_checked_at: row.guilds_checked_at,
+        mcp_client: row.mcp_client,
     }))
 }
 
@@ -2847,6 +2851,203 @@ pub async fn delete_expired_sessions(
     )
     .execute(conn)
     .await?)
+}
+
+/// An MCP client that registered itself.
+#[derive(Debug, Clone, PartialEq, HasQuery)]
+#[diesel(table_name = schema::mcp_clients)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct McpClient {
+    pub id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::mcp_clients)]
+struct NewMcpClient<'a> {
+    id: &'a str,
+    name: &'a str,
+    redirect_uris: &'a [String],
+    created_at: DateTime<Utc>,
+}
+
+pub async fn insert_mcp_client(
+    conn: &mut Connection,
+    id: &str,
+    name: &str,
+    redirect_uris: &[String],
+) -> Result<(), OpError> {
+    diesel::insert_into(schema::mcp_clients::table)
+        .values(&NewMcpClient {
+            id,
+            name,
+            redirect_uris,
+            created_at: Utc::now(),
+        })
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+pub async fn mcp_client(conn: &mut Connection, id: &str) -> Result<Option<McpClient>, OpError> {
+    Ok(McpClient::query()
+        .filter(schema::mcp_clients::id.eq(id))
+        .first(conn)
+        .await
+        .optional()?)
+}
+
+/// An MCP client's sign-in, from its authorize request until its code is used.
+#[derive(Debug, Clone, PartialEq, HasQuery, Insertable)]
+#[diesel(table_name = schema::mcp_authorizations)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct McpAuthorization {
+    pub id: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub state: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub code: Option<String>,
+    pub session_token: Option<String>,
+}
+
+/// How long an MCP sign-in may take, from the authorize request until the
+/// code is swapped for a token.
+pub const MCP_AUTHORIZATION_MINUTES: i64 = 10;
+
+pub async fn insert_mcp_authorization(
+    conn: &mut Connection,
+    authorization: &McpAuthorization,
+) -> Result<(), OpError> {
+    diesel::insert_into(schema::mcp_authorizations::table)
+        .values(authorization)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The sign-in waiting for the person's answer, while it's fresh.
+pub async fn pending_mcp_authorization(
+    conn: &mut Connection,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<McpAuthorization>, OpError> {
+    use schema::mcp_authorizations as a;
+    Ok(McpAuthorization::query()
+        .filter(a::id.eq(id))
+        .filter(a::code.is_null())
+        .filter(a::created_at.gt(now - chrono::Duration::minutes(MCP_AUTHORIZATION_MINUTES)))
+        .first(conn)
+        .await
+        .optional()?)
+}
+
+/// Gives a pending sign-in its code, for the browser sign-in that allowed it.
+/// False when it was already answered or has expired.
+pub async fn approve_mcp_authorization(
+    conn: &mut Connection,
+    id: &str,
+    code: &str,
+    session_token: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, OpError> {
+    use schema::mcp_authorizations as a;
+    let changed = diesel::update(
+        a::table
+            .filter(a::id.eq(id))
+            .filter(a::code.is_null())
+            .filter(a::created_at.gt(now - chrono::Duration::minutes(MCP_AUTHORIZATION_MINUTES))),
+    )
+    .set((a::code.eq(code), a::session_token.eq(session_token)))
+    .execute(conn)
+    .await?;
+    Ok(changed == 1)
+}
+
+/// Forgets a pending sign-in the person turned down.
+pub async fn delete_mcp_authorization(conn: &mut Connection, id: &str) -> Result<(), OpError> {
+    use schema::mcp_authorizations as a;
+    diesel::delete(a::table.filter(a::id.eq(id)))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Takes an allowed sign-in by its code, once: the code can't be used again.
+pub async fn take_mcp_code(
+    conn: &mut Connection,
+    code: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<McpAuthorization>, OpError> {
+    use schema::mcp_authorizations as a;
+    let taken: Option<McpAuthorization> = diesel::delete(a::table.filter(a::code.eq(code)))
+        .returning(McpAuthorization::as_returning())
+        .get_result(conn)
+        .await
+        .optional()?;
+    Ok(taken.filter(|taken| {
+        taken.created_at > now - chrono::Duration::minutes(MCP_AUTHORIZATION_MINUTES)
+    }))
+}
+
+/// A sign-in for an MCP client, as the person in `from`: their servers as
+/// they stand, and no Discord grant, so it never re-reads them.
+pub async fn insert_mcp_session(
+    conn: &mut Connection,
+    token: &str,
+    from: &WebSession,
+    client_id: &str,
+) -> Result<(), OpError> {
+    let token = token.to_string();
+    let guilds = from.guilds.clone();
+    let client_id = client_id.to_string();
+    with_tx(conn, async |conn| {
+        insert_web_session(
+            conn,
+            &token,
+            &from.discord_user_id,
+            &from.display_name,
+            from.guild_id,
+            from.membership_id,
+            &guilds,
+            None,
+        )
+        .await?;
+        diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token)))
+            .set(schema::web_sessions::mcp_client.eq(&client_id))
+            .execute(conn)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Forgets MCP sign-ins nobody finished, and registered clients that never
+/// got a token, a day on.
+pub async fn delete_stale_mcp(conn: &mut Connection, now: DateTime<Utc>) -> Result<usize, OpError> {
+    use schema::{mcp_authorizations as a, mcp_clients as c, web_sessions as w};
+    let authorizations = diesel::delete(
+        a::table
+            .filter(a::created_at.le(now - chrono::Duration::minutes(MCP_AUTHORIZATION_MINUTES))),
+    )
+    .execute(conn)
+    .await?;
+    let clients = diesel::delete(
+        c::table
+            .filter(c::created_at.le(now - chrono::Duration::days(1)))
+            .filter(diesel::dsl::not(diesel::dsl::exists(
+                w::table.filter(w::mcp_client.eq(c::id.nullable())),
+            )))
+            .filter(diesel::dsl::not(diesel::dsl::exists(
+                a::table.filter(a::client_id.eq(c::id)),
+            ))),
+    )
+    .execute(conn)
+    .await?;
+    Ok(authorizations + clients)
 }
 
 pub async fn delete_web_session(conn: &mut Connection, token: &str) -> Result<(), OpError> {
@@ -3053,6 +3254,7 @@ mod tests {
                 "20261115170000".to_string(),
                 "20261115180000".to_string(),
                 "20261116190000".to_string(),
+                "20261121120000".to_string(),
             ]
         );
     }
