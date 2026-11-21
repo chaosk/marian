@@ -18,6 +18,8 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/client-errors", post(super::report::client_error))
         .route("/me", get(me))
+        .route("/me/apps", get(apps))
+        .route("/me/apps/{id}", axum::routing::delete(disconnect_app))
         .route("/timezones", get(timezones))
         .route("/servers/{server}", get(server))
         .route(
@@ -262,17 +264,41 @@ fn finish(state: &AppState, outcome: Outcome) -> Reply<dto::Done> {
     Ok(Json(outcome.done))
 }
 
-async fn me(State(state): State<AppState>, headers: HeaderMap) -> Reply<dto::Me> {
+/// Runs `body` for whoever the cookie signs in, apart from any one server.
+async fn personal<T>(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<T, OpError>,
+) -> Reply<T> {
     let mut db = state.db.get().await.map_err(|_| {
         Problem(
             StatusCode::SERVICE_UNAVAILABLE,
             "The database is busy.".into(),
         )
     })?;
-    let viewer = read_session(&mut db, &headers)
+    let viewer = read_session(&mut db, headers)
         .await
         .ok_or_else(|| Problem(StatusCode::UNAUTHORIZED, "Sign in with Discord.".into()))?;
-    Ok(Json(api::me(&mut db, &viewer).await?))
+    Ok(Json(body(&mut db, &viewer).await?))
+}
+
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Reply<dto::Me> {
+    personal(&state, &headers, api::me).await
+}
+
+async fn apps(State(state): State<AppState>, headers: HeaderMap) -> Reply<Vec<dto::ConnectedApp>> {
+    personal(&state, &headers, api::connected_apps).await
+}
+
+async fn disconnect_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Reply<dto::Done> {
+    personal(&state, &headers, async |db, viewer| {
+        api::disconnect_app(db, viewer, &id).await
+    })
+    .await
 }
 
 #[derive(Deserialize)]

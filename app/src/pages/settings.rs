@@ -1,8 +1,10 @@
 use leptos::prelude::*;
 
+use crate::api::path;
 use crate::cache::{self, Ready, ask};
+use crate::format;
 use crate::head;
-use crate::widgets::{JsonForm, RolePicker, SaveState, ZonePicker};
+use crate::widgets::{ActionButton, JsonForm, RolePicker, SaveState, ZonePicker};
 
 /// A switch: its field name, title, and what it does.
 type Toggle = (&'static str, &'static str, &'static str);
@@ -424,4 +426,55 @@ pub fn Google() -> impl IntoView {
             <section class="panel google-cal"><p>{line}</p></section>
         }
     })
+}
+
+/// The AI assistants the signed-in person let act for them over MCP, each
+/// with a way to sign it out.
+#[component]
+pub fn ConnectedApps() -> impl IntoView {
+    let server = cache::listen(cache::server_scope(), cache::server_key);
+    let apps = cache::listen(cache::apps_scope(), || ());
+    cache::when(
+        move || (server.get(), apps.get()).ready(),
+        move |(server, apps)| {
+            let clock = format::clock_of(&server);
+            let list = if apps.is_empty() {
+                view! {
+                    <p class="settings-note">
+                        "No apps are connected. To connect one, add this site's address with "
+                        <code>"/mcp"</code>" on the end to an assistant such as Claude."
+                    </p>
+                }
+                .into_any()
+            } else {
+                apps.into_iter()
+                    .map(|app| {
+                        let allowed = format::format_long_date(clock.day(app.allowed_at));
+                        let until = format::format_long_date(clock.day(app.until));
+                        view! {
+                            <article class="card">
+                                <div class="card-top"><h3>{app.name.clone()}</h3></div>
+                                <p class="meta">{format!("Allowed {allowed}. It has to ask again after {until}.")}</p>
+                                <div class="actions">
+                                    <ActionButton method="DELETE" url=path::app(&app.id) label="Disconnect" class="danger"
+                                        done="Disconnected."
+                                        confirm=format!("Disconnect {}? It stops working until you allow it again.", app.name)/>
+                                </div>
+                            </article>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            };
+            view! {
+                {head("Connected apps")}
+                <section class="stack">
+                    <p class="settings-note">
+                        "AI assistants you let act for you over MCP. Each one can do what you can do here, on the servers you were in when you allowed it."
+                    </p>
+                    {list}
+                </section>
+            }
+        },
+    )
 }

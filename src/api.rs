@@ -323,6 +323,37 @@ pub async fn me(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Me, OpErr
     })
 }
 
+/// The AI assistants the viewer let act for them over MCP, newest first.
+pub async fn connected_apps(
+    conn: &mut Connection,
+    viewer: &Viewer,
+) -> Result<Vec<dto::ConnectedApp>, OpError> {
+    Ok(
+        store::connected_mcp_clients(conn, &viewer.discord_user_id, Utc::now())
+            .await?
+            .into_iter()
+            .map(|client| dto::ConnectedApp {
+                id: client.id,
+                name: client.name,
+                allowed_at: client.allowed_at,
+                until: client.allowed_at + Duration::days(store::SESSION_DAYS),
+            })
+            .collect(),
+    )
+}
+
+/// Signs an AI assistant out of every sign-in the viewer gave it.
+pub async fn disconnect_app(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    id: &str,
+) -> Result<dto::Done, OpError> {
+    match store::delete_mcp_sessions(conn, &viewer.discord_user_id, id).await? {
+        0 => Err(OpError::NotFound),
+        _ => Ok(dto::Done::default()),
+    }
+}
+
 pub async fn server(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Server, OpError> {
     let guild = store::guild(conn, viewer.guild_id)
         .await?

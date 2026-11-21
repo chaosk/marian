@@ -2899,6 +2899,66 @@ pub async fn mcp_client(conn: &mut Connection, id: &str) -> Result<Option<McpCli
         .optional()?)
 }
 
+/// An MCP client someone let act for them, with their newest sign-in for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectedMcpClient {
+    pub id: String,
+    pub name: String,
+    pub allowed_at: DateTime<Utc>,
+}
+
+/// The MCP clients `discord_user_id` has a live sign-in for, newest first.
+pub async fn connected_mcp_clients(
+    conn: &mut Connection,
+    discord_user_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<ConnectedMcpClient>, OpError> {
+    let rows: Vec<(String, String, DateTime<Utc>)> = schema::web_sessions::table
+        .inner_join(schema::mcp_clients::table)
+        .filter(schema::web_sessions::discord_user_id.eq(discord_user_id))
+        .filter(schema::web_sessions::created_at.gt(now - chrono::Duration::days(SESSION_DAYS)))
+        .select((
+            schema::mcp_clients::id,
+            schema::mcp_clients::name,
+            schema::web_sessions::created_at,
+        ))
+        .load(conn)
+        .await?;
+    let mut clients: Vec<ConnectedMcpClient> = Vec::new();
+    for (id, name, allowed_at) in rows {
+        match clients.iter_mut().find(|client| client.id == id) {
+            Some(client) => client.allowed_at = client.allowed_at.max(allowed_at),
+            None => clients.push(ConnectedMcpClient {
+                id,
+                name,
+                allowed_at,
+            }),
+        }
+    }
+    clients.sort_by(|a, b| {
+        b.allowed_at
+            .cmp(&a.allowed_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(clients)
+}
+
+/// Ends every sign-in `discord_user_id` gave the MCP client `client_id`, and
+/// says how many there were.
+pub async fn delete_mcp_sessions(
+    conn: &mut Connection,
+    discord_user_id: &str,
+    client_id: &str,
+) -> Result<usize, OpError> {
+    Ok(diesel::delete(
+        schema::web_sessions::table
+            .filter(schema::web_sessions::discord_user_id.eq(discord_user_id))
+            .filter(schema::web_sessions::mcp_client.eq(client_id)),
+    )
+    .execute(conn)
+    .await?)
+}
+
 /// An MCP client's sign-in, from its authorize request until its code is used.
 #[derive(Debug, Clone, PartialEq, HasQuery, Insertable)]
 #[diesel(table_name = schema::mcp_authorizations)]
