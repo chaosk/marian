@@ -2131,6 +2131,7 @@ version = "0.13.3"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "deadpool",
@@ -2148,6 +2149,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-postgres",

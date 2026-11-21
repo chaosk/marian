@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use marian_types as dto;
 use serde::Deserialize;
 
-use super::{AppState, Session, enqueue, read_session};
+use super::{AppState, Caller, Session, enqueue, read_session};
 use crate::api::{self, Outcome};
 use crate::error::OpError;
 use crate::jobs::DiscordJob;
@@ -118,7 +118,7 @@ pub(super) fn router() -> Router<AppState> {
         .fallback(missing)
 }
 
-pub(super) struct Problem(StatusCode, String);
+pub(super) struct Problem(pub(super) StatusCode, pub(super) String);
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
@@ -158,12 +158,12 @@ async fn missing() -> Problem {
     Problem(StatusCode::NOT_FOUND, "That isn't here.".into())
 }
 
-type Reply<T> = Result<Json<T>, Problem>;
+pub(super) type Reply<T> = Result<Json<T>, Problem>;
 
 /// Runs `body` for the signed-in person bound to `server`.
-async fn scoped<T>(
+pub(super) async fn scoped<T>(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<T, OpError>,
 ) -> Result<T, Problem> {
@@ -174,7 +174,7 @@ async fn scoped<T>(
             "The database is busy.".into(),
         )
     })?;
-    let Some(mut viewer) = read_session(&mut db, headers).await else {
+    let Some(mut viewer) = read_session(&mut db, caller).await else {
         return Err(Problem(
             StatusCode::UNAUTHORIZED,
             "Sign in with Discord.".into(),
@@ -184,25 +184,25 @@ async fn scoped<T>(
     Ok(body(&mut db, &viewer).await?)
 }
 
-async fn read<T>(
+pub(super) async fn read<T>(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<T, OpError>,
 ) -> Reply<T> {
-    scoped(state, headers, server, body).await.map(Json)
+    scoped(state, caller, server, body).await.map(Json)
 }
 
 /// Runs a change, then hands its Discord work to the gateway. Open pages hear
 /// about the event the change touched, or about the whole server.
-async fn change(
+pub(super) async fn change(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Done> {
     let mut guild_id = 0;
-    let (outcome, event) = scoped(state, headers, server, async |db, viewer| {
+    let (outcome, event) = scoped(state, caller, server, async |db, viewer| {
         guild_id = viewer.guild_id;
         let outcome = body(db, viewer).await?;
         let event = match outcome.sync {
@@ -223,13 +223,13 @@ async fn change(
 /// A change to who is signed up for one event.
 async fn change_signups(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     event: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Done> {
     let mut guild_id = 0;
-    let outcome = scoped(state, headers, server, async |db, viewer| {
+    let outcome = scoped(state, caller, server, async |db, viewer| {
         guild_id = viewer.guild_id;
         body(db, viewer).await
     })
@@ -244,11 +244,11 @@ async fn change_signups(
 /// A personal write that other open pages do not need to refetch.
 async fn write(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Done> {
-    finish(state, scoped(state, headers, server, body).await?)
+    finish(state, scoped(state, caller, server, body).await?)
 }
 
 fn finish(state: &AppState, outcome: Outcome) -> Reply<dto::Done> {
@@ -524,15 +524,15 @@ async fn update_event(
 }
 
 /// Runs a change to one event and answers with the event as it now reads.
-async fn change_event(
+pub(super) async fn change_event(
     state: &AppState,
-    headers: &HeaderMap,
+    caller: impl Into<Caller<'_>>,
     server: &str,
     id: &str,
     body: impl AsyncFnOnce(&mut Connection, &Session) -> Result<Outcome, OpError>,
 ) -> Reply<dto::Event> {
     let mut guild_id = 0;
-    let (outcome, fresh) = scoped(state, headers, server, async |db, v| {
+    let (outcome, fresh) = scoped(state, caller, server, async |db, v| {
         guild_id = v.guild_id;
         let outcome = body(db, v).await?;
         Ok((outcome, api::event(db, v, id).await?))

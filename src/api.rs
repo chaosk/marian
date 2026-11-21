@@ -66,30 +66,51 @@ impl Outcome {
     }
 }
 
+/// Who the request's cookie signs in as. Only a browser sign-in counts here:
+/// an MCP client's token works at `/mcp` alone.
 pub async fn viewer(conn: &mut Connection, headers: &HeaderMap) -> Option<Viewer> {
     let token = cookie(headers, "marian_session")?;
-    let row = store::web_session(conn, &token).await.ok()??;
+    let mut viewer = signed_in(conn, &token, false).await?;
+    viewer.notice = cookie(headers, "marian_notice").map(|value| percent_decode(&value));
+    Some(viewer)
+}
+
+/// Who an MCP client's bearer token signs in as.
+pub async fn mcp_viewer(conn: &mut Connection, token: &str) -> Option<Viewer> {
+    signed_in(conn, token, true).await
+}
+
+/// A browser sign-in that still counts, by its token.
+pub async fn browser_session(conn: &mut Connection, token: &str) -> Option<store::WebSession> {
+    signed_in(conn, token, false).await?;
+    store::web_session(conn, token).await.ok()?
+}
+
+async fn signed_in(conn: &mut Connection, token: &str, mcp: bool) -> Option<Viewer> {
+    let row = store::web_session(conn, token).await.ok()??;
+    if row.mcp_client.is_some() != mcp {
+        return None;
+    }
     let fresh = Utc::now() - row.created_at < Duration::days(store::SESSION_DAYS);
     if !fresh {
-        let _ = store::delete_web_session(conn, &token).await;
+        let _ = store::delete_web_session(conn, token).await;
         return None;
     }
     let user = store::membership(conn, row.membership_id).await.ok()??;
     let discord_id = store::discord_id_for_membership(conn, user.id).await.ok()?;
     if user.guild_id != row.guild_id || discord_id != row.discord_user_id {
-        let _ = store::delete_web_session(conn, &token).await;
+        let _ = store::delete_web_session(conn, token).await;
         return None;
     }
-    let notice = cookie(headers, "marian_notice").map(|value| percent_decode(&value));
     Some(Viewer {
-        token,
+        token: token.to_string(),
         discord_user_id: row.discord_user_id,
         user_id: user.user_id,
         display_name: row.display_name,
         guild_id: row.guild_id,
         membership_id: row.membership_id,
         allowed: row.guilds,
-        notice,
+        notice: None,
     })
 }
 
