@@ -3,8 +3,10 @@
 //! here to allow them, and swap the code for a token with PKCE.
 //!
 //! Marian doesn't sign anyone in itself: the consent page asks for the
-//! browser's Discord sign-in, and the token is a sign-in of its own, for the
-//! same person and servers, that answers only at `/mcp`.
+//! browser's Discord sign-in, and allowing a client goes through Discord
+//! again for a grant of the client's own. The token is a sign-in of its own,
+//! for the same person, that answers only at `/mcp` and re-reads their
+//! servers with that grant.
 
 use axum::Json;
 use axum::extract::{Form, Query, State};
@@ -314,6 +316,9 @@ pub(super) async fn authorize(
         created_at: Utc::now(),
         code: None,
         session_token: None,
+        discord_access: None,
+        discord_refresh: None,
+        discord_expires_at: None,
     };
     if let Err(err) = store::insert_mcp_authorization(&mut db, &authorization).await {
         tracing::error!(error = %err, "could not keep an MCP authorization");
@@ -400,7 +405,7 @@ pub(super) async fn consent(
 <li>see your servers, their events, and who signed up</li>
 <li>create, change, post and delete events, where Marian lets you</li>
 </ul>
-<p class="small">It will send you back to <strong>{to}</strong>. Only allow it if you started this from an app you trust.</p>
+<p class="small">Allowing it passes through Discord to confirm it's you, then sends you back to <strong>{to}</strong>. Only allow it if you started this from an app you trust.</p>
 <form method="post" action="/oauth/consent">
 <input type="hidden" name="request" value="{request}">
 <button type="submit" name="decision" value="allow">Allow</button>
@@ -454,30 +459,139 @@ pub(super) async fn decide(
             "Try again in a moment.",
         );
     };
-    let Some(viewer) = read_session(&mut db, Caller::Browser(&headers)).await else {
+    if read_session(&mut db, Caller::Browser(&headers))
+        .await
+        .is_none()
+    {
+        return page(
+            StatusCode::UNAUTHORIZED,
+            "Sign in first",
+            "Your Marian sign-in ended. Start connecting again from your app.",
+        );
+    }
+    let Some(pending) = pending(&mut db, &form.request).await else {
+        return expired();
+    };
+    if form.decision != "allow" {
+        let _ = store::delete_mcp_authorization(&mut db, &pending.id).await;
+        return denied(&pending);
+    }
+    drop(db);
+    // Discord confirms who is allowing it and gives the client a grant of its
+    // own, which keeps its list of servers current. Someone who already
+    // allowed Marian there comes straight back.
+    let Some(discord_redirect) = super::oauth_redirect(&state, &headers) else {
+        return not_configured_page();
+    };
+    let Ok(check) = auth::random_token() else {
+        return page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Something went wrong",
+            "Try again.",
+        );
+    };
+    let mut response = Redirect::to(&format!(
+        "{}&prompt=none",
+        auth::authorize_url(&state.client_id, &discord_redirect, &check)
+    ))
+    .into_response();
+    super::set_cookie(
+        &mut response,
+        DISCORD_COOKIE,
+        &format!("{check}.{}", pending.id),
+        600,
+        super::cookie_secure(&state, &headers),
+    );
+    response
+}
+
+/// Holds the Discord `state` of an MCP sign-in on its way through Discord,
+/// and which pending sign-in it finishes.
+const DISCORD_COOKIE: &str = "marian_mcp_oauth";
+
+/// The `(state, pending sign-in)` [`DISCORD_COOKIE`] holds.
+fn discord_cookie(headers: &HeaderMap) -> Option<(String, String)> {
+    let raw = super::cookie(headers, DISCORD_COOKIE)?;
+    let (check, request) = raw.split_once('.')?;
+    let hex = |text: &str| text.len() >= 16 && text.chars().all(|ch| ch.is_ascii_hexdigit());
+    (hex(check) && hex(request)).then(|| (check.to_string(), request.to_string()))
+}
+
+/// Discord coming back from an MCP sign-in [`decide`] sent there: `None` when
+/// the callback is a browser sign-in's instead. Checks that Discord signed in
+/// the person who allowed the client, keeps the client's grant, and sends the
+/// code on to it.
+pub(super) async fn discord_returned(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &super::DiscordCallback,
+) -> Option<Response> {
+    let (check, request) = discord_cookie(headers)?;
+    if query.state.as_deref() != Some(check.as_str()) {
+        return None;
+    }
+    let mut response = finish_discord(state, headers, query, &request).await;
+    super::clear_cookie(&mut response, DISCORD_COOKIE);
+    Some(response)
+}
+
+async fn finish_discord(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &super::DiscordCallback,
+    request: &str,
+) -> Response {
+    let busy = || {
+        page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Marian is busy",
+            "Try again in a moment.",
+        )
+    };
+    let Ok(mut db) = state.db.get().await else {
+        return busy();
+    };
+    let Some(pending) = pending(&mut db, request).await else {
+        return expired();
+    };
+    if query.error.is_some() {
+        let _ = store::delete_mcp_authorization(&mut db, &pending.id).await;
+        return denied(&pending);
+    }
+    let Some(viewer) = read_session(&mut db, Caller::Browser(headers)).await else {
         return page(
             StatusCode::UNAUTHORIZED,
             "Sign in first",
             "Your Marian sign-in ended. Start connecting again from your app.",
         );
     };
-    let Some(pending) = pending(&mut db, &form.request).await else {
-        return expired();
+    drop(db);
+    let Some(code) = query.code.as_deref().filter(|code| !code.is_empty()) else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            "Discord didn't answer",
+            "Start connecting again from your app.",
+        );
     };
-    let state_param = pending.state.clone();
-    let with_state = |mut params: Vec<(&'static str, String)>| {
-        if let Some(state) = &state_param {
-            params.push(("state", state.clone()));
-        }
-        params
+    let Some(discord_redirect) = super::oauth_redirect(state, headers) else {
+        return not_configured_page();
     };
-    if form.decision != "allow" {
-        let _ = store::delete_mcp_authorization(&mut db, &pending.id).await;
-        let params = with_state(vec![
-            ("error", "access_denied".into()),
-            ("error_description", "You didn't allow it.".into()),
-        ]);
-        return redirect_with(&pending.redirect_uri, &borrowed(&params));
+    let discord_failed =
+        |text: String| page(StatusCode::BAD_GATEWAY, "Discord didn't answer", &text);
+    let grant = match super::discord_token(state, code, &discord_redirect).await {
+        Ok(grant) => grant,
+        Err(text) => return discord_failed(text),
+    };
+    let me = match super::discord_me(state, &grant.access).await {
+        Ok(me) => me,
+        Err(text) => return discord_failed(text),
+    };
+    if me.id != viewer.discord_user_id {
+        return page(
+            StatusCode::FORBIDDEN,
+            "That's another Discord account",
+            "Discord signed in someone other than who is signed in to Marian here. Switch accounts in Discord, then connect again from your app.",
+        );
     }
     let Ok(code) = auth::random_token() else {
         return page(
@@ -486,8 +600,18 @@ pub(super) async fn decide(
             "Try again.",
         );
     };
-    match store::approve_mcp_authorization(&mut db, &pending.id, &code, &viewer.token, Utc::now())
-        .await
+    let Ok(mut db) = state.db.get().await else {
+        return busy();
+    };
+    match store::approve_mcp_authorization(
+        &mut db,
+        &pending.id,
+        &code,
+        &viewer.token,
+        &grant,
+        Utc::now(),
+    )
+    .await
     {
         Ok(true) => {}
         Ok(false) => return expired(),
@@ -500,11 +624,42 @@ pub(super) async fn decide(
             );
         }
     }
-    let mut params = with_state(vec![("code", code)]);
-    if let Some(base) = public_base(&state, &headers) {
+    let mut params = with_state(&pending, vec![("code", code)]);
+    if let Some(base) = public_base(state, headers) {
         params.push(("iss", base));
     }
     redirect_with(&pending.redirect_uri, &borrowed(&params))
+}
+
+/// The client's `state`, sent back with whatever answers it.
+fn with_state(
+    pending: &store::McpAuthorization,
+    mut params: Vec<(&'static str, String)>,
+) -> Vec<(&'static str, String)> {
+    if let Some(state) = &pending.state {
+        params.push(("state", state.clone()));
+    }
+    params
+}
+
+/// Tells the client the person turned it down.
+fn denied(pending: &store::McpAuthorization) -> Response {
+    let params = with_state(
+        pending,
+        vec![
+            ("error", "access_denied".into()),
+            ("error_description", "You didn't allow it.".into()),
+        ],
+    );
+    redirect_with(&pending.redirect_uri, &borrowed(&params))
+}
+
+fn not_configured_page() -> Response {
+    page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-in isn't set up",
+        "Set MARIAN_PUBLIC_URL and the Discord client so Discord can send you back.",
+    )
 }
 
 fn borrowed<'a>(params: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
@@ -574,7 +729,7 @@ pub(super) async fn token(State(state): State<AppState>, Form(form): Form<TokenF
     {
         return invalid();
     }
-    let Some(from) = taken.session_token.as_deref() else {
+    let (Some(from), Some(grant)) = (taken.session_token.as_deref(), taken.grant()) else {
         return invalid();
     };
     // The browser sign-in that allowed it, while it still counts.
@@ -588,7 +743,8 @@ pub(super) async fn token(State(state): State<AppState>, Form(form): Form<TokenF
             "Try again.",
         );
     };
-    if let Err(err) = store::insert_mcp_session(&mut db, &access, &browser, &taken.client_id).await
+    if let Err(err) =
+        store::insert_mcp_session(&mut db, &access, &browser, &taken.client_id, &grant).await
     {
         tracing::error!(error = %err, "could not give an MCP client its token");
         return oauth_error(
