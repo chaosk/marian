@@ -3288,7 +3288,8 @@ mod tests {
         let grant = store::DiscordGrant {
             access: "discord-access".into(),
             refresh: "discord-refresh".into(),
-            expires_at: Utc::now() + chrono::Duration::days(7),
+            // Whole seconds: Postgres keeps microseconds, a Linux clock nanoseconds.
+            expires_at: "2030-01-01T00:00:00Z".parse().unwrap(),
         };
         let code = "c0dec0dec0dec0dec0dec0dec0dec0de".to_string();
         assert!(
