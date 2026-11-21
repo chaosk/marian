@@ -12,7 +12,13 @@ all-features = true
 # patch release of either exists. That client only ever talks to Discord's
 # gateway, with the default webpki roots and no CRLs or session store of ours.
 # Drop these when serenity moves to rustls 0.23.
+#
+# chrono and chrono-tz are marked unmaintained, with no fixed release. They
+# carry no known vulnerability, and Marian's times, the API types, diesel and
+# serenity all use them, so moving to jiff or time is a project of its own.
 ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no known vulnerability; used throughout and by diesel and serenity" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, no known vulnerability; the server time zones are built on it" },
   { id = "RUSTSEC-2026-0346", reason = "rustls 0.22 via serenity: Debug of session values; we never format a ClientSessionStore" },
   { id = "RUSTSEC-2026-0349", reason = "rustls 0.22 via serenity: no fix in 0.22; gateway connection to Discord only" },
   { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102 via serenity: CRL matching; no CRLs are configured" },
