@@ -2972,6 +2972,20 @@ pub struct McpAuthorization {
     pub created_at: DateTime<Utc>,
     pub code: Option<String>,
     pub session_token: Option<String>,
+    pub discord_access: Option<String>,
+    pub discord_refresh: Option<String>,
+    pub discord_expires_at: Option<DateTime<Utc>>,
+}
+
+impl McpAuthorization {
+    /// The Discord grant Discord gave the client when the person allowed it.
+    pub fn grant(&self) -> Option<DiscordGrant> {
+        Some(DiscordGrant {
+            access: self.discord_access.clone()?,
+            refresh: self.discord_refresh.clone()?,
+            expires_at: self.discord_expires_at?,
+        })
+    }
 }
 
 /// How long an MCP sign-in may take, from the authorize request until the
@@ -3012,6 +3026,7 @@ pub async fn approve_mcp_authorization(
     id: &str,
     code: &str,
     session_token: &str,
+    grant: &DiscordGrant,
     now: DateTime<Utc>,
 ) -> Result<bool, OpError> {
     use schema::mcp_authorizations as a;
@@ -3021,7 +3036,13 @@ pub async fn approve_mcp_authorization(
             .filter(a::code.is_null())
             .filter(a::created_at.gt(now - chrono::Duration::minutes(MCP_AUTHORIZATION_MINUTES))),
     )
-    .set((a::code.eq(code), a::session_token.eq(session_token)))
+    .set((
+        a::code.eq(code),
+        a::session_token.eq(session_token),
+        a::discord_access.eq(&grant.access),
+        a::discord_refresh.eq(&grant.refresh),
+        a::discord_expires_at.eq(grant.expires_at),
+    ))
     .execute(conn)
     .await?;
     Ok(changed == 1)
@@ -3053,13 +3074,15 @@ pub async fn take_mcp_code(
     }))
 }
 
-/// A sign-in for an MCP client, as the person in `from`: their servers as
-/// they stand, and no Discord grant, so it never re-reads them.
+/// A sign-in for an MCP client, as the person in `from`, with a Discord grant
+/// of its own. It starts with their servers as `from` knows them, due a
+/// re-read on its first request.
 pub async fn insert_mcp_session(
     conn: &mut Connection,
     token: &str,
     from: &WebSession,
     client_id: &str,
+    grant: &DiscordGrant,
 ) -> Result<(), OpError> {
     let token = token.to_string();
     let guilds = from.guilds.clone();
@@ -3073,11 +3096,14 @@ pub async fn insert_mcp_session(
             from.guild_id,
             from.membership_id,
             &guilds,
-            None,
+            Some(grant),
         )
         .await?;
         diesel::update(schema::web_sessions::table.filter(schema::web_sessions::token.eq(&token)))
-            .set(schema::web_sessions::mcp_client.eq(&client_id))
+            .set((
+                schema::web_sessions::mcp_client.eq(&client_id),
+                schema::web_sessions::guilds_checked_at.eq(DateTime::<Utc>::UNIX_EPOCH),
+            ))
             .execute(conn)
             .await?;
         Ok(())

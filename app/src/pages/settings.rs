@@ -470,7 +470,7 @@ pub fn ConnectedApps() -> impl IntoView {
                 {head("Connected apps")}
                 <section class="stack">
                     <p class="settings-note">
-                        "AI assistants you let act for you over MCP. Each one can do what you can do here, on the servers you were in when you allowed it."
+                        "AI assistants you let act for you over MCP. Each one can do what you can do here, in your servers with Marian."
                     </p>
                     {list}
                 </section>

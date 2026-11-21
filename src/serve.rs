@@ -854,7 +854,9 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     if signed_in {
         // Both ask Discord, so neither holds up the request: it goes on with
         // what Marian already knows, at most a few minutes old.
-        start_session_guilds_recheck(&state, &headers).await;
+        if let Some(token) = cookie(&headers, "marian_session") {
+            start_session_guilds_recheck(&state, &token).await;
+        }
         let (state, path, headers) = (state.clone(), path.clone(), headers.clone());
         tokio::spawn(
             async move { refresh_member_roles(&state, &path, Caller::Browser(&headers)).await }
@@ -1108,10 +1110,9 @@ const SESSION_GUILDS_TTL: chrono::Duration = chrono::Duration::minutes(5);
 /// joins after they sign in shows up, and one they leave drops out. One request
 /// per session claims the check, and Discord is asked in the background: the
 /// requests a page fires together used to each ask, and wait out the 429s.
-async fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
-    let Some(token) = cookie(headers, "marian_session") else {
-        return;
-    };
+/// `token` is a browser's session cookie or an MCP client's bearer token.
+async fn start_session_guilds_recheck(state: &AppState, token: &str) {
+    let token = token.to_string();
     let session = {
         let mut db = state.db.get().await.expect("database");
         match store::web_session(&mut db, &token).await {
@@ -1248,6 +1249,9 @@ async fn auth_callback(
     headers: HeaderMap,
     Query(query): Query<DiscordCallback>,
 ) -> Response {
+    if let Some(response) = oauth::discord_returned(&state, &headers, &query).await {
+        return response;
+    }
     if query.error.is_some() {
         return nav_redirect("/", "Sign-in was cancelled.");
     }
@@ -3228,19 +3232,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
-        let allowed = client
-            .post(at("/oauth/consent"))
-            .header(header::COOKIE, browser)
-            .form(&[("request", request.as_str()), ("decision", "allow")])
-            .send()
+        // Allowing it goes by way of Discord, to check who it is and get the
+        // client a grant of its own.
+        let allow = |request: String| {
+            client
+                .post(at("/oauth/consent"))
+                .header(header::COOKIE, browser)
+                .form(&[("request", request), ("decision", "allow".into())])
+                .send()
+        };
+        let through_discord = |response: &reqwest::Response, request: &str| {
+            let discord = reqwest::Url::parse(&location(response)).unwrap();
+            assert_eq!(discord.host_str(), Some("discord.com"));
+            let asks: HashMap<_, _> = discord.query_pairs().into_owned().collect();
+            assert_eq!(asks["prompt"], "none");
+            assert_eq!(
+                asks["redirect_uri"],
+                "https://marian.example.com/auth/discord/callback"
+            );
+            let check = asks["state"].clone();
+            let held = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|value| {
+                    value
+                        .to_str()
+                        .unwrap()
+                        .starts_with(&format!("marian_mcp_oauth={check}.{request};"))
+                });
+            assert!(held, "{response:?}");
+            check
+        };
+        let allowed = allow(request.clone()).await.unwrap();
+        let check = through_discord(&allowed, &request);
+        let returned = |check: &str, request: &str, query: &str| {
+            client
+                .get(at(&format!("/auth/discord/callback?{query}")))
+                .header(
+                    header::COOKIE,
+                    format!("{browser}; marian_mcp_oauth={check}.{request}"),
+                )
+                .send()
+        };
+        // Another state is a browser sign-in's to answer, not this one's.
+        let stray = returned(
+            &check,
+            &request,
+            "state=0123456789abcdef0123&error=access_denied",
+        )
+        .await
+        .unwrap();
+        assert_eq!(location(&stray), "/");
+        // Discord isn't reachable from tests: this is what its answer leaves.
+        let grant = store::DiscordGrant {
+            access: "discord-access".into(),
+            refresh: "discord-refresh".into(),
+            expires_at: Utc::now() + chrono::Duration::days(7),
+        };
+        let code = "c0dec0dec0dec0dec0dec0dec0dec0de".to_string();
+        assert!(
+            store::approve_mcp_authorization(
+                &mut conn,
+                &request,
+                &code,
+                "browser-token",
+                &grant,
+                Utc::now()
+            )
             .await
-            .unwrap();
-        let back = reqwest::Url::parse(&location(&allowed)).unwrap();
+            .unwrap()
+        );
+
+        // Turned down at Discord, a second time round.
+        let again = authorize("http://localhost:9999/cb").await.unwrap();
+        let second = location(&again)
+            .trim_start_matches("/oauth/consent?request=")
+            .to_string();
+        let allowed = allow(second.clone()).await.unwrap();
+        let check = through_discord(&allowed, &second);
+        let refused = returned(
+            &check,
+            &second,
+            &format!("state={check}&error=access_denied"),
+        )
+        .await
+        .unwrap();
+        let back = reqwest::Url::parse(&location(&refused)).unwrap();
         assert_eq!(back.path(), "/cb");
         let params: HashMap<_, _> = back.query_pairs().into_owned().collect();
+        assert_eq!(params["error"], "access_denied");
         assert_eq!(params["state"], "xyz");
-        assert_eq!(params["iss"], "https://marian.example.com");
-        let code = params["code"].clone();
+        assert!(
+            refused
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|value| value.to_str().unwrap().starts_with("marian_mcp_oauth=;"))
+        );
 
         // The token.
         let exchange = |verifier: &str| {
@@ -3260,6 +3349,21 @@ mod tests {
         let access = token["access_token"].as_str().unwrap().to_string();
         let replayed = exchange(verifier).await.unwrap();
         assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
+
+        // The client's sign-in holds its own grant and re-reads the servers
+        // on its first request. Tests don't ask Discord, so it lets go of it.
+        let session = store::web_session(&mut conn, &access)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.grant, Some(grant));
+        assert_eq!(
+            session.guilds_checked_at,
+            chrono::DateTime::<Utc>::UNIX_EPOCH
+        );
+        store::set_session_grant(&mut conn, &access, None)
+            .await
+            .unwrap();
 
         // It isn't a browser sign-in.
         let as_cookie = client

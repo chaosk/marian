@@ -363,6 +363,9 @@ diesel::table! {
         created_at -> Timestamptz,
         code -> Nullable<Text>,
         session_token -> Nullable<Text>,
+        discord_access -> Nullable<Text>,
+        discord_refresh -> Nullable<Text>,
+        discord_expires_at -> Nullable<Timestamptz>,
     }
 }
 

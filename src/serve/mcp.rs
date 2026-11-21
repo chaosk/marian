@@ -53,6 +53,8 @@ pub(super) async fn handle(
     let (Some(token), true) = (token, signed_in) else {
         return unauthorized(&state, &headers, bearer(&headers).is_some());
     };
+    // Its servers stay current the way a browser's do.
+    super::start_session_guilds_recheck(&state, &token).await;
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return rpc_reply(error(Value::Null, -32700, "That isn't JSON."));
     };
