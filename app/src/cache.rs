@@ -424,6 +424,14 @@ async fn get_me() -> Result<dto::Me, Failure> {
     api::me().await
 }
 
+pub fn apps_scope() -> QueryScope<(), Result<Vec<dto::ConnectedApp>, Failure>> {
+    QueryScope::new(get_apps).with_invalidation_link(|_| ["me", "apps"])
+}
+
+async fn get_apps() -> Result<Vec<dto::ConnectedApp>, Failure> {
+    api::apps().await
+}
+
 pub fn server_scope() -> QueryScope<String, Result<dto::Server, Failure>> {
     QueryScope::new(get_server).with_invalidation_link(|id| link_server(id))
 }

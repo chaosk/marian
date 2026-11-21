@@ -562,6 +562,7 @@ diesel::joinable!(activity -> guilds (guild_id));
 diesel::joinable!(activity -> events (event_id));
 diesel::joinable!(web_session_guilds -> web_sessions (token));
 diesel::joinable!(mcp_authorizations -> mcp_clients (client_id));
+diesel::joinable!(web_sessions -> mcp_clients (mcp_client));
 diesel::joinable!(routines -> guilds (guild_id));
 diesel::joinable!(routines -> event_templates (template_id));
 diesel::joinable!(routines -> memberships (created_by));

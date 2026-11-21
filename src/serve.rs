@@ -3358,5 +3358,37 @@ mod tests {
         assert_eq!(deleted["isError"], false, "{deleted}");
         let gone = call("get_event", json!({ "server": "99", "event": event })).await;
         assert_eq!(gone["isError"], true);
+
+        // The member sees the app among their connected apps and signs it out.
+        let apps = |cookie: &'static str| {
+            client
+                .get(at("/api/me/apps"))
+                .header(header::COOKIE, cookie)
+                .send()
+        };
+        let listed: Value = apps(browser).await.unwrap().json().await.unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["id"], client_id.as_str());
+        assert!(listed[0]["name"].as_str().unwrap().starts_with("Test"));
+        let by_token = client
+            .get(at("/api/me/apps"))
+            .bearer_auth(&access)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_token.status(), StatusCode::UNAUTHORIZED);
+        let disconnect = || {
+            client
+                .delete(at(&format!("/api/me/apps/{client_id}")))
+                .header(header::COOKIE, browser)
+                .header(header::ORIGIN, "https://marian.example.com")
+                .send()
+        };
+        assert_eq!(disconnect().await.unwrap().status(), StatusCode::OK);
+        let after = rpc(2, "tools/list", json!({})).await.unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+        let listed: Value = apps(browser).await.unwrap().json().await.unwrap();
+        assert_eq!(listed, json!([]));
+        assert_eq!(disconnect().await.unwrap().status(), StatusCode::NOT_FOUND);
     }
 }

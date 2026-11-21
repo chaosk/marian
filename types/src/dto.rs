@@ -47,6 +47,17 @@ pub struct Me {
     pub servers: Vec<ServerRef>,
 }
 
+/// An AI assistant the signed-in person let act for them over MCP.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConnectedApp {
+    pub id: String,
+    pub name: String,
+    /// When they last allowed it.
+    pub allowed_at: DateTime<Utc>,
+    /// When that sign-in runs out and the app has to ask again.
+    pub until: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Counts {
     pub drafts: i64,
