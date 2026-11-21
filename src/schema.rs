@@ -340,6 +340,32 @@ diesel::table! {
         discord_refresh -> Nullable<Text>,
         discord_expires_at -> Nullable<Timestamptz>,
         guilds_checked_at -> Timestamptz,
+        mcp_client -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    mcp_clients (id) {
+        id -> Text,
+        name -> Text,
+        redirect_uris -> Array<Text>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    mcp_authorizations (id) {
+        id -> Text,
+        client_id -> Text,
+        redirect_uri -> Text,
+        code_challenge -> Text,
+        state -> Nullable<Text>,
+        created_at -> Timestamptz,
+        code -> Nullable<Text>,
+        session_token -> Nullable<Text>,
+        discord_access -> Nullable<Text>,
+        discord_refresh -> Nullable<Text>,
+        discord_expires_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -538,6 +564,8 @@ diesel::joinable!(option_library -> guilds (guild_id));
 diesel::joinable!(activity -> guilds (guild_id));
 diesel::joinable!(activity -> events (event_id));
 diesel::joinable!(web_session_guilds -> web_sessions (token));
+diesel::joinable!(mcp_authorizations -> mcp_clients (client_id));
+diesel::joinable!(web_sessions -> mcp_clients (mcp_client));
 diesel::joinable!(routines -> guilds (guild_id));
 diesel::joinable!(routines -> event_templates (template_id));
 diesel::joinable!(routines -> memberships (created_by));
@@ -592,6 +620,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     memberships,
     web_session_guilds,
     web_sessions,
+    mcp_clients,
+    mcp_authorizations,
 );
 
 use diesel::sql_types::Text;

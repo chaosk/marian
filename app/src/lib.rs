@@ -192,6 +192,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("channels") view=|| view! { <ManagersOnly heading="Channels"><pages::channels::Channels/></ManagersOnly> }/>
                     <Route path=path!("settings") view=|| view! { <ManagersOnly heading="Settings"><pages::settings::Settings/></ManagersOnly> }/>
                     <Route path=path!("google") view=pages::settings::Google/>
+                    <Route path=path!("apps") view=pages::settings::ConnectedApps/>
                 </ParentRoute>
             </Routes>
         </Router>
