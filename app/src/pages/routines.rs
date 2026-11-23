@@ -403,8 +403,8 @@ pub fn NewRoutine() -> impl IntoView {
                         .collect(),
                 ),
             };
-            let notify = channels
-                .first()
+            // The starting channel's default mentions.
+            let notify = super::starting_channel(&channels, &membership)
                 .map(|channel| channel.notify.clone())
                 .unwrap_or_default();
             let starting = dto::RoutineEvent {
