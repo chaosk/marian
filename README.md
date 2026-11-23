@@ -110,6 +110,34 @@ DATABASE_URL=postgres://marian:marian@127.0.0.1:5432/marian \
   cargo leptos watch --release
 ```
 
+## MCP
+
+Marian is an MCP server at `https://marian.example.com/mcp` (Streamable HTTP). Add that URL to Claude, Claude Code (`claude mcp add --transport http marian https://marian.example.com/mcp`) or another MCP client. The client registers itself and sends you to Marian, which asks for your Discord sign-in and then whether to allow the client. Nothing else needs setting up, apart from `MARIAN_PUBLIC_URL`.
+
+The client acts as you, with what you may do on the website, in your servers with Marian, for 30 days. Allowing it passes through Discord once more, so the client gets a Discord grant of its own and its list of your servers stays current, as a browser sign-in's does. Its token opens `/mcp` only, not the website or `/api`. Its tools:
+
+| Tool | Does |
+| --- | --- |
+| `list_servers` | The servers you share with Marian |
+| `get_server` | A server's time zone, whether you may create events, its channels and signup presets |
+| `list_events` | A server's events, by view, day, or words in the title |
+| `get_event` | An event and who signed up |
+| `create_event` | A new event, as a draft unless asked to post it now or at a time |
+| `update_event` | An event's title, description, start, length or location |
+| `post_event` | Posts a draft or scheduled event to Discord now |
+| `delete_event` | Deletes an event |
+| `list_routines` | A server's routines (server managers) |
+| `pending_approvals` | Routines whose closed poll waits for you to confirm its day |
+| `get_routine` | A routine's schedule, this week's poll and votes, and any approval waiting |
+| `decide_routine` | Confirms a waiting routine's day, or skips the week |
+| `vote_routine` | Votes for a day in a routine's open poll |
+| `set_routine_days` | The days this week's poll offers, or the usual days |
+| `stop_routine` | Stops a routine's weekly polls |
+
+Routines are created and edited on the website.
+
+Your account menu on the website has **Connected apps**, which lists the clients you allowed and disconnects one. Disconnecting ends its access at once; it has to ask again to come back.
+
 ## Install on Kubernetes
 
 The chart runs one container and reads the bot token and the database URL from a Secret. An image built from a tag passes the version number as `MARIAN_VERSION`. An image built from a branch passes the commit hash. That string is the image label and `service.version` on traces. A tag also publishes the chart and a GitHub release, with the tag's commit message as its notes and the static binary and chart attached.

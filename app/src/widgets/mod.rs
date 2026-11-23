@@ -938,6 +938,7 @@ pub fn AccountMenu(base: String, membership: dto::Membership) -> impl IntoView {
                 }}
                 {google}
                 <CalendarFeed url=membership.calendar_url/>
+                <crate::A href=format!("{base}/apps")>"Connected apps"</crate::A>
                 <form method="post" action="/logout">
                     <button type="submit">"Sign out"</button>
                 </form>

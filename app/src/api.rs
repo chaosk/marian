@@ -385,6 +385,15 @@ pub mod path {
         "/api/me".into()
     }
 
+    /// The AI assistants the signed-in person let act for them.
+    pub fn apps() -> String {
+        format!("{}/apps", me())
+    }
+
+    pub fn app(id: &str) -> String {
+        format!("{}/{}", apps(), super::encode(id))
+    }
+
     pub fn timezones(selected: &str) -> String {
         format!("/api/timezones?selected={}", encode(selected))
     }
@@ -582,6 +591,17 @@ pub async fn me() -> Result<dto::Me, Failure> {
     #[cfg(not(feature = "ssr"))]
     {
         send_wrapper::SendWrapper::new(remote::read::<_>(&path::me())).await
+    }
+}
+
+pub async fn apps() -> Result<Vec<dto::ConnectedApp>, Failure> {
+    #[cfg(feature = "ssr")]
+    {
+        local::signed_in(marian::api::connected_apps).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        send_wrapper::SendWrapper::new(remote::read::<_>(&path::apps())).await
     }
 }
 

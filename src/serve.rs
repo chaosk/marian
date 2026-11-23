@@ -24,6 +24,8 @@ use crate::jobs::DiscordJob;
 use crate::logic;
 use crate::store::{self, Connection};
 
+mod mcp;
+mod oauth;
 mod report;
 mod rest;
 
@@ -254,7 +256,8 @@ fn spawn_google_sync(
 }
 
 /// Hourly, from the start of the leader's term: deletes sign-ins past their
-/// 30 days, which hold Discord tokens nobody can use any more.
+/// 30 days, which hold Discord tokens nobody can use any more, and MCP
+/// sign-ins nobody finished.
 fn spawn_session_sweep(db: store::Db, term: Term) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -272,6 +275,13 @@ fn spawn_session_sweep(db: store::Db, term: Term) -> tokio::task::JoinHandle<()>
                 Some(Ok(0)) | None => {}
                 Some(Ok(gone)) => tracing::info!("Deleted {gone} expired sign-ins."),
                 Some(Err(err)) => tracing::warn!("session sweep failed: {err}"),
+            }
+            if let Some(Err(err)) = with_db(&db, "session sweep", async |conn| {
+                store::delete_stale_mcp(conn, Utc::now()).await
+            })
+            .await
+            {
+                tracing::warn!("MCP sweep failed: {err}");
             }
         }
     })
@@ -443,6 +453,26 @@ fn router(state: AppState, pages: Router) -> Router {
         .route("/auth/google/disconnect", post(google_disconnect))
         .route("/logout", post(logout))
         .route("/calendar/{file}", get(personal_calendar))
+        .route(
+            "/mcp",
+            post(mcp::handle).get(mcp::not_here).delete(mcp::not_here),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server),
+        )
+        .route("/oauth/register", post(oauth::register))
+        .route("/oauth/authorize", get(oauth::authorize))
+        .route("/oauth/consent", get(oauth::consent).post(oauth::decide))
+        .route("/oauth/token", post(oauth::token))
         .nest("/api", rest::router())
         .with_state(state.clone())
         .merge(pages)
@@ -458,15 +488,18 @@ fn router(state: AppState, pages: Router) -> Router {
 
 /// Only Marian's own pages may call the API from a browser, with the
 /// signed-in person's cookie: the origin of `MARIAN_PUBLIC_URL`. Without one
-/// (local runs) no origin is named, and browsers keep to same-origin.
+/// (local runs) no origin is named, and browsers keep to same-origin. MCP
+/// clients that run in a browser may reach `/mcp` and the OAuth endpoints
+/// they call from anywhere: those read a bearer token or nothing, never the
+/// cookie.
 fn cors(public_url: &str) -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowOrigin, CorsLayer};
-    let origins: Vec<HeaderValue> = public_origin(public_url)
-        .and_then(|origin| HeaderValue::from_str(&origin).ok())
-        .into_iter()
-        .collect();
+    let own: Option<HeaderValue> =
+        public_origin(public_url).and_then(|origin| HeaderValue::from_str(&origin).ok());
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(AllowOrigin::predicate(move |origin, request| {
+            own.as_ref() == Some(origin) || open_to_any_origin(request.uri.path())
+        }))
         .allow_credentials(true)
         .allow_methods([
             axum::http::Method::GET,
@@ -475,8 +508,19 @@ fn cors(public_url: &str) -> tower_http::cors::CorsLayer {
             axum::http::Method::PATCH,
             axum::http::Method::DELETE,
         ])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::HeaderName::from_static("mcp-protocol-version"),
+            header::HeaderName::from_static("mcp-session-id"),
+        ])
+        .expose_headers([header::WWW_AUTHENTICATE])
         .max_age(std::time::Duration::from_secs(3600))
+}
+
+fn open_to_any_origin(path: &str) -> bool {
+    matches!(path, "/mcp" | "/oauth/register" | "/oauth/token") || path.starts_with("/.well-known/")
 }
 
 /// `https://marian.example.com` from `https://marian.example.com/some/path`.
@@ -759,8 +803,25 @@ async fn asset(request: Request) -> Response {
     )
 }
 
-async fn read_session(conn: &mut Connection, headers: &HeaderMap) -> Option<Session> {
-    crate::api::viewer(conn, headers).await
+/// Who a request comes from: a browser, by its cookie, or an MCP client, by
+/// the token it sends to `/mcp`.
+#[derive(Clone, Copy)]
+enum Caller<'a> {
+    Browser(&'a HeaderMap),
+    Mcp(&'a str),
+}
+
+impl<'a> From<&'a HeaderMap> for Caller<'a> {
+    fn from(headers: &'a HeaderMap) -> Self {
+        Caller::Browser(headers)
+    }
+}
+
+async fn read_session<'a>(conn: &mut Connection, caller: impl Into<Caller<'a>>) -> Option<Session> {
+    match caller.into() {
+        Caller::Browser(headers) => crate::api::viewer(conn, headers).await,
+        Caller::Mcp(token) => crate::api::mcp_viewer(conn, token).await,
+    }
 }
 
 fn oauth_ready(state: &AppState) -> bool {
@@ -793,10 +854,13 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     if signed_in {
         // Both ask Discord, so neither holds up the request: it goes on with
         // what Marian already knows, at most a few minutes old.
-        start_session_guilds_recheck(&state, &headers).await;
+        if let Some(token) = cookie(&headers, "marian_session") {
+            start_session_guilds_recheck(&state, &token).await;
+        }
         let (state, path, headers) = (state.clone(), path.clone(), headers.clone());
         tokio::spawn(
-            async move { refresh_member_roles(&state, &path, &headers).await }.in_current_span(),
+            async move { refresh_member_roles(&state, &path, Caller::Browser(&headers)).await }
+                .in_current_span(),
         );
         return next.run(request).await;
     }
@@ -872,11 +936,11 @@ enum FreshRoles {
     Unavailable,
 }
 
-async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap) {
+async fn refresh_member_roles(state: &AppState, path: &str, caller: Caller<'_>) {
     if state.bot_token.trim().is_empty() {
         return;
     }
-    let Some(target) = load_role_target(state, path, headers).await else {
+    let Some(target) = load_role_target(state, path, caller).await else {
         return;
     };
     if !state.member_roles.lock().expect("member roles").claim(
@@ -912,10 +976,10 @@ async fn refresh_member_roles(state: &AppState, path: &str, headers: &HeaderMap)
     store_member_roles(state, &target, &roles).await;
 }
 
-async fn load_role_target(state: &AppState, path: &str, headers: &HeaderMap) -> Option<RoleTarget> {
+async fn load_role_target(state: &AppState, path: &str, caller: Caller<'_>) -> Option<RoleTarget> {
     let server = server_in_path(path)?;
     let mut db = state.db.get().await.expect("database");
-    role_target(&mut db, headers, server).await
+    role_target(&mut db, caller, server).await
 }
 
 async fn store_member_roles(state: &AppState, target: &RoleTarget, roles: &[String]) {
@@ -939,10 +1003,10 @@ fn snowflake(id: &str) -> bool {
 
 async fn role_target(
     conn: &mut Connection,
-    headers: &HeaderMap,
+    caller: Caller<'_>,
     server: &str,
 ) -> Option<RoleTarget> {
-    let session = read_session(conn, headers).await?;
+    let session = read_session(conn, caller).await?;
     let guild = store::guild_by_discord(conn, server).await.ok()??;
     if !session.allowed.contains(&guild.id) {
         return None;
@@ -1046,10 +1110,9 @@ const SESSION_GUILDS_TTL: chrono::Duration = chrono::Duration::minutes(5);
 /// joins after they sign in shows up, and one they leave drops out. One request
 /// per session claims the check, and Discord is asked in the background: the
 /// requests a page fires together used to each ask, and wait out the 429s.
-async fn start_session_guilds_recheck(state: &AppState, headers: &HeaderMap) {
-    let Some(token) = cookie(headers, "marian_session") else {
-        return;
-    };
+/// `token` is a browser's session cookie or an MCP client's bearer token.
+async fn start_session_guilds_recheck(state: &AppState, token: &str) {
+    let token = token.to_string();
     let session = {
         let mut db = state.db.get().await.expect("database");
         match store::web_session(&mut db, &token).await {
@@ -1186,6 +1249,9 @@ async fn auth_callback(
     headers: HeaderMap,
     Query(query): Query<DiscordCallback>,
 ) -> Response {
+    if let Some(response) = oauth::discord_returned(&state, &headers, &query).await {
+        return response;
+    }
     if query.error.is_some() {
         return nav_redirect("/", "Sign-in was cancelled.");
     }
@@ -2987,5 +3053,553 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(set.starts_with(&format!("marian_google={token}.")));
+    }
+
+    /// An MCP client finds the OAuth server from `/mcp`'s 401, registers,
+    /// has the person allow it, swaps the code for a token, and then works
+    /// with events as them. The token opens nothing but `/mcp`.
+    #[tokio::test]
+    async fn an_mcp_client_signs_in_and_works_with_events() {
+        use base64::Engine;
+        use diesel_async::SimpleAsyncConnection;
+        use serde_json::{Value, json};
+        use sha2::Digest;
+
+        let mut conn = store::open_memory().await.unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'Europe/Warsaw', '99');
+            INSERT INTO settings (guild_id) VALUES (1);
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES (1, 1, 'events', 'text', 0);
+            INSERT INTO users (id, discord_id) OVERRIDING SYSTEM VALUE VALUES (1, '42');
+            INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+            VALUES (1, 1, 1, 'Nell', 'nell', '#112233', true, true);
+            ",
+        )
+        .await
+        .unwrap();
+        store::seed_attendance(&mut conn, 1).await.unwrap();
+        store::insert_web_session(&mut conn, "browser-token", "42", "Nell", 1, 1, &[1], None)
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState {
+            db: store::pool_for(&mut conn).await.unwrap(),
+            discord: tx,
+            invite_url: String::new(),
+            http: reqwest::Client::new(),
+            client_id: "123".into(),
+            client_secret: "test-secret".into(),
+            public_url: "https://marian.example.com".into(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
+            bot_token: String::new(),
+            member_roles: member_roles_cache(),
+            members: crate::gateway::MemberView::default(),
+            heartbeat: Heartbeat::new(),
+            leader: crate::leader::Status::default(),
+        };
+        let app = router(state, Router::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let at = |path: &str| format!("http://{addr}{path}");
+        let location = |response: &reqwest::Response| {
+            response
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let browser = "marian_session=browser-token";
+
+        // Where to sign in.
+        let refused = client
+            .post(at("/mcp"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            refused.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer resource_metadata=\"https://marian.example.com/.well-known/oauth-protected-resource\""
+        );
+        let resource: Value = client
+            .get(at("/.well-known/oauth-protected-resource"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resource["resource"], "https://marian.example.com/mcp");
+        let metadata: Value = client
+            .get(at("/.well-known/oauth-authorization-server"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata["registration_endpoint"],
+            "https://marian.example.com/oauth/register"
+        );
+        assert_eq!(
+            metadata["code_challenge_methods_supported"],
+            json!(["S256"])
+        );
+
+        // Registering.
+        let bad = client
+            .post(at("/oauth/register"))
+            .json(&json!({ "redirect_uris": ["http://evil.example/cb"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let registered = client
+            .post(at("/oauth/register"))
+            .header(header::ORIGIN, "https://inspector.example")
+            .json(&json!({ "redirect_uris": ["http://localhost:9999/cb"], "client_name": "Test <client>" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::CREATED);
+        assert_eq!(
+            registered
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://inspector.example"
+        );
+        let registered: Value = registered.json().await.unwrap();
+        let client_id = registered["client_id"].as_str().unwrap().to_string();
+
+        // Allowing it.
+        let verifier = "a-verifier-long-enough-to-pass-for-pkce-0123456789";
+        let challenge =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier));
+        let authorize = |redirect: &str| {
+            let url = format!(
+                "/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state=xyz",
+                crate::auth::encode(redirect)
+            );
+            client.get(at(&url)).send()
+        };
+        let elsewhere = authorize("http://localhost:9999/other").await.unwrap();
+        assert_eq!(elsewhere.status(), StatusCode::BAD_REQUEST);
+        let asked = authorize("http://localhost:9999/cb").await.unwrap();
+        assert_eq!(asked.status(), StatusCode::SEE_OTHER);
+        let consent = location(&asked);
+        assert!(consent.starts_with("/oauth/consent?request="));
+        let request = consent
+            .trim_start_matches("/oauth/consent?request=")
+            .to_string();
+        let signed_out = client.get(at(&consent)).send().await.unwrap();
+        assert_eq!(
+            location(&signed_out),
+            format!("/auth/discord?next=%2Foauth%2Fconsent%3Frequest%3D{request}")
+        );
+        let page = client
+            .get(at(&consent))
+            .header(header::COOKIE, browser)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        let page = page.text().await.unwrap();
+        assert!(page.contains("Connect Test &lt;client&gt; to Marian?"));
+        assert!(page.contains("<strong>localhost</strong>"));
+        let unsigned = client
+            .post(at("/oauth/consent"))
+            .form(&[("request", request.as_str()), ("decision", "allow")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
+        // Allowing it goes by way of Discord, to check who it is and get the
+        // client a grant of its own.
+        let allow = |request: String| {
+            client
+                .post(at("/oauth/consent"))
+                .header(header::COOKIE, browser)
+                .form(&[("request", request), ("decision", "allow".into())])
+                .send()
+        };
+        let through_discord = |response: &reqwest::Response, request: &str| {
+            let discord = reqwest::Url::parse(&location(response)).unwrap();
+            assert_eq!(discord.host_str(), Some("discord.com"));
+            let asks: HashMap<_, _> = discord.query_pairs().into_owned().collect();
+            assert_eq!(asks["prompt"], "none");
+            assert_eq!(
+                asks["redirect_uri"],
+                "https://marian.example.com/auth/discord/callback"
+            );
+            let check = asks["state"].clone();
+            let held = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|value| {
+                    value
+                        .to_str()
+                        .unwrap()
+                        .starts_with(&format!("marian_mcp_oauth={check}.{request};"))
+                });
+            assert!(held, "{response:?}");
+            check
+        };
+        let allowed = allow(request.clone()).await.unwrap();
+        let check = through_discord(&allowed, &request);
+        let returned = |check: &str, request: &str, query: &str| {
+            client
+                .get(at(&format!("/auth/discord/callback?{query}")))
+                .header(
+                    header::COOKIE,
+                    format!("{browser}; marian_mcp_oauth={check}.{request}"),
+                )
+                .send()
+        };
+        // Another state is a browser sign-in's to answer, not this one's.
+        let stray = returned(
+            &check,
+            &request,
+            "state=0123456789abcdef0123&error=access_denied",
+        )
+        .await
+        .unwrap();
+        assert_eq!(location(&stray), "/");
+        // Discord isn't reachable from tests: this is what its answer leaves.
+        let grant = store::DiscordGrant {
+            access: "discord-access".into(),
+            refresh: "discord-refresh".into(),
+            // Whole seconds: Postgres keeps microseconds, a Linux clock nanoseconds.
+            expires_at: "2030-01-01T00:00:00Z".parse().unwrap(),
+        };
+        let code = "c0dec0dec0dec0dec0dec0dec0dec0de".to_string();
+        assert!(
+            store::approve_mcp_authorization(
+                &mut conn,
+                &request,
+                &code,
+                "browser-token",
+                &grant,
+                Utc::now()
+            )
+            .await
+            .unwrap()
+        );
+
+        // Turned down at Discord, a second time round.
+        let again = authorize("http://localhost:9999/cb").await.unwrap();
+        let second = location(&again)
+            .trim_start_matches("/oauth/consent?request=")
+            .to_string();
+        let allowed = allow(second.clone()).await.unwrap();
+        let check = through_discord(&allowed, &second);
+        let refused = returned(
+            &check,
+            &second,
+            &format!("state={check}&error=access_denied"),
+        )
+        .await
+        .unwrap();
+        let back = reqwest::Url::parse(&location(&refused)).unwrap();
+        assert_eq!(back.path(), "/cb");
+        let params: HashMap<_, _> = back.query_pairs().into_owned().collect();
+        assert_eq!(params["error"], "access_denied");
+        assert_eq!(params["state"], "xyz");
+        assert!(
+            refused
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|value| value.to_str().unwrap().starts_with("marian_mcp_oauth=;"))
+        );
+
+        // The token.
+        let exchange = |verifier: &str| {
+            client
+                .post(at("/oauth/token"))
+                .form(&[
+                    ("grant_type", "authorization_code"),
+                    ("code", code.as_str()),
+                    ("redirect_uri", "http://localhost:9999/cb"),
+                    ("client_id", client_id.as_str()),
+                    ("code_verifier", verifier),
+                ])
+                .send()
+        };
+        let token: Value = exchange(verifier).await.unwrap().json().await.unwrap();
+        assert_eq!(token["token_type"], "Bearer");
+        let access = token["access_token"].as_str().unwrap().to_string();
+        let replayed = exchange(verifier).await.unwrap();
+        assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
+
+        // The client's sign-in holds its own grant and re-reads the servers
+        // on its first request. Tests don't ask Discord, so it lets go of it.
+        let session = store::web_session(&mut conn, &access)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.grant, Some(grant));
+        assert_eq!(
+            session.guilds_checked_at,
+            chrono::DateTime::<Utc>::UNIX_EPOCH
+        );
+        store::set_session_grant(&mut conn, &access, None)
+            .await
+            .unwrap();
+
+        // It isn't a browser sign-in.
+        let as_cookie = client
+            .get(at("/api/me"))
+            .header(header::COOKIE, format!("marian_session={access}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(as_cookie.status(), StatusCode::UNAUTHORIZED);
+
+        // Working with events.
+        let rpc = |id: i64, method: &str, params: Value| {
+            client
+                .post(at("/mcp"))
+                .bearer_auth(&access)
+                .json(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+                .send()
+        };
+        let call = async |name: &str, arguments: Value| -> Value {
+            let reply: Value = rpc(
+                1,
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            )
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+            reply["result"].clone()
+        };
+        let hello: Value = rpc(1, "initialize", json!({ "protocolVersion": "2025-06-18" }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(hello["result"]["protocolVersion"], "2025-06-18");
+        let noted = client
+            .post(at("/mcp"))
+            .bearer_auth(&access)
+            .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(noted.status(), StatusCode::ACCEPTED);
+        let listed: Value = rpc(2, "tools/list", json!({}))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 15);
+
+        let servers = call("list_servers", json!({})).await;
+        assert_eq!(servers["structuredContent"]["servers"][0]["id"], "99");
+        let server = call("get_server", json!({ "server": "99" })).await;
+        assert_eq!(server["structuredContent"]["timezone"], "Europe/Warsaw");
+        assert_eq!(server["structuredContent"]["channels"][0]["name"], "events");
+
+        let created = call(
+            "create_event",
+            json!({ "server": "99", "title": "Raid night", "start": "2030-01-10T19:00", "channel": "#events" }),
+        )
+        .await;
+        assert_eq!(created["isError"], false, "{created}");
+        let event = created["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(created["structuredContent"]["status"], "draft");
+        // 19:00 in Warsaw, in winter.
+        assert_eq!(
+            created["structuredContent"]["starts_at"],
+            "2030-01-10T18:00:00Z"
+        );
+
+        let changed = call(
+            "update_event",
+            json!({ "server": "99", "event": event, "title": "Raid night (moved)", "duration_minutes": 90 }),
+        )
+        .await;
+        assert_eq!(changed["structuredContent"]["title"], "Raid night (moved)");
+        assert_eq!(changed["structuredContent"]["duration_minutes"], 90);
+        let drafts = call("list_events", json!({ "server": "99", "view": "drafts" })).await;
+        assert_eq!(drafts["structuredContent"]["items"][0]["id"], event);
+        let read = call("get_event", json!({ "server": "99", "event": event })).await;
+        assert_eq!(
+            read["structuredContent"]["event"]["title"],
+            "Raid night (moved)"
+        );
+
+        let elsewhere = call("get_server", json!({ "server": "12345" })).await;
+        assert_eq!(elsewhere["isError"], true);
+        let deleted = call("delete_event", json!({ "server": "99", "event": event })).await;
+        assert_eq!(deleted["isError"], false, "{deleted}");
+        let gone = call("get_event", json!({ "server": "99", "event": event })).await;
+        assert_eq!(gone["isError"], true);
+
+        // A routine whose poll waits for someone to confirm its day.
+        let nell = crate::api::Viewer {
+            token: "browser-token".into(),
+            discord_user_id: "42".into(),
+            user_id: 1,
+            display_name: "Nell".into(),
+            guild_id: 1,
+            membership_id: 1,
+            allowed: vec![1],
+            notice: None,
+        };
+        let events_channel = crate::api::channels(&mut conn, &nell).await.unwrap()[0]
+            .id
+            .clone();
+        let step = |kind: &str, channel: Option<String>| marian_types::RoutineStep {
+            kind: kind.into(),
+            channel_id: channel,
+            role_ids: Vec::new(),
+        };
+        let made = crate::api::create_routine(
+            &mut conn,
+            &nell,
+            &marian_types::RoutineDraft {
+                channel_id: events_channel.clone(),
+                title: "Weekly raid".into(),
+                duration_minutes: 120,
+                start_time: "19:00".into(),
+                poll_weekday: 0,
+                poll_time: "00:00".into(),
+                lock_weekday: 6,
+                lock_time: "23:59".into(),
+                days: (0..7).collect(),
+                steps: Some(vec![
+                    step("poll", None),
+                    step("approval", Some(events_channel)),
+                    step("post", None),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let routine = made
+            .done
+            .location
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let on = |view: &Value| -> Vec<u64> {
+            view["run"]["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|day| day["on"] == true)
+                .map(|day| day["n"].as_u64().unwrap())
+                .collect()
+        };
+
+        let routines = call("list_routines", json!({ "server": "99" })).await;
+        assert_eq!(routines["structuredContent"]["routines"][0]["id"], routine);
+        let at_routine = json!({ "server": "99", "routine": routine });
+        let shown = call("get_routine", at_routine.clone()).await;
+        assert_eq!(shown["structuredContent"]["title"], "Weekly raid");
+        let days = call(
+            "set_routine_days",
+            json!({ "server": "99", "routine": routine, "days": [1, 3], "scope": "this_week" }),
+        )
+        .await;
+        assert_eq!(on(&days["structuredContent"]), [1, 3], "{days}");
+        let voted = call(
+            "vote_routine",
+            json!({ "server": "99", "routine": routine, "day": 3 }),
+        )
+        .await;
+        assert_eq!(voted["isError"], false, "{voted}");
+        let none_yet = call("pending_approvals", json!({ "server": "99" })).await;
+        assert_eq!(none_yet["structuredContent"]["waiting"], json!([]));
+
+        // The poll closes and waits for its day to be confirmed.
+        conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'")
+            .await
+            .unwrap();
+        crate::logic::maintain_routines(&mut conn, 1, Utc::now())
+            .await
+            .unwrap();
+        let waiting = call("pending_approvals", json!({ "server": "99" })).await;
+        let waiting = &waiting["structuredContent"]["waiting"];
+        assert_eq!(waiting.as_array().unwrap().len(), 1, "{waiting}");
+        assert_eq!(waiting[0]["id"], routine);
+        assert_eq!(waiting[0]["approval"]["winner"], 3);
+        let unsaid = call("decide_routine", at_routine.clone()).await;
+        assert_eq!(unsaid["isError"], true, "a missing day isn't a skip");
+        let decided = call(
+            "decide_routine",
+            json!({ "server": "99", "routine": routine, "day": 3 }),
+        )
+        .await;
+        assert_eq!(decided["isError"], false, "{decided}");
+        assert_eq!(decided["structuredContent"]["approval"], Value::Null);
+        let answered = call("pending_approvals", json!({ "server": "99" })).await;
+        assert_eq!(answered["structuredContent"]["waiting"], json!([]));
+        let stopped = call("stop_routine", at_routine).await;
+        assert_eq!(stopped["structuredContent"]["active"], false, "{stopped}");
+
+        // The member sees the app among their connected apps and signs it out.
+        let apps = |cookie: &'static str| {
+            client
+                .get(at("/api/me/apps"))
+                .header(header::COOKIE, cookie)
+                .send()
+        };
+        let listed: Value = apps(browser).await.unwrap().json().await.unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["id"], client_id.as_str());
+        assert!(listed[0]["name"].as_str().unwrap().starts_with("Test"));
+        let by_token = client
+            .get(at("/api/me/apps"))
+            .bearer_auth(&access)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_token.status(), StatusCode::UNAUTHORIZED);
+        let disconnect = || {
+            client
+                .delete(at(&format!("/api/me/apps/{client_id}")))
+                .header(header::COOKIE, browser)
+                .header(header::ORIGIN, "https://marian.example.com")
+                .send()
+        };
+        assert_eq!(disconnect().await.unwrap().status(), StatusCode::OK);
+        let after = rpc(2, "tools/list", json!({})).await.unwrap();
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+        let listed: Value = apps(browser).await.unwrap().json().await.unwrap();
+        assert_eq!(listed, json!([]));
+        assert_eq!(disconnect().await.unwrap().status(), StatusCode::NOT_FOUND);
     }
 }
