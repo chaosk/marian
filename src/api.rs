@@ -453,6 +453,11 @@ pub async fn settings(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Set
         role_delete: public(conn, &s.role_delete).await?,
         role_channel: public(conn, &s.role_channel).await?,
         role_signup: public(conn, &s.role_signup).await?,
+        notify_everyone: s.mention.everyone,
+        notify_role_ids: {
+            let live = store::live_mention(conn, viewer.guild_id, s.mention.clone()).await?;
+            public(conn, &live.role_ids).await?
+        },
         timezone: guild.timezone,
         default_reminder_minutes: s.default_reminder_minutes,
         auto_archive_hours: s.auto_archive_hours,
@@ -515,6 +520,10 @@ pub async fn put_settings(
     s.role_delete = known(&next.role_delete);
     s.role_channel = known(&next.role_channel);
     s.role_signup = known(&next.role_signup);
+    s.mention = store::Mention {
+        everyone: next.notify_everyone,
+        role_ids: known(&next.notify_role_ids),
+    };
     s.thread_reminders = next.thread_reminders;
     s.auto_archive = next.auto_archive;
     s.event_threads = next.event_threads;
@@ -626,18 +635,67 @@ pub async fn channels(
         .into_iter()
         .filter(|event| sight.sees_event(event))
         .collect();
-    Ok(store::list_channels(conn, viewer.guild_id)
-        .await?
-        .into_iter()
-        .filter(|channel| sight.sees_channel(channel.id))
-        .map(|channel| dto::Channel {
+    let server = store::settings(conn, viewer.guild_id).await?.mention;
+    let server = notify(conn, viewer.guild_id, server).await?;
+    let mut out = Vec::new();
+    for channel in store::list_channels(conn, viewer.guild_id).await? {
+        if !sight.sees_channel(channel.id) {
+            continue;
+        }
+        let own_notify = match channel.own_mention() {
+            Some(own) => Some(notify(conn, viewer.guild_id, own).await?),
+            None => None,
+        };
+        out.push(dto::Channel {
             events: events.iter().filter(|e| e.channel_id == channel.id).count() as i64,
             id: channel.public_id.to_string(),
             name: channel.name,
             kind: channel.kind,
             purged_at: channel.purged_at,
-        })
-        .collect())
+            notify: own_notify.clone().unwrap_or_else(|| server.clone()),
+            own_notify,
+        });
+    }
+    Ok(out)
+}
+
+/// Who a default mentions, as the API names it, without roles Discord no
+/// longer has.
+async fn notify(
+    conn: &mut Connection,
+    guild_id: i64,
+    mention: store::Mention,
+) -> Result<dto::Notify, OpError> {
+    let mention = store::live_mention(conn, guild_id, mention).await?;
+    Ok(dto::Notify {
+        everyone: mention.everyone,
+        role_ids: ids::public::roles(conn, &mention.role_ids).await?,
+    })
+}
+
+/// Sets who a new event in a channel mentions, or has it follow the server.
+/// Server managers only, as the rest of the server's settings.
+pub async fn put_channel_notify(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    public_id: &str,
+    next: &dto::ChannelNotify,
+) -> Result<Outcome, OpError> {
+    if !must_member(conn, viewer).await?.server_manager {
+        return Err(OpError::message(
+            "Only someone who runs the server can change settings.",
+        ));
+    }
+    let channel_id = channel_seen(conn, viewer, public_id).await?;
+    let mention = match &next.notify {
+        Some(next) => Some(store::Mention {
+            everyone: next.everyone,
+            role_ids: ids::public::role_ids(conn, viewer.guild_id, &next.role_ids).await?,
+        }),
+        None => None,
+    };
+    store::set_channel_mention(conn, channel_id, mention.as_ref()).await?;
+    Ok(Outcome::ok())
 }
 
 fn matches_view(view: dto::EventView, event: &store::Event, now: DateTime<Utc>) -> bool {
@@ -3667,5 +3725,58 @@ mod tests {
         let after = settings(&mut conn, &viewer).await.unwrap();
         assert_eq!(after.timezone, "Europe/Warsaw");
         assert_ne!(after.waitlist, next.waitlist);
+    }
+
+    #[tokio::test]
+    async fn a_channel_mentions_its_own_default_or_the_servers() {
+        let (mut conn, viewer) = world().await;
+        let raider = store::role(&mut conn, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .public_id
+            .to_string();
+        let mut next = settings(&mut conn, &viewer).await.unwrap();
+        next.notify_role_ids = vec![raider.clone()];
+        put_settings(&mut conn, &viewer, &next).await.unwrap();
+        assert_eq!(
+            settings(&mut conn, &viewer).await.unwrap().notify_role_ids,
+            std::slice::from_ref(&raider)
+        );
+
+        let listed = channels(&mut conn, &viewer).await.unwrap();
+        let (events, elsewhere) = (listed[0].clone(), listed[1].clone());
+        assert_eq!(events.own_notify, None);
+        assert_eq!(
+            events.notify.role_ids,
+            std::slice::from_ref(&raider),
+            "the server's"
+        );
+
+        let nobody = dto::ChannelNotify {
+            notify: Some(dto::Notify::default()),
+        };
+        put_channel_notify(&mut conn, &viewer, &elsewhere.id, &nobody)
+            .await
+            .unwrap();
+        let elsewhere = channels(&mut conn, &viewer).await.unwrap()[1].clone();
+        assert_eq!(elsewhere.own_notify, Some(dto::Notify::default()));
+        assert_eq!(elsewhere.notify, dto::Notify::default(), "nobody");
+
+        let mut june = viewer.clone();
+        june.membership_id = 2;
+        let follow = dto::ChannelNotify { notify: None };
+        assert!(
+            put_channel_notify(&mut conn, &june, &elsewhere.id, &follow)
+                .await
+                .is_err(),
+            "only a server manager"
+        );
+        put_channel_notify(&mut conn, &viewer, &elsewhere.id, &follow)
+            .await
+            .unwrap();
+        let elsewhere = channels(&mut conn, &viewer).await.unwrap()[1].clone();
+        assert_eq!(elsewhere.own_notify, None);
+        assert_eq!(elsewhere.notify.role_ids, [raider], "back to the server's");
     }
 }

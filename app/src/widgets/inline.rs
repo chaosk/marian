@@ -62,6 +62,9 @@ pub struct LocalDraft {
     pub template: bool,
     /// Called after each change, for a page that saves as it goes.
     pub sync: Option<Callback<()>>,
+    /// Nothing is saved yet, so who it mentions follows its channel's default
+    /// until someone picks otherwise.
+    pub new: bool,
 }
 
 impl LocalDraft {
@@ -71,6 +74,37 @@ impl LocalDraft {
         if let Some(sync) = self.sync {
             sync.run(());
         }
+    }
+
+    /// Moving a new draft from channel `from` to `to` brings `to`'s default
+    /// mentions with it, unless someone already changed them from `from`'s.
+    pub fn follow_channel(self, from: &str, to: &str) {
+        if !self.new || from == to {
+            return;
+        }
+        let default = |id: &str| {
+            self.channels.with_value(|channels| {
+                channels
+                    .iter()
+                    .find(|channel| channel.id == id)
+                    .map(|channel| channel.notify.clone())
+            })
+        };
+        let (Some(was), Some(next)) = (default(from), default(to)) else {
+            return;
+        };
+        self.event.update(|event| {
+            let same = event.mention_everyone == was.everyone && {
+                let (mut now, mut was) = (event.mention_role_ids.clone(), was.role_ids.clone());
+                now.sort();
+                was.sort();
+                now == was
+            };
+            if same {
+                event.mention_everyone = next.everyone;
+                event.mention_role_ids = next.role_ids;
+            }
+        });
     }
 }
 
@@ -95,6 +129,13 @@ impl LocalDraft {
             .repeat
             .clone()
             .filter(|repeat| repeat.cadence != "none");
+        let was = self.event.with_untracked(|event| event.channel_id.clone());
+        if let Some(to) = &patch.channel_id
+            && patch.mention_everyone.is_none()
+            && patch.mention_role_ids.is_none()
+        {
+            self.follow_channel(&was, to);
+        }
         self.event.update(|event| {
             preview(event, patch, Some(clock));
             if let (Some(id), Some(name)) = (patch.channel_id.clone(), channel) {
@@ -1989,7 +2030,7 @@ pub fn EventReminders(
     .into_any()
 }
 
-fn role_names(roles: &[dto::Role], ids: &[String]) -> Vec<String> {
+pub(crate) fn role_names(roles: &[dto::Role], ids: &[String]) -> Vec<String> {
     ids.iter()
         .filter_map(|id| roles.iter().find(|role| &role.id == id))
         .map(|role| role.name.clone())
@@ -2008,7 +2049,7 @@ fn name_lines(names: Vec<String>, empty: &'static str) -> impl IntoView {
 /// Roles to mention, and @everyone, found by name the way members are. With
 /// nothing typed it lists only what is picked; typing finds the rest, so a
 /// server with hundreds of roles stays one short list.
-fn mention_search(
+pub(crate) fn mention_search(
     roles: StoredValue<Vec<dto::Role>>,
     picked: RwSignal<Vec<String>>,
     everyone: RwSignal<bool>,

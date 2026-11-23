@@ -3425,6 +3425,10 @@ mod tests {
         assert_eq!(server["structuredContent"]["timezone"], "Europe/Warsaw");
         assert_eq!(server["structuredContent"]["channels"][0]["name"], "events");
 
+        // A new event mentions whom its channel's default does: here the server's.
+        conn.batch_execute("UPDATE settings SET mention_everyone = true WHERE guild_id = 1")
+            .await
+            .unwrap();
         let created = call(
             "create_event",
             json!({ "server": "99", "title": "Raid night", "start": "2030-01-10T19:00", "channel": "#events" }),
@@ -3436,6 +3440,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(created["structuredContent"]["status"], "draft");
+        assert_eq!(created["structuredContent"]["mention_everyone"], true);
         // 19:00 in Warsaw, in winter.
         assert_eq!(
             created["structuredContent"]["starts_at"],

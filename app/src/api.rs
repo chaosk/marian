@@ -431,6 +431,11 @@ pub mod path {
         format!("{}/channels", on(server))
     }
 
+    /// Who a new event in the channel mentions.
+    pub fn channel_notify(server: &str, channel: &str) -> String {
+        format!("{}/{channel}/notify", channels(server))
+    }
+
     pub fn live(server: &str) -> String {
         format!("{}/live", on(server))
     }

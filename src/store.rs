@@ -73,6 +73,15 @@ struct SettingsRow {
     waitlist: bool,
     default_preset_id: Option<i64>,
     language: Lang,
+    mention_everyone: bool,
+    mention_role_ids: Vec<i64>,
+}
+
+/// Who a new event mentions when it's posted, before anyone changes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mention {
+    pub everyone: bool,
+    pub role_ids: Vec<i64>,
 }
 
 /// A server's settings. Each `role_*` list names the roles that may do one
@@ -105,6 +114,8 @@ pub struct Settings {
     pub default_preset_id: Option<i64>,
     /// The language Marian writes in on Discord.
     pub language: Lang,
+    /// Who a new event mentions, in a channel without a setting of its own.
+    pub mention: Mention,
 }
 
 impl Settings {
@@ -149,6 +160,8 @@ impl Settings {
             waitlist: self.waitlist,
             default_preset_id: self.default_preset_id,
             language: self.language,
+            mention_everyone: self.mention.everyone,
+            mention_role_ids: self.mention.role_ids.clone(),
         }
     }
 }
@@ -179,6 +192,10 @@ impl From<SettingsRow> for Settings {
             waitlist: row.waitlist,
             default_preset_id: row.default_preset_id,
             language: row.language,
+            mention: Mention {
+                everyone: row.mention_everyone,
+                role_ids: row.mention_role_ids,
+            },
         }
     }
 }
@@ -248,6 +265,10 @@ pub struct Channel {
     pub public_id: uuid::Uuid,
     /// When the Discord channel was deleted; the row stays for its events.
     pub gone_at: Option<DateTime<Utc>>,
+    /// Who a new event here mentions, with `mention_role_ids`; both none
+    /// follow the server's default.
+    pub mention_everyone: Option<bool>,
+    pub mention_role_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, HasQuery, Identifiable, Associations, AsChangeset)]
@@ -653,6 +674,15 @@ impl Role {
 }
 
 impl Channel {
+    /// Who a new event here mentions, if the channel says; none follows the
+    /// server. Nobody at all is a setting of its own.
+    pub fn own_mention(&self) -> Option<Mention> {
+        Some(Mention {
+            everyone: self.mention_everyone?,
+            role_ids: self.mention_role_ids.clone()?,
+        })
+    }
+
     #[diesel::dsl::auto_type(no_type_alias)]
     pub fn in_guild(guild_id: i64) -> _ {
         let channels: ChannelQuery = Channel::query();
@@ -1467,6 +1497,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         waitlist: false,
         default_preset_id: None,
         language: Lang::En,
+        mention: Mention::default(),
     }
 }
 
@@ -1752,6 +1783,65 @@ async fn update_settings_tx(conn: &mut Connection, settings: &Settings) -> Resul
             .execute(conn)
             .await?;
     }
+    Ok(())
+}
+
+/// Who a new event in `channel_id` mentions: the channel's own setting, or the
+/// server's where it has none. Roles deleted in Discord drop out.
+pub async fn new_event_mention(
+    conn: &mut Connection,
+    guild_id: i64,
+    channel_id: i64,
+) -> Result<Mention, OpError> {
+    let channel: Option<Channel> = Channel::in_guild(guild_id)
+        .filter(schema::channels::id.eq(channel_id))
+        .first(conn)
+        .await
+        .optional()?;
+    let mention = match channel.and_then(|channel| channel.own_mention()) {
+        Some(own) => own,
+        None => settings(conn, guild_id).await?.mention,
+    };
+    live_mention(conn, guild_id, mention).await
+}
+
+/// `mention` without the roles Discord no longer has.
+pub async fn live_mention(
+    conn: &mut Connection,
+    guild_id: i64,
+    mention: Mention,
+) -> Result<Mention, OpError> {
+    if mention.role_ids.is_empty() {
+        return Ok(mention);
+    }
+    let live: Vec<i64> = list_roles(conn, guild_id)
+        .await?
+        .into_iter()
+        .map(|role| role.id)
+        .collect();
+    Ok(Mention {
+        everyone: mention.everyone,
+        role_ids: mention
+            .role_ids
+            .into_iter()
+            .filter(|id| live.contains(id))
+            .collect(),
+    })
+}
+
+/// Sets who a new event in the channel mentions; none follows the server.
+pub async fn set_channel_mention(
+    conn: &mut Connection,
+    channel_id: i64,
+    mention: Option<&Mention>,
+) -> Result<(), OpError> {
+    diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel_id)))
+        .set((
+            schema::channels::mention_everyone.eq(mention.map(|m| m.everyone)),
+            schema::channels::mention_role_ids.eq(mention.map(|m| m.role_ids.clone())),
+        ))
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -3341,6 +3431,7 @@ mod tests {
                 "20261115180000".to_string(),
                 "20261116190000".to_string(),
                 "20261121120000".to_string(),
+                "20261123120000".to_string(),
             ]
         );
     }
@@ -3429,6 +3520,66 @@ mod tests {
                 .unwrap()
                 .grant
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_event_mentions_its_channels_default_or_the_servers() {
+        let mut conn = open_memory().await.unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone) VALUES (1, 'Guild', 'UTC');
+            INSERT INTO channels (id, guild_id, name, kind, position) VALUES
+              (1, 1, 'social', 'text', 0), (2, 1, 'raids', 'text', 1), (3, 1, 'quiet', 'text', 2);
+            INSERT INTO roles (id, guild_id, name, color) VALUES
+              (7, 1, 'Crew', '#888888'), (8, 1, 'Raiders', '#888888'), (9, 1, 'Gone', '#888888');
+            ",
+        )
+        .await
+        .unwrap();
+        insert_default_settings(&mut conn, 1).await.unwrap();
+        let nobody = Mention::default();
+        assert_eq!(new_event_mention(&mut conn, 1, 1).await.unwrap(), nobody);
+
+        let mut settings = settings(&mut conn, 1).await.unwrap();
+        settings.mention = Mention {
+            everyone: false,
+            role_ids: vec![7, 9],
+        };
+        update_settings(&mut conn, &settings).await.unwrap();
+        let raiders = Mention {
+            everyone: false,
+            role_ids: vec![8],
+        };
+        set_channel_mention(&mut conn, 2, Some(&raiders))
+            .await
+            .unwrap();
+        set_channel_mention(&mut conn, 3, Some(&nobody))
+            .await
+            .unwrap();
+        conn.batch_execute("UPDATE roles SET gone_at = now() WHERE id = 9")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            new_event_mention(&mut conn, 1, 1).await.unwrap(),
+            Mention {
+                everyone: false,
+                role_ids: vec![7],
+            },
+            "the server's, without the role Discord deleted"
+        );
+        assert_eq!(new_event_mention(&mut conn, 1, 2).await.unwrap(), raiders);
+        assert_eq!(
+            new_event_mention(&mut conn, 1, 3).await.unwrap(),
+            nobody,
+            "nobody, though the server mentions a role"
+        );
+        set_channel_mention(&mut conn, 3, None).await.unwrap();
+        assert_eq!(
+            new_event_mention(&mut conn, 1, 3).await.unwrap().role_ids,
+            [7],
+            "back to the server's"
         );
     }
 

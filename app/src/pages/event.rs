@@ -199,6 +199,10 @@ pub fn NewEvent() -> impl IntoView {
                 .map(|at| at.with_timezone(&chrono::Utc))
                 .unwrap_or(now + chrono::Duration::days(1));
             let first = channels.first();
+            // Who it mentions starts from its channel's default.
+            let notify = first
+                .map(|channel| channel.notify.clone())
+                .unwrap_or_default();
             let event = dto::Event {
                 id: "new".into(),
                 title: String::new(),
@@ -216,8 +220,8 @@ pub fn NewEvent() -> impl IntoView {
                     .map(|channel| channel.name.clone())
                     .unwrap_or_default(),
                 attendee_role_id: None,
-                mention_everyone: false,
-                mention_role_ids: Vec::new(),
+                mention_everyone: notify.everyone,
+                mention_role_ids: notify.role_ids,
                 restrict_role_ids: Vec::new(),
                 thread_enabled: settings.event_threads,
                 multiple_signups,
@@ -252,6 +256,7 @@ pub fn NewEvent() -> impl IntoView {
                 dirty: RwSignal::new(false),
                 template: false,
                 sync: None,
+                new: true,
             };
             provide_context(draft);
             let localize = localize_note(&server);

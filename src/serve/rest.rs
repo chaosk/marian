@@ -37,6 +37,10 @@ pub(super) fn router() -> Router<AppState> {
             "/servers/{server}/channels",
             get(channels).post(create_channel),
         )
+        .route(
+            "/servers/{server}/channels/{id}/notify",
+            put(put_channel_notify),
+        )
         .route("/servers/{server}/events", get(events).post(create_event))
         .route(
             "/servers/{server}/events/{id}",
@@ -491,6 +495,18 @@ async fn create_channel(
     open_channel(&state, &viewer, &draft.name).await?;
     crate::live::server(viewer.guild_id);
     Ok(Json(dto::Done { location: None }))
+}
+
+async fn put_channel_notify(
+    State(state): S,
+    headers: HeaderMap,
+    Path((server, id)): Two,
+    Json(next): Json<dto::ChannelNotify>,
+) -> Reply<dto::Done> {
+    change(&state, &headers, &server, async |db, v| {
+        api::put_channel_notify(db, v, &id, &next).await
+    })
+    .await
 }
 
 async fn open_channel(state: &AppState, viewer: &Session, name: &str) -> Result<String, Problem> {

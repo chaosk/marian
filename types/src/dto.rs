@@ -139,6 +139,29 @@ pub struct Channel {
     pub kind: ChannelKind,
     pub events: i64,
     pub purged_at: Option<DateTime<Utc>>,
+    /// Who a new event here mentions: the channel's own setting, or the server's.
+    #[serde(default)]
+    pub notify: Notify,
+    /// The channel's own setting; none follows the server's.
+    #[serde(default)]
+    pub own_notify: Option<Notify>,
+}
+
+/// Who a new event mentions when it's posted, before its creator changes it.
+/// Neither everyone nor any role mentions nobody.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Notify {
+    #[serde(default)]
+    pub everyone: bool,
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+}
+
+/// A channel's own default mentions; none follows the server's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelNotify {
+    #[serde(default)]
+    pub notify: Option<Notify>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -168,6 +191,12 @@ pub struct Settings {
     /// Roles that may change signup options and presets.
     #[serde(default)]
     pub role_signup: Vec<String>,
+    /// A new event mentions @everyone, in a channel without its own setting.
+    #[serde(default)]
+    pub notify_everyone: bool,
+    /// Roles a new event mentions, in a channel without its own setting.
+    #[serde(default)]
+    pub notify_role_ids: Vec<String>,
     pub thread_reminders: bool,
     pub auto_archive: bool,
     pub event_threads: bool,

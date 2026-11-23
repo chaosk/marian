@@ -540,8 +540,9 @@ async fn create_event(
             attendee_role_id: None,
             thread_enabled: settings.event_threads,
             multiple_signups: preset.is_some_and(|preset| preset.multiple_signups),
-            mention_everyone: false,
-            mention_role_ids: Vec::new(),
+            // Whom the channel's default mentions, as a new event on the website.
+            mention_everyone: channel.notify.everyone,
+            mention_role_ids: channel.notify.role_ids.clone(),
             restrict_role_ids: Vec::new(),
             options: preset
                 .map(|preset| preset.options.clone())
@@ -799,7 +800,7 @@ fn tools() -> Value {
         {
             "name": "create_event",
             "title": "Create an event",
-            "description": "Creates an event, as a draft unless post says otherwise. Signup options come from a preset.",
+            "description": "Creates an event, as a draft unless post says otherwise. Signup options come from a preset; whom the post mentions, from the channel's default.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

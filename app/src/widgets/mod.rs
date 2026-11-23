@@ -15,6 +15,7 @@ pub use inline::{
     EventLocation, EventMentions, EventReminders, EventRepeat, EventRestrictions, EventTitle,
     EventWhen, LeaveGuard, LocalDraft, MultipleToggle, PostButtons, ThreadToggle,
 };
+pub(crate) use inline::{mention_search, role_names};
 pub use routine::{
     PollMoment, PollTally, RoutineChannel, RoutineDescription, RoutineEdit, RoutineSteps,
     RoutineTime, RoutineTitle, TallyRow, UsualDays, routine_problems, tally, template_event,
