@@ -42,7 +42,7 @@ pub fn Channels() -> impl IntoView {
                 })
                 .collect_view();
             view! {
-                <div class="sheet compact">
+                <div class="sheet compact spills">
                     <table>
                         <thead>
                             <tr><th>"Channel"</th><th class="fit">"Kind"</th><th class="fit">"Events"</th><th>"New events mention"</th><th class="fit">"Cleared"</th></tr>

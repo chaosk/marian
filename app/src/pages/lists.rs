@@ -264,7 +264,7 @@ pub fn AllEvents() -> impl IntoView {
                     <div><h1>{heading}</h1></div>
                     <div class="page-tools">{clear}<Finder q=q.clone()/></div>
                 </div>
-                <div class="sheet filtered">
+                <div class="sheet spills">
                     <table>
                         <thead>
                             <tr>
