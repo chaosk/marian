@@ -102,6 +102,10 @@ pub struct Membership {
     pub reminders_enabled: bool,
     pub calendar_url: String,
     pub google: Google,
+    /// The channel a new event of theirs starts in: the one they last made an
+    /// event in, else the server's default channel. None starts in the first.
+    #[serde(default)]
+    pub new_event_channel: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -213,6 +217,10 @@ pub struct Settings {
     /// The language Marian writes in on Discord: "en" or "pl". Empty keeps it.
     #[serde(default)]
     pub language: String,
+    /// The channel a new event starts in for someone who hasn't made one here
+    /// yet. None (or empty, from a form) starts it in the first channel listed.
+    #[serde(default)]
+    pub default_channel_id: Option<String>,
 }
 
 /// How full one option is.

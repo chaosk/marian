@@ -181,10 +181,20 @@ pub fn NewEvent() -> impl IntoView {
     });
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    let membership = cache::listen(cache::membership_scope(), cache::server_key);
     // The draft lives in this page, so a refresh must not redraw it.
     cache::when_once(
-        move || (server.get(), start.get(), settings.get(), roles.get()).ready(),
-        move |(server, (channels, preset), settings, roles)| {
+        move || {
+            (
+                server.get(),
+                start.get(),
+                settings.get(),
+                roles.get(),
+                membership.get(),
+            )
+                .ready()
+        },
+        move |(server, (channels, preset), settings, roles, membership)| {
             let (options, multiple_signups) = preset
                 .map(|preset| (preset.options, preset.multiple_signups))
                 .unwrap_or_default();
@@ -198,7 +208,7 @@ pub fn NewEvent() -> impl IntoView {
                 .and_then(|at| clock.tz.from_local_datetime(&at).earliest())
                 .map(|at| at.with_timezone(&chrono::Utc))
                 .unwrap_or(now + chrono::Duration::days(1));
-            let first = channels.first();
+            let first = super::starting_channel(&channels, &membership);
             // Who it mentions starts from its channel's default.
             let notify = first
                 .map(|channel| channel.notify.clone())

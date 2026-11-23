@@ -101,11 +101,23 @@ pub fn Settings() -> impl IntoView {
     // for once with no zone while settings loaded, and that list, with nothing
     // marked as chosen, could be the one the form kept.
     let zones = cache::listen(cache::timezones_scope(), String::new);
+    let channels = cache::listen(cache::channels_scope(), cache::server_key);
     // The first full answer stays, so a save that refetches settings doesn't
     // remount the form under the person using it.
     cache::when_once(
-        move || (membership.get(), settings.get(), roles.get(), zones.get()).ready(),
-        |(membership, settings, roles, zones)| settings_form(membership, settings, roles, zones),
+        move || {
+            (
+                membership.get(),
+                settings.get(),
+                roles.get(),
+                zones.get(),
+                channels.get(),
+            )
+                .ready()
+        },
+        |(membership, settings, roles, zones, channels)| {
+            settings_form(membership, settings, roles, zones, channels)
+        },
     )
 }
 
@@ -117,6 +129,7 @@ fn settings_form(
     settings: marian_types::Settings,
     roles: Vec<marian_types::Role>,
     zones: Vec<marian_types::ZoneGroup>,
+    channels: Vec<marian_types::Channel>,
 ) -> impl IntoView {
     let server_manager = membership.server_manager;
     let status: Status = RwSignal::new(None);
@@ -130,6 +143,7 @@ fn settings_form(
     let round = RwSignal::new(0_u32);
     let roles = StoredValue::new(roles);
     let zones = StoredValue::new(zones);
+    let channels = StoredValue::new(channels);
     // Read now: the answer comes after the request, away from the page's context.
     let queries = cache::client();
     let server = StoredValue::new(cache::server_now());
@@ -163,7 +177,7 @@ fn settings_form(
         {(!server_manager).then(|| view! { <p class="notice info">"Only people who can manage this Discord server can change these."</p> })}
         <JsonForm method="PUT" url=crate::api::path::settings(&cache::server_now()) class="settings-page" autosave=server_manager on_status>
             <For each=move || [round.get()] key=|round| *round let:_round>
-                {settings_rows(shown.get_value(), roles.get_value(), zones.get_value(), server_manager, status)}
+                {settings_rows(shown.get_value(), roles.get_value(), zones.get_value(), channels.get_value(), server_manager, status)}
             </For>
         </JsonForm>
     }
@@ -217,6 +231,7 @@ fn settings_rows(
     settings: marian_types::Settings,
     roles: Vec<marian_types::Role>,
     zones: Vec<marian_types::ZoneGroup>,
+    channels: Vec<marian_types::Channel>,
     server_manager: bool,
     status: Status,
 ) -> impl IntoView {
@@ -338,6 +353,14 @@ fn settings_rows(
         .into_iter()
         .map(|(id, label)| view! { <option value=id selected=language == id>{label}</option> })
         .collect_view();
+    let default_channel = settings.default_channel_id.clone().unwrap_or_default();
+    let channel_options = channels
+        .into_iter()
+        .map(|channel| {
+            let chosen = channel.id == default_channel;
+            view! { <option value=channel.id selected=chosen>"#"{channel.name}</option> }
+        })
+        .collect_view();
     view! {
             <section class="panel settings-group">
                 <h2>"Time"</h2>
@@ -358,6 +381,13 @@ fn settings_rows(
                 </label>
                 {notify_everyone}
                 {notify_roles}
+                <label class="setting-row" data-setting="default_channel_id">
+                    <span class="setting-text">{setting_title("Default channel", "default_channel_id", status)}<span class="muted">"Where a new event or routine starts for someone who hasn't made an event here yet. After their first, it starts where they made their last one."</span></span>
+                    <select name="default_channel_id" disabled=!server_manager>
+                        <option value="" selected=default_channel.is_empty()>"First in the list"</option>
+                        {channel_options}
+                    </select>
+                </label>
                 {post_switches}
                 {lead}
                 <label class="setting-row" data-setting="digest">

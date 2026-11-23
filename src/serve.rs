@@ -3447,6 +3447,27 @@ mod tests {
             "2030-01-10T18:00:00Z"
         );
 
+        // With no channel named, it goes where they last made one: not the
+        // server's default channel, nor the first listed.
+        conn.batch_execute(
+            "INSERT INTO channels (id, guild_id, name, kind, position) VALUES (2, 1, 'lobby', 'text', -1);
+             UPDATE settings SET default_channel_id = 2 WHERE guild_id = 1;",
+        )
+        .await
+        .unwrap();
+        let unnamed = call(
+            "create_event",
+            json!({ "server": "99", "title": "Spare night", "start": "2030-01-11T19:00" }),
+        )
+        .await;
+        assert_eq!(
+            unnamed["structuredContent"]["channel"], "events",
+            "{unnamed}"
+        );
+        let spare = unnamed["structuredContent"]["id"].as_str().unwrap();
+        let removed = call("delete_event", json!({ "server": "99", "event": spare })).await;
+        assert_eq!(removed["isError"], false, "{removed}");
+
         let changed = call(
             "update_event",
             json!({ "server": "99", "event": event, "title": "Raid night (moved)", "duration_minutes": 90 }),

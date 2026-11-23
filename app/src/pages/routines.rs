@@ -358,6 +358,7 @@ pub fn NewRoutine() -> impl IntoView {
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
     let settings = cache::listen(cache::settings_scope(), cache::server_key);
     let presets = cache::listen(cache::presets_scope(), cache::server_key);
+    let membership = cache::listen(cache::membership_scope(), cache::server_key);
     // The draft lives in this page, so a refresh must not redraw it.
     cache::when_once(
         move || {
@@ -367,10 +368,11 @@ pub fn NewRoutine() -> impl IntoView {
                 roles.get(),
                 settings.get(),
                 presets.get(),
+                membership.get(),
             )
                 .ready()
         },
-        move |(server, channels, roles, settings, presets)| {
+        move |(server, channels, roles, settings, presets, membership)| {
             // The server's default preset, as a new event would start.
             let preset = presets
                 .iter()
@@ -378,8 +380,7 @@ pub fn NewRoutine() -> impl IntoView {
                 .or_else(|| presets.first())
                 .cloned();
             let draft = dto::RoutineDraft {
-                channel_id: channels
-                    .first()
+                channel_id: super::starting_channel(&channels, &membership)
                     .map(|channel| channel.id.clone())
                     .unwrap_or_default(),
                 title: String::new(),
@@ -402,8 +403,8 @@ pub fn NewRoutine() -> impl IntoView {
                         .collect(),
                 ),
             };
-            let notify = channels
-                .first()
+            // The starting channel's default mentions.
+            let notify = super::starting_channel(&channels, &membership)
                 .map(|channel| channel.notify.clone())
                 .unwrap_or_default();
             let starting = dto::RoutineEvent {
