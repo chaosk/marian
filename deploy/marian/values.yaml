@@ -1,6 +1,6 @@
 image:
   repository: marian
-  tag: "0.13.3"
+  tag: "0.14.0"
   pullPolicy: IfNotPresent
 
 # Pods. Each serves the web; one at a time runs the bot, the task worker and
