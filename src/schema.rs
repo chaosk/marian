@@ -45,6 +45,8 @@ diesel::table! {
         waitlist -> Bool,
         default_preset_id -> Nullable<BigInt>,
         language -> Text,
+        mention_everyone -> Bool,
+        mention_role_ids -> Array<BigInt>,
     }
 }
 
@@ -81,6 +83,8 @@ diesel::table! {
         discord_id -> Nullable<Text>,
         public_id -> Uuid,
         gone_at -> Nullable<Timestamptz>,
+        mention_everyone -> Nullable<Bool>,
+        mention_role_ids -> Nullable<Array<BigInt>>,
     }
 }
 

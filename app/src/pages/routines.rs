@@ -132,6 +132,7 @@ fn event_draft(
         dirty: edit.dirty,
         template: true,
         sync: saved.then(|| Callback::new(move |_| edit.push())),
+        new: !saved,
     };
     edit.local.set_value(Some(local));
     provide_context(local);
@@ -401,6 +402,10 @@ pub fn NewRoutine() -> impl IntoView {
                         .collect(),
                 ),
             };
+            let notify = channels
+                .first()
+                .map(|channel| channel.notify.clone())
+                .unwrap_or_default();
             let starting = dto::RoutineEvent {
                 color: "#1e3a6e".into(),
                 thread_enabled: settings.event_threads,
@@ -416,6 +421,9 @@ pub fn NewRoutine() -> impl IntoView {
                     })
                     .into_iter()
                     .collect(),
+                // Who it mentions starts from its channel's default.
+                mention_everyone: notify.everyone,
+                mention_role_ids: notify.role_ids,
                 ..Default::default()
             };
             let edit = RoutineEdit::new(draft, None);

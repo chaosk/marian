@@ -647,6 +647,9 @@ struct EventDraft {
     reminders: Vec<ReminderInput>,
     #[serde(default)]
     mention_everyone: bool,
+    /// They picked who it mentions; otherwise it mentions the channel's default.
+    #[serde(default)]
+    mentions_picked: bool,
     #[serde(default)]
     event_id: Option<i64>,
 }
@@ -668,6 +671,7 @@ impl Default for EventDraft {
             post_raw: None,
             reminders: Vec::new(),
             mention_everyone: false,
+            mentions_picked: false,
             event_id: None,
         }
     }
@@ -1182,6 +1186,7 @@ async fn answer_mention(
             }
         }
     }
+    draft.mentions_picked = true;
     save_draft(conn, discord_user_id, PromptStep::Finish, draft).await?;
     just(finish_card(draft, lang))
 }
@@ -1352,6 +1357,14 @@ async fn finish_event(
         draft.duration_minutes
     };
     let thread_enabled = store::settings(conn, guild_id).await?.event_threads;
+    let mention = if draft.mentions_picked {
+        store::Mention {
+            everyone: draft.mention_everyone,
+            role_ids: draft.mention_role_ids.clone(),
+        }
+    } else {
+        store::new_event_mention(conn, guild_id, channel.id).await?
+    };
     let saved = logic::save_event(
         conn,
         EventInput {
@@ -1372,8 +1385,8 @@ async fn finish_event(
             attendee_role_id: draft.attendee_role_id,
             thread_enabled,
             multiple_signups: multiple,
-            mention_everyone: draft.mention_everyone,
-            mention_role_ids: draft.mention_role_ids.clone(),
+            mention_everyone: mention.everyone,
+            mention_role_ids: mention.role_ids,
             restrict_role_ids: draft.restrict_role_ids.clone(),
             options,
             reminders: draft.reminders.clone(),
@@ -2584,6 +2597,16 @@ mod tests {
         )
         .await.unwrap();
         store::insert_default_settings(&mut conn, 1).await.unwrap();
+        // The server mentions @everyone; the channel the event goes to, its role.
+        conn.batch_execute(
+            "
+            INSERT INTO roles (id, guild_id, name, color, discord_id) VALUES (7, 1, 'Crew', '#888888', '700');
+            UPDATE settings SET mention_everyone = true WHERE guild_id = 1;
+            UPDATE channels SET mention_everyone = false, mention_role_ids = '{7}' WHERE id = 2;
+            ",
+        )
+        .await
+        .unwrap();
         let first = start_event_dm(&mut conn, 1, 1, "u1", "social", Some("99"), Lang::En)
             .await
             .unwrap();
@@ -2665,6 +2688,16 @@ mod tests {
         );
         assert_eq!(event.channel_id, 2, "the agreed channel");
         assert_eq!(event.status, EventStatus::Posted);
+        assert!(
+            !event.mention_everyone,
+            "the channel's default, not the server's"
+        );
+        assert_eq!(
+            store::event_role_ids(&mut conn, &event, EventRoleKind::Mention)
+                .await
+                .unwrap(),
+            [7]
+        );
         let view = logic::discord_view(&mut conn, event.id, "https://marian.example.com")
             .await
             .unwrap()

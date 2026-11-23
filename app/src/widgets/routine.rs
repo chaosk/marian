@@ -279,6 +279,11 @@ pub fn RoutineChannel(edit: RoutineEdit, channels: Vec<dto::Channel>) -> impl In
     let save = move || {
         let next = picked.get_untracked();
         open.set(false);
+        let was = edit.draft.with_untracked(|draft| draft.channel_id.clone());
+        // A new routine's mentions follow its channel's default.
+        if let Some(local) = edit.local.get_value() {
+            local.follow_channel(&was, &next);
+        }
         edit.change(|draft| draft.channel_id = next);
     };
     fact("Change the channel", face, body, open, begin, save)

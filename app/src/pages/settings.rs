@@ -231,6 +231,7 @@ fn settings_rows(
         "purge_channels" => settings.purge_channels,
         "temp_roles" => settings.temp_roles,
         "waitlist" => settings.waitlist,
+        "notify_everyone" => settings.notify_everyone,
         _ => settings.calendar_auto_sync,
     };
     let switch = |(name, title, note): &Toggle| {
@@ -277,6 +278,22 @@ fn settings_rows(
             }
         })
         .collect_view();
+    let notify_everyone = switch(&(
+        "notify_everyone",
+        "New events mention @everyone",
+        "A new event's post mentions @everyone, unless its channel has a setting of its own on the Channels page. The event's creator can change it.",
+    ));
+    let notify_roles = view! {
+        <div class="setting-row" data-setting="notify_role_ids">
+            <span class="setting-text">
+                {setting_title("New events mention roles", "notify_role_ids", status)}
+                <span class="muted">"Roles a new event's post mentions, unless its channel has a setting of its own on the Channels page."</span>
+            </span>
+            <span class="combo-slot">
+                <RolePicker name="notify_role_ids" label="New events mention roles" roles=roles.clone() chosen=settings.notify_role_ids.clone() enabled=server_manager empty="No roles"/>
+            </span>
+        </div>
+    };
     let time_switches = switches(TIME_TOGGLES);
     let post_switches = switches(POST_TOGGLES);
     let thread_switches = switches(THREAD_TOGGLES);
@@ -339,6 +356,8 @@ fn settings_rows(
                     <span class="setting-text">{setting_title("Language", "language", status)}<span class="muted">"Marian writes in this language on Discord: posts, reminders, replies, and command descriptions. This site stays in English."</span></span>
                     <select name="language" disabled=!server_manager>{languages}</select>
                 </label>
+                {notify_everyone}
+                {notify_roles}
                 {post_switches}
                 {lead}
                 <label class="setting-row" data-setting="digest">
