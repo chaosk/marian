@@ -159,6 +159,26 @@ pub fn event_thread_name(
     format!("{}{suffix}", trim_chars(title, room))
 }
 
+/// A posted event's thread whose name no longer matches the event's title and
+/// date, after an edit: its Discord id, and the name it should have now.
+pub async fn thread_rename(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<(String, String)>, OpError> {
+    let Some(event) = store::event(conn, event_id).await? else {
+        return Ok(None);
+    };
+    // An ended or archived event's thread keeps the name it had.
+    if event.status != EventStatus::Posted {
+        return Ok(None);
+    }
+    let Some((name, Some(discord_id))) = store::thread(conn, event_id).await? else {
+        return Ok(None);
+    };
+    let wanted = stored_thread_name(conn, &event).await?;
+    Ok((wanted != name).then_some((discord_id, wanted)))
+}
+
 pub(super) async fn stored_thread_name(
     conn: &mut Connection,
     event: &store::Event,
@@ -1553,6 +1573,56 @@ mod tests {
         sync_channel_order(&mut conn, 1, &["200".into(), "300".into(), "100".into()])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_thread_is_renamed_when_its_event_changes() {
+        let mut conn = store::open_memory().await.unwrap();
+        conn.batch_execute(
+            "
+            INSERT INTO guilds (id, name, timezone, discord_id) VALUES (1, 'Guild', 'UTC', '4242');
+            INSERT INTO settings (guild_id) VALUES (1);
+            INSERT INTO channels (id, guild_id, name, kind, discord_id) VALUES (1, 1, 'events', 'text', '100');
+            INSERT INTO events (
+              id, public_id, guild_id, channel_id, title, starts_at, duration_minutes,
+              status, created_at, updated_at, discord_message_id
+            ) VALUES (1, '01900000-0000-7000-8000-000000000051', 1, 1, 'Raid night', '2030-01-10T19:00:00Z', 60,
+              'posted', '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', '55');
+            ",
+        )
+        .await
+        .unwrap();
+        let event = store::event(&mut conn, 1).await.unwrap().unwrap();
+        let opened = stored_thread_name(&mut conn, &event).await.unwrap();
+        store::set_thread_discord_id(&mut conn, 1, &opened, "900")
+            .await
+            .unwrap();
+        assert_eq!(thread_rename(&mut conn, 1).await.unwrap(), None, "as named");
+
+        conn.batch_execute(
+            "UPDATE events SET title = 'Raid night (moved)', starts_at = '2030-01-11T19:00:00Z' WHERE id = 1",
+        )
+        .await
+        .unwrap();
+        let (thread, name) = thread_rename(&mut conn, 1).await.unwrap().unwrap();
+        assert_eq!(thread, "900");
+        assert!(name.starts_with("Raid night (moved) -- "), "{name}");
+        assert_ne!(name, opened);
+        store::set_thread_name(&mut conn, 1, &name).await.unwrap();
+        assert_eq!(thread_rename(&mut conn, 1).await.unwrap(), None, "renamed");
+
+        // An archived event's thread keeps its name.
+        conn.batch_execute("UPDATE events SET title = 'Later', status = 'archived' WHERE id = 1")
+            .await
+            .unwrap();
+        assert_eq!(thread_rename(&mut conn, 1).await.unwrap(), None);
+        // So does one Discord hasn't opened yet.
+        conn.batch_execute(
+            "UPDATE events SET status = 'posted' WHERE id = 1; UPDATE threads SET discord_id = NULL;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(thread_rename(&mut conn, 1).await.unwrap(), None);
     }
 
     #[tokio::test]
