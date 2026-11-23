@@ -961,27 +961,47 @@ pub async fn sync_channel_order(
     guild_id: i64,
     order: &[String],
 ) -> Result<(), OpError> {
-    let place = |discord_id: Option<&str>| {
-        discord_id.and_then(|id| order.iter().position(|listed| listed == id))
-    };
+    let place: HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
     let mut channels = store::all_channels(conn, guild_id).await?;
     // Listed ones by Discord's order, then the rest as they were.
     channels.sort_by_key(|channel| {
         (
-            place(channel.discord_id.as_deref()).unwrap_or(usize::MAX),
+            channel
+                .discord_id
+                .as_deref()
+                .and_then(|id| place.get(id).copied())
+                .unwrap_or(usize::MAX),
             channel.position,
             channel.id,
         )
     });
-    for (index, channel) in channels.iter().enumerate() {
-        let position = index as i64;
-        if channel.position != position {
-            diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
-                .set(schema::channels::position.eq(position))
-                .execute(conn)
-                .await?;
-        }
+    // Only what moved. Discord sends an update for each channel a drag moves,
+    // and once the first has been followed the rest find nothing to change.
+    let (ids, positions): (Vec<i64>, Vec<i64>) = channels
+        .iter()
+        .enumerate()
+        .map(|(index, channel)| (channel, index as i64))
+        .filter(|(channel, position)| channel.position != *position)
+        .map(|(channel, position)| (channel.id, position))
+        .unzip();
+    if ids.is_empty() {
+        return Ok(());
     }
+    use diesel::sql_types::{Array, BigInt};
+    diesel::sql_query(
+        "UPDATE channels AS c SET position = o.position \
+         FROM unnest($1::bigint[], $2::bigint[]) AS o(id, position) \
+         WHERE c.id = o.id AND c.guild_id = $3",
+    )
+    .bind::<Array<BigInt>, _>(ids)
+    .bind::<Array<BigInt>, _>(positions)
+    .bind::<BigInt, _>(guild_id)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -1527,6 +1547,12 @@ mod tests {
             names(&mut conn).await,
             ["lobby", "boards", "raids", "race-night"]
         );
+
+        // The same order again writes nothing, as for the rest of a drag's updates.
+        refuse(&mut conn, "UPDATE", "channels").await;
+        sync_channel_order(&mut conn, 1, &["200".into(), "300".into(), "100".into()])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
