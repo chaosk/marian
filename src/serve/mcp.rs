@@ -502,9 +502,19 @@ async fn create_event(
                         "There's no channel {wanted} here. get_server lists them."
                     ))
                 })?,
-            None => channels.first().ok_or_else(|| {
-                crate::error::OpError::message("This server has no channel for events yet.")
-            })?,
+            // Where a new event of theirs starts on the website.
+            None => {
+                let server_default = crate::store::settings(db, v.guild_id)
+                    .await?
+                    .default_channel_id;
+                let start = api::new_event_channel(db, v, server_default).await?;
+                start
+                    .and_then(|id| channels.iter().find(|channel| channel.id == id))
+                    .or_else(|| channels.first())
+                    .ok_or_else(|| {
+                        crate::error::OpError::message("This server has no channel for events yet.")
+                    })?
+            }
         };
         let presets = api::presets(db, v).await?;
         let preset = match a.preset.as_deref() {
@@ -810,7 +820,7 @@ fn tools() -> Value {
                     "duration_minutes": { "type": "integer", "minimum": 1, "description": "60 if not given." },
                     "description": { "type": "string" },
                     "location": { "type": "string" },
-                    "channel": { "type": "string", "description": "The channel's id or name, from get_server. The first one if not given." },
+                    "channel": { "type": "string", "description": "The channel's id or name, from get_server. If not given, the channel you last made an event in, else the server's default channel, else the first one." },
                     "preset": { "type": "string", "description": "The signup preset's id or name, from get_server. The server's default if not given." },
                     "reminder_minutes": { "type": "integer", "minimum": 0, "description": "Remind people this many minutes before; 0 for no reminder. The server's default if not given." },
                     "post": { "type": "string", "enum": ["draft", "now", "at"], "description": "draft (the default) keeps it in Marian; now posts it to Discord; at posts it at post_at." },

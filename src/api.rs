@@ -405,7 +405,7 @@ pub async fn membership(
 /// Where the viewer's next event starts: the channel they last made an event
 /// in, else the server's default channel, either only if they can see it and
 /// Discord still has it.
-async fn new_event_channel(
+pub async fn new_event_channel(
     conn: &mut Connection,
     viewer: &Viewer,
     server_default: Option<i64>,
