@@ -29,6 +29,7 @@ pub(super) async fn remember_guild(data: &Data, guild: &serenity::Guild) -> Resu
         .filter(|channel| postable(channel.kind))
         .map(|channel| (channel.id.get().to_string(), channel.name.clone()))
         .collect();
+    let order = sidebar(guild.channels.values());
     let roles: Vec<(String, String, String)> = guild
         .roles
         .values()
@@ -46,6 +47,7 @@ pub(super) async fn remember_guild(data: &Data, guild: &serenity::Guild) -> Resu
     store::with_tx(&mut conn, async |tx| {
         let stored = logic::ensure_discord_guild(tx, &guild_discord, &guild.name).await?;
         logic::sync_discord_channels(tx, stored.id, &channels).await?;
+        logic::sync_channel_order(tx, stored.id, &order).await?;
         logic::sync_discord_roles(tx, stored.id, &roles).await?;
         for role in guild.roles.values() {
             logic::sync_discord_permissions(
@@ -401,6 +403,46 @@ fn postable(kind: serenity::ChannelType) -> bool {
         kind,
         serenity::ChannelType::Text | serenity::ChannelType::News
     )
+}
+
+/// The Discord ids of a server's text channels, in its sidebar's order.
+fn sidebar<'a>(channels: impl IntoIterator<Item = &'a serenity::GuildChannel>) -> Vec<String> {
+    let listed: Vec<logic::SidebarChannel> = channels
+        .into_iter()
+        .filter(|channel| postable(channel.kind) || channel.kind == serenity::ChannelType::Category)
+        .map(|channel| logic::SidebarChannel {
+            id: channel.id.get(),
+            parent: channel.parent_id.map(|parent| parent.get()),
+            position: i64::from(channel.position),
+            category: channel.kind == serenity::ChannelType::Category,
+        })
+        .collect();
+    logic::sidebar_order(&listed)
+}
+
+/// Numbers the server's channels in Discord's order again, from the cache,
+/// after a channel or a category was added, moved or deleted.
+pub(super) async fn reorder_channels(
+    data: &Data,
+    cache: &serenity::Cache,
+    guild_id: serenity::GuildId,
+) -> Result<(), Error> {
+    let Some(order) = cache
+        .guild(guild_id)
+        .map(|guild| sidebar(guild.channels.values()))
+    else {
+        return Ok(());
+    };
+    let mut conn = data
+        .db
+        .get()
+        .await
+        .map_err(|_| "Could not reach the database.")?;
+    let Some(guild) = store::guild_by_discord(&mut conn, &guild_id.get().to_string()).await? else {
+        return Ok(());
+    };
+    logic::sync_channel_order(&mut conn, guild.id, &order).await?;
+    Ok(())
 }
 
 /// Follows a channel Discord added, renamed or deleted, so the channel lists

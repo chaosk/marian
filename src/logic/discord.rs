@@ -914,6 +914,77 @@ pub async fn sync_discord_channels(
     Ok(())
 }
 
+/// One of a server's Discord channels, as its sidebar sorts it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarChannel {
+    pub id: u64,
+    /// The category it sits in.
+    pub parent: Option<u64>,
+    pub position: i64,
+    pub category: bool,
+}
+
+/// The Discord ids of `channels` that aren't categories, in the order
+/// Discord's sidebar shows them: those in no category first, then each
+/// category in its own order, and within each, by position, then by id
+/// (Discord's tie-break for equal positions).
+pub fn sidebar_order(channels: &[SidebarChannel]) -> Vec<String> {
+    let category = |id: u64| {
+        channels
+            .iter()
+            .find(|channel| channel.category && channel.id == id)
+            .map(|channel| (channel.position, channel.id))
+    };
+    let mut listed: Vec<&SidebarChannel> = channels
+        .iter()
+        .filter(|channel| !channel.category)
+        .collect();
+    // No category (None) sorts before any category.
+    listed.sort_by_key(|channel| {
+        (
+            channel.parent.and_then(category),
+            channel.position,
+            channel.id,
+        )
+    });
+    listed
+        .into_iter()
+        .map(|channel| channel.id.to_string())
+        .collect()
+}
+
+/// Numbers the server's channels in `order` (Discord ids), so lists show them
+/// as Discord does. Channels Discord doesn't list, such as one Marian is still
+/// creating, follow in the order they had.
+pub async fn sync_channel_order(
+    conn: &mut Connection,
+    guild_id: i64,
+    order: &[String],
+) -> Result<(), OpError> {
+    let place = |discord_id: Option<&str>| {
+        discord_id.and_then(|id| order.iter().position(|listed| listed == id))
+    };
+    let mut channels = store::all_channels(conn, guild_id).await?;
+    // Listed ones by Discord's order, then the rest as they were.
+    channels.sort_by_key(|channel| {
+        (
+            place(channel.discord_id.as_deref()).unwrap_or(usize::MAX),
+            channel.position,
+            channel.id,
+        )
+    });
+    for (index, channel) in channels.iter().enumerate() {
+        let position = index as i64;
+        if channel.position != position {
+            diesel::update(schema::channels::table.filter(schema::channels::id.eq(channel.id)))
+                .set(schema::channels::position.eq(position))
+                .execute(conn)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Insertable)]
 #[diesel(table_name = schema::roles)]
 struct NewDiscordRole<'a> {
@@ -1395,6 +1466,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(names(&mut conn).await, vec!["raids", "pending"]);
+    }
+
+    #[test]
+    fn channels_sort_as_discords_sidebar_does() {
+        let channel = |id, parent, position| SidebarChannel {
+            id,
+            parent,
+            position,
+            category: false,
+        };
+        let category = |id, position| SidebarChannel {
+            id,
+            parent: None,
+            position,
+            category: true,
+        };
+        let channels = [
+            // Categories: "Games" below "Talk", though made first.
+            category(10, 1),
+            category(20, 0),
+            channel(11, Some(10), 0),
+            channel(12, Some(10), 1),
+            channel(21, Some(20), 3),
+            // Equal positions fall back to the id.
+            channel(23, Some(20), 2),
+            channel(22, Some(20), 2),
+            // Outside any category: first, by position.
+            channel(2, None, 5),
+            channel(1, None, 9),
+        ];
+        assert_eq!(
+            sidebar_order(&channels),
+            ["2", "1", "22", "23", "21", "11", "12"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_channels_take_discords_order() {
+        let mut conn = one_channel().await;
+        conn.batch_execute(
+            "INSERT INTO channels (id, guild_id, name, kind, position, discord_id) VALUES
+               (42, 1, 'lobby', 'text', 2, '200'), (43, 1, 'boards', 'text', 3, '300');
+             INSERT INTO channels (id, guild_id, name, kind, position) VALUES (44, 1, 'race-night', 'event', 4);",
+        )
+        .await
+        .unwrap();
+        sync_channel_order(&mut conn, 1, &["300".into(), "100".into(), "200".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            names(&mut conn).await,
+            ["boards", "raids", "lobby", "race-night"],
+            "Discord's order, then one Discord doesn't list yet"
+        );
+        sync_channel_order(&mut conn, 1, &["200".into(), "300".into(), "100".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            names(&mut conn).await,
+            ["lobby", "boards", "raids", "race-night"]
+        );
     }
 
     #[tokio::test]

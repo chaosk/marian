@@ -23,7 +23,7 @@ use crate::store;
 use buttons::{guests_from_form, handle_button};
 use follow::{
     admit_signed_in, follow_channel, follow_member, follow_names, follow_role, member_joined,
-    member_left, remember_guild, role_deleted,
+    member_left, remember_guild, reorder_channels, role_deleted,
 };
 use publish::{push_sync, tell_pages};
 use slash::{all_commands, register_commands};
@@ -333,10 +333,17 @@ async fn handle_event(
             if let Err(err) = follow_channel(data, channel, false).await {
                 tracing::warn!("could not follow #{}: {err}", channel.name);
             }
+            // A move, of a channel or a whole category, changes the order.
+            if let Err(err) = reorder_channels(data, &ctx.cache, channel.guild_id).await {
+                tracing::warn!("could not reorder the channels: {err}");
+            }
         }
         serenity::FullEvent::ChannelDelete { channel, .. } => {
             if let Err(err) = follow_channel(data, channel, true).await {
                 tracing::warn!("could not forget #{}: {err}", channel.name);
+            }
+            if let Err(err) = reorder_channels(data, &ctx.cache, channel.guild_id).await {
+                tracing::warn!("could not reorder the channels: {err}");
             }
         }
         serenity::FullEvent::GuildRoleCreate { new: role }
