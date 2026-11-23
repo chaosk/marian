@@ -1476,15 +1476,16 @@ summary.tally-line:focus-visible { outline: 2px solid var(--blue); outline-offse
 }
 
 /* Events page filters: menus in the column headings. */
-/* Its filter menus spill out of the table, so it can't clip to its corners;
+/* A table with menus or popovers that spill out of it (the events page's
+   filters, the channels page's mention editor) can't clip to its corners;
    the corner cells round themselves instead, inside the 1px border. */
-.sheet.filtered { overflow: visible; }
+.sheet.spills { overflow: visible; }
 /* Cells in a collapsed table ignore border-radius. */
-.sheet.filtered table { border-collapse: separate; border-spacing: 0; }
-.sheet.filtered thead tr:first-child th:first-child { border-top-left-radius: 15px; }
-.sheet.filtered thead tr:first-child th:last-child { border-top-right-radius: 15px; }
-.sheet.filtered tbody tr:last-child td:first-child { border-bottom-left-radius: 15px; }
-.sheet.filtered tbody tr:last-child td:last-child { border-bottom-right-radius: 15px; }
+.sheet.spills table { border-collapse: separate; border-spacing: 0; }
+.sheet.spills thead tr:first-child th:first-child { border-top-left-radius: 15px; }
+.sheet.spills thead tr:first-child th:last-child { border-top-right-radius: 15px; }
+.sheet.spills tbody tr:last-child td:first-child { border-bottom-left-radius: 15px; }
+.sheet.spills tbody tr:last-child td:last-child { border-bottom-right-radius: 15px; }
 .page-tools { display: flex; align-items: center; gap: 12px; }
 .filter-head { width: auto; }
 .filter-button {
