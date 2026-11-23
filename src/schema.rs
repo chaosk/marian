@@ -44,6 +44,7 @@ diesel::table! {
         digest -> Text,
         waitlist -> Bool,
         default_preset_id -> Nullable<BigInt>,
+        default_channel_id -> Nullable<BigInt>,
         language -> Text,
         mention_everyone -> Bool,
         mention_role_ids -> Array<BigInt>,

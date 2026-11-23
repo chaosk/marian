@@ -386,7 +386,9 @@ pub async fn membership(
     let settings = store::settings(conn, user.guild_id).await?;
     let roles = store::membership_role_ids(conn, &user).await?;
     let can_create_event = crate::logic::can_create(&user, &settings, &roles);
+    let new_event_channel = new_event_channel(conn, viewer, settings.default_channel_id).await?;
     Ok(dto::Membership {
+        new_event_channel,
         name: user.name,
         avatar: user.avatar,
         server_manager: user.server_manager,
@@ -398,6 +400,35 @@ pub async fn membership(
         ),
         google: google(conn, user.user_id).await?,
     })
+}
+
+/// Where the viewer's next event starts: the channel they last made an event
+/// in, else the server's default channel, either only if they can see it and
+/// Discord still has it.
+async fn new_event_channel(
+    conn: &mut Connection,
+    viewer: &Viewer,
+    server_default: Option<i64>,
+) -> Result<Option<String>, OpError> {
+    let sight = sight(conn, viewer).await?;
+    let recent = store::recent_event_channels(conn, viewer.guild_id, viewer.membership_id).await?;
+    let picked = match recent.into_iter().find(|id| sight.sees_channel(*id)) {
+        Some(id) => Some(id),
+        None => server_default.filter(|id| sight.sees_channel(*id)),
+    };
+    Ok(match picked {
+        Some(id) => live_channel(conn, id)
+            .await?
+            .map(|channel| channel.public_id.to_string()),
+        None => None,
+    })
+}
+
+/// A channel Discord still has.
+async fn live_channel(conn: &mut Connection, id: i64) -> Result<Option<store::Channel>, OpError> {
+    Ok(store::channel(conn, id)
+        .await?
+        .filter(|channel| channel.gone_at.is_none()))
 }
 
 /// A person's calendar feed: its full address when the server knows its own,
@@ -475,6 +506,12 @@ pub async fn settings(conn: &mut Connection, viewer: &Viewer) -> Result<dto::Set
         waitlist: s.waitlist,
         calendar_auto_sync: s.calendar_auto_sync,
         language: s.language.code().to_string(),
+        default_channel_id: match s.default_channel_id {
+            Some(id) => live_channel(conn, id)
+                .await?
+                .map(|channel| channel.public_id.to_string()),
+            None => None,
+        },
     })
 }
 
@@ -542,6 +579,10 @@ pub async fn put_settings(
         // The slash commands list every language, so nothing to register.
         s.language = picked;
     }
+    s.default_channel_id = match next.default_channel_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(id) => Some(channel_seen(conn, viewer, id).await?),
+    };
     store::with_tx(conn, async |tx| {
         store::set_guild_timezone(tx, viewer.guild_id, &next.timezone).await?;
         store::update_settings(tx, &s).await
@@ -3778,5 +3819,85 @@ mod tests {
         let elsewhere = channels(&mut conn, &viewer).await.unwrap()[1].clone();
         assert_eq!(elsewhere.own_notify, None);
         assert_eq!(elsewhere.notify.role_ids, [raider], "back to the server's");
+    }
+
+    #[tokio::test]
+    async fn a_new_event_starts_where_its_creator_made_their_last() {
+        let (mut conn, viewer) = world().await;
+        let listed = channels(&mut conn, &viewer).await.unwrap();
+        let (events, elsewhere) = (listed[0].id.clone(), listed[1].id.clone());
+        let starts = async |conn: &mut Connection, viewer: &Viewer| {
+            membership(conn, viewer).await.unwrap().new_event_channel
+        };
+        assert_eq!(starts(&mut conn, &viewer).await, None, "the first listed");
+
+        // The server's default channel, for someone who hasn't made an event.
+        let mut next = settings(&mut conn, &viewer).await.unwrap();
+        next.default_channel_id = Some(elsewhere.clone());
+        put_settings(&mut conn, &viewer, &next).await.unwrap();
+        assert_eq!(
+            settings(&mut conn, &viewer)
+                .await
+                .unwrap()
+                .default_channel_id
+                .as_ref(),
+            Some(&elsewhere)
+        );
+        assert_eq!(starts(&mut conn, &viewer).await.as_ref(), Some(&elsewhere));
+
+        // Then wherever they made their newest event.
+        conn.batch_execute(
+            "
+            INSERT INTO events (id, public_id, guild_id, channel_id, title, starts_at, status, created_by, created_at, updated_at)
+            VALUES (11, marian_uuid_v7(), 1, 2, 'Older', now(), 'draft', 1, now() - interval '1 day', now()),
+                   (12, marian_uuid_v7(), 1, 1, 'Newer', now(), 'draft', 1, now(), now()),
+                   (13, marian_uuid_v7(), 1, 2, 'June''s', now(), 'draft', 2, now() + interval '1 minute', now());
+            ",
+        )
+        .await
+        .unwrap();
+        assert_eq!(starts(&mut conn, &viewer).await.as_ref(), Some(&events));
+
+        // A channel Discord deleted is passed over, for the one before it.
+        conn.batch_execute("UPDATE channels SET gone_at = now() WHERE id = 1")
+            .await
+            .unwrap();
+        assert_eq!(starts(&mut conn, &viewer).await.as_ref(), Some(&elsewhere));
+
+        // Someone with no events of their own gets the server's default, while
+        // Discord still has it.
+        let mut ada = viewer.clone();
+        ada.membership_id = 3;
+        conn.batch_execute(
+            "INSERT INTO users (discord_id) VALUES ('u3');
+             INSERT INTO memberships (id, user_id, guild_id, name, handle, color, reminders_enabled, server_manager)
+             SELECT 3, id, 1, 'Ada', 'ada', '#334455', true, false FROM users WHERE discord_id = 'u3';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(starts(&mut conn, &ada).await.as_ref(), Some(&elsewhere));
+        conn.batch_execute("UPDATE channels SET gone_at = now() WHERE id = 2")
+            .await
+            .unwrap();
+        assert_eq!(starts(&mut conn, &ada).await, None);
+        assert_eq!(
+            settings(&mut conn, &viewer)
+                .await
+                .unwrap()
+                .default_channel_id,
+            None,
+            "a deleted default reads as none"
+        );
+        // The form's "First in the list" sends an empty id.
+        let mut next = settings(&mut conn, &viewer).await.unwrap();
+        next.default_channel_id = Some(String::new());
+        put_settings(&mut conn, &viewer, &next).await.unwrap();
+        assert_eq!(
+            store::settings(&mut conn, 1)
+                .await
+                .unwrap()
+                .default_channel_id,
+            None
+        );
     }
 }

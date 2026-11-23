@@ -72,6 +72,7 @@ struct SettingsRow {
     digest: Digest,
     waitlist: bool,
     default_preset_id: Option<i64>,
+    default_channel_id: Option<i64>,
     language: Lang,
     mention_everyone: bool,
     mention_role_ids: Vec<i64>,
@@ -112,6 +113,8 @@ pub struct Settings {
     pub waitlist: bool,
     /// The preset a new event starts with.
     pub default_preset_id: Option<i64>,
+    /// The channel a new event starts in, for someone who hasn't made one here.
+    pub default_channel_id: Option<i64>,
     /// The language Marian writes in on Discord.
     pub language: Lang,
     /// Who a new event mentions, in a channel without a setting of its own.
@@ -159,6 +162,7 @@ impl Settings {
             digest: self.digest,
             waitlist: self.waitlist,
             default_preset_id: self.default_preset_id,
+            default_channel_id: self.default_channel_id,
             language: self.language,
             mention_everyone: self.mention.everyone,
             mention_role_ids: self.mention.role_ids.clone(),
@@ -191,6 +195,7 @@ impl From<SettingsRow> for Settings {
             digest: row.digest,
             waitlist: row.waitlist,
             default_preset_id: row.default_preset_id,
+            default_channel_id: row.default_channel_id,
             language: row.language,
             mention: Mention {
                 everyone: row.mention_everyone,
@@ -1496,6 +1501,7 @@ pub fn default_settings(guild_id: i64) -> Settings {
         digest: Digest::Off,
         waitlist: false,
         default_preset_id: None,
+        default_channel_id: None,
         language: Lang::En,
         mention: Mention::default(),
     }
@@ -1888,6 +1894,32 @@ pub async fn role_by_name(
     name: &str,
 ) -> Result<Option<Role>, OpError> {
     Ok(Role::named(guild_id, name).first(conn).await.optional()?)
+}
+
+/// The channels `membership_id` made their newest events in, newest first,
+/// each once, without channels Discord deleted.
+pub async fn recent_event_channels(
+    conn: &mut Connection,
+    guild_id: i64,
+    membership_id: i64,
+) -> Result<Vec<i64>, OpError> {
+    let recent: Vec<i64> = schema::events::table
+        .inner_join(schema::channels::table)
+        .filter(schema::events::guild_id.eq(guild_id))
+        .filter(schema::events::created_by.eq(membership_id))
+        .filter(schema::channels::gone_at.is_null())
+        .order((schema::events::created_at.desc(), schema::events::id.desc()))
+        .select(schema::events::channel_id)
+        .limit(20)
+        .load(conn)
+        .await?;
+    let mut out = Vec::new();
+    for id in recent {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
 }
 
 /// The server's channels that still exist, for picking where to post.
@@ -3432,6 +3464,7 @@ mod tests {
                 "20261116190000".to_string(),
                 "20261121120000".to_string(),
                 "20261123120000".to_string(),
+                "20261123130000".to_string(),
             ]
         );
     }

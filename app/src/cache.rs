@@ -82,6 +82,8 @@ pub fn apply_change(client: QueryClient, server: &str, change: &dto::Change) {
             });
             lists(client);
             client.invalidate_query(server_scope(), &here);
+            // A new event moves where the creator's next one starts.
+            client.invalidate_query(membership_scope(), &here);
             client.invalidate_query(pending_reminders_scope(), &here);
             client.invalidate_query(series_list_scope(), &here);
             client.invalidate_queries_with_predicate(series_scope(), |(s, _)| *s == here);
@@ -105,6 +107,8 @@ pub fn apply_settings(client: QueryClient, server: &str, next: &dto::Settings) {
         }
         client.untrack_update_query();
     });
+    // The default channel is where someone's first event starts.
+    client.invalidate_query(membership_scope(), server.to_string());
 }
 
 /// Writes an event's signups into the cache, so a refresh renders them while
@@ -353,6 +357,7 @@ impl_ready!(0: A, 1: B);
 impl_ready!(0: A, 1: B, 2: C);
 impl_ready!(0: A, 1: B, 2: C, 3: D);
 impl_ready!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_ready!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 
 /// Renders when `gather` has every read it needs. Start the resources first
 /// so they run together, then pass `(a.get(), b.get(), …).ready()`.
