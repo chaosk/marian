@@ -12,6 +12,8 @@ pub fn Channels() -> impl IntoView {
     let server = cache::listen(cache::server_scope(), cache::server_key);
     let channels = cache::listen(cache::channels_scope(), cache::server_key);
     let roles = cache::listen(cache::roles_scope(), cache::server_key);
+    // The one channel whose mention editor is open: opening another closes it.
+    let editing = RwSignal::new(None::<String>);
     when(
         move || (server.get(), channels.get(), roles.get()).ready(),
         move |(server, channels, roles)| {
@@ -35,7 +37,7 @@ pub fn Channels() -> impl IntoView {
                             <td>"#"{name}</td>
                             <td class="fit">{kind}</td>
                             <td class="fit">{events}</td>
-                            <td><ChannelMentions channel roles=roles.clone()/></td>
+                            <td><ChannelMentions channel roles=roles.clone() editing/></td>
                             <td class="fit">{purged}</td>
                         </tr>
                     }
@@ -87,7 +89,12 @@ fn mention_line(notify: &dto::Notify, roles: &[dto::Role]) -> String {
 /// Who a new event in the channel mentions, and a popover to have it follow the
 /// server or name its own: some roles, @everyone, or nobody.
 #[component]
-fn ChannelMentions(channel: dto::Channel, roles: Vec<dto::Role>) -> impl IntoView {
+fn ChannelMentions(
+    channel: dto::Channel,
+    roles: Vec<dto::Role>,
+    /// The channel whose editor is open, shared by the table's rows.
+    editing: RwSignal<Option<String>>,
+) -> impl IntoView {
     let face = match &channel.own_notify {
         Some(own) => mention_line(own, &roles),
         None => format!("{} (server default)", mention_line(&channel.notify, &roles)),
@@ -99,26 +106,37 @@ fn ChannelMentions(channel: dto::Channel, roles: Vec<dto::Role>) -> impl IntoVie
     let follow = RwSignal::new(channel.own_notify.is_none());
     let everyone = RwSignal::new(start.everyone);
     let picked = RwSignal::new(start.role_ids.clone());
-    let open = RwSignal::new(false);
     let problem = RwSignal::new(String::new());
     let roles = StoredValue::new(roles);
     let start = StoredValue::new((channel.own_notify.is_none(), start));
     let url = StoredValue::new(api::path::channel_notify(&cache::server_now(), &channel.id));
     let server = StoredValue::new(cache::server_now());
-    let cancel = move || {
+    let id = StoredValue::new(channel.id.clone());
+    let open =
+        Memo::new(move |_| editing.with(|now| now.as_deref() == Some(id.get_value().as_str())));
+    let close = move || {
+        if open.get_untracked() {
+            editing.set(None);
+        }
+    };
+    // What the editor shows on opening: what's saved, not what a closed one left.
+    let reset = move || {
         let (follows, notify) = start.get_value();
         follow.set(follows);
         everyone.set(notify.everyone);
         picked.set(notify.role_ids);
         problem.set(String::new());
-        open.set(false);
+    };
+    let cancel = move || {
+        reset();
+        close();
     };
     let saving = client::action(move |body: &dto::ChannelNotify| {
         let body = body.clone();
         async move {
             match api::send::<dto::Done, _>("PUT", &url.get_value(), Some(&body)).await {
                 Ok(_) => {
-                    open.set(false);
+                    close();
                     cache::refresh(&server.get_value());
                 }
                 Err(failure) => problem.set(failure.message),
@@ -136,13 +154,22 @@ fn ChannelMentions(channel: dto::Channel, roles: Vec<dto::Role>) -> impl IntoVie
     view! {
         <div class="inline-anchor">
             <button type="button" class="inline-edit" title="Change who a new event here mentions"
-                on:click=move |_| if open.get_untracked() { cancel() } else { open.set(true) }>
+                aria-expanded=move || if open.get() { "true" } else { "false" }
+                on:click=move |_| {
+                    if open.get_untracked() {
+                        cancel();
+                    } else {
+                        reset();
+                        editing.set(Some(id.get_value()));
+                    }
+                }>
                 <span class="face">{face}</span>
             </button>
             {move || open.get().then(|| {
                 let name = name.clone();
                 view! {
-                    <form class="popover" on:submit=move |ev| { ev.prevent_default(); save(); }>
+                    <form class="popover" on:submit=move |ev| { ev.prevent_default(); save(); }
+                        on:keydown=move |ev| if ev.key() == "Escape" { cancel(); }>
                         <p class="popover-title">"New events mention"</p>
                         <label class="check-row">
                             <input type="radio" name=name.clone() prop:checked=move || follow.get()
