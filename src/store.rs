@@ -2488,7 +2488,37 @@ pub async fn set_thread_discord_id(
         ))
         .on_conflict(schema::threads::event_id)
         .do_update()
-        .set(schema::threads::discord_id.eq(discord_id))
+        .set((
+            schema::threads::name.eq(name),
+            schema::threads::discord_id.eq(discord_id),
+        ))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// An event's thread: the name Discord has for it, and its Discord id once
+/// it has one.
+pub async fn thread(
+    conn: &mut Connection,
+    event_id: i64,
+) -> Result<Option<(String, Option<String>)>, OpError> {
+    Ok(schema::threads::table
+        .filter(schema::threads::event_id.eq(event_id))
+        .select((schema::threads::name, schema::threads::discord_id))
+        .first(conn)
+        .await
+        .optional()?)
+}
+
+/// Remembers the name an event's thread was renamed to in Discord.
+pub async fn set_thread_name(
+    conn: &mut Connection,
+    event_id: i64,
+    name: &str,
+) -> Result<(), OpError> {
+    diesel::update(schema::threads::table.filter(schema::threads::event_id.eq(event_id)))
+        .set(schema::threads::name.eq(name))
         .execute(conn)
         .await?;
     Ok(())

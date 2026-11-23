@@ -167,7 +167,48 @@ pub(super) async fn post_event(
     {
         tracing::warn!("could not purge the event channel: {err}");
     }
+    rename_thread(db, &http, event_id).await;
     Ok(())
+}
+
+/// Gives a posted event's thread its new title and date after an edit. The
+/// post is what matters, so a thread that won't rename is logged, and the
+/// next update to the event tries again.
+async fn rename_thread(db: &store::Db, http: &serenity::Http, event_id: i64) {
+    let found = match db.get().await {
+        Ok(mut conn) => logic::thread_rename(&mut conn, event_id).await,
+        Err(_) => return,
+    };
+    let (thread, name) = match found {
+        Ok(Some(rename)) => rename,
+        Ok(None) => return,
+        Err(err) => {
+            tracing::warn!("could not check event {event_id}'s thread name: {err}");
+            return;
+        }
+    };
+    let Ok(thread_id) = thread.parse::<u64>() else {
+        return;
+    };
+    // Discord renames an archived thread only as it opens it again, and an
+    // event someone just changed is worth talking about.
+    let renamed = serenity::ChannelId::new(thread_id)
+        .edit_thread(
+            http,
+            serenity::EditThread::new().name(&name).archived(false),
+        )
+        .await;
+    match renamed {
+        Ok(_) => match db.get().await {
+            Ok(mut conn) => {
+                if let Err(err) = store::set_thread_name(&mut conn, event_id, &name).await {
+                    tracing::warn!("could not note event {event_id}'s thread name: {err}");
+                }
+            }
+            Err(_) => tracing::warn!("could not note event {event_id}'s thread name"),
+        },
+        Err(err) => tracing::warn!("could not rename event {event_id}'s thread: {err}"),
+    }
 }
 
 pub(super) async fn purge_event_channel(

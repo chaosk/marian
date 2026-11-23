@@ -31,7 +31,7 @@ pub use discord::{
     event_thread_name, follow_discord_avatar, follow_discord_name, mark_channel_purged,
     mention_line, remember_discord_message, set_server_manager, sidebar_order, sync_channel_order,
     sync_channel_overwrites, sync_discord_channel, sync_discord_channels, sync_discord_permissions,
-    sync_discord_role, sync_discord_roles, web_event_url,
+    sync_discord_role, sync_discord_roles, thread_rename, web_event_url,
 };
 pub use event::{save_event, save_options};
 pub use library::{
