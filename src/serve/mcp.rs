@@ -25,7 +25,9 @@ Start with list_servers. Servers and events are named by the ids the tools retur
 Times you send are in the server's own time zone (get_server says which), as \
 YYYY-MM-DDTHH:MM; times Marian sends back are UTC. New events are drafts unless you \
 ask to post them: check the details with the person before posting, since a post \
-goes out to the whole Discord channel.";
+goes out to the whole Discord channel. Routines run a weekly poll in Discord that \
+picks a day; some then wait for someone to confirm the day (pending_approvals lists \
+those waiting on the person) before the event is posted.";
 
 /// `GET` and `DELETE` on `/mcp`: Marian opens no stream of its own and keeps
 /// no session.
@@ -275,6 +277,61 @@ async fn call(state: &AppState, token: &str, name: &str, raw: Value) -> Called {
             .await
             .map(|_| json!({ "deleted": a.event }))
             .map_err(String::from),
+            Err(err) => Err(err),
+        },
+        "list_routines" => match args::<ServerArgs>(raw) {
+            Ok(a) => rest::read(state, caller, &a.server, api::routines)
+                .await
+                .map_err(String::from)
+                .and_then(|routines| to_value(routines.0))
+                .map(|routines| json!({ "routines": routines })),
+            Err(err) => Err(err),
+        },
+        "pending_approvals" => match args::<ServerArgs>(raw) {
+            Ok(a) => pending_approvals(state, caller, &a.server).await,
+            Err(err) => Err(err),
+        },
+        "get_routine" => match args::<RoutineArgs>(raw) {
+            Ok(a) => get_routine(state, caller, &a.server, &a.routine).await,
+            Err(err) => Err(err),
+        },
+        "decide_routine" => match args::<DecideArgs>(raw) {
+            Ok(a) => decide_routine(state, caller, a).await,
+            Err(err) => Err(err),
+        },
+        "vote_routine" => match args::<VoteArgs>(raw) {
+            Ok(a) => {
+                let vote = dto::Vote { day: a.day };
+                change_routine(state, caller, &a.server, &a.routine, async |db, v| {
+                    api::vote(db, v, &a.routine, &vote).await
+                })
+                .await
+            }
+            Err(err) => Err(err),
+        },
+        "set_routine_days" => match args::<DaysArgs>(raw) {
+            Ok(a) => {
+                let days = dto::RoutineDays {
+                    days: a.days.clone(),
+                    scope: match a.scope {
+                        DaysFor::ThisWeek => dto::DayScope::Run,
+                        DaysFor::Usual => dto::DayScope::Usual,
+                    },
+                };
+                change_routine(state, caller, &a.server, &a.routine, async |db, v| {
+                    api::routine_days(db, v, &a.routine, &days).await
+                })
+                .await
+            }
+            Err(err) => Err(err),
+        },
+        "stop_routine" => match args::<RoutineArgs>(raw) {
+            Ok(a) => {
+                change_routine(state, caller, &a.server, &a.routine, async |db, v| {
+                    api::stop_routine(db, v, &a.routine).await
+                })
+                .await
+            }
             Err(err) => Err(err),
         },
         _ => return Called::Unknown,
@@ -558,6 +615,123 @@ async fn update_event(
     to_value(event.0)
 }
 
+#[derive(Deserialize)]
+struct RoutineArgs {
+    server: String,
+    routine: String,
+}
+
+#[derive(Deserialize)]
+struct DecideArgs {
+    server: String,
+    routine: String,
+    #[serde(default)]
+    day: Option<u8>,
+    #[serde(default)]
+    skip: bool,
+}
+
+#[derive(Deserialize)]
+struct VoteArgs {
+    server: String,
+    routine: String,
+    day: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DaysFor {
+    ThisWeek,
+    Usual,
+}
+
+#[derive(Deserialize)]
+struct DaysArgs {
+    server: String,
+    routine: String,
+    days: Vec<u8>,
+    scope: DaysFor,
+}
+
+async fn get_routine(
+    state: &AppState,
+    caller: Caller<'_>,
+    server: &str,
+    routine: &str,
+) -> Result<Value, String> {
+    let view = rest::read(state, caller, server, async |db, v| {
+        api::routine(db, v, routine).await
+    })
+    .await?;
+    to_value(view.0)
+}
+
+/// What each routine waiting on the person asks: the day that won, when it
+/// lapses, and the poll's votes.
+async fn pending_approvals(
+    state: &AppState,
+    caller: Caller<'_>,
+    server: &str,
+) -> Result<Value, String> {
+    let waiting = rest::read(state, caller, server, api::pending_approvals).await?;
+    let waiting: Vec<Value> = waiting
+        .0
+        .into_iter()
+        .map(|routine| {
+            json!({
+                "id": routine.id,
+                "title": routine.title,
+                "channel": routine.channel,
+                "event_when": routine.event_when,
+                "approval": routine.approval,
+            })
+        })
+        .collect();
+    Ok(json!({ "waiting": waiting }))
+}
+
+/// Confirms the day a closed poll waits on, or skips the week. Skipping has
+/// to be asked for: a missing day isn't taken as one.
+async fn decide_routine(
+    state: &AppState,
+    caller: Caller<'_>,
+    a: DecideArgs,
+) -> Result<Value, String> {
+    let day = match (a.day, a.skip) {
+        (Some(_), true) => return Err("Give a day or skip: true, not both.".into()),
+        (None, false) => {
+            return Err(
+                "Give the day to confirm, or skip: true to have no event this week.".into(),
+            );
+        }
+        (day, _) => day,
+    };
+    let decision = dto::Decision { day };
+    change_routine(state, caller, &a.server, &a.routine, async |db, v| {
+        api::decide_routine(db, v, &a.routine, &decision).await
+    })
+    .await
+}
+
+/// Makes a change to a routine, then reads it back as it stands. Someone who
+/// could see it only to answer its approval may not see it afterwards.
+async fn change_routine(
+    state: &AppState,
+    caller: Caller<'_>,
+    server: &str,
+    routine: &str,
+    body: impl AsyncFnOnce(
+        &mut crate::store::Connection,
+        &super::Session,
+    ) -> Result<api::Outcome, crate::error::OpError>,
+) -> Result<Value, String> {
+    let _done = rest::change(state, caller, server, body).await?;
+    match get_routine(state, caller, server, routine).await {
+        Ok(view) => Ok(view),
+        Err(_) => Ok(json!({ "done": true, "routine": routine })),
+    }
+}
+
 fn tools() -> Value {
     let server = json!({ "type": "string", "description": "The server's id, from list_servers." });
     let event = json!({ "type": "string", "description": "The event's id, from list_events." });
@@ -568,6 +742,15 @@ fn tools() -> Value {
         })
     };
     let read_only = json!({ "readOnlyHint": true, "openWorldHint": false });
+    let routine = json!({ "type": "string", "description": "The routine's id, from list_routines or pending_approvals." });
+    let weekday = |what: &str| {
+        json!({
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6,
+            "description": format!("{what}: 0 for Monday through 6 for Sunday, as get_routine's days number them."),
+        })
+    };
     json!([
         {
             "name": "list_servers",
@@ -667,6 +850,77 @@ fn tools() -> Value {
             "title": "Delete an event",
             "description": "Deletes an event, with its Discord post and signups.",
             "inputSchema": { "type": "object", "properties": { "server": server, "event": event }, "required": ["server", "event"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true },
+        },
+        {
+            "name": "list_routines",
+            "title": "List routines",
+            "description": "A server's routines: weekly polls in Discord that pick a day, then post the event. Server managers only; anyone else finds what waits on them with pending_approvals.",
+            "inputSchema": { "type": "object", "properties": { "server": server }, "required": ["server"] },
+            "annotations": read_only,
+        },
+        {
+            "name": "pending_approvals",
+            "title": "List approvals waiting on you",
+            "description": "Routines whose poll has closed and waits for you to confirm its day, with the votes, the day that won, and when the request lapses with no event.",
+            "inputSchema": { "type": "object", "properties": { "server": server }, "required": ["server"] },
+            "annotations": read_only,
+        },
+        {
+            "name": "get_routine",
+            "title": "Get a routine",
+            "description": "A routine's schedule, its usual days, this week's poll with its votes, any approval waiting, and recent weeks.",
+            "inputSchema": { "type": "object", "properties": { "server": server, "routine": routine }, "required": ["server", "routine"] },
+            "annotations": read_only,
+        },
+        {
+            "name": "decide_routine",
+            "title": "Answer a routine's approval",
+            "description": "Confirms the day a closed poll waits on, and the event is posted for it; or, with skip, has no event this week. Check the day with the person before answering.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "server": server,
+                    "routine": routine,
+                    "day": weekday("The day to confirm"),
+                    "skip": { "type": "boolean", "description": "true to have no event this week, instead of giving a day." },
+                },
+                "required": ["server", "routine"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true },
+        },
+        {
+            "name": "vote_routine",
+            "title": "Vote in a routine's poll",
+            "description": "Votes for a day in a routine's open poll, as a vote in Discord does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "server": server, "routine": routine, "day": weekday("The day") },
+                "required": ["server", "routine", "day"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true },
+        },
+        {
+            "name": "set_routine_days",
+            "title": "Set a routine's days",
+            "description": "Which days a routine's poll offers: this week's open poll, or the usual days for the weeks after.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "server": server,
+                    "routine": routine,
+                    "days": { "type": "array", "items": weekday("A day"), "minItems": 1 },
+                    "scope": { "type": "string", "enum": ["this_week", "usual"], "description": "this_week changes the open poll; usual, the weeks after." },
+                },
+                "required": ["server", "routine", "days", "scope"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+        },
+        {
+            "name": "stop_routine",
+            "title": "Stop a routine",
+            "description": "Stops a routine: no more weekly polls. Events it already posted stay.",
+            "inputSchema": { "type": "object", "properties": { "server": server, "routine": routine }, "required": ["server", "routine"] },
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true },
         },
     ])

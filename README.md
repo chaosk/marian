@@ -126,6 +126,15 @@ The client acts as you, with what you may do on the website, in your servers wit
 | `update_event` | An event's title, description, start, length or location |
 | `post_event` | Posts a draft or scheduled event to Discord now |
 | `delete_event` | Deletes an event |
+| `list_routines` | A server's routines (server managers) |
+| `pending_approvals` | Routines whose closed poll waits for you to confirm its day |
+| `get_routine` | A routine's schedule, this week's poll and votes, and any approval waiting |
+| `decide_routine` | Confirms a waiting routine's day, or skips the week |
+| `vote_routine` | Votes for a day in a routine's open poll |
+| `set_routine_days` | The days this week's poll offers, or the usual days |
+| `stop_routine` | Stops a routine's weekly polls |
+
+Routines are created and edited on the website.
 
 Your account menu on the website has **Connected apps**, which lists the clients you allowed and disconnects one. Disconnecting ends its access at once; it has to ask again to come back.
 

@@ -2137,6 +2137,41 @@ pub async fn routine(
     Ok(view)
 }
 
+/// The routines whose closed poll waits on the viewer to confirm its day,
+/// in channels they can see. Anyone who may answer one finds it here, not
+/// only managers, who can list every routine.
+pub async fn pending_approvals(
+    conn: &mut Connection,
+    viewer: &Viewer,
+) -> Result<Vec<dto::RoutineView>, OpError> {
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+    must_member(conn, viewer).await?;
+    let rows: Vec<(i64, uuid::Uuid, i64)> = crate::schema::routines::table
+        .filter(crate::schema::routines::guild_id.eq(viewer.guild_id))
+        .filter(crate::schema::routines::active.eq(true))
+        .order(crate::schema::routines::id)
+        .select((
+            crate::schema::routines::id,
+            crate::schema::routines::public_id,
+            crate::schema::routines::template_id,
+        ))
+        .load(conn)
+        .await?;
+    let sight = sight(conn, viewer).await?;
+    let mut waiting = Vec::new();
+    for (id, public_id, template_id) in rows {
+        if logic::waiting_run_id(conn, id).await?.is_none()
+            || !logic::can_decide(conn, id, viewer.membership_id).await?
+            || !sight.sees_channel(template_channel(conn, template_id).await?)
+        {
+            continue;
+        }
+        waiting.push(routine(conn, viewer, &public_id.to_string()).await?);
+    }
+    Ok(waiting)
+}
+
 /// A routine form's steps, with public ids turned into keys.
 async fn routine_steps(
     conn: &mut Connection,
@@ -3476,6 +3511,12 @@ mod tests {
         let kinds: Vec<&str> = shown.steps.iter().map(|step| step.kind.as_str()).collect();
         assert_eq!(kinds, ["poll", "approval", "post"]);
         assert!(shown.approval.is_none());
+        assert!(
+            pending_approvals(&mut conn, &viewer)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // The poll closes now.
         conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'")
@@ -3488,12 +3529,21 @@ mod tests {
         let approval = shown.approval.expect("the poll waits for approval");
         assert_eq!(approval.channel, "elsewhere");
         assert!(approval.can_decide, "a server manager may answer");
+        let waiting = pending_approvals(&mut conn, &viewer).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].id, id);
 
         let mut june = viewer.clone();
         june.membership_id = 2;
         assert!(
             matches!(routine(&mut conn, &june, &id).await, Err(OpError::NotFound)),
             "not hers to answer"
+        );
+        assert!(
+            pending_approvals(&mut conn, &june)
+                .await
+                .unwrap()
+                .is_empty()
         );
         assert!(
             decide_routine(&mut conn, &june, &id, &dto::Decision { day: None })
@@ -3512,6 +3562,7 @@ mod tests {
                 .unwrap()
                 .can_decide
         );
+        assert_eq!(pending_approvals(&mut conn, &june).await.unwrap().len(), 1);
         conn.batch_execute("DELETE FROM membership_roles WHERE membership_id = 2;")
             .await
             .unwrap();
@@ -3525,6 +3576,12 @@ mod tests {
                 .unwrap()
                 .approval
                 .is_none()
+        );
+        assert!(
+            pending_approvals(&mut conn, &viewer)
+                .await
+                .unwrap()
+                .is_empty()
         );
         let again = decide_routine(&mut conn, &viewer, &id, &dto::Decision { day: None })
             .await

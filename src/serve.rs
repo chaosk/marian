@@ -3417,7 +3417,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 15);
 
         let servers = call("list_servers", json!({})).await;
         assert_eq!(servers["structuredContent"]["servers"][0]["id"], "99");
@@ -3463,6 +3463,112 @@ mod tests {
         assert_eq!(deleted["isError"], false, "{deleted}");
         let gone = call("get_event", json!({ "server": "99", "event": event })).await;
         assert_eq!(gone["isError"], true);
+
+        // A routine whose poll waits for someone to confirm its day.
+        let nell = crate::api::Viewer {
+            token: "browser-token".into(),
+            discord_user_id: "42".into(),
+            user_id: 1,
+            display_name: "Nell".into(),
+            guild_id: 1,
+            membership_id: 1,
+            allowed: vec![1],
+            notice: None,
+        };
+        let events_channel = crate::api::channels(&mut conn, &nell).await.unwrap()[0]
+            .id
+            .clone();
+        let step = |kind: &str, channel: Option<String>| marian_types::RoutineStep {
+            kind: kind.into(),
+            channel_id: channel,
+            role_ids: Vec::new(),
+        };
+        let made = crate::api::create_routine(
+            &mut conn,
+            &nell,
+            &marian_types::RoutineDraft {
+                channel_id: events_channel.clone(),
+                title: "Weekly raid".into(),
+                duration_minutes: 120,
+                start_time: "19:00".into(),
+                poll_weekday: 0,
+                poll_time: "00:00".into(),
+                lock_weekday: 6,
+                lock_time: "23:59".into(),
+                days: (0..7).collect(),
+                steps: Some(vec![
+                    step("poll", None),
+                    step("approval", Some(events_channel)),
+                    step("post", None),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let routine = made
+            .done
+            .location
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let on = |view: &Value| -> Vec<u64> {
+            view["run"]["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|day| day["on"] == true)
+                .map(|day| day["n"].as_u64().unwrap())
+                .collect()
+        };
+
+        let routines = call("list_routines", json!({ "server": "99" })).await;
+        assert_eq!(routines["structuredContent"]["routines"][0]["id"], routine);
+        let at_routine = json!({ "server": "99", "routine": routine });
+        let shown = call("get_routine", at_routine.clone()).await;
+        assert_eq!(shown["structuredContent"]["title"], "Weekly raid");
+        let days = call(
+            "set_routine_days",
+            json!({ "server": "99", "routine": routine, "days": [1, 3], "scope": "this_week" }),
+        )
+        .await;
+        assert_eq!(on(&days["structuredContent"]), [1, 3], "{days}");
+        let voted = call(
+            "vote_routine",
+            json!({ "server": "99", "routine": routine, "day": 3 }),
+        )
+        .await;
+        assert_eq!(voted["isError"], false, "{voted}");
+        let none_yet = call("pending_approvals", json!({ "server": "99" })).await;
+        assert_eq!(none_yet["structuredContent"]["waiting"], json!([]));
+
+        // The poll closes and waits for its day to be confirmed.
+        conn.batch_execute("UPDATE routine_runs SET locks_at = now() - interval '1 minute'")
+            .await
+            .unwrap();
+        crate::logic::maintain_routines(&mut conn, 1, Utc::now())
+            .await
+            .unwrap();
+        let waiting = call("pending_approvals", json!({ "server": "99" })).await;
+        let waiting = &waiting["structuredContent"]["waiting"];
+        assert_eq!(waiting.as_array().unwrap().len(), 1, "{waiting}");
+        assert_eq!(waiting[0]["id"], routine);
+        assert_eq!(waiting[0]["approval"]["winner"], 3);
+        let unsaid = call("decide_routine", at_routine.clone()).await;
+        assert_eq!(unsaid["isError"], true, "a missing day isn't a skip");
+        let decided = call(
+            "decide_routine",
+            json!({ "server": "99", "routine": routine, "day": 3 }),
+        )
+        .await;
+        assert_eq!(decided["isError"], false, "{decided}");
+        assert_eq!(decided["structuredContent"]["approval"], Value::Null);
+        let answered = call("pending_approvals", json!({ "server": "99" })).await;
+        assert_eq!(answered["structuredContent"]["waiting"], json!([]));
+        let stopped = call("stop_routine", at_routine).await;
+        assert_eq!(stopped["structuredContent"]["active"], false, "{stopped}");
 
         // The member sees the app among their connected apps and signs it out.
         let apps = |cookie: &'static str| {
