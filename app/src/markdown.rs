@@ -7,9 +7,90 @@ use discord_md::ast::{MarkdownElement, MarkdownElementCollection};
 use discord_md::parse;
 
 pub fn render(src: &str) -> String {
+    let (src, urls) = shield(src);
     let mut html = String::new();
-    blocks(&mut html, parse(src).content());
-    html
+    blocks(&mut html, parse(&src).content());
+    unshield(&html, &urls)
+}
+
+/// Marks a web address set aside by [`shield`]: its index between the two.
+const URL_OPEN: char = '\u{E000}';
+const URL_CLOSE: char = '\u{E001}';
+
+/// Swaps each web address for a token the parser leaves alone, so the `_`, `*`
+/// or `~~` in one stays part of it rather than starting formatting, as in
+/// Discord. [`unshield`] puts them back once the HTML is built.
+fn shield(src: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(src.len());
+    let mut urls = Vec::new();
+    let mut rest = src;
+    while let Some(start) = find_url(rest) {
+        let (before, from) = rest.split_at(start);
+        out.push_str(before);
+        let len = url_len(from, before.ends_with("]("));
+        out.push(URL_OPEN);
+        out.push_str(&urls.len().to_string());
+        out.push(URL_CLOSE);
+        urls.push(from[..len].to_string());
+        rest = &from[len..];
+    }
+    out.push_str(rest);
+    (out, urls)
+}
+
+fn find_url(src: &str) -> Option<usize> {
+    src.match_indices("http")
+        .map(|(at, _)| at)
+        .find(|&at| src[at..].starts_with("https://") || src[at..].starts_with("http://"))
+}
+
+/// Where the address at the start of `src` ends: at the `)` closing a link's
+/// target, or for a bare one at a space or the `](` after a link's label, less
+/// any punctuation or formatting markers trailing it.
+fn url_len(src: &str, in_link: bool) -> usize {
+    let end = src
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>') || (in_link && c == ')'))
+        .unwrap_or(src.len());
+    let url = &src[..end];
+    if in_link {
+        return url.len();
+    }
+    let url = url.find("](").map_or(url, |label_end| &url[..label_end]);
+    url.trim_end_matches([
+        '*', '_', '~', '|', '`', '.', ',', ';', ':', '!', '?', ')', '\'',
+    ])
+    .len()
+}
+
+fn shielded(url: &str) -> bool {
+    url.strip_prefix(URL_OPEN)
+        .and_then(|rest| rest.strip_suffix(URL_CLOSE))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn unshield(html: &str, urls: &[String]) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find(URL_OPEN) {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + URL_OPEN.len_utf8()..];
+        let url = after.find(URL_CLOSE).and_then(|close| {
+            let url = urls.get(after[..close].parse::<usize>().ok()?)?;
+            Some((url, close))
+        });
+        match url {
+            Some((url, close)) => {
+                out.push_str(&escape(url));
+                rest = &after[close + URL_CLOSE.len_utf8()..];
+            }
+            None => {
+                out.push(URL_OPEN);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn blocks(html: &mut String, elements: &MarkdownElementCollection) {
@@ -36,7 +117,7 @@ fn blocks(html: &mut String, elements: &MarkdownElementCollection) {
 
 fn span(element: &MarkdownElement) -> String {
     match element {
-        MarkdownElement::Plain(text) => plain(text.content()),
+        MarkdownElement::Plain(text) => plain(text.content(), true),
         MarkdownElement::ItalicsStar(inner) => wrap("em", inner.content()),
         MarkdownElement::ItalicsUnderscore(inner) => wrap("em", inner.content()),
         MarkdownElement::Bold(inner) => wrap("strong", inner.content()),
@@ -63,11 +144,20 @@ fn spans(elements: &MarkdownElementCollection) -> String {
     elements.get().iter().map(span).collect()
 }
 
-fn plain(text: &str) -> String {
+/// Text with its `[label](address)` links, and with `bare` its bare addresses
+/// linked too (not in a link's label, since links don't nest).
+fn plain(text: &str, bare: bool) -> String {
+    let words = |text: &str| {
+        if bare {
+            link_bare(text)
+        } else {
+            escape_keep_nl(text)
+        }
+    };
     let mut out = String::new();
     let mut rest = text;
     while let Some(open) = rest.find('[') {
-        out.push_str(&escape_keep_nl(&rest[..open]));
+        out.push_str(&words(&rest[..open]));
         match take_link(&rest[open..]) {
             Some((html, used)) => {
                 out.push_str(&html);
@@ -78,6 +168,36 @@ fn plain(text: &str) -> String {
                 rest = &rest[open + 1..];
             }
         }
+    }
+    out.push_str(&words(rest));
+    out
+}
+
+/// Each address [`shield`] set aside in `text` as a link to itself. Wrapped in
+/// `<…>`, as Discord writes one with its preview turned off, it loses those.
+fn link_bare(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(URL_OPEN) {
+        let token = rest[open..]
+            .find(URL_CLOSE)
+            .map(|close| &rest[open..open + close + URL_CLOSE.len_utf8()])
+            .filter(|token| shielded(token));
+        let Some(token) = token else {
+            let next = open + URL_OPEN.len_utf8();
+            out.push_str(&escape_keep_nl(&rest[..next]));
+            rest = &rest[next..];
+            continue;
+        };
+        let mut before = &rest[..open];
+        let mut after = &rest[open + token.len()..];
+        if let (Some(b), Some(a)) = (before.strip_suffix('<'), after.strip_prefix('>')) {
+            before = b;
+            after = a;
+        }
+        out.push_str(&escape_keep_nl(before));
+        out.push_str(&format!("<a href=\"{token}\">{token}</a>"));
+        rest = after;
     }
     out.push_str(&escape_keep_nl(rest));
     out
@@ -91,10 +211,10 @@ fn take_link(src: &str) -> Option<(String, usize)> {
     let url_start = label_end + 2;
     let url_end = src[url_start..].find(')')? + url_start;
     let url = &src[url_start..url_end];
-    if !safe_url(url) {
+    if !(shielded(url) || safe_url(url)) {
         return None;
     }
-    let label = plain(&src[1..label_end]);
+    let label = plain(&src[1..label_end], false);
     Some((
         format!("<a href=\"{}\">{label}</a>", escape(url)),
         url_end + 1,
@@ -322,6 +442,47 @@ mod tests {
         assert_eq!(
             render("[hall](https://example.com/a)"),
             "<p><a href=\"https://example.com/a\">hall</a></p>"
+        );
+        assert_eq!(
+            render(
+                "[Goose Goose Duck](https://store.steampowered.com/app/1568590/Goose_Goose_Duck/)"
+            ),
+            "<p><a href=\"https://store.steampowered.com/app/1568590/Goose_Goose_Duck/\">Goose Goose Duck</a></p>",
+            "a link's underscores are part of it"
+        );
+        assert_eq!(
+            render("see https://example.com/a_b_c and _this_"),
+            "<p>see <a href=\"https://example.com/a_b_c\">https://example.com/a_b_c</a> and <em>this</em></p>"
+        );
+        assert_eq!(
+            render("**https://example.com/a_b**"),
+            "<p><strong><a href=\"https://example.com/a_b\">https://example.com/a_b</a></strong></p>"
+        );
+        assert_eq!(
+            render("no preview: <https://example.com/a>."),
+            "<p>no preview: <a href=\"https://example.com/a\">https://example.com/a</a>.</p>"
+        );
+        assert_eq!(
+            render("(https://example.com/a), <b>"),
+            "<p>(<a href=\"https://example.com/a\">https://example.com/a</a>), &lt;b&gt;</p>"
+        );
+        assert_eq!(
+            render("[https://example.com/a](https://example.com/b)"),
+            "<p><a href=\"https://example.com/b\">https://example.com/a</a></p>",
+            "links don't nest"
+        );
+        assert_eq!(
+            render("||https://example.com/a||"),
+            "<p><span class=\"spoiler\" role=\"button\" tabindex=\"0\" aria-expanded=\"false\"><a href=\"https://example.com/a\">https://example.com/a</a></span></p>"
+        );
+        assert_eq!(
+            render("`https://example.com/a_b_c`"),
+            "<p><code>https://example.com/a_b_c</code></p>"
+        );
+        assert_eq!(
+            render("[x](https://example.com/\"onmouseover)"),
+            "<p>[x](<a href=\"https://example.com/\">https://example.com/</a>&quot;onmouseover)</p>",
+            "a quote ends an address, outside the link"
         );
         assert_eq!(
             render("[x](javascript:alert(1))"),
