@@ -52,6 +52,43 @@ pub(super) async fn archive_tx(conn: &mut Connection, event: &Event) -> Result<S
     Ok(notice)
 }
 
+/// Puts an event that Delete cancelled back, before it starts. Its post is
+/// redrawn, or posted again if it was removed, and the reply saying it was
+/// cancelled is taken back.
+pub async fn reinstate_event(
+    conn: &mut Connection,
+    event_id: i64,
+    actor_id: i64,
+) -> Result<crate::i18n::Msg, OpError> {
+    store::with_tx(conn, async |tx| {
+        let event = must_event(tx, event_id).await?;
+        let actor = must_membership(tx, actor_id).await?;
+        let settings = store::settings(tx, event.guild_id).await?;
+        let roles = store::membership_role_ids(tx, &actor).await?;
+        if !can_delete(&actor, &event, &settings, &roles) {
+            return Err(OpError::from(crate::msg!("err-cant-reinstate")));
+        }
+        if event.status != EventStatus::Cancelled {
+            return Err(OpError::from(crate::msg!("err-reinstate-uncancelled")));
+        }
+        if event.starts_at <= Utc::now() {
+            return Err(OpError::from(crate::msg!("err-reinstate-started")));
+        }
+        diesel::update(schema::events::table.filter(schema::events::id.eq(event.id)))
+            .set((
+                schema::events::status.eq(EventStatus::Posted),
+                schema::events::archived_at.eq(None::<chrono::DateTime<Utc>>),
+                schema::events::updated_at.eq(Utc::now()),
+            ))
+            .execute(tx)
+            .await?;
+        let notice = crate::msg!("notice-reinstated", title = &event.title);
+        log(tx, event.guild_id, Some(event.id), &notice.to_string()).await?;
+        Ok(notice)
+    })
+    .await
+}
+
 pub async fn delete_event(
     conn: &mut Connection,
     event_id: i64,
@@ -101,6 +138,14 @@ pub async fn delete_event(
                     schema::events::archived_at.eq(&stamp),
                     schema::events::updated_at.eq(&stamp),
                 ))
+                .execute(tx)
+                .await?;
+            // Its post stays, marked cancelled, and its thread gets a reply
+            // saying so. A reply from an earlier cancel that's still waiting to
+            // be taken back says the same, so it stays.
+            diesel::insert_into(schema::cancel_notices::table)
+                .values(schema::cancel_notices::event_id.eq(event.id))
+                .on_conflict_do_nothing()
                 .execute(tx)
                 .await?;
             let notice = crate::msg!("notice-cancelled", title = &event.title);

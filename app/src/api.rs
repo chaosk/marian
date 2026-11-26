@@ -490,6 +490,10 @@ pub mod path {
         format!("{}/archive", self::event(server, event))
     }
 
+    pub fn event_reinstate(server: &str, event: &str) -> String {
+        format!("{}/reinstate", self::event(server, event))
+    }
+
     pub fn event_duplicate(server: &str, event: &str) -> String {
         format!("{}/duplicate", self::event(server, event))
     }

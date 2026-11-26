@@ -65,5 +65,6 @@ notice-was-not-on = W opcji { $option } nie było { $name }.
 notice-deleted = Usunięto { $title }.
 notice-deleted-series-date = Pominięto { $title }. Ten termin zostaje w serii jako pominięty, więc seria go nie przywróci.
 notice-cancelled = Odwołano { $title }.
+notice-reinstated = Przywrócono { $title }.
 guests-form-title = Goście: { $option }
 guests-form-label = Ilu gości? (0–{ $most })
